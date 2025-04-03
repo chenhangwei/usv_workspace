@@ -1,0 +1,5 @@
+usv_station:
+  ros__parameters:
+    namespace: "usv_2"
+    control_mode: "manual"
+    max_speed: 5.0

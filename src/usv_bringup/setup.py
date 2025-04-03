@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'gs_swarm_control'
+package_name = 'usv_bringup'
 
 setup(
     name=package_name,
@@ -10,13 +10,15 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/'+package_name +'/config',['config/usv_station_params.yaml']),
+        ('share/' + package_name + '/launch', ['launch/usv_launch.py']),  # 添加 launch 文件夹
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
     description='TODO: Package description',
-    license='Apache License 2.0',
+    license='TODO: License declaration',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
