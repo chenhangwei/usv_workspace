@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-          ('share/' + package_name, ['usv_drivers/uwb_publisher_node.py']), 
+
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,8 +20,10 @@ setup(
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [           
-            'uwb_publisher_node=usv_drivers.uwb_node:main'
+        'console_scripts': [              
+            'usv_ultrasonic_node=usv_drivers.usv_ultrasonic_node:main',
+            'usv_laserscan_node=usv_drivers.usv_laserscan_node:main',
+            'usv_uwb_node=usv_drivers.usv_uwb_node:main',
         ],
     },
 )

@@ -6,25 +6,22 @@ from std_msgs.msg import String
 from common_interfaces.msg import UsvStatus
 from geometry_msgs.msg import TwistStamped,PoseStamped
 
-class StatusReporterNode(Node):
+class UsvStatusNode(Node):
     def __init__(self):
-        super().__init__('status_reporter_node')
+        super().__init__('usv_status_node')   
 
-
-        
-        
         self.usv_battery=0.0
         self.usv_velocity=TwistStamped()
         self.state_msg = UsvStatus()
         self.usv_pose=PoseStamped()
 
-        self.state_publisher=self.create_publisher(UsvStatus,f'state',10)
-        
+        self.state_publisher=self.create_publisher(UsvStatus,f'usv_state',10)
+        self.get_logger().info('Status reporter node has been started.')
 
         # 订阅 MAVROS 的状态主题
         self.state_subscriber = self.create_subscription(
             State,
-            f'mavros/state',  # 使用命名空间
+            f'state',  # 使用命名空间
             self.state_callback,
             10
         )
@@ -32,27 +29,29 @@ class StatusReporterNode(Node):
         # 订阅 MAVROS 的电池状态主题
         self.battery_subscriber = self.create_subscription(
             BatteryState,
-            f'mavros/battery',  # 使用命名空间
+            f'battery',  # 使用命名空间
             self.battery_callback,
             10
         )
 
+
         self.velocity_local_subscriber=self.create_subscription(
             TwistStamped, 
-            f'mavros/local_position/velocity_local',
+            f'local_position/velocity_local',
             self.velocity_local_callback,
             10
         )
 
         self.subscription_pose=self.create_subscription(
             PoseStamped,
-            f'mavros/local_position/pose',
+            f'local_position/pose',
             self.pose_callback,
             10
         )
         self.state_timer=self.create_timer(1,self.state_timer_callback)
 
     def state_callback(self, msg):
+            self.get_logger().info(f"飞控的状态信息：{msg}")
             self.state_msg.mode = msg.mode
             self.state_msg.connected = msg.connected
             self.state_msg.armed = msg.armed
@@ -73,12 +72,13 @@ class StatusReporterNode(Node):
         self.get_logger().info(f"电池状态：{msg}")
         self.usv_battery=msg.percentage
 
+
     def velocity_local_callback(self,msg):
         
         self.usv_velocity=msg
 
     def pose_callback(self,msg):
-        self.get_logger().info(f"定位状态：{msg}")
+        self.get_logger().info(f'状态过渡程序接受到的定位信息:{msg.pose.position.x},{msg.pose.position.y},{msg.pose.position.z}')
         self.usv_pose=msg 
 
     def state_timer_callback(self):
@@ -87,7 +87,7 @@ class StatusReporterNode(Node):
     
 def main():
     rclpy.init()
-    node = StatusReporterNode()
+    node = UsvStatusNode()
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

@@ -21,6 +21,7 @@ setup(
     entry_points={
         'console_scripts': [
             'main_gui_app = gs_gui.main_gui_app:main',
+
         ],
     },
 )

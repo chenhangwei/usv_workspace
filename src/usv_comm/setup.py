@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name, ['usv_comm/status_reporter_node.py']), 
+
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -21,7 +21,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'status_reporter_node = usv_comm.status_reporter_node:main'
+            'usv_status_node = usv_comm.usv_status_node:main'
         ],
     },
 )

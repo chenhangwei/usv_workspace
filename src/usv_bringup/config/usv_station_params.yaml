@@ -1,5 +1,35 @@
-usv_station:
+mavros:
   ros__parameters:
-    namespace: "usv_2"
-    control_mode: "manual"
-    max_speed: 5.0
+    fcu_url: "serial:///dev/ttyACM0:57600"
+    gcs_url: ""
+    tgt_system: 1
+    tgt_component: 1
+
+usv_status_node:
+  ros__parameters:
+    dummy_param: true
+   
+
+usv_avoidance_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_command_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_control_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_laserscan_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_ultrasonic_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_uwb_node:
+  ros__parameters:
+    dummy_param: true

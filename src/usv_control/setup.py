@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-         ('share/' + package_name, ['usv_control/local_planner_node.py']), 
+
 
     ],
     install_requires=['setuptools'],
@@ -22,7 +22,9 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'local_planner_node = usv_control.local_planner_node:main'
+            'usv_control_node = usv_control.usv_control_node:main',
+            'usv_avoidance_node = usv_control.usv_avoidance_node:main',
+            'usv_command_node = usv_control.usv_command_node:main',
         ],
     },
 )
