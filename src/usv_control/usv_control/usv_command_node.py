@@ -10,7 +10,7 @@ class UsvCommandNode(Node):
         # 订阅地面站的模式切换命令
         self.sub_mode = self.create_subscription(
             String,  # 模式命令使用 String 类型
-            'set_mode',  # 话题名称，添加前缀斜杠
+            'usv_set_mode',  # 话题名称，添加前缀斜杠
             self.set_mode_callback,
             10
         )
@@ -18,7 +18,7 @@ class UsvCommandNode(Node):
         # 订阅地面站的解锁命令
         self.sub_arming = self.create_subscription(
             Bool,  # 解锁命令使用 Bool 类型
-            'set_arming',  # 话题名称
+            'usv_set_arming',  # 话题名称
             self.set_arming_callback,
             10
         )

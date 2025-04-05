@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/'+package_name +'/config',['config/usv_station_params.yaml']),
+        ('share/'+package_name +'/config',['config/usv_params.yaml']),
         ('share/' + package_name + '/launch', ['launch/usv_launch.py']),  # 添加 launch 文件夹
     ],
     install_requires=['setuptools'],

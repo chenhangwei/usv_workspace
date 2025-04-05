@@ -18,7 +18,7 @@ def generate_launch_description():
         default_value=PathJoinSubstitution([
             FindPackageShare('usv_bringup'),
             'config',
-            'usv_station_params.yaml'
+            'usv_params.yaml'
         ]),
         description='设备站的参数文件路径'
 

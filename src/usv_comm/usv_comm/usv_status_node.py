@@ -5,10 +5,17 @@ from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String
 from common_interfaces.msg import UsvStatus
 from geometry_msgs.msg import TwistStamped,PoseStamped
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 class UsvStatusNode(Node):
     def __init__(self):
         super().__init__('usv_status_node')   
+
+        # 创建 QoS 配置
+        qos = QoSProfile(
+            depth=10,  # 队列大小
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
 
         self.usv_battery=0.0
         self.usv_velocity=TwistStamped()
@@ -23,7 +30,7 @@ class UsvStatusNode(Node):
             State,
             f'state',  # 使用命名空间
             self.state_callback,
-            10
+            qos
         )
 
         # 订阅 MAVROS 的电池状态主题
@@ -31,7 +38,7 @@ class UsvStatusNode(Node):
             BatteryState,
             f'battery',  # 使用命名空间
             self.battery_callback,
-            10
+            qos
         )
 
 
@@ -39,14 +46,14 @@ class UsvStatusNode(Node):
             TwistStamped, 
             f'local_position/velocity_local',
             self.velocity_local_callback,
-            10
+            qos
         )
 
         self.subscription_pose=self.create_subscription(
             PoseStamped,
             f'local_position/pose',
             self.pose_callback,
-            10
+            qos
         )
         self.state_timer=self.create_timer(1,self.state_timer_callback)
 

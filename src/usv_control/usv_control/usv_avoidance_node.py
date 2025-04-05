@@ -5,25 +5,43 @@ from geometry_msgs.msg import PoseStamped
 import math
 from std_msgs.msg import Header
 from mavros_msgs.msg import State
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+
 
 class UsvAvoidanceNode(Node):
     def __init__(self):
         super().__init__('usv_avoidance_node')
+
+        qos = QoSProfile(
+            depth=10,  # 队列大小
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+
+        # 从参数加载阈值，默认值为 1.0
+        self.in_distance_value = self.declare_parameter('in_distance_value ', 2.0).value
+
+        
+        #订阅当前状态
+        self.state_sub = self.create_subscription(
+            State, 'state', self.state_callback, qos)
         # 订阅雷达数据
         self.radar_sub = self.create_subscription(
-            LaserScan, 'radar_scan', self.radar_callback, 10)
+            LaserScan, 'radar_scan', self.radar_callback, qos)
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
-            PoseStamped, 'setpoint_position/local', self.target_callback, 10)
+            PoseStamped, 'setpoint_position/local', self.target_callback, qos)
         # 订阅当前 UWB 位置
         self.position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.position_callback, 10)
+            PoseStamped, 'local_position/pose', self.position_callback, qos)
+        
+
+
         # 发布调整后的目标点
         self.target_pub = self.create_publisher(PoseStamped, 'setpoint_avoidance', 10)
         # 当前状态
         self.current_state = State()
-        self.current_position = PoseStamped()
-        self.current_target = PoseStamped()
+        self.current_position = None
+        self.current_target = None
         self.avoiding = False
 
     def radar_callback(self, msg):
@@ -36,10 +54,16 @@ class UsvAvoidanceNode(Node):
             self.get_logger().info("雷达数据接收成功")
             # 检测前方障碍（假设雷达正前方为 0 度）
             min_distance = min(msg.ranges)  # 最近障碍距离
-            if min_distance < 2.0 and not self.avoiding:  # 2 米内有障碍
+            if min_distance < self.in_distance_value  and not self.avoiding:  # 2 米内有障碍
                 self.get_logger().info('障碍物检测到，启动避让')
                 self.avoiding = True
                 self.adjust_path()
+    def state_callback(self, msg):
+        if isinstance(msg, State):
+            self.get_logger().info("避障节点usv状态信息接收成功")
+            self.current_state = msg
+           
+
 
     def position_callback(self, msg):
         if isinstance(msg, PoseStamped):

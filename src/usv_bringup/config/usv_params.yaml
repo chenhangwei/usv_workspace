@@ -12,7 +12,7 @@ usv_status_node:
 
 usv_avoidance_node:
   ros__parameters:
-    dummy_param: true
+    in_distance_value : 1.2 # 设置达到避障临时目标点距离为 1.2 米
 
 usv_command_node:
   ros__parameters:
@@ -20,7 +20,7 @@ usv_command_node:
 
 usv_control_node:
   ros__parameters:
-    dummy_param: true
+     reach_threshold: 1.5  # 设置到达目标点距离阈值为 1.5 米
 
 usv_laserscan_node:
   ros__parameters:
