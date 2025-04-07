@@ -116,23 +116,10 @@
            <layout class="QVBoxLayout" name="verticalLayout_7">
             <item>
              <layout class="QGridLayout" name="gridLayout">
-              <item row="0" column="0">
-               <widget class="QDoubleSpinBox" name="move_speed_doubleSpinBox"/>
-              </item>
               <item row="0" column="1">
                <widget class="QPushButton" name="forward_pushButton">
                 <property name="text">
                  <string>forward</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="2">
-               <widget class="QDoubleSpinBox" name="turn_speed_doubleSpinBox"/>
-              </item>
-              <item row="1" column="0">
-               <widget class="QPushButton" name="left_pushButton">
-                <property name="text">
-                 <string>left</string>
                 </property>
                </widget>
               </item>
@@ -143,10 +130,13 @@
                 </property>
                </widget>
               </item>
-              <item row="1" column="2">
-               <widget class="QPushButton" name="right_pushButton">
+              <item row="0" column="2">
+               <widget class="QDoubleSpinBox" name="turn_speed_doubleSpinBox"/>
+              </item>
+              <item row="1" column="0">
+               <widget class="QPushButton" name="left_pushButton">
                 <property name="text">
-                 <string>right</string>
+                 <string>left</string>
                 </property>
                </widget>
               </item>
@@ -164,12 +154,22 @@
                 </property>
                </widget>
               </item>
+              <item row="1" column="2">
+               <widget class="QPushButton" name="right_pushButton">
+                <property name="text">
+                 <string>right</string>
+                </property>
+               </widget>
+              </item>
               <item row="2" column="2">
                <widget class="QPushButton" name="led_pushButton">
                 <property name="text">
                  <string>led</string>
                 </property>
                </widget>
+              </item>
+              <item row="0" column="0">
+               <widget class="QDoubleSpinBox" name="move_speed_doubleSpinBox"/>
               </item>
              </layout>
             </item>
@@ -183,46 +183,82 @@
            </property>
            <layout class="QVBoxLayout" name="verticalLayout_5">
             <item>
-             <layout class="QGridLayout" name="gridLayout_3">
+             <layout class="QGridLayout" name="gridLayout_2">
               <item row="1" column="0">
-               <widget class="QPushButton" name="led1_pushButton">
-                <property name="text">
-                 <string>led1</string>
-                </property>
-               </widget>
-              </item>
-              <item row="1" column="1">
-               <widget class="QPushButton" name="led2_pushButton">
-                <property name="text">
-                 <string>led2</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="1">
                <widget class="QPushButton" name="gaga1_pushButton">
                 <property name="text">
                  <string>gaga1</string>
                 </property>
                </widget>
               </item>
-              <item row="1" column="2">
+              <item row="0" column="1">
+               <widget class="QComboBox" name="cluster_setmode_comboBox">
+                <item>
+                 <property name="text">
+                  <string>MANAUL</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>GUIDED</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>AUTO</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item row="2" column="0">
+               <widget class="QPushButton" name="led1_pushButton">
+                <property name="text">
+                 <string>led1</string>
+                </property>
+               </widget>
+              </item>
+              <item row="2" column="1">
+               <widget class="QPushButton" name="led2_pushButton">
+                <property name="text">
+                 <string>led2</string>
+                </property>
+               </widget>
+              </item>
+              <item row="0" column="0">
+               <widget class="QComboBox" name="arm_comboBox">
+                <item>
+                 <property name="text">
+                  <string>ARM</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>DISARM</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item row="2" column="2">
                <widget class="QPushButton" name="led3_pushButton">
                 <property name="text">
                  <string>led3</string>
                 </property>
                </widget>
               </item>
-              <item row="0" column="0">
-               <widget class="QPushButton" name="open_pushButton">
+              <item row="1" column="1">
+               <widget class="QPushButton" name="gaga2_pushButton">
                 <property name="text">
-                 <string>open</string>
+                 <string>gaga2</string>
                 </property>
                </widget>
               </item>
               <item row="0" column="2">
-               <widget class="QPushButton" name="gaga2_pushButton">
+               <widget class="QDoubleSpinBox" name="cluster_speed_doubleSpinBox"/>
+              </item>
+              <item row="1" column="2">
+               <widget class="QPushButton" name="gaga3_pushButton">
                 <property name="text">
-                 <string>gaga2</string>
+                 <string>gaga3</string>
                 </property>
                </widget>
               </item>

@@ -23,16 +23,16 @@ class UsvAvoidanceNode(Node):
         
         #订阅当前状态
         self.state_sub = self.create_subscription(
-            State, 'state', self.state_callback, qos)
+            State, 'mavros/state', self.state_callback, qos)
         # 订阅雷达数据
         self.radar_sub = self.create_subscription(
             LaserScan, 'radar_scan', self.radar_callback, qos)
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
-            PoseStamped, 'setpoint_position/local', self.target_callback, qos)
+            PoseStamped, 'mavros/setpoint_position/local', self.target_callback, qos)
         # 订阅当前 UWB 位置
         self.position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.position_callback, qos)
+            PoseStamped, 'mavros/local_position/pose', self.position_callback, qos)
         
 
 
@@ -67,7 +67,6 @@ class UsvAvoidanceNode(Node):
 
     def position_callback(self, msg):
         if isinstance(msg, PoseStamped):
-            self.get_logger().info("UWB 位置信息接收成功")
             self.current_position = (msg.pose.position.x, msg.pose.position.y)
 
     def target_callback(self, msg):

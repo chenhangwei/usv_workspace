@@ -5,9 +5,9 @@ from geometry_msgs.msg import PoseStamped
 class UsvUwbNode(Node): 
     def __init__(self): 
         super().__init__('usv_uwb_node') 
-        self.uwb_pub = self.create_publisher(PoseStamped, 'local_position/pose', 10) 
+        self.uwb_pub = self.create_publisher(PoseStamped, 'mavros/local_position/pose', 10) 
     #     self.serial_port = serial.Serial('/dev/ttyUSB0', 57600, timeout=1) # 假设串口为 "/dev/ttyUSB0"，波特率为 57600
-        self.timer = self.create_timer(1, self.read_and_publish) # 10 Hz 
+        self.timer = self.create_timer(0.1, self.read_and_publish) # 10 Hz 
 
 
         self.ax=1.0
@@ -20,13 +20,13 @@ class UsvUwbNode(Node):
                 x, y, z = self.ax, self.by, 0.0 # 示例数据
                 pose = PoseStamped() 
                 pose.header.stamp = self.get_clock().now().to_msg() 
-                pose.header.frame_id = 'map' 
+                pose.header.frame_id = 'base_link' 
                 pose.pose.position.x = x 
                 pose.pose.position.y = y 
                 pose.pose.position.z = z 
                 pose.pose.orientation.w = 1.0 # 默认朝向 
                 self.uwb_pub.publish(pose) 
-                self.get_logger().info(f'Published: x={x}, y={y}, z={z}') 
+
                 self.ax+=0.1
                 self.by+=0.1
 

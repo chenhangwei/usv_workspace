@@ -26,12 +26,12 @@ class UsvCommandNode(Node):
         # 创建服务客户端
         self.arming_client = self.create_client(
             CommandBool,
-            'cmd/arming'  # MAVROS 默认服务名称
+            'mavros/cmd/arming'  # MAVROS 默认服务名称
         )
 
         self.mode_client = self.create_client(
             SetMode,
-            'set_mode'  # MAVROS 默认服务名称
+            'mavros/set_mode'  # MAVROS 默认服务名称
         )
 
     def set_mode_callback(self, msg):

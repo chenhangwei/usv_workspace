@@ -22,7 +22,7 @@ class UsvControlNode(Node):
 
        
         # 发布目标点
-        self.target_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', 10)
+        self.target_pub = self.create_publisher(PoseStamped, 'mavros/setpoint_position/local', 10)
         # 发布到达信号Bool
         self.signal_pub = self.create_publisher(Bool, 'reached_target', 10)
 
@@ -30,7 +30,7 @@ class UsvControlNode(Node):
 
         #订阅当前状态
         self.state_sub = self.create_subscription(
-            State, 'state', self.state_callback, qos)
+            State, 'mavros/state', self.state_callback, qos)
         
         # 订阅目标点
         self.target_sub = self.create_subscription(
@@ -38,7 +38,7 @@ class UsvControlNode(Node):
         
         # 订阅当前位置
         self.current_position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.current_position_callback, qos)
+            PoseStamped, 'mavros/local_position/pose', self.current_position_callback, qos)
         
         # 定时器检查是否到达目标点
         self.timer = self.create_timer(1, self.check_target_reached)
