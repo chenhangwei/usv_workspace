@@ -30,7 +30,7 @@ class UsvControlNode(Node):
 
         #订阅当前状态
         self.state_sub = self.create_subscription(
-            State, 'mavros/state', self.state_callback, qos)
+            State, 'state', self.state_callback, qos)
         
         # 订阅目标点
         self.target_sub = self.create_subscription(

@@ -87,19 +87,18 @@ class GroundStationNode(Node):
         return online_usvs
         
     def  set_arming_callback(self, msg):
+        test_msg=String()
+        test_msg.data = msg
         """处理解锁/上锁命令"""
-        if not isinstance(msg, String):
-            self.get_logger().error('收到无效的解除武装消息类型')
-            return
+        self.get_logger().info(f'收到解锁/上锁命令: { test_msg}')
         # 发布解锁/上锁命令
-        self.arm_publisher(msg.data)
+        self.arm_publisher.publish(test_msg)
 
     def set_mode_callback(self, msg):
         """处理模式切换命令"""
-        if not isinstance(msg, String):
-            self.get_logger().error('收到无效的模式消息类型')
-            return
-        # 发布模式切换命令
-        self.mode_publisher(msg.data)
+        test_msg=String()
+        test_msg.data = msg
+        self.get_logger().info(f'收到模式切换命令: { test_msg}')
+        self.mode_publisher.publish(test_msg)
 
   
