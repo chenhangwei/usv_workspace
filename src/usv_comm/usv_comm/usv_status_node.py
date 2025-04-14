@@ -78,7 +78,7 @@ class UsvStatusNode(Node):
 
     def usv_velocity_callback(self,msg):
         if isinstance(msg, TwistStamped):      
-           self.usv_velocity=msg.twist
+           self.usv_velocity=msg
 
 
     def usv_pose_callback(self,msg):
@@ -90,7 +90,7 @@ class UsvStatusNode(Node):
         self.usv_state_msg.header.stamp=self.usv_state.header.stamp
         self.get_logger().info(f'当前时间戳：{self.usv_state_msg.header.stamp}')    
         self.usv_state_msg.header.frame_id=self.usv_state.header.frame_id
-        self.get_logger().info(f'当前帧ID：{self.usv_state_msg.header.frame_id}')
+        self.get_logger().info(f'当前帧ID:{self.usv_state_msg.header.frame_id}')
         self.usv_state_msg.armed=self.usv_state.armed
         self.get_logger().info(f'当前解锁状态：{self.usv_state_msg.armed}')
         self.usv_state_msg.connected=self.usv_state.connected
@@ -107,9 +107,9 @@ class UsvStatusNode(Node):
         self.get_logger().info(f'当前电池电量：{self.usv_state_msg.battery_percentage}')
         self.usv_state_msg.power_supply_status=self.usv_battery.power_supply_status
         self.get_logger().info(f'当前电池状态：{self.usv_state_msg.power_supply_status}')
-
         self.usv_state_msg.velocity=self.usv_velocity.twist
-        self.get_logger().info(f'当前速度：{self.usv_state_msg.velocity}')
+        self.get_logger().info(f'当前线速度：{self.usv_state_msg.velocity.linear}')
+        self.get_logger().info(f'当前角速度：{self.usv_state_msg.velocity.angular}')
         self.usv_state_msg.position=self.usv_pose.pose.position
         self.get_logger().info(f'当前定位：{self.usv_state_msg.position}')
 

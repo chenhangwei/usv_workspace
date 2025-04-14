@@ -1,9 +1,12 @@
-mavros:
+mavros_node:
   ros__parameters:
     fcu_url: "serial:///dev/ttyACM0:57600"
     gcs_url: ""
     tgt_system: 1
     tgt_component: 1
+    vision_pose.enable: true
+    
+
 
 usv_status_node:
   ros__parameters:

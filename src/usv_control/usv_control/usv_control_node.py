@@ -38,7 +38,7 @@ class UsvControlNode(Node):
         
         # 订阅当前位置
         self.current_position_sub = self.create_subscription(
-            PoseStamped, 'mavros/local_position/pose', self.current_position_callback, qos)
+            PoseStamped, 'local_position/pose', self.current_position_callback, qos)
         
         # 定时器检查是否到达目标点
         self.timer = self.create_timer(1, self.check_target_reached)

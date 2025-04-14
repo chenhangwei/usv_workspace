@@ -23,16 +23,16 @@ class UsvAvoidanceNode(Node):
         
         #订阅当前状态
         self.state_sub = self.create_subscription(
-            State, 'mavros/state', self.state_callback, qos)
+            State, 'state', self.state_callback, qos)
         # 订阅雷达数据
         self.radar_sub = self.create_subscription(
             LaserScan, 'radar_scan', self.radar_callback, qos)
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
-            PoseStamped, 'mavros/setpoint_position/local', self.target_callback, qos)
+            PoseStamped, 'setpoint_position/local', self.target_callback, qos)
         # 订阅当前 UWB 位置
         self.position_sub = self.create_subscription(
-            PoseStamped, 'mavros/local_position/pose', self.position_callback, qos)
+            PoseStamped, 'local_position/pose', self.position_callback, qos)
         
 
 

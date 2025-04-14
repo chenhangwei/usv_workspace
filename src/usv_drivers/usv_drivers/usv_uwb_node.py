@@ -3,43 +3,61 @@ import rclpy
 import random
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped 
+import re
 class UsvUwbNode(Node): 
     def __init__(self): 
         super().__init__('usv_uwb_node') 
-        self.uwb_pub = self.create_publisher(PoseStamped, 'local_position/pose', 10) 
-    #     self.serial_port = serial.Serial('/dev/ttyUSB0', 57600, timeout=1) # 假设串口为 "/dev/ttyUSB0"，波特率为 57600
-        self.timer = self.create_timer(0.1, self.read_and_publish) # 10 Hz 
+        self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10) 
+        self.serial_port = serial.Serial('/dev/ttyUSB0', 115200, timeout=1) # 假设串口为 "/dev/ttyUSB0"，波特率为 57600
+        self.timer = self.create_timer(0.05, self.read_and_publish) # 10 Hz 
+        
+        self.uwb_msg=PoseStamped()
 
-
-        self.ax=1.0
-        self.by=2.0
-        self.cz=3.0
     def read_and_publish(self): 
-            try: 
-                # line = self.serial_port.readline().decode('utf-8').strip() # 假设 UWB 输出为 "x,y,z"（单位：米） 
-                # x, y, z = map(float, line.split(',')) 
-                random_int = random.randint(0,10)
-                randint=random_int/100
+      
+        try:  
+            # 读取一行数据
+            data = self.serial_port.readline().decode('ASCII').strip()
+            if not data:
+                self.get_logger().warn("没有接收到数据")
+                return
+            # self.get_logger().info(f"Raw data: {data}")
 
+            # 查找 LO=[...]
+            ma=re.search(r'LO=\[([^]]+)\]',data)
 
-                x, y, z = self.ax, self.by,self.cz # 示例数据
-                pose = PoseStamped() 
-                pose.header.stamp = self.get_clock().now().to_msg() 
-                pose.header.frame_id = 'base_link' 
-                pose.pose.position.x = x 
-                pose.pose.position.y = y 
-                pose.pose.position.z = z 
-                pose.pose.orientation.w = 1.0 # 默认朝向 
-                self.uwb_pub.publish(pose) 
+            if ma:
+                    coords_str = ma.group(1)  # 提取括号内的内容，例如 "1.41,4.13,0.26" 或 "no solution"
+                     # 检查是否为 "no solution"
+                    if coords_str == 'no solution':
+                        self.get_logger().warn("No valid position solution from $KT0")
+                        return
+                    try:
+                    
+                    
+                        values=list(map(float,ma.group(1).split(',')))
+                        if len(values)==3:
+                            x,y,z=values
+                           # self.get_logger().info(f'x:{x},y:{y},z:{z}')
+                            self.uwb_msg.header.stamp=self.get_clock().now().to_msg()
+                            self.uwb_msg.header.frame_id='map'
+                            self.uwb_msg.pose.position.x=x
+                            self.uwb_msg.pose.position.y=y
+                            self.uwb_msg.pose.position.z=z
+                            self.uwb_pub.publish(self.uwb_msg)
+                        else:
+                            pass
+                            #self.get_logger().warning(f'括号内数据不符合三个数值的要求')  
+                    except ValueError as e:
+                            self.get_logger().warning(f'{e}')
+                                 
+            else:
+                 pass
+                  #self.get_logger().warning(f'括号内数据不符合三个数值的要求')  
+        except Exception as e :
+                self.get_logger().warn(f'{e}')
+           
 
-                self.ax+=(0.1+randint)
-                self.by+=(0.1+randint)
-                self.cz+=(0.1+randint)
-
-
-
-            except Exception as e: 
-                self.get_logger().error(f'Error: {e}') 
     
 def main(): 
         rclpy.init() 
