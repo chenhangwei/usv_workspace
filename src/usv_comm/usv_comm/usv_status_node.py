@@ -18,7 +18,7 @@ class UsvStatusNode(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT # 可靠性策略
         )
 
-        self.state_publisher=self.create_publisher(UsvStatus,f'usv_current_state',10)
+        self.state_publisher=self.create_publisher(UsvStatus,'usv_state',10)
 
         self.is_running=False #是否运行中
         self.usv_state=State() #状态信息
@@ -87,6 +87,7 @@ class UsvStatusNode(Node):
 
 
     def state_timer_callback(self):
+
         self.usv_state_msg.header.stamp=self.usv_state.header.stamp
         self.get_logger().info(f'当前时间戳：{self.usv_state_msg.header.stamp}')    
         self.usv_state_msg.header.frame_id=self.usv_state.header.frame_id
@@ -124,6 +125,7 @@ class UsvStatusNode(Node):
         roll, pitch, yaw = euler_from_quaternion(quaternion)
         # 赋值给 yaw（单位：弧度）
         self.usv_state_msg.yaw = float(yaw)  # 转换为 float32
+        self.get_logger().info(f'当前偏角：{yaw}')
 
 
         self.state_publisher.publish( self.usv_state_msg)

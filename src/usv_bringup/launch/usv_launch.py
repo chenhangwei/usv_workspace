@@ -114,7 +114,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             param_file,  # 加载参数文件
-            {'fcu_url': 'serial:///dev/ttyACM0:115200'},  # 飞控串口和波特率
+            {'fcu_url': 'serial:///dev/ttyACM0:921600'},  # 飞控串口和波特率
             {'gcs_url': ''},  # 禁用 GCS 代理
             {'tgt_system': 1},  # 飞控的系统 ID
             {'tgt_component': 1},  # 飞控的组件 ID

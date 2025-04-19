@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1200</width>
-    <height>626</height>
+    <height>848</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -53,7 +53,7 @@
            <item>
             <widget class="QPushButton" name="add_cluster_pushButton">
              <property name="text">
-              <string>Add</string>
+              <string>&gt;&gt;</string>
              </property>
             </widget>
            </item>
@@ -73,7 +73,7 @@
            <item>
             <widget class="QPushButton" name="quit_cluster_pushButton">
              <property name="text">
-              <string>Quit</string>
+              <string>&lt;&lt;</string>
              </property>
             </widget>
            </item>
@@ -107,71 +107,114 @@
         </layout>
        </item>
        <item>
-        <layout class="QHBoxLayout" name="horizontalLayout">
+        <layout class="QHBoxLayout" name="horizontalLayout" stretch="30,50">
+         <property name="leftMargin">
+          <number>5</number>
+         </property>
+         <property name="topMargin">
+          <number>5</number>
+         </property>
+         <property name="rightMargin">
+          <number>5</number>
+         </property>
+         <property name="bottomMargin">
+          <number>5</number>
+         </property>
          <item>
           <widget class="QGroupBox" name="groupBox_6">
            <property name="title">
             <string>manual</string>
            </property>
-           <layout class="QVBoxLayout" name="verticalLayout_7">
+           <layout class="QVBoxLayout" name="verticalLayout_6">
             <item>
-             <layout class="QGridLayout" name="gridLayout">
-              <item row="0" column="1">
-               <widget class="QPushButton" name="forward_pushButton">
+             <layout class="QHBoxLayout" name="horizontalLayout_7">
+              <item>
+               <widget class="QLabel" name="label">
                 <property name="text">
-                 <string>forward</string>
+                 <string>x:</string>
                 </property>
                </widget>
               </item>
-              <item row="1" column="1">
-               <widget class="QPushButton" name="stop_pushButton">
-                <property name="text">
-                 <string>stop</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="2">
-               <widget class="QDoubleSpinBox" name="turn_speed_doubleSpinBox"/>
-              </item>
-              <item row="1" column="0">
-               <widget class="QPushButton" name="left_pushButton">
-                <property name="text">
-                 <string>left</string>
-                </property>
-               </widget>
-              </item>
-              <item row="2" column="0">
-               <widget class="QPushButton" name="gaga_pushButton">
-                <property name="text">
-                 <string>gaga</string>
-                </property>
-               </widget>
-              </item>
-              <item row="2" column="1">
-               <widget class="QPushButton" name="backward_pushButton">
-                <property name="text">
-                 <string>backward</string>
-                </property>
-               </widget>
-              </item>
-              <item row="1" column="2">
-               <widget class="QPushButton" name="right_pushButton">
-                <property name="text">
-                 <string>right</string>
-                </property>
-               </widget>
-              </item>
-              <item row="2" column="2">
-               <widget class="QPushButton" name="led_pushButton">
-                <property name="text">
-                 <string>led</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="0">
-               <widget class="QDoubleSpinBox" name="move_speed_doubleSpinBox"/>
+              <item>
+               <widget class="QDoubleSpinBox" name="set_departed_x_doubleSpinBox"/>
               </item>
              </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_9">
+              <item>
+               <widget class="QLabel" name="label_2">
+                <property name="text">
+                 <string>y:</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QDoubleSpinBox" name="set_departed_y_doubleSpinBox"/>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPushButton" name="send_departed_point_pushButton">
+              <property name="text">
+               <string>send point</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_10">
+              <item>
+               <widget class="QPushButton" name="departed_arming_pushButton">
+                <property name="text">
+                 <string>Arming</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="departed_disarming_pushButton">
+                <property name="text">
+                 <string>Disarming</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_11">
+              <item>
+               <widget class="QPushButton" name="set_departed_guided_pushButton">
+                <property name="text">
+                 <string>Guided</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="set_departed_manual_pushButton">
+                <property name="text">
+                 <string>Manual</string>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QSlider" name="usv_departed_velocity_horizontalSlider">
+              <property name="minimumSize">
+               <size>
+                <width>0</width>
+                <height>30</height>
+               </size>
+              </property>
+              <property name="maximum">
+               <number>100</number>
+              </property>
+              <property name="value">
+               <number>50</number>
+              </property>
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+             </widget>
             </item>
            </layout>
           </widget>
@@ -181,86 +224,190 @@
            <property name="title">
             <string>cluster command</string>
            </property>
-           <layout class="QVBoxLayout" name="verticalLayout_5">
+           <layout class="QHBoxLayout" name="horizontalLayout_8">
             <item>
-             <layout class="QGridLayout" name="gridLayout_2">
-              <item row="1" column="0">
-               <widget class="QPushButton" name="gaga1_pushButton">
-                <property name="text">
-                 <string>gaga1</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="1">
-               <widget class="QComboBox" name="cluster_setmode_comboBox">
+             <layout class="QVBoxLayout" name="verticalLayout_5">
+              <property name="leftMargin">
+               <number>5</number>
+              </property>
+              <property name="topMargin">
+               <number>5</number>
+              </property>
+              <property name="rightMargin">
+               <number>5</number>
+              </property>
+              <property name="bottomMargin">
+               <number>5</number>
+              </property>
+              <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_12">
                 <item>
-                 <property name="text">
-                  <string>MANAUL</string>
-                 </property>
+                 <widget class="QLabel" name="label_3">
+                  <property name="text">
+                   <string>x:</string>
+                  </property>
+                 </widget>
                 </item>
                 <item>
-                 <property name="text">
-                  <string>GUIDED</string>
-                 </property>
+                 <widget class="QDoubleSpinBox" name="set_cluster_x_doubleSpinBox"/>
                 </item>
                 <item>
-                 <property name="text">
-                  <string>AUTO</string>
-                 </property>
-                </item>
-               </widget>
-              </item>
-              <item row="2" column="0">
-               <widget class="QPushButton" name="led1_pushButton">
-                <property name="text">
-                 <string>led1</string>
-                </property>
-               </widget>
-              </item>
-              <item row="2" column="1">
-               <widget class="QPushButton" name="led2_pushButton">
-                <property name="text">
-                 <string>led2</string>
-                </property>
-               </widget>
-              </item>
-              <item row="0" column="0">
-               <widget class="QComboBox" name="arm_comboBox">
-                <item>
-                 <property name="text">
-                  <string>ARM</string>
-                 </property>
+                 <widget class="QLabel" name="label_4">
+                  <property name="text">
+                   <string>y:</string>
+                  </property>
+                 </widget>
                 </item>
                 <item>
-                 <property name="text">
-                  <string>DISARM</string>
-                 </property>
+                 <widget class="QDoubleSpinBox" name="set_cluster_y_doubleSpinBox"/>
                 </item>
-               </widget>
+               </layout>
               </item>
-              <item row="2" column="2">
-               <widget class="QPushButton" name="led3_pushButton">
+              <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_4">
+                <property name="leftMargin">
+                 <number>5</number>
+                </property>
+                <property name="topMargin">
+                 <number>5</number>
+                </property>
+                <property name="rightMargin">
+                 <number>5</number>
+                </property>
+                <property name="bottomMargin">
+                 <number>5</number>
+                </property>
+                <item>
+                 <widget class="QPushButton" name="arming_pushButton">
+                  <property name="text">
+                   <string>Arming</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="disarming_pushButton">
+                  <property name="text">
+                   <string>Disarming</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="set_guided_pushButton">
+                  <property name="text">
+                   <string>Guided</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="set_manual_pushButton">
+                  <property name="text">
+                   <string>Manual</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </item>
+              <item>
+               <widget class="QPushButton" name="send_cluster_point_pushButton">
                 <property name="text">
-                 <string>led3</string>
+                 <string>send point</string>
                 </property>
                </widget>
               </item>
-              <item row="1" column="1">
-               <widget class="QPushButton" name="gaga2_pushButton">
-                <property name="text">
-                 <string>gaga2</string>
+              <item>
+               <widget class="QSlider" name="usv_cluster_velocity_horizontalSlider">
+                <property name="minimumSize">
+                 <size>
+                  <width>0</width>
+                  <height>30</height>
+                 </size>
+                </property>
+                <property name="maximum">
+                 <number>100</number>
+                </property>
+                <property name="value">
+                 <number>50</number>
+                </property>
+                <property name="orientation">
+                 <enum>Qt::Horizontal</enum>
                 </property>
                </widget>
               </item>
-              <item row="0" column="2">
-               <widget class="QDoubleSpinBox" name="cluster_speed_doubleSpinBox"/>
-              </item>
-              <item row="1" column="2">
-               <widget class="QPushButton" name="gaga3_pushButton">
-                <property name="text">
-                 <string>gaga3</string>
+              <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_5">
+                <property name="leftMargin">
+                 <number>5</number>
                 </property>
-               </widget>
+                <property name="topMargin">
+                 <number>5</number>
+                </property>
+                <property name="rightMargin">
+                 <number>5</number>
+                </property>
+                <property name="bottomMargin">
+                 <number>5</number>
+                </property>
+                <item>
+                 <widget class="QPushButton" name="gaga1_pushButton">
+                  <property name="text">
+                   <string>send point</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="gaga2_pushButton">
+                  <property name="text">
+                   <string>gaga2</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="gaga3_pushButton">
+                  <property name="text">
+                   <string>gaga3</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="gaga3_pushButton_2">
+                  <property name="text">
+                   <string>gaga4</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </item>
+              <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_6">
+                <item>
+                 <widget class="QPushButton" name="led1_pushButton">
+                  <property name="text">
+                   <string>led1</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="led2_pushButton">
+                  <property name="text">
+                   <string>led2</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="led3_pushButton">
+                  <property name="text">
+                   <string>led3</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="led3_pushButton_2">
+                  <property name="text">
+                   <string>led3</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
               </item>
              </layout>
             </item>

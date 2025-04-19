@@ -1,104 +1,187 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String,Float32
 from gs_gui.ros_signal import ROSSignal
 from sensor_msgs.msg import BatteryState
 from mavros_msgs.msg import State
+from geometry_msgs.msg import PoseStamped
 from common_interfaces.msg import UsvStatus
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 class GroundStationNode(Node):
-    def __init__(self, ros_signal):
-        super().__init__('ground_station_node')
-        self.ros_signal = ros_signal
-
-   
-        self.qos = QoSProfile(
-            depth=10,  # 队列大小
-            reliability=QoSReliabilityPolicy.BEST_EFFORT)
-
-       
-       
-        # 创建发布器
-        self.arm_publisher = self.create_publisher(String, 'usv_set_arming', 10)
-        self.mode_publisher = self.create_publisher(String, 'usv_set_mode', 10)
-
-        self.subscribers = {}  # 存储订阅器
-        self.usv_status = {}  # 存储无人船的在线状态
-
-        # 定时器：定期检查在线的无人船节点
-        self.timer = self.create_timer(1.0, self.update_usv_namespaces)
-
-    # 更新无人船命名空间
-    def update_usv_namespaces(self):
-        # 获取当前网络中的所有节点及其命名空间
-        node_names_and_usv_namespaces = self.get_node_names_and_namespaces()
-        # 获取当前的无人船命名空间
-        current_usv_namespaces = [ns for _, ns in node_names_and_usv_namespaces if ns.startswith('/usv_')]
-        #检查新增的无人船命名空间
-        for namespace in current_usv_namespaces:
-            if namespace not in self.subscribers:
-                self.get_logger().info(f"发现新设备: {namespace}")
-                # 创建订阅器
-                self.create_usv_subscriber(namespace)
-        # 检查断开的无人船命名空间        
-        for namespace in list(self.subscribers.keys()):
-            if namespace not in current_usv_namespaces:
-                self.get_logger().info(f"设备离线: {namespace}")
-                # 删除订阅器
-                self.destroy_subscription(self.subscribers[namespace])
-                del self.subscribers[namespace]
-                del self.usv_status[namespace]
-
-        # 获取当前在线的无人船列表     
-        online_usv_list=self.get_online_usvs()
-        # 向UI发布在线无人船列表
-        self.ros_signal.receive_state_list.emit( online_usv_list)
-
-    def create_usv_subscriber(self, namespace):
-        # 创建订阅器
-        state_subscriber = self.create_subscription(
-           UsvStatus,
-            f'{namespace}/usv_current_state',
-            lambda msg, ns=namespace: self.state_callback(msg, ns),
-            self.qos
-        )
-        # 将订阅器存储在字典中,记录状态
-        self.subscribers[namespace] = {
-            'state':state_subscriber,
-        } 
-           # 初始化无人船的状态
-        self.usv_status[namespace] = {
-            'connected': False,  # 假设初始状态为未连接
-             }   
-
-    def state_callback(self, msg, namespace):
-        current_state = UsvStatus()
-        current_state = msg
-         # 如果 namespace 不在 usv_status 中，先初始化
-        if namespace not in self.usv_status:
-            self.usv_status[namespace] = {'connected': False}
-         # 更新 connected 状态
-            self.usv_status[namespace]['connected'] =current_state.connected           
-    
-    def get_online_usvs(self):
-           # 返回当前在线的无人船列表
-        online_usvs = [ns for ns, status in self.usv_status.items() if status['connected']]
-        return online_usvs
+    def __init__(self,signal):
+        super().__init__('groundstationnode')
+        self.ros_signal=signal
+        # 初始化 QoS 策略（根据需要调整）
+        self.qos_a = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.RELIABLE)
         
-    def  set_arming_callback(self, msg):
-        test_msg=String()
-        test_msg.data = msg
-        """处理解锁/上锁命令"""
-        self.get_logger().info(f'收到解锁/上锁命令: { test_msg}')
-        # 发布解锁/上锁命令
-        self.arm_publisher.publish(test_msg)
+        # 初始化订阅器和发布器字典
+        self.usv_state_subs = {}
+        self.set_usv_target_position_pubs = {}
+        self.set_usv_target_velocity_pubs = {}
+        self.set_usv_mode_pubs={}
+        self.set_usv_arming_pubs={}
+        self.usv_states={}
+   
+        
+        # 创建定时器，定期检查命名空间变化（例如每 5 秒）
+        self.timer = self.create_timer(10.0, self.update_subscribers_and_publishers)
+        
+        # 立即执行一次初始化
+        self.update_subscribers_and_publishers()
 
-    def set_mode_callback(self, msg):
-        """处理模式切换命令"""
-        test_msg=String()
-        test_msg.data = msg
-        self.get_logger().info(f'收到模式切换命令: { test_msg}')
-        self.mode_publisher.publish(test_msg)
+    def update_subscribers_and_publishers(self):
+        # 获取当前命名空间列表
+        namespaces = self.get_node_names_and_namespaces()
+        current_ns_list = list(set([ns for _, ns in namespaces if ns.startswith('/usv_')]))
+
+
+        # 如果命名空间未变化，快速退出
+        if current_ns_list == self.last_ns_list:
+            return
+        
+        self.last_ns_list = current_ns_list
+        
+        # 获取当前字典中的命名空间
+        existing_ns = set(self.usv_state_subs.keys())
+        
+        # 找出新增和移除的命名空间
+        new_ns = set(current_ns_list) - existing_ns  # 新增的命名空间
+        removed_ns = existing_ns - set(current_ns_list)  # 已移除的命名空间
+        
+        # 为新增的命名空间创建订阅器和发布器
+        for ns in new_ns:
+            # 构造话题名
+            topic_state = f"{ns}/usv_state"
+            topic_position = f"{ns}/set_usv_target_position"
+            topic_velocity = f"{ns}/set_usv_target_velocity"
+            topic_mode=f'{ns}/set_usv_mode'
+            topic_arming=f'{ns}/set_usv_arming'
+            
+            # 创建usv_state 订阅器
+            self.usv_state_subs[ns] = self.create_subscription(
+                UsvStatus,
+                topic_state,
+                lambda msg, ns=ns: self.usv_state_callback(msg, ns),
+                self.qos_a
+            )
+            self.get_logger().info(f"新建订阅者 for {topic_state}")
+            
+            # 创建 set_usv_position 发布器
+            self.set_usv_target_position_pubs[ns] = self.create_publisher(
+                PoseStamped,
+                topic_position,
+                self.qos_a
+            )
+            self.get_logger().info(f"新建发布者 for {topic_position}")
+            
+            # 创建 set_usv_velocity 发布器
+            self.set_usv_target_velocity_pubs[ns] = self.create_publisher(
+                Float32,
+                topic_velocity,
+                self.qos_a
+            )
+            self.get_logger().info(f"新建发布者 for {topic_velocity}")
+
+            #创建 set_usv_model 发布器
+            self.set_usv_mode_pubs[ns]=self.create_publisher(
+                String,
+                topic_mode,
+                self.qos_a
+            )
+            self.get_logger().info(f"新建发布者 for {topic_mode}")
+
+            #创建 set_usv_arming 发布器
+            self.set_usv_arming_pubs[ns]=self.create_publisher(
+                String,
+                topic_arming,
+                self.qos_a
+            )
+            self.get_logger().info(f"新建发布者 for {topic_arming}")
+        
+        # 移除已不存在的命名空间的订阅器和发布器
+        for ns in removed_ns:
+            # 销毁订阅器
+            if ns in self.usv_state_subs:
+                self.destroy_subscription(self.usv_state_subs[ns])
+                del self.usv_state_subs[ns]
+                self.get_logger().info(f"已销毁订阅者： {ns}/usv_state")
+            
+            # 销毁 set_usv_target_position 发布器
+            if ns in self.set_usv_target_position_pubs:
+                self.destroy_publisher(self.set_usv_target_position_pubs[ns])
+                del self.set_usv_target_position_pubs[ns]
+                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_target_position")
+            
+            # 销毁 set_usv_target_velocity 发布器
+            if ns in self.set_usv_target_velocity_pubs:
+                self.destroy_publisher(self.set_usv_target_velocity_pubs[ns])
+                del self.set_usv_target_velocity_pubs[ns]
+                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_target_velocity")
+
+             # 销毁 set_usv_model 发布器
+            if ns in self.set_usv_mode_pubs:
+                self.destroy_publisher(self.set_usv_mode_pubs[ns])
+                del self.set_usv_mode_pubs[ns]
+                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_model")
+
+             # 销毁 set_usv_arming 发布器
+            if ns in self.set_usv_arming_pubs:
+                self.destroy_publisher(self.set_usv_arming_pubs[ns])
+                del self.set_usv_arming_pubs[ns]
+                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_arming")
+
+    def usv_state_callback(self, msg, ns):
+        if  isinstance(msg,UsvStatus):
+            state_data={
+                 'namespace': ns,
+                'mode':msg.mode,
+                'connected':msg.connected,
+                'armed':msg.armed,
+                'guided':msg.guided,
+                'battery_voltage':msg.battery_voltage,
+                'battery_prcentage':msg.battery_percentage,
+                'power_supply_status':msg.power_supply_status,
+                'position':msg.position,
+                'velocity':msg.velocity,
+                'yaw':msg.yaw,
+
+            }
+            self.usv_states[ns] = state_data
+            self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+
+    def set_manaul_callback(self,msg):
+        pass
+    def set_guided_callback(self,msg):
+        pass
+    def set_arming_callback(self,msg):
+        pass
+    def set_disarming_callback(self,msg):
+        pass
+
+
+    #销毁
+    def destroy_node(self):
+        self.get_logger().info("Destroying node resources...")
+        for ns in list(self.usv_state_subs.keys()):
+            self.destroy_subscription(self.usv_state_subs[ns])
+            del self.usv_state_subs[ns]
+        for ns in list(self.set_usv_target_position_pubs.keys()):
+            self.destroy_publisher(self.set_usv_target_position_pubs[ns])
+            del self.set_usv_target_position_pubs[ns]
+        for ns in list(self.set_usv_target_velocity_pubs.keys()):
+            self.destroy_publisher(self.set_usv_target_velocity_pubs[ns])
+            del self.set_usv_target_velocity_pubs[ns]
+        for ns in list(self.set_usv_mode_pubs.keys()):
+            self.destroy_publisher(self.set_usv_mode_pubs[ns])
+            del self.set_usv_mode_pubs[ns]
+        for ns in list(self.set_usv_arming_pubs.keys()):
+            self.destroy_publisher(self.set_usv_arming_pubs[ns])
+            del self.set_usv_arming_pubs[ns]
+
+        super().destroy_node()
+
+
+
 
   

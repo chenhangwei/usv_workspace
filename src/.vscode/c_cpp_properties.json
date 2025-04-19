@@ -1,0 +1,24 @@
+{
+  "configurations": [
+    {
+      "browse": {
+        "databaseFilename": "${default}",
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "includePath": [
+        "/home/chenhangwei/dev_ws/install/common_interfaces/include/**",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_ros_com/include/**",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_msgs/include/**",
+        "/opt/ros/jazzy/include/**",
+        "/home/chenhangwei/dev_ws/src/common_interfaces/include/**",
+        "/usr/include/**"
+      ],
+      "name": "ROS",
+      "intelliSenseMode": "gcc-x64",
+      "compilerPath": "/usr/bin/gcc",
+      "cStandard": "gnu11",
+      "cppStandard": "c++14"
+    }
+  ],
+  "version": 4
+}
