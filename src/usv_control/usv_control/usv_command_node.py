@@ -39,7 +39,7 @@ class UsvCommandNode(Node):
         )
 
     def set_mode_callback(self, msg):
-        
+        self.get_logger().info(f'收到模式消息: {msg.data}')
         """处理模式切换命令"""
         if not isinstance(msg, String):
             self.get_logger().error('收到无效的模式消息类型')
@@ -61,7 +61,7 @@ class UsvCommandNode(Node):
             self.get_logger().error('切换模式失败')
 
     def set_arming_callback(self, msg):
-        
+        self.get_logger().info(f'收到解锁消息: {msg.data}')
         """处理解锁/上锁命令"""
         if not isinstance(msg, Bool):
             self.get_logger().error('收到无效的解除武装消息类型')

@@ -240,30 +240,6 @@
                <number>5</number>
               </property>
               <item>
-               <layout class="QHBoxLayout" name="horizontalLayout_12">
-                <item>
-                 <widget class="QLabel" name="label_3">
-                  <property name="text">
-                   <string>x:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QDoubleSpinBox" name="set_cluster_x_doubleSpinBox"/>
-                </item>
-                <item>
-                 <widget class="QLabel" name="label_4">
-                  <property name="text">
-                   <string>y:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QDoubleSpinBox" name="set_cluster_y_doubleSpinBox"/>
-                </item>
-               </layout>
-              </item>
-              <item>
                <layout class="QHBoxLayout" name="horizontalLayout_4">
                 <property name="leftMargin">
                  <number>5</number>
@@ -350,7 +326,7 @@
                 <item>
                  <widget class="QPushButton" name="gaga1_pushButton">
                   <property name="text">
-                   <string>send point</string>
+                   <string>gaga1</string>
                   </property>
                  </widget>
                 </item>
@@ -463,8 +439,20 @@
      <height>20</height>
     </rect>
    </property>
+   <widget class="QMenu" name="menuFile">
+    <property name="title">
+     <string>File</string>
+    </property>
+    <addaction name="actionopen"/>
+   </widget>
+   <addaction name="menuFile"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
+  <action name="actionopen">
+   <property name="text">
+    <string>open</string>
+   </property>
+  </action>
  </widget>
  <resources/>
  <connections/>

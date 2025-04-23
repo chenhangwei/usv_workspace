@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<cluster type="triangle">
+    <step number="1">
+        <usvs>
+            <usv>
+                <usv_id>usv_01</usv_id>
+                <position>
+                    <x>10.5</x>
+                    <y>20.3</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <usv>
+                <usv_id>usv_02</usv_id>
+                <position>
+                    <x>15.7</x>
+                    <y>25.1</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <usv>
+                <usv_id>usv_03</usv_id>
+                <position>
+                    <x>12.9</x>
+                    <y>22.8</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+        </usvs>
+    </step>
+</cluster>

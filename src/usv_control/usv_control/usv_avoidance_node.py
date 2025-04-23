@@ -66,7 +66,7 @@ class UsvAvoidanceNode(Node):
     # 获取当前状态
     def state_callback(self, msg):
         if isinstance(msg, State):
-            self.get_logger().info("避障节点usv状态信息接收成功")
+            # self.get_logger().info("避障节点usv状态信息接收成功")
             self.current_state = msg
     # 获取当前坐标     
     def position_callback(self, msg):
@@ -98,7 +98,12 @@ class UsvAvoidanceNode(Node):
                     min_distance = ranges[i]
                     
                 # 如果前方障碍物距离小于安全距离，触发避障
-            if min_distance < self.in_distance_value and min_distance > 0:
+            if (
+                min_distance is not None and
+                self.in_distance_value is not None and
+                min_distance < self.in_distance_value and
+                min_distance > 0
+            ):
                 self.obstacle_detected = True
                 self.get_logger().info(f"Obstacle detected at {min_distance:.2f} m, initiating avoidance")
             else:

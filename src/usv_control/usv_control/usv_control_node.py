@@ -1,8 +1,12 @@
+import signal
+import stat
+
+from hamcrest import is_
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped,Point
 from mavros_msgs.msg import State,OverrideRCIn #覆盖RC通道
-from std_msgs.msg import Bool, Header,Float32
+from std_msgs.msg import Bool, Header,Float32,String
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
@@ -26,14 +30,13 @@ class UsvControlNode(Node):
 
      
         # 发布目标点
-        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', self.publish_qos)     
-      
+        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', self.publish_qos)    
         # 发布到达信号Bool
         self.signal_pub = self.create_publisher(Bool, 'reached_target', self.publish_qos)
         # 发布油门
         self.rc_override_pub=self.create_publisher(OverrideRCIn,'rc/override',self.publish_qos)
 
-
+        self.is_running_pub=self.create_publisher(Bool,'is_running',self.publish_qos)
 
         #订阅当前状态
         self.state_sub = self.create_subscription(
@@ -43,7 +46,7 @@ class UsvControlNode(Node):
         self.target_point_sub = self.create_subscription(
             PoseStamped, 'set_usv_target_position', self.set_target_point_callback, qos)
         
-              # 订阅需要运行的目标速度
+        # 订阅需要运行的目标速度
         self.target_velocity_sub=self.create_subscription(
             Float32,'set_usv_target_velocity',self.set_target_velocity_callback,qos)
 
@@ -58,8 +61,7 @@ class UsvControlNode(Node):
         self.current_position_sub = self.create_subscription(
             PoseStamped, 'local_position/pose', self.current_position_callback, qos)
         
-  
-        
+           
         # 定时器检查是否到达目标点
         self.check_target_timer_reached = self.create_timer(1, self.check_target_reached)
 
@@ -74,7 +76,8 @@ class UsvControlNode(Node):
         self.speed_value=0.0
         self.avoidance_postition=PoseStamped()
         self.avoidance_point=Point()
-        self.avoidance_flag=False
+        self.avoidance_flag=Bool()
+        self.is_running=Bool()
 
     def state_callback(self, msg):
         if isinstance(msg, State):
@@ -90,16 +93,18 @@ class UsvControlNode(Node):
 
     #订阅到达目标点话题
     def set_target_point_callback(self, msg):
+        self.get_logger().info(f"目标点信息接收成功:{msg}")
         if not isinstance(msg, PoseStamped):
             self.get_logger().info('目标坐标为空，忽略')
             return
         self.current_target_position=msg
         self.current_target_point = msg.pose.position
     def set_target_velocity_callback(self,msg):
+        self.get_logger().info(f"目标速度信息接收成功:{msg}")
         if not isinstance(msg,float):
             self.get_logger().info('目标速度为空，忽略')
             return
-        self.speed_value=self.speed_to_pwm(msg,0.0,1.0,1000,2000 )
+        self.speed_value=self.speed_to_pwm(msg,0.0,1.0,1000,2000)
 
     def set_avoidance_target_position_callback(self,msg):
         if not isinstance(msg,PoseStamped):
@@ -111,16 +116,12 @@ class UsvControlNode(Node):
         if not isinstance(msg,Bool):
             self.get_logger().info('避障标记为空，忽略')
             return
-        self.avoidance_flag=msg
+        self.avoidance_flag.data=msg.data
         
-
-    def speed_to_pwm(speed, speed_min=0.0, speed_max=1.0, pwm_min=1000, pwm_max=2000):
-    # 限制 speed 范围
+    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=1.0, pwm_min=1000, pwm_max=2000):
+        # 限制 speed 范围
         speed = max(min(speed, speed_max), speed_min)
         return int(((speed - speed_min) / (speed_max - speed_min)) * (pwm_max - pwm_min) + pwm_min)
-      
-        
-
    
     #发布目标点
     def publish_target(self):
@@ -165,25 +166,42 @@ class UsvControlNode(Node):
 
         rc_msg.channels=[0]*8
 
-        rc_msg.channels[0]=self.speed_value
+        rc_msg.channels[0]=int(self.speed_value)
 
 
         self.target_point_pub.publish(point_msg)
         self.rc_override_pub.publish(rc_msg)
+        is_running_=Bool()
+        is_running_.data=True
+        self.is_running_pub.publish(is_running_)
+        signal_=Bool()
+        signal_.data=False
+        self.signal_pub.publish(signal_)
 
   
 
     #检测无人船是否到达目标点
     def check_target_reached(self):
-        self.reach_threshold=self.get_parameter('reach_threshold').value
-        if self.current_point and self.current_target_point:
+        self.reach_threshold = self.get_parameter('reach_threshold').value
+        if (
+            self.current_point
+            and self.current_target_point
+            and self.current_point.x is not None
+            and self.current_point.y is not None
+            and self.current_target_point.x is not None
+            and self.current_target_point.y is not None
+            and self.reach_threshold is not None
+        ):
             distance = math.hypot(
-                self.current_point.x- self.current_target_point.x,
+                self.current_point.x - self.current_target_point.x,
                 self.current_point.y - self.current_target_point.y)
             if distance < self.reach_threshold:  # 靠近目标（1 米阈值）
-                signal_msg = Bool()
-                signal_msg.data = True
-                self.signal_pub.publish(signal_msg)
+                signal_msg_=Bool()
+                signal_msg_.data=True
+                self.signal_pub.publish(signal_msg_)
+                is_running_=Bool()
+                is_running_.data=False
+                self.is_running_pub.publish(is_running_)
                 self.get_logger().info(f'目标点已经到达')
 
 def main(args=None):

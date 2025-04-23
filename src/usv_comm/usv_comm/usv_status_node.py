@@ -1,8 +1,10 @@
+from xmlrpc.client import Boolean
+from sympy import false
 import rclpy
 from rclpy.node import Node
 from mavros_msgs.msg import State,PositionTarget
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import String
+from std_msgs.msg import String,Bool
 from common_interfaces.msg import UsvStatus
 from geometry_msgs.msg import TwistStamped,PoseStamped,Vector3
 from tf_transformations import euler_from_quaternion
@@ -20,7 +22,7 @@ class UsvStatusNode(Node):
 
         self.state_publisher=self.create_publisher(UsvStatus,'usv_state',10)
 
-        self.is_running=False #是否运行中
+        self.is_runing=Bool() #是否运行中
         self.usv_state=State() #状态信息
         self.usv_battery=BatteryState() #电池电压信息
         self.usv_velocity=TwistStamped() #速度信息      
@@ -62,8 +64,36 @@ class UsvStatusNode(Node):
             self.usv_pose_callback,
             qos
         )
+
+        self.subscription_state=self.create_subscription(
+            String,
+            f'status',
+            self.usv_status_callback,
+            qos
+        )
+
+        self.subscription_is_runing=self.create_subscription(
+            Bool,
+            f'is_running',
+            self.usv_is_runing_callback,
+            qos
+        )
+
         self.state_timer=self.create_timer(1,self.state_timer_callback)
 
+    def usv_is_runing_callback(self,msg):
+        if isinstance(msg, Bool):
+            self.is_runing.data=msg.data
+            self.get_logger().info(f'当前运行状态：{self.is_runing.data}')
+        else:
+            self.get_logger().error('接收到的消息类型不正确')
+
+    def usv_status_callback(self,msg):
+        if isinstance(msg, String):
+            self.status=msg.data
+            self.get_logger().info(f'当前状态：{self.status}')
+        else:
+            self.get_logger().error('接收到的消息类型不正确')
 
     def usv_state_callback(self, msg):
             if isinstance(msg, State):
@@ -87,7 +117,6 @@ class UsvStatusNode(Node):
 
 
     def state_timer_callback(self):
-
         self.usv_state_msg.header.stamp=self.usv_state.header.stamp
         self.get_logger().info(f'当前时间戳：{self.usv_state_msg.header.stamp}')    
         self.usv_state_msg.header.frame_id=self.usv_state.header.frame_id
@@ -126,6 +155,9 @@ class UsvStatusNode(Node):
         # 赋值给 yaw（单位：弧度）
         self.usv_state_msg.yaw = float(yaw)  # 转换为 float32
         self.get_logger().info(f'当前偏角：{yaw}')
+
+        self.usv_state_msg.is_runing=self.is_runing.data
+        self.get_logger().info(f'当前运行状态：{self.usv_state_msg.is_runing}')
 
 
         self.state_publisher.publish( self.usv_state_msg)
