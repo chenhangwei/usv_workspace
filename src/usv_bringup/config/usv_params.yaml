@@ -36,3 +36,11 @@ usv_ultrasonic_node:
 usv_uwb_node:
   ros__parameters:
     dummy_param: true
+
+usv_led_node:
+  ros__parameters:
+    dummy_param: true
+
+usv_sound_node:
+  ros__parameters:
+    dummy_param: true

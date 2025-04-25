@@ -5,6 +5,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
+
 def generate_launch_description():
      # 声明命名空间参数
     namespace_arg = DeclareLaunchArgument(
@@ -79,10 +80,6 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-  
-
-
-
    # uwb激光雷达
     usv_laserscan_node= Node(
         package='usv_drivers',
@@ -103,8 +100,25 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
+    #  LED控制
+    usv_led_node = Node(
+        package='usv_led',
+        executable='usv_led_node',
+        name='usv_led_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
 
-
+    # 声音控制
+    usv_sound_node = Node(
+        package='usv_sound',
+        executable='usv_sound_node',
+        name='usv_sound_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
       # 定义 MAVROS 节点
     mavros_node = Node(
         package='mavros',
@@ -136,6 +150,8 @@ def generate_launch_description():
         usv_avoidance_node,
         usv_laserscan_node,
         usv_ultrasonic_node,
+        usv_led_node,
+        usv_sound_node,
         
     ]
     )

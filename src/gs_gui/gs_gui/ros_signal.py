@@ -17,3 +17,6 @@ class ROSSignal(QObject):
   
 
     receive_state_list= pyqtSignal(list)  # 无人船状态
+
+
+    str_command=pyqtSignal(str)

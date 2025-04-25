@@ -1,3 +1,29 @@
 {
-    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/status_interfaces"
+    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/status_interfaces",
+    "python.autoComplete.extraPaths": [
+        "/home/chenhangwei/dev_ws/install/usv_drivers/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_control/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_comm/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_bringup/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_swarm_control/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_gui/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_bringup/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/common_interfaces/lib/python3.12/site-packages",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_ros_com/lib/python3.12/site-packages",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_msgs/lib/python3.12/site-packages",
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/home/chenhangwei/dev_ws/install/usv_drivers/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_control/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_comm/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/usv_bringup/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_swarm_control/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_gui/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/gs_bringup/lib/python3.12/site-packages",
+        "/home/chenhangwei/dev_ws/install/common_interfaces/lib/python3.12/site-packages",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_ros_com/lib/python3.12/site-packages",
+        "/home/chenhangwei/px4_ros_ws/src/install/px4_msgs/lib/python3.12/site-packages",
+        "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ]
 }

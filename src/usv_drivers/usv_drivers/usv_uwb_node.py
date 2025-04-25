@@ -1,6 +1,5 @@
 import serial 
 import rclpy 
-import random
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped 
 import re

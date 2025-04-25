@@ -53,6 +53,16 @@ class Mainwindow(QMainWindow):
         self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
         self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)#离开集群list，到离群list
 
+        self.ui.gaga1_pushButton.clicked.connect(self.gaga1_command)
+        self.ui.gaga2_pushButton.clicked.connect(self.gaga2_command)
+        self.ui.gaga3_pushButton.clicked.connect(self.gaga3_command)
+        self.ui.gaga4_pushButton.clicked.connect(self.gaga4_command)
+
+        self.ui.led1_pushButton.clicked.connect(self.led1_command)
+        self.ui.led2_pushButton.clicked.connect(self.led2_command)
+        self.ui.led3_pushButton.clicked.connect(self.led3_command)
+        self.ui.led4_pushButton.clicked.connect(self.led4_command)
+
 
         # 点击open菜单
         self.ui.actionopen.triggered.connect(self.read_data_from_file)
@@ -329,9 +339,12 @@ class Mainwindow(QMainWindow):
 
     # 离开集群列表
     def quit_cluster_command(self):
+
         self.ui.info_textEdit.append(f"离开集群列表")
         # 获取选中的标签
         selected_indexes = self.ui.cluster_tableView.selectedIndexes()
+        self.ui.info_textEdit.append(f'选中的标签：{selected_indexes}')
+
         if selected_indexes:
             selected_row = selected_indexes[0].row()
             # 获取选中行的数据
@@ -394,7 +407,7 @@ class Mainwindow(QMainWindow):
                 self.cluster_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
-        # self.ui.cluster_tableView.update()
+
    # 更新离群表格
     def update_departed_table(self, lists):
         if lists is None:
@@ -417,11 +430,6 @@ class Mainwindow(QMainWindow):
             self.departed_table_model.setItem(i, 10, QStandardItem(str(state.velocity)))
             self.departed_table_model.setItem(i, 11, QStandardItem(str(state.yaw)))
 
-
-
-
-  
-
 def main(argv=None):
     app = QApplication(sys.argv)
     ros_signal = ROSSignal()
@@ -440,6 +448,12 @@ def main(argv=None):
     ros_signal.cluster_target_velocity_command.connect(node.set_cluster_target_velocity_callback)
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
     ros_signal.departed_target_velocity_command.connect(node.set_departed_target_velocity_callback)
+
+   
+    ros_signal.str_command.connect(node.str_command_callback)
+
+
+
 
     ros_thread = threading.Thread(target=lambda:rclpy.spin(node), daemon=True)
     ros_thread.start()
