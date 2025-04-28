@@ -81,7 +81,7 @@ class UsvControlNode(Node):
 
     def state_callback(self, msg):
         if isinstance(msg, State):
-            self.get_logger().info("避障节点usv状态信息接收成功")
+            # self.get_logger().info("避障节点usv状态信息接收成功")
             self.current_state = msg
   #订阅当前位置
     def current_position_callback(self, msg):       
@@ -93,7 +93,7 @@ class UsvControlNode(Node):
 
     #订阅到达目标点话题
     def set_target_point_callback(self, msg):
-        self.get_logger().info(f"目标点信息接收成功:{msg}")
+        # self.get_logger().info(f"目标点信息接收成功:{msg}")
         if not isinstance(msg, PoseStamped):
             self.get_logger().info('目标坐标为空，忽略')
             return
@@ -101,10 +101,10 @@ class UsvControlNode(Node):
         self.current_target_point = msg.pose.position
     def set_target_velocity_callback(self,msg):
         self.get_logger().info(f"目标速度信息接收成功:{msg}")
-        if not isinstance(msg,float):
+        if not isinstance(msg,Float32):
             self.get_logger().info('目标速度为空，忽略')
             return
-        self.speed_value=self.speed_to_pwm(msg,0.0,1.0,1000,2000)
+        self.speed_value=self.speed_to_pwm(msg.data,0.0,100,1100,1900)
 
     def set_avoidance_target_position_callback(self,msg):
         if not isinstance(msg,PoseStamped):
@@ -118,7 +118,7 @@ class UsvControlNode(Node):
             return
         self.avoidance_flag.data=msg.data
         
-    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=1.0, pwm_min=1000, pwm_max=2000):
+    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=100.0, pwm_min=1100, pwm_max=1900):
         # 限制 speed 范围
         speed = max(min(speed, speed_max), speed_min)
         return int(((speed - speed_min) / (speed_max - speed_min)) * (pwm_max - pwm_min) + pwm_min)
@@ -128,24 +128,24 @@ class UsvControlNode(Node):
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
                 # self.get_logger().warn("设备站未解锁或未在 GUIDED模式,将不会执行任何操作")
                 return  
-        if not self.avoidance_flag:    
-            px=self.current_target_position.pose.position.x
-            py=self.current_target_position.pose.position.y
-            pz=self.current_target_position.pose.position.z
+        # if not self.avoidance_flag:    
+        px=self.current_target_position.pose.position.x
+        py=self.current_target_position.pose.position.y
+        pz=self.current_target_position.pose.position.z
 
-            ox=self.current_target_position.pose.orientation.x
-            oy=self.current_target_position.pose.orientation.y
-            oz=self.current_target_position.pose.orientation.z
-            ow=self.current_target_position.pose.orientation.w
-        else :
-            px=self.avoidance_postition.pose.position.x
-            py=self.avoidance_postition.pose.position.y
-            pz=self.avoidance_postition.pose.position.z  
+        ox=self.current_target_position.pose.orientation.x
+        oy=self.current_target_position.pose.orientation.y
+        oz=self.current_target_position.pose.orientation.z
+        ow=self.current_target_position.pose.orientation.w
+        # else :
+        #     px=self.avoidance_postition.pose.position.x
+        #     py=self.avoidance_postition.pose.position.y
+        #     pz=self.avoidance_postition.pose.position.z  
 
-            ox=self.avoidance_postition.pose.orientation.x
-            oy=self.avoidance_postition.pose.orientation.y
-            oz=self.avoidance_postition.pose.orientation.z
-            ow=self.avoidance_postition.pose.orientation.w
+        #     ox=self.avoidance_postition.pose.orientation.x
+        #     oy=self.avoidance_postition.pose.orientation.y
+        #     oz=self.avoidance_postition.pose.orientation.z
+        #     ow=self.avoidance_postition.pose.orientation.w
 
         if px is None or py is None or pz is None :
             self.get_logger().info('目标点为空，忽略')
@@ -166,7 +166,7 @@ class UsvControlNode(Node):
 
         rc_msg.channels=[0]*8
 
-        rc_msg.channels[0]=int(self.speed_value)
+        rc_msg.channels[2]=int(self.speed_value)
 
 
         self.target_point_pub.publish(point_msg)
@@ -202,7 +202,7 @@ class UsvControlNode(Node):
                 is_running_=Bool()
                 is_running_.data=False
                 self.is_running_pub.publish(is_running_)
-                self.get_logger().info(f'目标点已经到达')
+                # self.get_logger().info(f'目标点已经到达')
 
 def main(args=None):
     rclpy.init(args=args)
