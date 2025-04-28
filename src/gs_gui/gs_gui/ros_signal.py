@@ -4,7 +4,7 @@ from PyQt5.QtCore import pyqtSignal, QObject
 class ROSSignal(QObject):
     arm_command= pyqtSignal(list)  # 武装
     disarm_command= pyqtSignal(list)  # 解除武装
-    manaul_command= pyqtSignal(list)  # manaul模式
+    manual_command= pyqtSignal(list)  # manaul模式
     guided_command= pyqtSignal(list)  # guided模式
 
     cluster_target_point_command= pyqtSignal(list)     # 集群目标点

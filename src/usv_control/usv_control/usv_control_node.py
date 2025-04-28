@@ -5,7 +5,7 @@ from hamcrest import is_
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped,Point
-from mavros_msgs.msg import State,OverrideRCIn #覆盖RC通道
+from mavros_msgs.msg import State,OverrideRCIn ,PositionTarget
 from std_msgs.msg import Bool, Header,Float32,String
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -97,6 +97,8 @@ class UsvControlNode(Node):
         if not isinstance(msg, PoseStamped):
             self.get_logger().info('目标坐标为空，忽略')
             return
+        
+
         self.current_target_position=msg
         self.current_target_point = msg.pose.position
     def set_target_velocity_callback(self,msg):
@@ -104,7 +106,7 @@ class UsvControlNode(Node):
         if not isinstance(msg,Float32):
             self.get_logger().info('目标速度为空，忽略')
             return
-        self.speed_value=self.speed_to_pwm(msg.data,0.0,100,1100,1900)
+        self.speed_value=self.speed_to_pwm(msg.data,0.0,100,1000,2000)
 
     def set_avoidance_target_position_callback(self,msg):
         if not isinstance(msg,PoseStamped):
@@ -118,7 +120,7 @@ class UsvControlNode(Node):
             return
         self.avoidance_flag.data=msg.data
         
-    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=100.0, pwm_min=1100, pwm_max=1900):
+    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=100.0, pwm_min=1000, pwm_max=2000):
         # 限制 speed 范围
         speed = max(min(speed, speed_max), speed_min)
         return int(((speed - speed_min) / (speed_max - speed_min)) * (pwm_max - pwm_min) + pwm_min)
@@ -137,6 +139,9 @@ class UsvControlNode(Node):
         oy=self.current_target_position.pose.orientation.y
         oz=self.current_target_position.pose.orientation.z
         ow=self.current_target_position.pose.orientation.w
+
+
+
         # else :
         #     px=self.avoidance_postition.pose.position.x
         #     py=self.avoidance_postition.pose.position.y
@@ -156,11 +161,12 @@ class UsvControlNode(Node):
         point_msg.pose.position.x=px
         point_msg.pose.position.y=py
         point_msg.pose.position.z=pz
+        point_msg.pose.orientation.x=ox
+        point_msg.pose.orientation.y=oy
+        point_msg.pose.orientation.z=oz
+        point_msg.pose.orientation.w=ow
 
-        point_msg.pose.orientation.x = ox
-        point_msg.pose.orientation.y = oy
-        point_msg.pose.orientation.z = oz
-        point_msg.pose.orientation.w = ow
+     
 
         rc_msg=OverrideRCIn()
 

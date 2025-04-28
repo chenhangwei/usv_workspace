@@ -449,12 +449,24 @@
     </property>
     <addaction name="actionopen"/>
    </widget>
+   <widget class="QMenu" name="menuVisual">
+    <property name="title">
+     <string>Visual</string>
+    </property>
+    <addaction name="actionrviz2"/>
+   </widget>
    <addaction name="menuFile"/>
+   <addaction name="menuVisual"/>
   </widget>
   <widget class="QStatusBar" name="statusbar"/>
   <action name="actionopen">
    <property name="text">
     <string>open</string>
+   </property>
+  </action>
+  <action name="actionrviz2">
+   <property name="text">
+    <string>rviz2</string>
    </property>
   </action>
  </widget>

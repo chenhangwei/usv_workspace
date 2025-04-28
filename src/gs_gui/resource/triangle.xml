@@ -43,4 +43,47 @@
             </usv>
         </usvs>
     </step>
+    <step number="2">
+        <usvs>
+            <usv>
+                <usv_id>usv_01</usv_id>
+                <position>
+                    <x>15.5</x>
+                    <y>25.3</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <usv>
+                <usv_id>usv_02</usv_id>
+                <position>
+                    <x>18.7</x>
+                    <y>28.1</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <usv>
+                <usv_id>usv_03</usv_id>
+                <position>
+                    <x>20.9</x>
+                    <y>30.8</y>
+                </position>
+                <yaw>
+                    <value>0.5</value>
+                </yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+        </usvs>
+    </step>
 </cluster>

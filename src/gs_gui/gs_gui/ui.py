@@ -213,14 +213,20 @@ class Ui_MainWindow(object):
         self.menubar.setObjectName("menubar")
         self.menuFile = QtWidgets.QMenu(self.menubar)
         self.menuFile.setObjectName("menuFile")
+        self.menuVisual = QtWidgets.QMenu(self.menubar)
+        self.menuVisual.setObjectName("menuVisual")
         MainWindow.setMenuBar(self.menubar)
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
         self.statusbar.setObjectName("statusbar")
         MainWindow.setStatusBar(self.statusbar)
         self.actionopen = QtWidgets.QAction(MainWindow)
         self.actionopen.setObjectName("actionopen")
+        self.actionrviz2 = QtWidgets.QAction(MainWindow)
+        self.actionrviz2.setObjectName("actionrviz2")
         self.menuFile.addAction(self.actionopen)
+        self.menuVisual.addAction(self.actionrviz2)
         self.menubar.addAction(self.menuFile.menuAction())
+        self.menubar.addAction(self.menuVisual.menuAction())
 
         self.retranslateUi(MainWindow)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
@@ -259,7 +265,9 @@ class Ui_MainWindow(object):
         self.groupBox_9.setTitle(_translate("MainWindow", "info"))
         self.groupBox_10.setTitle(_translate("MainWindow", "warning"))
         self.menuFile.setTitle(_translate("MainWindow", "File"))
+        self.menuVisual.setTitle(_translate("MainWindow", "Visual"))
         self.actionopen.setText(_translate("MainWindow", "open"))
+        self.actionrviz2.setText(_translate("MainWindow", "rviz2"))
 
 
 if __name__ == "__main__":

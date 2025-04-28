@@ -75,7 +75,7 @@ class UsvAvoidanceNode(Node):
     # 获取目标坐标
     def target_callback(self, msg):
         if isinstance(msg, PoseStamped):
-            self.get_logger().info("目标点信息接收成功")
+            # self.get_logger().info("目标点信息接收成功")
             self.current_target = msg.pose.position
 
  
@@ -110,7 +110,7 @@ class UsvAvoidanceNode(Node):
                 self.obstacle_detected = False   
 
 
-        if not self.current_position or not self.current_target or self.obstacle_detected:              
+        if not self.current_position and not self.current_target and self.obstacle_detected:              
             # 计算当前到目标的方向
             dx = self.current_target.x - self.current_position.x
             dy = self.current_target.y- self.current_position.y
@@ -128,7 +128,10 @@ class UsvAvoidanceNode(Node):
 
             self.target_pub.publish(msg)
             self.get_logger().info(f'Avoidance target: ({avoid_x}, {avoid_y})')
-        self.avoidance_flag.publish(self.obstacle_detected)
+
+        temp = Bool()
+        temp.data=self.obstacle_detected
+        self.avoidance_flag.publish(temp)
 
 
 

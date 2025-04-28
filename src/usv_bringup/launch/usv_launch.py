@@ -10,7 +10,7 @@ def generate_launch_description():
      # 声明命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_1',# 默认命名空间
+        default_value='usv_01',# 默认命名空间
         description='无人船节点的命名空间'
     )
       # 声明参数文件路径参数
@@ -150,8 +150,8 @@ def generate_launch_description():
         usv_avoidance_node,
         usv_laserscan_node,
         usv_ultrasonic_node,
-        usv_led_node,
-        usv_sound_node,
+        # usv_led_node,
+        # usv_sound_node,
         
     ]
     )

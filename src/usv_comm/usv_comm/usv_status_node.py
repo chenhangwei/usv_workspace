@@ -84,14 +84,14 @@ class UsvStatusNode(Node):
     def usv_is_runing_callback(self,msg):
         if isinstance(msg, Bool):
             self.is_runing.data=msg.data
-            self.get_logger().info(f'当前运行状态：{self.is_runing.data}')
+            # self.get_logger().info(f'当前运行状态：{self.is_runing.data}')
         else:
             self.get_logger().error('接收到的消息类型不正确')
 
     def usv_status_callback(self,msg):
         if isinstance(msg, String):
             self.status=msg.data
-            self.get_logger().info(f'当前状态：{self.status}')
+            # self.get_logger().info(f'当前状态：{self.status}')
         else:
             self.get_logger().error('接收到的消息类型不正确')
 
@@ -118,30 +118,30 @@ class UsvStatusNode(Node):
 
     def state_timer_callback(self):
         self.usv_state_msg.header.stamp=self.usv_state.header.stamp
-        self.get_logger().info(f'当前时间戳：{self.usv_state_msg.header.stamp}')    
+        # self.get_logger().info(f'当前时间戳：{self.usv_state_msg.header.stamp}')    
         self.usv_state_msg.header.frame_id=self.usv_state.header.frame_id
-        self.get_logger().info(f'当前帧ID:{self.usv_state_msg.header.frame_id}')
+        # self.get_logger().info(f'当前帧ID:{self.usv_state_msg.header.frame_id}')
         self.usv_state_msg.armed=self.usv_state.armed
-        self.get_logger().info(f'当前解锁状态：{self.usv_state_msg.armed}')
+        # self.get_logger().info(f'当前解锁状态：{self.usv_state_msg.armed}')
         self.usv_state_msg.connected=self.usv_state.connected
-        self.get_logger().info(f'当前连接状态：{self.usv_state_msg.connected}')
+        # self.get_logger().info(f'当前连接状态：{self.usv_state_msg.connected}')
         self.usv_state_msg.mode=self.usv_state.mode
-        self.get_logger().info(f'当前模式：{self.usv_state_msg.mode}')
+        # self.get_logger().info(f'当前模式：{self.usv_state_msg.mode}')
         self.usv_state_msg.guided=self.usv_state.guided
-        self.get_logger().info(f'当前引导状态：{self.usv_state_msg.guided}')
+        # self.get_logger().info(f'当前引导状态：{self.usv_state_msg.guided}')
 
 
         self.usv_state_msg.battery_voltage=self.usv_battery.voltage
         self.get_logger().info(f'当前电池电压：{self.usv_state_msg.battery_voltage}')
         self.usv_state_msg.battery_percentage=self.usv_battery.percentage
-        self.get_logger().info(f'当前电池电量：{self.usv_state_msg.battery_percentage}')
+        # self.get_logger().info(f'当前电池电量：{self.usv_state_msg.battery_percentage}')
         self.usv_state_msg.power_supply_status=self.usv_battery.power_supply_status
-        self.get_logger().info(f'当前电池状态：{self.usv_state_msg.power_supply_status}')
+        # self.get_logger().info(f'当前电池状态：{self.usv_state_msg.power_supply_status}')
         self.usv_state_msg.velocity=self.usv_velocity.twist
-        self.get_logger().info(f'当前线速度：{self.usv_state_msg.velocity.linear}')
-        self.get_logger().info(f'当前角速度：{self.usv_state_msg.velocity.angular}')
+        # self.get_logger().info(f'当前线速度：{self.usv_state_msg.velocity.linear}')
+        # self.get_logger().info(f'当前角速度：{self.usv_state_msg.velocity.angular}')
         self.usv_state_msg.position=self.usv_pose.pose.position
-        self.get_logger().info(f'当前定位：{self.usv_state_msg.position}')
+        # self.get_logger().info(f'当前定位：{self.usv_state_msg.position}')
 
                 # 获取四元数
         quaternion = (
@@ -154,10 +154,10 @@ class UsvStatusNode(Node):
         roll, pitch, yaw = euler_from_quaternion(quaternion)
         # 赋值给 yaw（单位：弧度）
         self.usv_state_msg.yaw = float(yaw)  # 转换为 float32
-        self.get_logger().info(f'当前偏角：{yaw}')
+        # self.get_logger().info(f'当前偏角：{yaw}')
 
         self.usv_state_msg.is_runing=self.is_runing.data
-        self.get_logger().info(f'当前运行状态：{self.usv_state_msg.is_runing}')
+        # self.get_logger().info(f'当前运行状态：{self.usv_state_msg.is_runing}')
 
 
         self.state_publisher.publish( self.usv_state_msg)

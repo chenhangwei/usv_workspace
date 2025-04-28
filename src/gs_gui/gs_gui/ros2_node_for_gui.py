@@ -3,558 +3,388 @@ from scipy import cluster
 from sympy import Quaternion, public
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String,Float32
+from std_msgs.msg import String, Float32
 from gs_gui.ros_signal import ROSSignal
 from sensor_msgs.msg import BatteryState
 from mavros_msgs.msg import State
 from geometry_msgs.msg import PoseStamped
-from common_interfaces.msg import UsvStatus
+from common_interfaces.msg import UsvStatus, UsvSetPoint
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from rclpy.duration import Duration
 import tf_transformations
-from transitions import Machine
-import time
+import queue
 import threading
 
-
 class GroundStationNode(Node):
-    def __init__(self,signal):
+    def __init__(self, signal):
         super().__init__('groundstationnode')
-        self.ros_signal=signal
-        # 初始化 QoS 策略（根据需要调整）
-        self.qos_a = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.RELIABLE)
+        self.ros_signal = signal
+        self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
         
-        # 初始化订阅器和发布器字典
         self.usv_state_subs = {}
         self.set_usv_target_position_pubs = {}
         self.set_usv_target_velocity_pubs = {}
-        self.set_usv_mode_pubs={}
-        self.set_usv_arming_pubs={}
-        self.led_pubs={}
-        self.sound_pubs={}
-        self.usv_states={}
-        self.last_ns_list = []  # 用于存储上一个命名空间列表
-        self.is_runing=False #usv设备端是否运行
-        self.run_step=0#运行步数
-        self.usv_target_number=0 #完成的目标点数量
-        self.send_target_loop_flag=False #发送目标点循环标志
-   
+        self.set_usv_mode_pubs = {}
+        self.set_usv_arming_pubs = {}
+        self.led_pubs = {}
+        self.sound_pubs = {}
+        self.usv_states = {}
+        self.last_ns_list = []
+        self.is_runing = False
+        self.run_step = 0
+        self.usv_target_number = 0
+        self.current_targets = []
+        self.max_step = 1
         
-        # 创建定时器，定期检查命名空间变化（例如每 2秒）
-        self.timer = self.create_timer(2.0, self.update_subscribers_and_publishers)
+        self.publish_queue = queue.Queue()
+        self.publish_thread = threading.Thread(target=self.process_publish_queue, daemon=True)
+        self.publish_thread.start()
         
-        # 立即执行一次初始化
+        self.ns_timer = self.create_timer(2.0, self.update_subscribers_and_publishers)
+        self.target_timer = self.create_timer(0.5, self.publish_cluster_targets_callback)
+        
         self.update_subscribers_and_publishers()
+        
+        # # 订阅集群目标点
+        # self.cluster_target_sub = self.create_subscription(
+        #     UsvSetPoint, '/usv_cluster/target_points', self.set_cluster_target_point_callback, self.qos_a)
+
+    def process_publish_queue(self):
+        while rclpy.ok():
+            try:
+                pub, msg = self.publish_queue.get(timeout=1.0)
+                pub.publish(msg)
+                self.get_logger().info(f"发布消息到 {pub.topic}")
+                self.publish_queue.task_done()
+            except queue.Empty:
+                continue
+            except Exception as e:
+                self.get_logger().error(f"发布消息失败: {e}")
 
     def update_subscribers_and_publishers(self):
-        # 获取当前命名空间列表
         namespaces = self.get_node_names_and_namespaces()
         current_ns_list = list(set([ns for _, ns in namespaces if ns.startswith('/usv_')]))
-
-        # 如果命名空间未变化，快速退出
+        # self.get_logger().info(f"检测到的命名空间: {current_ns_list}")
+        
         if current_ns_list == self.last_ns_list:
             return
         
         self.last_ns_list = current_ns_list
-        
-        # 获取当前字典中的命名空间
         existing_ns = set(self.usv_state_subs.keys())
+        new_ns = set(current_ns_list) - existing_ns
+        removed_ns = existing_ns - set(current_ns_list)
         
-        # 找出新增和移除的命名空间
-        new_ns = set(current_ns_list) - existing_ns  # 新增的命名空间
-        removed_ns = existing_ns - set(current_ns_list)  # 已移除的命名空间
-        
-        # 为新增的命名空间创建订阅器和发布器
         for ns in new_ns:
-            # 构造话题名
+            # 存储不带斜杠的 usv_id（usv_01 而非 /usv_01）
+            usv_id = ns.lstrip('/')
             topic_state = f"{ns}/usv_state"
             topic_position = f"{ns}/set_usv_target_position"
             topic_velocity = f"{ns}/set_usv_target_velocity"
-            topic_mode=f'{ns}/set_usv_mode'
-            topic_arming=f'{ns}/set_usv_arming'
-            topic_led=f'{ns}/gs_led_command'
-            topic_sound=f'{ns}/gs_sound_command'
+            topic_mode = f"{ns}/set_usv_mode"
+            topic_arming = f"{ns}/set_usv_arming"
+            topic_led = f"{ns}/gs_led_command"
+            topic_sound = f"{ns}/gs_sound_command"
             
-            # 创建usv_state 订阅器
-            self.usv_state_subs[ns] = self.create_subscription(
-                UsvStatus,
-                topic_state,
-                lambda msg, ns=ns: self.usv_state_callback(msg, ns),
-                self.qos_a
-            )
-            self.get_logger().info(f"新建订阅者 for {topic_state}")
-            
-            # 创建 set_usv_position 发布器
-            self.set_usv_target_position_pubs[ns] = self.create_publisher(
-                PoseStamped,
-                topic_position,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_position}")
-            
-            # 创建 set_usv_velocity 发布器
-            self.set_usv_target_velocity_pubs[ns] = self.create_publisher(
-                Float32,
-                topic_velocity,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_velocity}")
+            self.usv_state_subs[usv_id] = self.create_subscription(
+                UsvStatus, topic_state, lambda msg, id=usv_id: self.usv_state_callback(msg, id), self.qos_a)
+            self.set_usv_target_position_pubs[usv_id] = self.create_publisher(
+                PoseStamped, topic_position, self.qos_a)
+            self.set_usv_target_velocity_pubs[usv_id] = self.create_publisher(
+                Float32, topic_velocity, self.qos_a)
+            self.set_usv_mode_pubs[usv_id] = self.create_publisher(
+                String, topic_mode, self.qos_a)
+            self.set_usv_arming_pubs[usv_id] = self.create_publisher(
+                String, topic_arming, self.qos_a)
+            self.led_pubs[usv_id] = self.create_publisher(
+                String, topic_led, self.qos_a)
+            self.sound_pubs[usv_id] = self.create_publisher(
+                String, topic_sound, self.qos_a)
+            self.get_logger().info(f"新建订阅者和发布者 for {usv_id}")
 
-            #创建 set_usv_model 发布器
-            self.set_usv_mode_pubs[ns]=self.create_publisher(
-                String,
-                topic_mode,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_mode}")
-
-            #创建 set_usv_arming 发布器
-            self.set_usv_arming_pubs[ns]=self.create_publisher(
-                String,
-                topic_arming,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_arming}")
-
-            #创建 gs_led_command 发布器
-            self.led_pubs[ns]=self.create_publisher(
-                String,
-                topic_led,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_led}")
-
-            #创建 gs_sound_command 发布器
-            self.sound_pubs[ns]=self.create_publisher(
-                String,
-                topic_sound,
-                self.qos_a
-            )
-            self.get_logger().info(f"新建发布者 for {topic_sound}")
-
-        
-        # 移除已不存在的命名空间的订阅器和发布器
         for ns in removed_ns:
-            # 销毁订阅器
-            if ns in self.usv_state_subs:
-                self.destroy_subscription(self.usv_state_subs[ns])
-                del self.usv_state_subs[ns]
-                self.get_logger().info(f"已销毁订阅者： {ns}/usv_state")
-            
-            # 销毁 set_usv_target_position 发布器
-            if ns in self.set_usv_target_position_pubs:
-                self.destroy_publisher(self.set_usv_target_position_pubs[ns])
-                del self.set_usv_target_position_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_target_position")
-            
-            # 销毁 set_usv_target_velocity 发布器
-            if ns in self.set_usv_target_velocity_pubs:
-                self.destroy_publisher(self.set_usv_target_velocity_pubs[ns])
-                del self.set_usv_target_velocity_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_target_velocity")
+            usv_id = ns.lstrip('/')
+            if usv_id in self.usv_state_subs:
+                self.destroy_subscription(self.usv_state_subs[usv_id])
+                del self.usv_state_subs[usv_id]
+            if usv_id in self.set_usv_target_position_pubs:
+                self.destroy_publisher(self.set_usv_target_position_pubs[usv_id])
+                del self.set_usv_target_position_pubs[usv_id]
+            if usv_id in self.set_usv_target_velocity_pubs:
+                self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
+                del self.set_usv_target_velocity_pubs[usv_id]
+            if usv_id in self.set_usv_mode_pubs:
+                self.destroy_publisher(self.set_usv_mode_pubs[usv_id])
+                del self.set_usv_mode_pubs[usv_id]
+            if usv_id in self.set_usv_arming_pubs:
+                self.destroy_publisher(self.set_usv_arming_pubs[usv_id])
+                del self.set_usv_arming_pubs[usv_id]
+            if usv_id in self.led_pubs:
+                self.destroy_publisher(self.led_pubs[usv_id])
+                del self.led_pubs[usv_id]
+            if usv_id in self.sound_pubs:
+                self.destroy_publisher(self.sound_pubs[usv_id])
+                del self.sound_pubs[usv_id]
+            self.get_logger().info(f"销毁订阅者和发布者 for {usv_id}")
 
-             # 销毁 set_usv_model 发布器
-            if ns in self.set_usv_mode_pubs:
-                self.destroy_publisher(self.set_usv_mode_pubs[ns])
-                del self.set_usv_mode_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_model")
-
-             # 销毁 set_usv_arming 发布器
-            if ns in self.set_usv_arming_pubs:
-                self.destroy_publisher(self.set_usv_arming_pubs[ns])
-                del self.set_usv_arming_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/set_usv_arming")
-
-             # 销毁 led_pubs 发布器
-            if ns in self.led_pubs:
-                self.destroy_publisher(self.led_pubs[ns])
-                del self.led_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/led")
-            
-             # 销毁 sound_pubs 发布器
-            if ns in self.sound_pubs:
-                self.destroy_publisher(self.sound_pubs[ns])
-                del self.sound_pubs[ns]
-                self.get_logger().info(f"已销毁发布者： {ns}/sound")
-
-
-
-    def usv_state_callback(self, msg, ns):
-        if  isinstance(msg,UsvStatus):
-            state_data={
-                'namespace':ns,
-                'mode':msg.mode,
-                'connected':msg.connected,
-                'armed':msg.armed,
-                'guided':msg.guided,
-                'battery_voltage':msg.battery_voltage,
-                'battery_prcentage':msg.battery_percentage,
-                'power_supply_status':msg.power_supply_status,
-                'position':msg.position,
-                'velocity':msg.velocity,
-                'yaw':msg.yaw,
-                'is_running':msg.is_runing,
-
+    def usv_state_callback(self, msg, usv_id):
+        if isinstance(msg, UsvStatus):
+            state_data = {
+                'namespace': usv_id,
+                'mode': msg.mode,
+                'connected': msg.connected,
+                'armed': msg.armed,
+                'guided': msg.guided,
+                'battery_voltage': msg.battery_voltage,
+                'battery_prcentage': msg.battery_percentage,
+                'power_supply_status': msg.power_supply_status,
+                'position': msg.position,
+                'velocity': msg.velocity,
+                'yaw': msg.yaw,
+                'is_runing': msg.is_runing,
             }
-            self.usv_states[ns] = state_data
+            self.usv_states[usv_id] = state_data
+            # self.get_logger().info(f"更新 USV 状态: {usv_id}, is_runing: {msg.is_runing}")
             self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
 
-    def set_manaul_callback(self, msg):
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Manaul模式")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg  # 将接收到的消息赋值给 USV 列表
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_mode_pubs:
-                    # 创建一个 String 类型的消息
-                    mode_msg = String()
-                    mode_msg.data = "MANAUL"  # 设置消息内容为 "MANAUL"（手动模式）
-
-                    # 使用对应命名空间的发布器发布模式切换消息
-                    self.set_usv_mode_pubs[ns].publish(mode_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_mode")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布模式消息")
-                time.sleep(0.1)  # 延时0.1秒，避免过快发布    
-        threading.Thread(target=publish_with_delay,daemon=True).start()            
-    def set_guided_callback(self,msg):
-          # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为GUIDED模式")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg  # 将接收到的消息赋值给 USV 列表
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_mode_pubs:
-                    # 创建一个 String 类型的消息
-                    mode_msg = String()
-                    mode_msg.data = "GUIDED"  # 设置消息内容为 "MANAUL"（手动模式）
-                    # 使用对应命名空间的发布器发布模式切换消息
-                    self.set_usv_mode_pubs[ns].publish(mode_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_mode")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布模式消息")
-
-                time.sleep(0.1)  # 延时0.1秒，避免过快发布
-        threading.Thread(target=publish_with_delay,daemon=True).start()            
-    def set_arming_callback(self,msg):
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Arming模式")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_arming_pubs:
-                    # 创建一个 String 类型的消息
-                    arming_msg = String()
-                    arming_msg.data = "ARMING"
-                    # 设置消息内容为 "ARMING"（手动模式）
-                    # 使用对应命名空间的发布器发布模式切换消息
-                    self.set_usv_arming_pubs[ns].publish(arming_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_arming")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布模式消息")
-                time.sleep(0.1)  # 延时0.1秒，避免过快发布    
-        threading.Thread(target=publish_with_delay,daemon=True).start()    
-
-    def set_disarming_callback(self,msg):
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Disarming模式")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg
-        # 将接收到的消息赋值给 USV 列表
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_arming_pubs:
-                    # 创建一个 String 类型的消息
-                    disarming_msg = String()
-                    disarming_msg.data = "DISARMING"
-                    # 设置消息内容为 "ARMING"（手动模式）
-                    # 使用对应命名空间的发布器发布模式切换消息
-                    self.set_usv_arming_pubs[ns].publish(disarming_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_arming")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布模式消息")
-                time.sleep(0.1)  # 延时0.1秒，避免过快发布
-        threading.Thread(target=publish_with_delay,daemon=True).start()
-                
-    
-    def set_cluster_target_point_callback(self,msg):
-
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到集群目标点")
-        # 初始化 USV 列表
-        temp_list = []
-        temp_list = msg
-        usv_id_set={} 
-        usv_status_id_set={}
-        self.send_target_loop_flag=True #发送目标点循环标志
-        self.run_step=1
-                   # 将接收到的消息赋值给 USV 列表
-            # 遍历 USV 列表中的命名空间
-
-        for ns in temp_list:     
-            if isinstance(ns, dict): 
-                usv_id_set = ns.get('usv_id', None)
-                if  usv_id_set is None:
-                    self.get_logger().warn("未找到usv_id,跳过该项")
-                    continue
-                else:
-                    self.get_logger().warn("接收到的ns不是字典,跳过该项")   
-                    continue
-
-        # 检查命名空间是否存在于发布器字典中
-        # 遍历 usv_states 字典，检查每个 USV 的状态
-        for nn in self.usv_states:
-            if isinstance(nn,dict):
-                usv_status_id_set=nn.get('usv_id',None)
-                if usv_status_id_set is None:
-                    self.get_logger().warn("未找到usv_id,跳过该项")
-                    continue
-                else:
-                    self.get_logger().warn("接收到的ns不是字典,跳过该项")   
-                    continue
-        # 检查 usv_status_id 是否与 usv_id 匹配
-        if usv_id_set is not None and usv_status_id_set is not None:
-            for n in usv_id_set:  
-               for v in usv_status_id_set:
-                    if n == v:
-                        if  self.usv_states[v]['is_runing'] == False:
-                            self.usv_target_number += 1
-
-
-
-        while self.send_target_loop_flag:
-       
-            # 获取指定步骤下的 USV 列表
-            cluster_usv_list=self.get_usvs_by_step( temp_list, self.run_step)  
-            if cluster_usv_list is not None:
-                self.get_logger().info(f"当前步数下的 USV 列表: {cluster_usv_list}")
+    def set_manual_callback(self, msg):
+        self.get_logger().info("接收到手动模式命令")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_mode_pubs:
+                mode_msg = String()
+                mode_msg.data = "MANUAL"
+                self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
             else:
-                self.get_logger().warn("当前步数下的 USV 列表为空")
-                self.send_target_loop_flag=False #发送目标点循环标志  
-                self.run_step=0 
+                self.get_logger().warn(f"无效命名空间 {usv_id}，跳过")
 
-            def publish_with_delay():
-                for ns in cluster_usv_list:     
-                    if isinstance(ns, dict): 
-                        usv_id= ns.get('usv_id', None)
-                        # 检查命名空间是否存在于发布器字典中
-                        if usv_id in self.set_usv_target_position_pubs:
-                            # 创建一个 PoseStamped 类型的消息
-                            target_point_msg = PoseStamped()
-                            target_point_msg.header.frame_id = "map"
-                            target_point_msg.header.stamp = self.get_clock().now().to_msg()
-                            target_point_msg.pose.position.x = ns.get('position', {}).get('x', 0.0)
-                            target_point_msg.pose.position.y = ns.get('position', {}).get('y', 0.0)
-                            target_point_msg.pose.position.z = ns.get('position', {}).get('z', 0.0)
+    def set_guided_callback(self, msg):
+        self.get_logger().info("接收到引导模式命令")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_mode_pubs:
+                mode_msg = String()
+                mode_msg.data = "GUIDED"
+                self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
+            else:
+                self.get_logger().warn(f"无效命名空间 {usv_id}，跳过")
 
-                            # 设置目标点的方向
-                            yaw = ns.get('yaw', 0.0)
+    def set_arming_callback(self, msg):
+        self.get_logger().info("接收到武装命令")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_arming_pubs:
+                arming_msg = String()
+                arming_msg.data = "ARMING"
+                self.publish_queue.put((self.set_usv_arming_pubs[usv_id], arming_msg))
+            else:
+                self.get_logger().warn(f"无效命名空间 {usv_id}，跳过")
 
-                            # 将yaw 转换为四元数
-                            quaternion=tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
-                            target_point_msg.pose.orientation.x = quaternion[0]
-                            target_point_msg.pose.orientation.y = quaternion[1]
-                            target_point_msg.pose.orientation.z = quaternion[2]
-                            target_point_msg.pose.orientation.w = quaternion[3]
+    def set_disarming_callback(self, msg):
+        self.get_logger().info("接收到解除武装命令")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_arming_pubs:
+                disarming_msg = String()
+                disarming_msg.data = "DISARMING"
+                self.publish_queue.put((self.set_usv_arming_pubs[usv_id], disarming_msg))
+            else:
+                self.get_logger().warn(f"无效命名空间 {usv_id}，跳过")
 
-                            # 使用对应命名空间的发布器发布目标点消息
-                            if  self.usv_target_number==len(cluster_usv_list):#判断是否所有的目标点已经到达目标位置
-                                self.set_usv_target_position_pubs[usv_id].publish(target_point_msg)
-                                self.run_step=+1
-                                # 打印日志，表示消息已发布到对应的话题
-                                self.get_logger().info(f"发布到话题 {ns}/set_usv_target_position")
-                            else:
-                                self.get_logger().info(f"目标点未到达，跳过发布到话题 {ns}/set_usv_target_position")
-                    time.sleep(0.1)  # 延时0.1秒，避免过快发布
-            threading.Thread(target=publish_with_delay,daemon=True).start()            
-            
-    def set_cluster_target_velocity_callback(self,msg):
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Cluster目标的速度")
-
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg
-        # 将接收到的消息赋值给 USV 列表
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_target_velocity_pubs:
-                    # 创建一个 Float32 类型的消息
-                    target_velocity_msg = Float32()
-                    target_velocity_msg.data = msg[ns]['velocity']
-                    # 使用对应命名空间的发布器发布目标速度消息
-                    self.set_usv_target_velocity_pubs[ns].publish(target_velocity_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_target_velocity")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布目标速度消息")
-                time.sleep(0.1)  # 延时0.1秒，避免过快发布
-        threading.Thread(target=publish_with_delay,daemon=True).start()
-
-
-    def set_departed_target_point_callback(self,msg):
-
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Cluster目标点")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg
-        usv_id=''
-        # 将接收到的消息赋值给 USV 列表
-
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:     
-                    if isinstance(ns, dict): 
-                        usv_id = ns.get('usv_id', None)
-                        if usv_id is None:
-                            self.get_logger().warn("未找到usv_id,跳过该项")
-                            continue
-                    else:
-                        self.get_logger().warn("接收到的ns不是字典,跳过该项")   
-                        continue
-
-                    # 检查命名空间是否存在于发布器字典中
-
-                    if usv_id in self.set_usv_target_position_pubs:
-                        # 创建一个 PoseStamped 类型的消息
-                        target_point_msg = PoseStamped()
-                        target_point_msg.header.frame_id = "map"
-                        target_point_msg.header.stamp = self.get_clock().now().to_msg()
-                        target_point_msg.pose.position.x = ns.get('position', {}).get('x', 0.0)
-                        target_point_msg.pose.position.y = ns.get('position', {}).get('y', 0.0)
-                        target_point_msg.pose.position.z = ns.get('position', {}).get('z', 0.0)
-
-                        # 设置目标点的方向
-                        yaw = ns.get('yaw', 0.0)
-
-                        # 将yaw 转换为四元数
-                        quaternion=tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
-                        target_point_msg.pose.orientation.x = quaternion[0]
-                        target_point_msg.pose.orientation.y = quaternion[1]
-                        target_point_msg.pose.orientation.z = quaternion[2]
-                        target_point_msg.pose.orientation.w = quaternion[3]
-
-                        # 使用对应命名空间的发布器发布目标点消息
-                        self.set_usv_target_position_pubs[usv_id].publish(target_point_msg)
-                        # 打印日志，表示消息已发布到对应的话题
-                        self.get_logger().info(f"发布到话题 {ns}/set_usv_target_position")
-                    time.sleep(0.1)  # 延时0.1秒，避免过快发布
-        threading.Thread(target=publish_with_delay,daemon=True).start()        
-    def set_departed_target_velocity_callback(self,msg):
-        # 打印日志，表示接收到切换为手动模式的命令
-        self.get_logger().info("接收到切换为Departed目标速度")
-        # 初始化 USV 列表
-        usv_list = []
-        usv_list = msg
-        # 将接收到的消息赋值给 USV 列表
-        def publish_with_delay():
-            # 遍历 USV 列表中的命名空间
-            for ns in usv_list:
-                self.get_logger().info(f"ns 类型: {type(ns)}, 内容: {ns}")
-                # 检查命名空间是否存在于发布器字典中
-                if ns in self.set_usv_target_velocity_pubs:
-                    # 创建一个 Float32 类型的消息
-                    target_velocity_msg = Float32()
-                    target_velocity_msg.data = msg[ns]['velocity']
-                    # 使用对应命名空间的发布器发布目标速度消息
-                    self.set_usv_target_velocity_pubs[ns].publish(target_velocity_msg)
-                    # 打印日志，表示消息已发布到对应的话题
-                    self.get_logger().info(f"发布到话题 {ns}/set_usv_target_velocity")
-                else:
-                    # 如果命名空间不存在，打印警告日志
-                    self.get_logger().warn(f"命名空间 {ns} 不存在，无法发布目标速度消息")
-                time.sleep(0.1)
-        threading.Thread(target=publish_with_delay,daemon=True).start()        
-
-    # 获取指定步骤下的 USV 列表
-    def get_usvs_by_step(self,cluster_usv_list, step):
-        # 返回在指定步骤下的 USV 列表
-        return [usv for usv in cluster_usv_list if usv.get('step') == step]
-    
-
-    def str_command_callback(self,msg):
-            command_str=String()
-            if not isinstance(msg,str):
+    def set_cluster_target_point_callback(self, msg):
+        self.get_logger().info("接收到集群目标点")
+        try:
+            temp_list = msg.targets if hasattr(msg, 'targets') else msg
+            if not isinstance(temp_list, list):
+                self.get_logger().error(f"temp_list 不是列表: {temp_list}")
                 return
-            command_str.data=msg
 
-            def publish_with_delay():    
-                try:
-                    for ns in self.last_ns_list:
-                        self.led_pubs[ns].publish(command_str)
-                        self.get_logger().info(f'发布led或sound命令:{ns}-{command_str}')
-                        time.sleep(5)  # 延时5秒
-                except Exception as e:
-                    self.get_logger().error(f'发布led或sound命令失败: {e}')
+            self.current_targets = temp_list
+            self.run_step = 1
+            self.usv_target_number = 0
+            self.max_step = max(target.get('step', 1) for target in temp_list) if temp_list else 1
 
-            threading.Thread(target=publish_with_delay,daemon=True).start()
-            self.get_logger().info(f'已启动新线程发布命令')
+            for ns in temp_list:
+                if not isinstance(ns, dict):
+                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
+                    continue
+                usv_id = ns.get('usv_id', None)
+                if usv_id is None:
+                    self.get_logger().warn("未找到 usv_id, 跳过")
+                    continue
+                if usv_id in self.usv_states and not self.usv_states[usv_id].get('is_runing', True):
+                    self.usv_target_number += 1
+            self.get_logger().info(f"目标点: {temp_list}, 发布器: {list(self.set_usv_target_position_pubs.keys())}")
+        except Exception as e:
+            self.get_logger().error(f"处理集群目标点失败: {e}")
 
+    def publish_cluster_targets_callback(self):
+        if not self.current_targets:
+            return
 
-    #销毁
+        try:
+            cluster_usv_list = self.get_usvs_by_step(self.current_targets, self.run_step)
+            if not cluster_usv_list:
+                self.get_logger().warn(f"步骤 {self.run_step} 的 USV 列表为空")
+                if self.run_step >= self.max_step:
+                    self.current_targets = []
+                else:
+                    self.run_step += 1
+                return
+
+            arrived_count = sum(1 for usv_id in self.usv_states if not self.usv_states.get(usv_id, {}).get('is_runing', True))
+            for ns in cluster_usv_list:
+                if not isinstance(ns, dict):
+                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
+                    continue
+                usv_id = ns.get('usv_id', None)
+                if usv_id is None:
+                    self.get_logger().warn("未找到 usv_id, 跳过")
+                    continue
+                if usv_id not in self.set_usv_target_position_pubs:
+                    self.get_logger().warn(f"发布器不存在 for {usv_id}, 当前发布器: {list(self.set_usv_target_position_pubs.keys())}")
+                    continue
+
+                target_point_msg = PoseStamped()
+                target_point_msg.header.frame_id = "map"
+                target_point_msg.header.stamp = self.get_clock().now().to_msg()
+                target_point_msg.pose.position.x = ns.get('position', {}).get('x', 0.0)
+                target_point_msg.pose.position.y = ns.get('position', {}).get('y', 0.0)
+                target_point_msg.pose.position.z = ns.get('position', {}).get('z', 0.0)
+                yaw = ns.get('yaw', 0.0)
+                quaternion = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
+                target_point_msg.pose.orientation.x = quaternion[0]
+                target_point_msg.pose.orientation.y = quaternion[1]
+                target_point_msg.pose.orientation.z = quaternion[2]
+                target_point_msg.pose.orientation.w = quaternion[3]
+                self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
+                self.get_logger().info(f"发布目标点到 {usv_id}: {target_point_msg.pose.position}")
+
+            if arrived_count >= len(cluster_usv_list):
+                self.run_step += 1
+                self.usv_target_number = 0
+                if self.run_step > self.max_step:
+                    self.current_targets = []
+        except Exception as e:
+            self.get_logger().error(f"发布集群目标点失败: {e}")
+
+    def set_cluster_target_velocity_callback(self, msg):
+        self.get_logger().info("接收到集群目标速度")
+        try:
+            # 假设 msg 是 UsvSetPoint 或 UsvSetPoint 列表
+            usv_list = [msg] if not isinstance(msg, list) else msg
+            for target in usv_list:
+                if not hasattr(target, 'usv_id'):
+                    self.get_logger().warn(f"无效的目标格式: {target}, 跳过")
+                    continue
+                usv_id = target.usv_id
+                if usv_id not in self.set_usv_target_velocity_pubs:
+                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
+                    continue
+                velocity = target.velocity
+                target_velocity_msg = Float32()
+                target_velocity_msg.data = float(velocity)
+                self.publish_queue.put((self.set_usv_target_velocity_pubs[usv_id], target_velocity_msg))
+                self.get_logger().info(f"发布速度到 {usv_id}: {velocity}")
+        except Exception as e:
+            self.get_logger().error(f"处理集群目标速度失败: {e}")
+
+    def set_departed_target_point_callback(self, msg):
+        self.get_logger().info("接收到离群目标点")
+        try:
+            usv_list = msg.targets if hasattr(msg, 'targets') else msg
+            if not isinstance(usv_list, list):
+                self.get_logger().error(f"usv_list 不是列表: {usv_list}")
+                return
+
+            for ns in usv_list:
+                if not isinstance(ns, dict):
+                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
+                    continue
+                usv_id = ns.get('usv_id', None)
+                if usv_id is None or usv_id not in self.set_usv_target_position_pubs:
+                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
+                    continue
+
+                target_point_msg = PoseStamped()
+                target_point_msg.header.frame_id = "map"
+                target_point_msg.header.stamp = self.get_clock().now().to_msg()
+                target_point_msg.pose.position.x = ns.get('position', {}).get('x', 0.0)
+                target_point_msg.pose.position.y = ns.get('position', {}).get('y', 0.0)
+                target_point_msg.pose.position.z = ns.get('position', {}).get('z', 0.0)
+                yaw = ns.get('yaw', 0.0)
+                quaternion = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
+                target_point_msg.pose.orientation.x = quaternion[0]
+                target_point_msg.pose.orientation.y = quaternion[1]
+                target_point_msg.pose.orientation.z = quaternion[2]
+                target_point_msg.pose.orientation.w = quaternion[3]
+                self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
+        except Exception as e:
+            self.get_logger().error(f"处理离群目标点失败: {e}")
+
+    def set_departed_target_velocity_callback(self, msg):
+        self.get_logger().info("接收到离群目标速度")
+        try:
+            usv_list = msg.targets if hasattr(msg, 'targets') else msg
+            if not isinstance(usv_list, list):
+                self.get_logger().error(f"usv_list 不是列表: {usv_list}")
+                return
+
+            for ns in usv_list:
+                if not isinstance(ns, dict):
+                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
+                    continue
+                usv_id = ns.get('usv_id', None)
+                if usv_id is None or usv_id not in self.set_usv_target_velocity_pubs:
+                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
+                    continue
+                velocity = ns.get('velocity', 0.0)
+                target_velocity_msg = Float32()
+                target_velocity_msg.data = float(velocity)
+                self.publish_queue.put((self.set_usv_target_velocity_pubs[usv_id], target_velocity_msg))
+        except Exception as e:
+            self.get_logger().error(f"处理离群目标速度失败: {e}")
+
+    def get_usvs_by_step(self, cluster_usv_list, step):
+        return [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
+
+    def str_command_callback(self, msg):
+        self.get_logger().info(f"接收到 LED 或声音命令: {msg}")
+        if not isinstance(msg, str):
+            self.get_logger().warn("命令不是字符串，跳过")
+            return
+        command_str = String()
+        command_str.data = msg
+        for ns in self.last_ns_list:
+            usv_id = ns.lstrip('/')
+            if usv_id in self.led_pubs:
+                self.publish_queue.put((self.led_pubs[usv_id], command_str))
+            if usv_id in self.sound_pubs:
+                self.publish_queue.put((self.sound_pubs[usv_id], command_str))
+
     def destroy_node(self):
-        self.get_logger().info("Destroying node resources...")
-        for ns in list(self.usv_state_subs.keys()):
-            self.destroy_subscription(self.usv_state_subs[ns])
-            del self.usv_state_subs[ns]
-        for ns in list(self.set_usv_target_position_pubs.keys()):
-            self.destroy_publisher(self.set_usv_target_position_pubs[ns])
-            del self.set_usv_target_position_pubs[ns]
-        for ns in list(self.set_usv_target_velocity_pubs.keys()):
-            self.destroy_publisher(self.set_usv_target_velocity_pubs[ns])
-            del self.set_usv_target_velocity_pubs[ns]
-        for ns in list(self.set_usv_mode_pubs.keys()):
-            self.destroy_publisher(self.set_usv_mode_pubs[ns])
-            del self.set_usv_mode_pubs[ns]
-        for ns in list(self.set_usv_arming_pubs.keys()):
-            self.destroy_publisher(self.set_usv_arming_pubs[ns])
-            del self.set_usv_arming_pubs[ns]
-        for ns in list(self.led_pubs.keys()):
-            self.destroy_publisher(self.led_pubs[ns])
-            del self.led_pubs[ns] 
-        for ns in list(self.sound_pubs.keys()):
-            self.destroy_publisher(self.sound_pubs[ns])
-            del self.sound_pubs[ns]   
-
+        self.get_logger().info("销毁节点资源...")
+        for usv_id in list(self.usv_state_subs.keys()):
+            self.destroy_subscription(self.usv_state_subs[usv_id])
+            del self.usv_state_subs[usv_id]
+        for usv_id in list(self.set_usv_target_position_pubs.keys()):
+            self.destroy_publisher(self.set_usv_target_position_pubs[usv_id])
+            del self.set_usv_target_position_pubs[usv_id]
+        for usv_id in list(self.set_usv_target_velocity_pubs.keys()):
+            self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
+            del self.set_usv_target_velocity_pubs[usv_id]
+        for usv_id in list(self.set_usv_mode_pubs.keys()):
+            self.destroy_publisher(self.set_usv_mode_pubs[usv_id])
+            del self.set_usv_mode_pubs[usv_id]
+        for usv_id in list(self.set_usv_arming_pubs.keys()):
+            self.destroy_publisher(self.set_usv_arming_pubs[usv_id])
+            del self.set_usv_arming_pubs[usv_id]
+        for usv_id in list(self.led_pubs.keys()):
+            self.destroy_publisher(self.led_pubs[usv_id])
+            del self.led_pubs[usv_id]
+        for usv_id in list(self.sound_pubs.keys()):
+            self.destroy_publisher(self.sound_pubs[usv_id])
+            del self.sound_pubs[usv_id]
         super().destroy_node()
-
-
-
-
-  

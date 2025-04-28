@@ -37,7 +37,7 @@ class Mainwindow(QMainWindow):
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)            # 集群解锁按钮
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)      # 集群加锁按钮
         self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)    # 集群切换到guided模式
-        self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_manaul_command)    # 集群切换到manaul模式
+        self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_manual_command)    # 集群切换到manaul模式
 
         self.ui.departed_arming_pushButton.clicked.connect(self.departed_arming_command)  # 离群解锁按钮
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command) #离群加锁按钮
@@ -66,6 +66,7 @@ class Mainwindow(QMainWindow):
 
         # 点击open菜单
         self.ui.actionopen.triggered.connect(self.read_data_from_file)
+        self.ui.actionrviz2.triggered.connect(self.rviz_process)
 
 
         # 在线设备列表
@@ -119,55 +120,83 @@ class Mainwindow(QMainWindow):
         # 将模型设置到窗口表格
         self.ui.departed_tableView.setModel(self.departed_table_model)
 
-
-
-
-        # 启动 RViz2
-        self.rviz_process = QProcess(self)
-        self.rviz_process.start("rviz2")
-
-
-
-
     # 集群解锁命令
     def set_cluster_arming_command(self):   
+         
+        for usv_id in self.usv_cluster_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_cluster_namespace_list.append(usv_namespace)
         self.ros_signal.arm_command.emit(self.usv_cluster_namespace_list)
         self.ui.info_textEdit.append(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
+        self.usv_cluster_namespace_list.clear()
 
     # 集群设置manaul模式命令
-    def set_cluster_manaul_command(self):      
-        self.ros_signal.manaul_command.emit(self.usv_cluster_namespace_list)
+    def set_cluster_manual_command(self):   
+        for usv_id in self.usv_cluster_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_cluster_namespace_list.append(usv_namespace)   
+        self.ros_signal.manual_command.emit(self.usv_cluster_namespace_list)
         self.ui.info_textEdit.append(f"集群设置manual模式命令已发送: {self.usv_cluster_namespace_list}")
+        self.usv_cluster_namespace_list.clear()
 
     # 集群加锁命令  
     def cluster_disarming_command(self):
+        for usv_id in self.usv_cluster_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_cluster_namespace_list.append(usv_namespace)
         self.ros_signal.disarm_command.emit(self.usv_cluster_namespace_list)
         self.ui.info_textEdit.append(f"集群加锁命令已发送: {self.usv_cluster_namespace_list}")
+        self.usv_cluster_namespace_list.clear()
 
     # 集群设置guided模式命令 
     def set_cluster_guided_command(self):
+        for usv_id in self.usv_cluster_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_cluster_namespace_list.append(usv_namespace)
+        # 发送 guided 模式命令
         self.ros_signal.guided_command.emit(self.usv_cluster_namespace_list)
         self.ui.info_textEdit.append(f"集群设置guided模式命令已发送: {self.usv_cluster_namespace_list}")
+        self.usv_cluster_namespace_list.clear()
 
     # 离群解锁命令
-    def departed_arming_command (self):        
-         self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
-         self.ui.info_textEdit.append(f"离群解锁命令已发送: {self.usv_departed_namespace_list}")
+    def departed_arming_command (self): 
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群解锁命令       
+        self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
+        self.ui.info_textEdit.append(f"离群解锁命令已发送: {self.usv_departed_namespace_list}")
+        self.usv_departed_namespace_list.clear()
 
     # 离群解锁命令
-    def departed_disarming_command (self):        
-         self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list) 
-         self.ui.info_textEdit.append(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")    
+    def departed_disarming_command (self): 
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群加锁命令       
+        self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list) 
+        self.ui.info_textEdit.append(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
+        self.usv_departed_namespace_list.clear()    
          
     # 离群设置manaul模式命令
-    def set_departed_manaul_command (self):        
-         self.ros_signal.manaul_command.emit(self.usv_departed_namespace_list) 
-         self.ui.info_textEdit.append(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}") 
+    def set_departed_manaul_command (self): 
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群设置manual模式命令       
+        self.ros_signal.manaul_command.emit(self.usv_departed_namespace_list) 
+        self.ui.info_textEdit.append(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.usv_departed_namespace_list.clear()
 
     # 离群设置guided模式命令
-    def set_departed_guided_command (self):        
-         self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
-         self.ui.info_textEdit.append(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}")   
+    def set_departed_guided_command (self): 
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群设置guided模式命令       
+        self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
+        self.ui.info_textEdit.append(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.usv_departed_namespace_list.clear()  
 
     
     # 从数据文件中读取数据，数据格式xml
@@ -235,14 +264,21 @@ class Mainwindow(QMainWindow):
                 except Exception as e:
                     print(f"其他错误: {e}")
                     self.cluster_position_list=[]
+    
+    # 启动 RViz2
+    def rviz_process(self):
+        # 启动 RViz2
+        self.rviz_process = QProcess(self)
+        self.rviz_process.start("rviz2")
+        self.ui.info_textEdit.append(f"启动RViz2")
 
     # 发送集群目标点命令
     def send_cluster_point_command(self):  
         self.ui.info_textEdit.append(f"发送集群目标点命令")
         # 检查是否有集群列表
         if not self.cluster_position_list:
-                self.ui.warning_textEdit.append("请先选择数据文件")
-                return
+            self.ui.warning_textEdit.append("集群列表为空")
+            return
         # 创建副本以避免修改原始列表时的遍历问题
         filtered_list = self.cluster_position_list.copy()
         # 将 usv_departed_list 转换为集合以提高查找效率
@@ -251,8 +287,7 @@ class Mainwindow(QMainWindow):
         filtered_list = [usv for usv in filtered_list if usv.get('usv_id', '') not in departed_ids]
         if not filtered_list:
             self.ui.warning_textEdit.append("集群列表为空（所有 USV 均在离群列表中）")          
-            return
-        
+            return 
         # 弹窗确认
         reply = QMessageBox.question(
             self,
@@ -276,16 +311,18 @@ class Mainwindow(QMainWindow):
     
     # 集群速度命令
     def cluster_velocity_value_changed(self):
+
         cluster_velocity_list = []
         self.cluster_velocity=float(self.ui.usv_cluster_velocity_horizontalSlider.value())
         # 发送集群速度命令
-        for usv_id in self.usv_cluster_list:
+        for usv_id in self.usv_cluster_list:       
             cluster_velocity_ = UsvSetPoint()
-            cluster_velocity_.usv_id = usv_id
+            cluster_velocity_.usv_id = usv_id.get('namespace', None)
             cluster_velocity_.velocity = self.cluster_velocity
             cluster_velocity_list.append(cluster_velocity_)
         self.ros_signal.cluster_target_velocity_command.emit( cluster_velocity_list)
         self.ui.info_textEdit.append(f"集群目标速度: {cluster_velocity_list}")
+        cluster_velocity_list.clear()
 
     # 离群目标点命令
     def send_departed_point_command(self):
@@ -294,7 +331,7 @@ class Mainwindow(QMainWindow):
         departed_target_list = []
         for usv_id in self.usv_departed_list:
             departed_target = UsvSetPoint()
-            departed_target.usv_id = usv_id
+            departed_target.usv_id = usv_id.get('namespace', None)
             departed_target.position.x = x
             departed_target.position.y = y
             departed_target_list.append(departed_target)
@@ -309,7 +346,7 @@ class Mainwindow(QMainWindow):
         # 发送离群速度命令
         for usv_id in self.usv_departed_list:
             departed_velocity_ = UsvSetPoint()
-            departed_velocity_.usv_id = usv_id
+            departed_velocity_.usv_id = usv_id.get('namespace', None)
             departed_velocity_.velocity = self.departed_velocity
             departed_velocity_list.append(departed_velocity_)
         self.ros_signal.departed_target_velocity_command.emit(departed_velocity_list)
@@ -319,76 +356,147 @@ class Mainwindow(QMainWindow):
     # 添加到集群列表
     def add_cluster_command(self):
         self.ui.info_textEdit.append(f"添加到集群列表")
-        # 获取选中的标签
         selected_indexes = self.ui.departed_tableView.selectedIndexes()
-        if selected_indexes:
-            selected_row = selected_indexes[0].row()
-            # 获取选中行的数据，从模型获取
-            model = self.ui.departed_tableView.model()
-            if model is not None:
-                usv_id = model.data(model.index(selected_row, 0))
-                # 将选中的设备添加到集群列表
-                self.usv_cluster_list.append(usv_id)
-                # 从离群列表中删除
-                if usv_id in self.usv_departed_list:
-                    self.usv_departed_list.remove(usv_id)
-                # 更新表格
-                self.update_cluster_table(self.usv_cluster_list)
-                self.update_departed_table(self.usv_departed_list)
-                self.ui.info_textEdit.append(f"添加设备 {usv_id} 到集群列表")
+        if not selected_indexes:
+            self.ui.info_textEdit.append("请先选择一行")
+            return
+
+        selected_row = selected_indexes[0].row()
+        model = self.ui.departed_tableView.model()
+        if model is None:
+            self.ui.info_textEdit.append("错误：离群表格模型未初始化")
+            return
+
+        # 获取整行状态数据
+        state = {}
+        headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
+                "battery_prcentage", "power_supply_status", "position",
+                "velocity", "yaw", "is_running"]
+        for col, key in enumerate(headers):
+            index = model.index(selected_row, col)
+            state[key] = model.data(index) or "Unknown"
+
+        usv_id = state.get("namespace")
+        if not usv_id:
+            self.ui.info_textEdit.append("错误：无法获取 USV ID")
+            return
+
+        try:
+            self.usv_cluster_list.append(state)
+            # 从 usv_departed_list 移除匹配的项
+            for item in self.usv_departed_list:
+                if item.get('namespace') == usv_id:
+                    self.usv_departed_list.remove(item)
+                    break
+            self.update_cluster_table(self.usv_cluster_list)
+            self.update_departed_table(self.usv_departed_list)
+            self.ui.info_textEdit.append(f"添加设备 {usv_id} 到集群列表")
+        except Exception as e:
+            self.ui.info_textEdit.append(f"错误：添加设备失败 - {str(e)}")
 
     # 离开集群列表
     def quit_cluster_command(self):
-
         self.ui.info_textEdit.append(f"离开集群列表")
-        # 获取选中的标签
         selected_indexes = self.ui.cluster_tableView.selectedIndexes()
         self.ui.info_textEdit.append(f'选中的标签：{selected_indexes}')
 
-        if selected_indexes:
-            selected_row = selected_indexes[0].row()
-            # 获取选中行的数据
-            usv_id = self.ui.cluster_tableView.item(selected_row, 0).text()
-            # 将选中的设备添加到离群列表
-            self.usv_departed_list.append(usv_id)
-            # 从集群列表中删除
-            self.usv_cluster_list.remove(usv_id)
-            # 更新表格
+        if not selected_indexes:
+            self.ui.info_textEdit.append("请先选择一行")
+            return
+
+        selected_row = selected_indexes[0].row()
+        model = self.ui.cluster_tableView.model()
+        if model is None:
+            self.ui.info_textEdit.append("错误：集群表格模型未初始化")
+            return
+
+        # 获取整行状态数据
+        state = {}
+        headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
+                "battery_prcentage", "power_supply_status", "position", 
+                "velocity", "yaw", "is_running"]
+        for col, key in enumerate(headers):
+            index = model.index(selected_row, col)
+            state[key] = model.data(index) or "Unknown"
+
+        usv_id = state.get("namespace")
+        if not usv_id:
+            self.ui.info_textEdit.append("错误：无法获取 USV ID")
+            return
+
+        try:
+            # 从 usv_cluster_list 移除匹配的字典
+            for item in self.usv_cluster_list:
+                if item.get('namespace') == usv_id:
+                    self.usv_cluster_list.remove(item)
+                    self.usv_departed_list.append(item)  # 添加状态字典
+                    break
             self.update_cluster_table(self.usv_cluster_list)
             self.update_departed_table(self.usv_departed_list)
             self.ui.info_textEdit.append(f"添加设备 {usv_id} 到离群列表")
+        except Exception as e:
+            self.ui.info_textEdit.append(f"错误：移除设备失败 - {str(e)}")
 
 
     # 接收所有在线的usv状态
-    def receive_state_callback(self, msg): 
-         
+    def receive_state_callback(self, msg):
         if not isinstance(msg, list):
             self.ui.warning_textEdit.append("接收到的数据类型错误，期望为列表")
             return
-        self.usv_online_list = msg
-        temp_list =self.usv_online_list.copy()
-
-             # 遍历 USV 列表中的命名空间
-        for ns in self.usv_online_list:     
-            if isinstance(ns, dict): 
-                usv_id_set = ns.get('usv_id', None)
-                for nn in self.usv_departed_list:
-                    if isinstance(nn, dict):
-                        usv_id_departed = nn.get('usv_id', None)
-                        if usv_id_set == usv_id_departed:
-                            temp_list.remove(usv_id_departed)
-                            self.ui.info_textEdit.append(f"总在线清单已移除离群设备: {usv_id_departed}")
-                            break
- 
-
-
-        self.update_cluster_table(temp_list)
+        
+        # 验证并过滤 msg 数据
+        self.usv_online_list = [ns for ns in msg if isinstance(ns, dict) and ns.get('namespace')]
+        # print(f"Online List: {self.usv_online_list}")
+        
+        # 更新 usv_departed_list 状态
+        for i, departed in enumerate(self.usv_departed_list):
+            departed_id = departed.get('namespace') if isinstance(departed, dict) else departed
+            state = next((ns for ns in self.usv_online_list if ns.get('namespace') == departed_id), None)
+            if state:
+                self.usv_departed_list[i] = state
+            else:
+                # 如果离群 USV 已下线，保留现有数据
+                if not isinstance(departed, dict):
+                    self.usv_departed_list[i] = {'namespace': departed_id}  # 转换为字典
+                self.ui.info_textEdit.append(f"警告：离群设备 {departed_id} 未在在线列表中")
+        
+        # 创建 temp_list，移除离群 USV
+        temp_list = self.usv_online_list.copy()
+        for ns in self.usv_online_list:
+            usv_id_set = ns.get('namespace')
+            for departed in self.usv_departed_list:
+                departed_id = departed.get('namespace') if isinstance(departed, dict) else departed
+                if usv_id_set == departed_id:
+                    if ns in temp_list:
+                        temp_list.remove(ns)
+                        break
+        
+        # 保留现有 usv_cluster_list 的手动添加 USV
+        current_cluster = self.usv_cluster_list.copy()
+        current_cluster_ids = {item.get('namespace') for item in current_cluster if isinstance(item, dict) and item.get('namespace')}
+        print(f"Current Cluster IDs: {current_cluster_ids}")
+        
+        # 更新 usv_cluster_list
+        self.usv_cluster_list = []
+        for item in current_cluster:
+            if isinstance(item, dict) and item.get('namespace'):
+                state = next((ns for ns in self.usv_online_list if ns.get('namespace') == item.get('namespace')), item)
+                self.usv_cluster_list.append(state)
+        for ns in temp_list:
+            if ns.get('namespace') not in current_cluster_ids:
+                self.usv_cluster_list.append(ns)
+        
+        # 更新表格
+        self.update_cluster_table(self.usv_cluster_list)
         self.update_departed_table(self.usv_departed_list)
-    # 更新集群表格
+        
+   
     def update_cluster_table(self, lists):
 
         if lists is None:
             lists = []
+
+        # self.ui.info_textEdit.append(f"更新集群表格: {lists}")
         self.cluster_table_model.setRowCount(len(lists))
         self.cluster_table_model.setColumnCount(11)
         self.cluster_table_model.setHorizontalHeaderLabels(["编号", "当前模式",
@@ -408,27 +516,59 @@ class Mainwindow(QMainWindow):
                 self.cluster_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
 
-   # 更新离群表格
+    # 更新离群表格
     def update_departed_table(self, lists):
         if lists is None:
             lists = []
         self.departed_table_model.setRowCount(len(lists))
-        self.departed_table_model.setColumnCount(12)
-        self.departed_table_model.setHorizontalHeaderLabels(["编号", "时间戳", "坐标格式", "当前模式",
-                                                    "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角'])
+        self.departed_table_model.setColumnCount(11)
+        self.departed_table_model.setHorizontalHeaderLabels(["编号",  "当前模式",
+                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否运行中'])
         for i, state in enumerate(lists):
-            self.departed_table_model.setItem(i, 0, QStandardItem(str(state.namespace)))
-            self.departed_table_model.setItem(i, 1, QStandardItem(str(state.header.stamp)))
-            self.departed_table_model.setItem(i, 2, QStandardItem(str(state.header.frame_id)))
-            self.departed_table_model.setItem(i, 3, QStandardItem(str(state.mode)))
-            self.departed_table_model.setItem(i, 4, QStandardItem(str(state.connected)))
-            self.departed_table_model.setItem(i, 5, QStandardItem(str(state.armed)))
-            self.departed_table_model.setItem(i, 6, QStandardItem(str(state.battery_voltage)))
-            self.departed_table_model.setItem(i, 7, QStandardItem(str(state.battery_percentage)))
-            self.departed_table_model.setItem(i, 8, QStandardItem(str(state.power_supply_status)))
-            self.departed_table_model.setItem(i, 9, QStandardItem(str(state.position)))
-            self.departed_table_model.setItem(i, 10, QStandardItem(str(state.velocity)))
-            self.departed_table_model.setItem(i, 11, QStandardItem(str(state.yaw)))
+            if isinstance(state, dict):
+                self.departed_table_model.setItem(i, 0, QStandardItem(str(state.get('namespace', 'Unknown'))))
+                self.departed_table_model.setItem(i, 1, QStandardItem(str(state.get('mode', 'Unknown'))))
+                self.departed_table_model.setItem(i, 2, QStandardItem(str(state.get('connected', 'Unknown'))))
+                self.departed_table_model.setItem(i, 3, QStandardItem(str(state.get('armed', 'Unknown'))))
+                self.departed_table_model.setItem(i, 4, QStandardItem(str(state.get('battery_voltage', 'Unknown'))))
+                self.departed_table_model.setItem(i, 5, QStandardItem(str(state.get('battery_prcentage', 'Unknown'))))
+                self.departed_table_model.setItem(i, 6, QStandardItem(str(state.get('power_supply_status', 'Unknown'))))
+                self.departed_table_model.setItem(i, 7, QStandardItem(str(state.get('position', 'Unknown'))))
+                self.departed_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
+                self.departed_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
+                self.departed_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
+
+    def gaga1_command(self):
+        self.ros_signal.str_command.emit('gaga1')
+        self.ui.info_textEdit.append(f"发送gaga1命令: gaga1")
+
+    def gaga2_command(self):
+        self.ros_signal.str_command.emit('gaga2')
+        self.ui.info_textEdit.append(f"发送gaga2命令: gaga2")
+
+    def gaga3_command(self):
+        self.ros_signal.str_command.emit('gaga3')
+        self.ui.info_textEdit.append(f"发送gaga3命令: gaga3")
+    def gaga4_command(self):
+        self.ros_signal.str_command.emit('gaga4')
+        self.ui.info_textEdit.append(f"发送gaga4命令: gaga4")
+
+    def led1_command(self):
+        self.ros_signal.str_command.emit('led1')
+        self.ui.info_textEdit.append(f"发送led1命令: led1")
+    
+    def led2_command(self):
+        self.ros_signal.str_command.emit('led2')
+        self.ui.info_textEdit.append(f"发送led2命令: led2")
+        
+    def led3_command(self):
+        self.ros_signal.str_command.emit('led3')
+        self.ui.info_textEdit.append(f"发送led3命令: led3")
+
+    def led4_command(self):
+        self.ros_signal.str_command.emit('led4')
+        self.ui.info_textEdit.append(f"发送led4命令: led4")
+
 
 def main(argv=None):
     app = QApplication(sys.argv)
@@ -439,7 +579,7 @@ def main(argv=None):
     node=GroundStationNode(ros_signal)
 
 
-    ros_signal.manaul_command.connect(node.set_manaul_callback)#主线程连接
+    ros_signal.manual_command.connect(node.set_manual_callback)#主线程连接
     ros_signal.guided_command.connect(node.set_guided_callback)
     ros_signal.arm_command.connect(node.set_arming_callback)#主线程连接
     ros_signal.disarm_command.connect(node.set_disarming_callback)

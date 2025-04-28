@@ -4,12 +4,17 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from sensor_msgs.msg import BatteryState
 import serial
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 class UsvLedNode(Node):
     def __init__(self):
-        super().__init__('usv_led_node')       
+        super().__init__('usv_led_node')  
+
+                 # 初始化 QoS 策略（根据需要调整）
+        self.qos = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.BEST_EFFORT)
+
         # 声明并获取串口参数 
-        self.declare_parameter('port', '/dev/ttyUSB0') # 默认串口
+        self.declare_parameter('port', '/dev/ttyUSB1') # 默认串口
         self.declare_parameter('baudrate', 9600) # 默认波特率 
         port=self.get_parameter('port').get_parameter_value().string_value
         baud=self.get_parameter('baudrate').get_parameter_value().integer_value
@@ -20,15 +25,15 @@ class UsvLedNode(Node):
             self.get_logger().error(f'打开串口失败: {e}')
             return        
         # 订阅地面站的 LED 控制命令
-        self.gs_led_sub = self.create_subscription(String, 'gs_led_command', self.gs_led_callback, 10)
-        self.get_logger().info('订阅地面站的 LED 控制命令')
+        self.gs_led_sub = self.create_subscription(String, 'gs_led_command', self.gs_led_callback, self.qos)
+  
 
-        self.usv_batterystate_sub = self.create_subscription(BatteryState, 'battery', self.usv_batterystate_callback, 10)
-        self.get_logger().info('订阅 USV 的状态 控制命令')
+        self.usv_batterystate_sub = self.create_subscription(BatteryState, 'battery', self.usv_batterystate_callback, self.qos)
+
 
         # 创建定时器
         self.timer = self.create_timer(1.0, self.timer_callback)
-        self.get_logger().info('定时器已创建，间隔 1 秒')
+
 
         self.is_low_battery_level = False  # 是否处于低电量状态
         self.gs_command_str= None  # 地面站的命令字符串 
@@ -68,10 +73,10 @@ class UsvLedNode(Node):
             self.usv_state = msg
             if self.usv_state.voltage<=11.1:
                 self.is_low_battery_level= True
-                self.get_logger().info('电池电量过低')
+                # self.get_logger().info('电池电量过低')
             if self.usv_state.voltage>11.1:
                 self.is_low_battery_level= False
-                self.get_logger().info('电池电量正常')
+                # self.get_logger().info('电池电量正常')
     def timer_callback(self):
         if self.is_low_battery_level:
             # 发送低电量指令
@@ -106,10 +111,11 @@ class UsvLedNode(Node):
              self.process_response(response)
 
     def process_response(self, response):
-        """
-        处理控制器返回的数据
-        """
-        self.get_logger().info(f'收到控制器返回: {response.hex()}')
+        pass
+        # """
+        # 处理控制器返回的数据
+        # """
+        # self.get_logger().info(f'收到控制器返回: {response.hex()}')
         #  根据协议解析返回值，例如确认信息或错误代码                    
 
 def main(args=None):
