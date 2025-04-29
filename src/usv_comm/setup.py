@@ -21,7 +21,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'usv_status_node = usv_comm.usv_status_node:main'
+            'usv_status_node = usv_comm.usv_status_node:main',
+            'auto_set_home_node= usv_comm.auto_set_home_node:main'
         ],
     },
 )

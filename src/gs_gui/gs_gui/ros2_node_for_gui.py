@@ -260,7 +260,7 @@ class GroundStationNode(Node):
                 target_point_msg.pose.orientation.z = quaternion[2]
                 target_point_msg.pose.orientation.w = quaternion[3]
                 self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
-                self.get_logger().info(f"发布目标点到 {usv_id}: {target_point_msg.pose.position}")
+                # self.get_logger().info(f"发布目标点到 {usv_id}: {target_point_msg.pose.position}")
 
             if arrived_count >= len(cluster_usv_list):
                 self.run_step += 1
@@ -287,7 +287,7 @@ class GroundStationNode(Node):
                 target_velocity_msg = Float32()
                 target_velocity_msg.data = float(velocity)
                 self.publish_queue.put((self.set_usv_target_velocity_pubs[usv_id], target_velocity_msg))
-                self.get_logger().info(f"发布速度到 {usv_id}: {velocity}")
+                # self.get_logger().info(f"发布速度到 {usv_id}: {velocity}")
         except Exception as e:
             self.get_logger().error(f"处理集群目标速度失败: {e}")
 

@@ -132,7 +132,7 @@ class UsvStatusNode(Node):
 
 
         self.usv_state_msg.battery_voltage=self.usv_battery.voltage
-        self.get_logger().info(f'当前电池电压：{self.usv_state_msg.battery_voltage}')
+        # self.get_logger().info(f'当前电池电压：{self.usv_state_msg.battery_voltage}')
         self.usv_state_msg.battery_percentage=self.usv_battery.percentage
         # self.get_logger().info(f'当前电池电量：{self.usv_state_msg.battery_percentage}')
         self.usv_state_msg.power_supply_status=self.usv_battery.power_supply_status

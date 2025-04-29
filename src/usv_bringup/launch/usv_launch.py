@@ -39,6 +39,15 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],  # 加载参数文件
     )
+    # 自动设置home点
+    auto_set_home_node = Node(
+        package='usv_comm',
+        executable='auto_set_home_node',
+        name='auto_set_home_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
 
           # uwb避障
     usv_avoidance_node= Node(
@@ -150,6 +159,7 @@ def generate_launch_description():
         usv_avoidance_node,
         usv_laserscan_node,
         usv_ultrasonic_node,
+        auto_set_home_node,
         # usv_led_node,
         # usv_sound_node,
         

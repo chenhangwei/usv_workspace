@@ -65,7 +65,7 @@ class UsvControlNode(Node):
         # 定时器检查是否到达目标点
         self.check_target_timer_reached = self.create_timer(1, self.check_target_reached)
 
-        self.publish_target_timer=self.create_timer(0.1,self.publish_target)
+        self.publish_target_timer=self.create_timer(0.05,self.publish_target)
 
         # 当前状态
         self.current_state = State()
@@ -161,6 +161,7 @@ class UsvControlNode(Node):
         point_msg.pose.position.x=px
         point_msg.pose.position.y=py
         point_msg.pose.position.z=pz
+
         point_msg.pose.orientation.x=ox
         point_msg.pose.orientation.y=oy
         point_msg.pose.orientation.z=oz
@@ -168,21 +169,22 @@ class UsvControlNode(Node):
 
      
 
-        rc_msg=OverrideRCIn()
+        # rc_msg=OverrideRCIn()
 
-        rc_msg.channels=[0]*8
+        # rc_msg.channels=[0]*8
 
-        rc_msg.channels[2]=int(self.speed_value)
+        # rc_msg.channels[2]=int(self.speed_value)
 
 
         self.target_point_pub.publish(point_msg)
-        self.rc_override_pub.publish(rc_msg)
-        is_running_=Bool()
-        is_running_.data=True
-        self.is_running_pub.publish(is_running_)
-        signal_=Bool()
-        signal_.data=False
-        self.signal_pub.publish(signal_)
+        self.get_logger().info(f'发布目标点: {point_msg}')
+        # self.rc_override_pub.publish(rc_msg)
+        # is_running_=Bool()
+        # is_running_.data=True
+        # self.is_running_pub.publish(is_running_)
+        # signal_=Bool()
+        # signal_.data=False
+        # self.signal_pub.publish(signal_)
 
   
 
