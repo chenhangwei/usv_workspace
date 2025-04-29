@@ -177,7 +177,7 @@ class UsvControlNode(Node):
 
 
         self.target_point_pub.publish(point_msg)
-        self.get_logger().info(f'发布目标点: {point_msg}')
+        # self.get_logger().info(f'发布目标点: {point_msg}')
         # self.rc_override_pub.publish(rc_msg)
         # is_running_=Bool()
         # is_running_.data=True

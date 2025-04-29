@@ -42,7 +42,7 @@ class UsvUwbNode(Node):
                             self.uwb_msg.header.frame_id='map'
                             self.uwb_msg.pose.position.x=x
                             self.uwb_msg.pose.position.y=y
-                            self.uwb_msg.pose.position.z=z
+                            self.uwb_msg.pose.position.z=0.0
                             self.uwb_pub.publish(self.uwb_msg)
                         else:
                             pass

@@ -216,7 +216,7 @@ class GroundStationNode(Node):
                     continue
                 if usv_id in self.usv_states and not self.usv_states[usv_id].get('is_runing', True):
                     self.usv_target_number += 1
-            self.get_logger().info(f"目标点: {temp_list}, 发布器: {list(self.set_usv_target_position_pubs.keys())}")
+            # self.get_logger().info(f"目标点: {temp_list}, 发布器: {list(self.set_usv_target_position_pubs.keys())}")
         except Exception as e:
             self.get_logger().error(f"处理集群目标点失败: {e}")
 
