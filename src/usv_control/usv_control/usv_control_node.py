@@ -65,7 +65,7 @@ class UsvControlNode(Node):
         # 定时器检查是否到达目标点
         self.check_target_timer_reached = self.create_timer(1, self.check_target_reached)
 
-        self.publish_target_timer=self.create_timer(0.05,self.publish_target)
+        self.publish_target_timer=self.create_timer(0.1,self.publish_target)
 
         # 当前状态
         self.current_state = State()
@@ -152,20 +152,20 @@ class UsvControlNode(Node):
         #     oz=self.avoidance_postition.pose.orientation.z
         #     ow=self.avoidance_postition.pose.orientation.w
 
-        if px is None or py is None or pz is None :
-            self.get_logger().info('目标点为空，忽略')
-            return
+        # if px is None or py is None or pz is None :
+        #     self.get_logger().info('目标点为空，忽略')
+        #     return
         point_msg = PoseStamped()
         point_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id='map')
 
-        point_msg.pose.position.x=px
-        point_msg.pose.position.y=py
-        point_msg.pose.position.z=pz
+        point_msg.pose.position.x= px
+        point_msg.pose.position.y= py
+        point_msg.pose.position.z=0.0
 
-        point_msg.pose.orientation.x=ox
-        point_msg.pose.orientation.y=oy
-        point_msg.pose.orientation.z=oz
-        point_msg.pose.orientation.w=ow
+        point_msg.pose.orientation.x=0.0
+        point_msg.pose.orientation.y=0.0
+        point_msg.pose.orientation.z=0.0
+        point_msg.pose.orientation.w=1.0
 
      
 

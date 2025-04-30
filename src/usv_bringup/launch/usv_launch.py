@@ -141,6 +141,7 @@ def generate_launch_description():
             {'gcs_url': ''},  # 禁用 GCS 代理
             {'tgt_system': 1},  # 飞控的系统 ID
             {'tgt_component': 1},  # 飞控的组件 ID
+            {'plugin_blacklist': ['global_position']},  # 禁用 global_position 插件
          
         ]
     )
@@ -154,7 +155,7 @@ def generate_launch_description():
     
         usv_status_node,
         usv_control_node,
-        usv_uwb_node,
+        # usv_uwb_node,
         usv_command_node,
         usv_avoidance_node,
         usv_laserscan_node,

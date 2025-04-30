@@ -8,7 +8,7 @@ class UsvUwbNode(Node):
         super().__init__('usv_uwb_node') 
         self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10) 
         self.serial_port = serial.Serial('/dev/ttyUSB0', 115200, timeout=1) # 假设串口为 "/dev/ttyUSB0"，波特率为 57600
-        self.timer = self.create_timer(0.02, self.read_and_publish) # 10 Hz 
+        self.timer = self.create_timer(0.01, self.read_and_publish) # 10 Hz 
         
         self.uwb_msg=PoseStamped()
 
