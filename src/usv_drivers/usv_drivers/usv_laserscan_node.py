@@ -10,7 +10,7 @@ class UsvLaserScanNode(Node):
         super().__init__('usv_lasercan_node')
         
         # 创建 LaserScan 消息发布者，发布到 'laser_scan' 话题，队列大小为 10
-        self.radar_pub = self.create_publisher(LaserScan, 'laser_scan111', 10)
+        self.radar_pub = self.create_publisher(LaserScan, 'laser_scan', 10)
         
         # 串口参数（根据实际雷达设备调整）
         self.serial_port = '/dev/ttyUSB0'  # 串口设备路径

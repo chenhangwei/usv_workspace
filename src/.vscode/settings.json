@@ -26,5 +26,19 @@
         "/opt/ros/jazzy/lib/python3.12/site-packages"
     ],
     "python.analysis.autoImportCompletions": true,
-    "python.analysis.typeCheckingMode": "standard"
+    "python.analysis.typeCheckingMode": "standard",
+    "cSpell.words": [
+        "bringup",
+        "chenhangwei",
+        "groundstationnode",
+        "lasercan",
+        "laserscan",
+        "mavros",
+        "prcentage",
+        "rclpy",
+        "rplidar",
+        "runing",
+        "setpoint",
+        "usvs"
+    ]
 }

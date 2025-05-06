@@ -23,15 +23,15 @@ usv_command_node:
 
 usv_control_node:
   ros__parameters:
-     reach_threshold: 1.5  # 设置到达目标点距离阈值为 1.5 米
+     dummy_param: true
 
-usv_laserscan_node:
-  ros__parameters:
-    dummy_param: true
+# usv_laserscan_node:
+#   ros__parameters:
+#     dummy_param: true
 
-usv_ultrasonic_node:
-  ros__parameters:
-    dummy_param: true
+# usv_ultrasonic_node:
+#   ros__parameters:
+#     dummy_param: true
 
 usv_uwb_node:
   ros__parameters:

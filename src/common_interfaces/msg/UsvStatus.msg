@@ -13,4 +13,4 @@ uint8 power_supply_status            # 电池状态（0=未知, 1=充电, 2=放�
 geometry_msgs/Point position    # 位置（x, y, z）
 geometry_msgs/Twist velocity    # 速度信息（线速度和角速度）
 float32 yaw                     # 偏航角（单位：弧度）
-bool is_runing                   # 是否在运行
+bool reached_target                  # 是否到达目标点

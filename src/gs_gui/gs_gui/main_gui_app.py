@@ -386,8 +386,7 @@ class Mainwindow(QMainWindow):
             # 从 usv_departed_list 移除匹配的项
             for item in self.usv_departed_list:
                 if item.get('namespace') == usv_id:
-                    self.usv_departed_list.remove(item)
-                    break
+                    self.usv_departed_list.remove(item)               
             self.update_cluster_table(self.usv_cluster_list)
             self.update_departed_table(self.usv_departed_list)
             self.ui.info_textEdit.append(f"添加设备 {usv_id} 到集群列表")
@@ -474,7 +473,7 @@ class Mainwindow(QMainWindow):
         # 保留现有 usv_cluster_list 的手动添加 USV
         current_cluster = self.usv_cluster_list.copy()
         current_cluster_ids = {item.get('namespace') for item in current_cluster if isinstance(item, dict) and item.get('namespace')}
-        print(f"Current Cluster IDs: {current_cluster_ids}")
+        # print(f"Current Cluster IDs: {current_cluster_ids}")
         
         # 更新 usv_cluster_list
         self.usv_cluster_list = []

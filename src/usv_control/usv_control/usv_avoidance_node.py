@@ -18,7 +18,7 @@ class UsvAvoidanceNode(Node):
         )
         qos_a = QoSProfile(
             depth=10,  # 队列大小
-            reliability=QoSReliabilityPolicy.BEST_EFFORT
+            reliability=QoSReliabilityPolicy.RELIABLE
         )
 
         # 从参数加载阈值，默认值为 1.0
@@ -35,7 +35,7 @@ class UsvAvoidanceNode(Node):
         
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
-            PoseStamped, 'setpoint_position/local', self.target_callback, qos)
+            PoseStamped, 'setpoint_position/local', self.target_callback, qos_a)
         
         # 订阅当前 UWB 位置
         self.position_sub = self.create_subscription(
@@ -61,12 +61,10 @@ class UsvAvoidanceNode(Node):
     # 获取雷达数据
     def radar_callback(self, msg):
         if isinstance(msg, LaserScan):
-            self.get_logger().info("雷达数据接收成功")
             self.current_laserscan=msg          
     # 获取当前状态
     def state_callback(self, msg):
         if isinstance(msg, State):
-            # self.get_logger().info("避障节点usv状态信息接收成功")
             self.current_state = msg
     # 获取当前坐标     
     def position_callback(self, msg):
@@ -75,7 +73,6 @@ class UsvAvoidanceNode(Node):
     # 获取目标坐标
     def target_callback(self, msg):
         if isinstance(msg, PoseStamped):
-            # self.get_logger().info("目标点信息接收成功")
             self.current_target = msg.pose.position
 
  
@@ -83,7 +80,6 @@ class UsvAvoidanceNode(Node):
     def avoidance_run(self):
         self.in_distance_value=self.get_parameter("in_distance_value").value 
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
-                # self.get_logger().warn("设备站未解锁或未在 GUIDED模式,避障将不会执行任何操作")
                 return
         if self.current_laserscan is not None:
             # 检测前方 ±30° 范围内的最小距离
