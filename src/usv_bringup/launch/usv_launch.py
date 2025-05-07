@@ -1,7 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -25,11 +25,13 @@ def generate_launch_description():
         description='设备站的参数文件路径'
 
      ) 
+    
+
        # 加载参数文件
     param_file = LaunchConfiguration('param_file')
     namespace = LaunchConfiguration('namespace')
 
- 
+    
 
     #状态处理
     usv_status_node = Node(
@@ -142,7 +144,7 @@ def generate_launch_description():
             {'gcs_url': ''},  # 禁用 GCS 代理
             {'tgt_system': 1},  # 飞控的系统 ID
             {'tgt_component': 1},  # 飞控的组件 ID
-            {'plugin_blacklist': ['global_position']},  # 禁用 global_position 插件        
+            # {'plugin_blacklist': ['global_position']},  # 禁用 global_position 插件        
         ]
     )
 
@@ -157,7 +159,7 @@ def generate_launch_description():
             {'serial_port': '/dev/ttyUSB0'},
             {'serial_baudrate': 115200},
             {'scan_frequency': 10.0},
-            {'frame_id': f'laser_frame_{namespace}'}  # 设置激光雷达坐标系
+            {'frame_id': [TextSubstitution(text='laser_frame_'), LaunchConfiguration('namespace')]}
         ]
     )
 

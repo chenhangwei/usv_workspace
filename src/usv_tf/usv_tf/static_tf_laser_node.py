@@ -27,7 +27,8 @@ class StaticTfLaserNode(Node):
         transform.transform.translation.z=0.3
 
         #欧拉角转四元数
-        q=quaternion_from_euler(math.radians(180),0,0)
+        # q=quaternion_from_euler(math.radians(180),0,0)
+        q=quaternion_from_euler(0,0,0)
         transform.transform.rotation.x=q[0]
         transform.transform.rotation.y=q[1]
         transform.transform.rotation.z=q[2]
