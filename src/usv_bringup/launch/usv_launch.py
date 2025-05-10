@@ -151,8 +151,9 @@ def generate_launch_description():
     # 启动 RPLIDAR 节点
     rplidar_node = Node(
         package='rplidar_ros',
+        # executable='rplidar_node',
         executable='rplidar_node',
-        name='rplidar_node',
+        name='rplidar_composition',
         namespace=namespace ,  # 使用相同的命名空间
         output='screen',
         parameters=[

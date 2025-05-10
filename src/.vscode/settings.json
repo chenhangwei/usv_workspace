@@ -40,5 +40,6 @@
         "runing",
         "setpoint",
         "usvs"
-    ]
+    ],
+    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/common_interfaces"
 }
