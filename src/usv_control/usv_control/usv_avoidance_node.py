@@ -35,7 +35,7 @@ class UsvAvoidanceNode(Node):
         
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
-            PoseStamped, 'setpoint_position/local', self.target_callback, qos_a)
+            PoseStamped, 'setpoint_position/local', self.target_callback, qos)
         
         # 订阅当前 UWB 位置
         self.position_sub = self.create_subscription(

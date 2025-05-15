@@ -195,7 +195,7 @@ def generate_launch_description():
         # usv_laserscan_node,
         # usv_ultrasonic_node,
         auto_set_home_node,
-        rplidar_node,
+        # rplidar_node,
         static_tf_laser_node,
         odom_to_tf,
         # usv_led_node,

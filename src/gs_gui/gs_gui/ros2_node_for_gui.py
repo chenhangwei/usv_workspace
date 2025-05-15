@@ -252,7 +252,7 @@ class GroundStationNode(Node):
                 target_point_msg.pose.orientation.z = quaternion[2]
                 target_point_msg.pose.orientation.w = quaternion[3]
                 self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
-
+                self.get_logger().info(f'发送坐标：{target_point_msg}')
 
             if arrived_count >= len(cluster_usv_list):
                 self.run_step += 1
