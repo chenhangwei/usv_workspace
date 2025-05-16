@@ -139,6 +139,7 @@ class GroundStationNode(Node):
             self.usv_states[usv_id] = state_data
 
             self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            
 
     def set_manual_callback(self, msg):
         self.get_logger().info("Received manual mode command")

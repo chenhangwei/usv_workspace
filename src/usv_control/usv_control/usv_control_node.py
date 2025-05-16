@@ -23,7 +23,7 @@ class UsvControlNode(Node):
         )
     
         # 发布目标点
-        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', self.publish_qos)    
+        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)    
 
         # 订阅当前状态
         self.state_sub = self.create_subscription(
@@ -43,12 +43,14 @@ class UsvControlNode(Node):
             Bool,'avoidance_flag',self.set_avoidance_flag_callback,qos)
         
         # 发送目标位置循环     
-        self.publish_target_timer=self.create_timer(0.1,self.publish_target)
+        self.publish_target_timer=self.create_timer(0.05,self.publish_target)
     
         self.current_state = State() # 当前状态
         self.target_position =PoseStamped()#目标点
         self.avoidance_position=PoseStamped()#避障目标点
         self.avoidance_flag=Bool()#避障标记
+
+        self.point_msg = PoseStamped() #初始化目标点
  
     def state_callback(self, msg):
         if isinstance(msg, State):
@@ -99,40 +101,40 @@ class UsvControlNode(Node):
     def publish_target(self):
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
                 return  
-        if not self.avoidance_flag:    
-            px=self.current_target_position.pose.position.x
-            py=self.current_target_position.pose.position.y
-            pz=self.current_target_position.pose.position.z
+        # if not self.avoidance_flag:    
+        px=self.current_target_position.pose.position.x
+        py=self.current_target_position.pose.position.y
+        pz=self.current_target_position.pose.position.z
 
-            ox=self.current_target_position.pose.orientation.x
-            oy=self.current_target_position.pose.orientation.y
-            oz=self.current_target_position.pose.orientation.z
-            ow=self.current_target_position.pose.orientation.w
-        else :
-            px=self.avoidance_position.pose.position.x
-            py=self.avoidance_position.pose.position.y
-            pz=self.avoidance_position.pose.position.z  
+        # ox=self.current_target_position.pose.orientation.x
+        # oy=self.current_target_position.pose.orientation.y
+        # oz=self.current_target_position.pose.orientation.z
+        # ow=self.current_target_position.pose.orientation.w
+        # else :
+        #     px=self.avoidance_position.pose.position.x
+        #     py=self.avoidance_position.pose.position.y
+        #     pz=self.avoidance_position.pose.position.z  
 
-            ox=self.avoidance_position.pose.orientation.x
-            oy=self.avoidance_position.pose.orientation.y
-            oz=self.avoidance_position.pose.orientation.z
-            ow=self.avoidance_position.pose.orientation.w
+        #     ox=self.avoidance_position.pose.orientation.x
+        #     oy=self.avoidance_position.pose.orientation.y
+        #     oz=self.avoidance_position.pose.orientation.z
+        #     ow=self.avoidance_position.pose.orientation.w
 
         if px is None or py is None or pz is None :
             self.get_logger().info('目标点为空，忽略')
             return
-        point_msg = PoseStamped()
-        point_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id='map')
+      
+        self.point_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id='map')
 
-        point_msg.pose.position.x= px
-        point_msg.pose.position.y= py
-        point_msg.pose.position.z= pz
+        self.point_msg.pose.position.x= px
+        self.point_msg.pose.position.y= py
+        self.point_msg.pose.position.z= 0
 
-        point_msg.pose.orientation.x=ox
-        point_msg.pose.orientation.y=oy
-        point_msg.pose.orientation.z=oz
-        point_msg.pose.orientation.w=ow
-        self.target_point_pub.publish(point_msg)
+        self.point_msg.pose.orientation.x=0
+        self.point_msg.pose.orientation.y=0
+        self.point_msg.pose.orientation.z=0
+        self.point_msg.pose.orientation.w=1
+        self.target_point_pub.publish(self.point_msg)
 
 def main(args=None):
     rclpy.init(args=args)
