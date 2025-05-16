@@ -23,8 +23,12 @@ class UsvControlNode(Node):
         )
     
         # 发布目标点
+<<<<<<< HEAD
         self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)  
         # self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_position/local', qos)   
+=======
+        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)    
+>>>>>>> 548b7eb85975afe95162b866cff2b83861a245af
 
         # 订阅当前状态
         self.state_sub = self.create_subscription(
@@ -47,7 +51,7 @@ class UsvControlNode(Node):
         self.publish_target_timer=self.create_timer(0.05,self.publish_target)
     
         self.current_state = State() # 当前状态
-        self.target_position =PoseStamped()#目标点
+        self.current_target_position =PoseStamped()#目标点
         self.avoidance_position=PoseStamped()#避障目标点
         self.avoidance_flag=Bool()#避障标记
 
@@ -59,19 +63,13 @@ class UsvControlNode(Node):
         if isinstance(msg, State):
             self.current_state = msg
 
-    # 订阅当前位置
-    def current_position_callback(self, msg):       
-        if not isinstance(msg, PoseStamped):
-            self.get_logger().info('当前位置为空，忽略')
-            return
-        self.current_position=msg
-
     # 订阅到达目标点话题
     def set_target_point_callback(self, msg):
         if not isinstance(msg, PoseStamped):
             self.get_logger().info('目标坐标为空，忽略')
             return      
         self.current_target_position=msg
+        # self.get_logger().info(f'接受到目标点：{self.current_target_position}')
 
     # 订阅目标速度   
     def set_target_velocity_callback(self,msg):
@@ -109,10 +107,17 @@ class UsvControlNode(Node):
         py=self.current_target_position.pose.position.y
         pz=self.current_target_position.pose.position.z
 
+<<<<<<< HEAD
         # ox=self.current_target_position.pose.orientation.x
         # oy=self.current_target_position.pose.orientation.y
         # oz=self.current_target_position.pose.orientation.z
         # ow=self.current_target_position.pose.orientation.w
+=======
+        ox=self.current_target_position.pose.orientation.x
+        oy=self.current_target_position.pose.orientation.y
+        oz=self.current_target_position.pose.orientation.z
+        ow=self.current_target_position.pose.orientation.w
+>>>>>>> 548b7eb85975afe95162b866cff2b83861a245af
         # else :
         #     px=self.avoidance_position.pose.position.x
         #     py=self.avoidance_position.pose.position.y
@@ -160,6 +165,16 @@ class UsvControlNode(Node):
         # self.point_msg2.yaw=0.0
         # self.target_point_pub.publish(self.point_msg2)
 
+<<<<<<< HEAD
+=======
+        point_msg.pose.orientation.x=ox
+        point_msg.pose.orientation.y=oy
+        point_msg.pose.orientation.z=oz
+        point_msg.pose.orientation.w=ow
+
+        self.target_point_pub.publish(point_msg)
+        # self.get_logger().info(f'发送给usv的目标点：{point_msg}')
+>>>>>>> 548b7eb85975afe95162b866cff2b83861a245af
 
 def main(args=None):
     rclpy.init(args=args)
