@@ -2,8 +2,8 @@ import signal
 import stat
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped,Point
-from mavros_msgs.msg import State,OverrideRCIn ,PositionTarget
+from geometry_msgs.msg import PoseStamped
+from mavros_msgs.msg import State,PositionTarget
 from std_msgs.msg import Bool, Header,Float32,String
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -23,7 +23,8 @@ class UsvControlNode(Node):
         )
     
         # 发布目标点
-        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)    
+        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)  
+        # self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_position/local', qos)   
 
         # 订阅当前状态
         self.state_sub = self.create_subscription(
@@ -50,7 +51,9 @@ class UsvControlNode(Node):
         self.avoidance_position=PoseStamped()#避障目标点
         self.avoidance_flag=Bool()#避障标记
 
-        self.point_msg = PoseStamped() #初始化目标点
+        self.point_msg = PoseStamped() #初始化目标点 
+        self.point_msg2 = PositionTarget() #初始化目标点
+        self.header=Header()
  
     def state_callback(self, msg):
         if isinstance(msg, State):
@@ -124,17 +127,39 @@ class UsvControlNode(Node):
             self.get_logger().info('目标点为空，忽略')
             return
       
-        self.point_msg.header = Header(stamp=self.get_clock().now().to_msg(), frame_id='map')
+        self.point_msg.header.stamp = self.get_clock().now().to_msg()
+        self.point_msg.header.frame_id='map'
 
         self.point_msg.pose.position.x= px
         self.point_msg.pose.position.y= py
-        self.point_msg.pose.position.z= 0
+        self.point_msg.pose.position.z= 0.0
 
         self.point_msg.pose.orientation.x=0
         self.point_msg.pose.orientation.y=0
         self.point_msg.pose.orientation.z=0
         self.point_msg.pose.orientation.w=1
         self.target_point_pub.publish(self.point_msg)
+
+
+        # self.point_msg2.header.stamp=self.get_clock().now().to_msg()
+        # self.point_msg2.header.frame_id='map'
+        # self.point_msg2.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
+        # self.point_msg2.type_mask=(
+        #     PositionTarget.IGNORE_VX |
+        #     PositionTarget.IGNORE_VY |
+        #     PositionTarget.IGNORE_VZ |
+        #     PositionTarget.IGNORE_AFX |
+        #     PositionTarget.IGNORE_AFY |
+        #     PositionTarget.IGNORE_AFZ |
+        #     PositionTarget.IGNORE_YAW_RATE
+        # )
+        # self.point_msg2.position.x=px
+        # self.point_msg2.position.y=py
+        # self.point_msg2.position.z=0.0
+
+        # self.point_msg2.yaw=0.0
+        # self.target_point_pub.publish(self.point_msg2)
+
 
 def main(args=None):
     rclpy.init(args=args)
