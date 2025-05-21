@@ -20,7 +20,7 @@ import json
 
 
 
-class Mainwindow(QMainWindow):
+class MainWindow(QMainWindow):
     def __init__(self,ros_signal):
         super().__init__()
         self.ui=Ui_MainWindow()        
@@ -52,6 +52,7 @@ class Mainwindow(QMainWindow):
 
         self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
         self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)#离开集群list，到离群list
+
 
         self.ui.gaga1_pushButton.clicked.connect(self.gaga1_command)
         self.ui.gaga2_pushButton.clicked.connect(self.gaga2_command)
@@ -268,8 +269,8 @@ class Mainwindow(QMainWindow):
     # 启动 RViz2
     def rviz_process(self):
         # 启动 RViz2
-        self.rviz_process = QProcess(self)
-        self.rviz_process.start("rviz2")
+        self._rviz_process = QProcess(self)
+        self._rviz_process.start("rviz2")
         self.ui.info_textEdit.append(f"启动RViz2")
 
     # 发送集群目标点命令
@@ -488,6 +489,7 @@ class Mainwindow(QMainWindow):
         # 更新表格
         self.update_cluster_table(self.usv_cluster_list)
         self.update_departed_table(self.usv_departed_list)
+        self.update_selected_table_row()
         
    
     def update_cluster_table(self, lists):
@@ -537,6 +539,58 @@ class Mainwindow(QMainWindow):
                 self.departed_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
                 self.departed_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
 
+
+
+
+    def update_selected_table_row(self):
+        try:
+            # 获取选中的行
+            selected_row = self.ui.cluster_tableView.selectedIndexes()[0].row()
+            model = self.ui.cluster_tableView.model()
+            # 获取选中行的状态数据
+            state = {}
+            headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
+                    "battery_prcentage", "power_supply_status", "position",
+                    "velocity", "yaw", "is_running"]
+                    
+            if model is None:
+                self.ui.info_textEdit.append("集群列表为空")
+                return
+
+            # 获取整行状态数据
+            state = {}
+            headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
+                    "battery_prcentage", "power_supply_status", "position", 
+                    "velocity", "yaw", "is_running"]
+            for col, key in enumerate(headers):
+                index = model.index(selected_row, col)
+                state[key] = model.data(index) or "Unknown"
+            self.ui.usv_id_label.setText(f"当前选中 USV ID: {state.get('namespace', 'Unknown')}")
+            position_str=state.get('position', 'Unknown')
+            position_ = position_str.split(',')
+            yaw_ = state.get('yaw', 'Unknown')
+            if len(position_str) == 3:
+                x = float(position_[0].split('=')[1])
+                y = float(position_[1].split('=')[1])
+                z= float(position_[2].split('=')[1])
+                yaw_yaw = float(yaw_.split('=')[1])
+                self.ui.usv_x_label.setText(f" {x}")
+                self.ui.usv_y_label.setText(f" {y}")
+                self.ui.usv_z_label.setText(f"{z}")
+                self.ui.usv_yaw_label.setText(f"{yaw_yaw}")
+            else:
+                self.ui.usv_x_label.setText(f"当前选中 USV X: Unknown")
+                self.ui.usv_y_label.setText(f"当前选中 USV Y: Unknown")
+                self.ui.usv_z_label.setText(f"当前选中 USV Z: Unknown")
+        except IndexError:
+            self.ui.info_textEdit.append("没有选中任何行")
+        except Exception as e:
+            self.ui.info_textEdit.append(f"错误：获取选中行数据失败 - {str(e)}")
+            self.ui.usv_id_label.setText("当前选中 USV ID: Unknown")
+            self.ui.usv_x_label.setText("当前选中 USV X: Unknown")
+            self.ui.usv_y_label.setText("当前选中 USV Y: Unknown")
+            self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")        
+
     def gaga1_command(self):
         self.ros_signal.str_command.emit('gaga1')
         self.ui.info_textEdit.append(f"发送gaga1命令: gaga1")
@@ -572,7 +626,7 @@ class Mainwindow(QMainWindow):
 def main(argv=None):
     app = QApplication(sys.argv)
     ros_signal = ROSSignal()
-    main_window = Mainwindow(ros_signal)
+    main_window = MainWindow(ros_signal)
 
     rclpy.init(args=None)
     node=GroundStationNode(ros_signal)

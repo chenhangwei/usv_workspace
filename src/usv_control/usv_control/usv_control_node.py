@@ -23,8 +23,8 @@ class UsvControlNode(Node):
         )
     
         # 发布目标点
-        self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)  
-        # self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_position/local', qos)   
+        # self.target_point_pub = self.create_publisher(PoseStamped, 'setpoint_position/local', qos)  
+        self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos)   
 
         # 订阅当前状态
         self.state_sub = self.create_subscription(
@@ -121,38 +121,40 @@ class UsvControlNode(Node):
             self.get_logger().info('目标点为空，忽略')
             return
       
-        self.point_msg.header.stamp = self.get_clock().now().to_msg()
-        self.point_msg.header.frame_id='map'
+        # self.point_msg.header.stamp = self.get_clock().now().to_msg()
+        # self.point_msg.header.frame_id='map'
 
-        self.point_msg.pose.position.x= px
-        self.point_msg.pose.position.y= py
-        self.point_msg.pose.position.z= 0.0
+        # self.point_msg.pose.position.x= px
+        # self.point_msg.pose.position.y= py
+        # self.point_msg.pose.position.z= 0.0
 
-        self.point_msg.pose.orientation.x=0
-        self.point_msg.pose.orientation.y=0
-        self.point_msg.pose.orientation.z=0
-        self.point_msg.pose.orientation.w=1
-        self.target_point_pub.publish(self.point_msg)
+        # self.point_msg.pose.orientation.x=0
+        # self.point_msg.pose.orientation.y=0
+        # self.point_msg.pose.orientation.z=0
+        # self.point_msg.pose.orientation.w=1
+        # self.target_point_pub.publish(self.point_msg)
 
 
-        # self.point_msg2.header.stamp=self.get_clock().now().to_msg()
+        self.point_msg2.header.stamp=self.get_clock().now().to_msg()
         # self.point_msg2.header.frame_id='map'
-        # self.point_msg2.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
-        # self.point_msg2.type_mask=(
-        #     PositionTarget.IGNORE_VX |
-        #     PositionTarget.IGNORE_VY |
-        #     PositionTarget.IGNORE_VZ |
-        #     PositionTarget.IGNORE_AFX |
-        #     PositionTarget.IGNORE_AFY |
-        #     PositionTarget.IGNORE_AFZ |
-        #     PositionTarget.IGNORE_YAW_RATE
-        # )
-        # self.point_msg2.position.x=px
-        # self.point_msg2.position.y=py
-        # self.point_msg2.position.z=0.0
+        self.point_msg2.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
+        self.point_msg2.type_mask=(
+            PositionTarget.IGNORE_VX |
+            PositionTarget.IGNORE_VY |
+            PositionTarget.IGNORE_VZ |
+            PositionTarget.IGNORE_AFX |
+            PositionTarget.IGNORE_AFY |
+            PositionTarget.IGNORE_AFZ |
+            PositionTarget.FORCE |
+            PositionTarget.IGNORE_YAW |
+            PositionTarget.IGNORE_YAW_RATE
+        )
+        self.point_msg2.position.x=px
+        self.point_msg2.position.y=py
+        self.point_msg2.position.z=0.0
 
         # self.point_msg2.yaw=0.0
-        # self.target_point_pub.publish(self.point_msg2)
+        self.target_point_pub.publish(self.point_msg2)
 
 
 def main(args=None):

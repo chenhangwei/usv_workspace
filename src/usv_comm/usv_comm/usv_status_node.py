@@ -1,12 +1,13 @@
+from math import sqrt
 from xmlrpc.client import Boolean
 from sympy import false
 import rclpy
 from rclpy.node import Node
-from mavros_msgs.msg import State,PositionTarget
+from mavros_msgs.msg import State,PositionTarget,WaypointReached
 from sensor_msgs.msg import BatteryState
 from std_msgs.msg import String,Bool
 from common_interfaces.msg import UsvStatus
-from geometry_msgs.msg import TwistStamped,PoseStamped,Vector3
+from geometry_msgs.msg import TwistStamped,PoseStamped,Vector3,Point
 from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
@@ -32,6 +33,9 @@ class UsvStatusNode(Node):
 
         self.state_publisher=self.create_publisher(UsvStatus,'usv_state',10)
 
+        
+        # 临时目标点，初始化为 [0.0, 0.0, 0.0]
+        self.temp_point=Point()
         self.reached_target=Bool() #是否运行中
         self.usv_state=State() #状态信息
         self.usv_battery=BatteryState() #电池电压信息
@@ -74,19 +78,22 @@ class UsvStatusNode(Node):
             self.usv_pose_callback,
             qos 
         )
-        # 订阅usv的运行状态
-        self.reached_sub=self.create_subscription(
-            Bool,
-            f'reached_target',
-            self.reached_target_callback,
+        # 订阅目标点位置
+        self.target_sub=self.create_subscription(
+            PositionTarget,
+            f'setpoint_raw/local',
+            self.target_callback,
             qos
-        )
+            )
+
 
         self.state_timer=self.create_timer(1,self.state_timer_callback)
 
-    def reached_target_callback(self,msg):
-        if isinstance(msg, Bool):
-            self.reached_target.data=msg.data          
+    def target_callback(self,msg):
+        if isinstance(msg, PositionTarget):
+            self.temp_point.x=msg.position.x
+            self.temp_point.y=msg.position.y
+            self.temp_point.z=msg.position.z
         else:
             self.get_logger().error('接收到的消息类型不正确')
 
@@ -153,7 +160,20 @@ class UsvStatusNode(Node):
         # 赋值给 yaw（单位：弧度）
         self.usv_state_msg.yaw = float(yaw)  # 转换为 float32
         # self.get_logger().info(f'当前偏角：{yaw}')
-        self.usv_state_msg.reached_target=self.reached_target.data
+
+        dx = self.usv_pose.pose.position.x - self.temp_point.x
+        dy = self.usv_pose.pose.position.y - self.temp_point.y
+        dz = self.usv_pose.pose.position.z - self.temp_point.z
+        dist = sqrt(dx**2 + dy**2 + dz**2)
+
+        if dist < 1.0:
+            self.usv_state_msg.reached_target = True
+            self.get_logger().info(f'到达目标点，当前距离：{dist:.2f} 米')          
+        else:
+            self.usv_state_msg.reached_target = False
+            self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
+
+     
         self.state_publisher.publish( self.usv_state_msg)
 
         
