@@ -48,6 +48,9 @@ class UsvSoundNode(Node):
                self.sound_loop(2, 3)  # 延时2秒，循环3次
             case 'gaga4':
                 self.sound_loop(2, 4)  # 延时2秒，循环4次
+            case 'gaga-stop':
+                self.sound_loop(0, 0)  # 停止循环
+
                 
        
     def sound_loop(self,sec,num):
@@ -69,7 +72,8 @@ class UsvSoundNode(Node):
  
     def post_play_callback(self):
         self.get_logger().info('音频播放后延时 {} 秒执行的任务'.format(self.delay_sec))
-        self.timer_.cancel()  # 取消当前定时器
+        if self.timer_ is not None:
+            self.timer_.cancel()  # 取消当前定时器
 
         self.current_iteration += 1
         if self.current_iteration >= self.max_iterations:

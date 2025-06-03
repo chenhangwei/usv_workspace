@@ -7,6 +7,7 @@ from mavros_msgs.msg import State,PositionTarget
 from std_msgs.msg import Bool, Header,Float32,String
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+import time
 
 class UsvControlNode(Node):
     def __init__(self):
@@ -54,7 +55,8 @@ class UsvControlNode(Node):
         self.point_msg = PoseStamped() #初始化目标点 
         self.point_msg2 = PositionTarget() #初始化目标点
         self.header=Header()
- 
+
+    
     def state_callback(self, msg):
         if isinstance(msg, State):
             self.current_state = msg
@@ -98,63 +100,63 @@ class UsvControlNode(Node):
     def publish_target(self):
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
                 return  
-        # if not self.avoidance_flag:    
-        px=self.current_target_position.pose.position.x
-        py=self.current_target_position.pose.position.y
-        pz=self.current_target_position.pose.position.z
+        if not self.avoidance_flag:    
+            px=self.current_target_position.pose.position.x
+            py=self.current_target_position.pose.position.y
+            pz=self.current_target_position.pose.position.z
 
-        # ox=self.current_target_position.pose.orientation.x
-        # oy=self.current_target_position.pose.orientation.y
-        # oz=self.current_target_position.pose.orientation.z
-        # ow=self.current_target_position.pose.orientation.w
-        # else :
-        #     px=self.avoidance_position.pose.position.x
-        #     py=self.avoidance_position.pose.position.y
-        #     pz=self.avoidance_position.pose.position.z  
+            ox=self.current_target_position.pose.orientation.x
+            oy=self.current_target_position.pose.orientation.y
+            oz=self.current_target_position.pose.orientation.z
+            ow=self.current_target_position.pose.orientation.w
+        else :
+            px=self.avoidance_position.pose.position.x
+            py=self.avoidance_position.pose.position.y
+            pz=self.avoidance_position.pose.position.z  
 
-        #     ox=self.avoidance_position.pose.orientation.x
-        #     oy=self.avoidance_position.pose.orientation.y
-        #     oz=self.avoidance_position.pose.orientation.z
-        #     ow=self.avoidance_position.pose.orientation.w
+            ox=self.avoidance_position.pose.orientation.x
+            oy=self.avoidance_position.pose.orientation.y
+            oz=self.avoidance_position.pose.orientation.z
+            ow=self.avoidance_position.pose.orientation.w
 
-        if px is None or py is None or pz is None :
-            self.get_logger().info('目标点为空，忽略')
-            return
+            if px is None or py is None or pz is None :
+                self.get_logger().info('目标点为空，忽略')
+                return
       
-        # self.point_msg.header.stamp = self.get_clock().now().to_msg()
-        # self.point_msg.header.frame_id='map'
+            # self.point_msg.header.stamp = self.get_clock().now().to_msg()
+            # self.point_msg.header.frame_id='map'
 
-        # self.point_msg.pose.position.x= px
-        # self.point_msg.pose.position.y= py
-        # self.point_msg.pose.position.z= 0.0
+            # self.point_msg.pose.position.x= px
+            # self.point_msg.pose.position.y= py
+            # self.point_msg.pose.position.z= 0.0
 
-        # self.point_msg.pose.orientation.x=0
-        # self.point_msg.pose.orientation.y=0
-        # self.point_msg.pose.orientation.z=0
-        # self.point_msg.pose.orientation.w=1
-        # self.target_point_pub.publish(self.point_msg)
+            # self.point_msg.pose.orientation.x=0
+            # self.point_msg.pose.orientation.y=0
+            # self.point_msg.pose.orientation.z=0
+            # self.point_msg.pose.orientation.w=1
+            # self.target_point_pub.publish(self.point_msg)
 
 
-        self.point_msg2.header.stamp=self.get_clock().now().to_msg()
-        # self.point_msg2.header.frame_id='map'
-        self.point_msg2.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
-        self.point_msg2.type_mask=(
-            PositionTarget.IGNORE_VX |
-            PositionTarget.IGNORE_VY |
-            PositionTarget.IGNORE_VZ |
-            PositionTarget.IGNORE_AFX |
-            PositionTarget.IGNORE_AFY |
-            PositionTarget.IGNORE_AFZ |
-            PositionTarget.FORCE |
-            PositionTarget.IGNORE_YAW |
-            PositionTarget.IGNORE_YAW_RATE
-        )
-        self.point_msg2.position.x=px
-        self.point_msg2.position.y=py
-        self.point_msg2.position.z=0.0
+            self.point_msg2.header.stamp=self.get_clock().now().to_msg()
+            self.point_msg2.header.frame_id='map'
+            self.point_msg2.coordinate_frame=PositionTarget.FRAME_LOCAL_NED
+            self.point_msg2.type_mask=(
+                PositionTarget.IGNORE_VX |
+                PositionTarget.IGNORE_VY |
+                PositionTarget.IGNORE_VZ |
+                PositionTarget.IGNORE_AFX |
+                PositionTarget.IGNORE_AFY |
+                PositionTarget.IGNORE_AFZ |
+                PositionTarget.FORCE |
+                PositionTarget.IGNORE_YAW |
+                PositionTarget.IGNORE_YAW_RATE
+            )
+            self.point_msg2.position.x=px
+            self.point_msg2.position.y=py
+            self.point_msg2.position.z=0.0
 
-        # self.point_msg2.yaw=0.0
-        self.target_point_pub.publish(self.point_msg2)
+            # self.point_msg2.yaw=0.0
+            self.target_point_pub.publish(self.point_msg2)
 
 
 def main(args=None):

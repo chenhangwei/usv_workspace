@@ -32,18 +32,26 @@
         "actionrviz",
         "bringup",
         "chenhangwei",
+        "fontsize",
         "groundstationnode",
+        "inaxes",
         "lasercan",
         "laserscan",
         "manaul",
         "mavros",
         "prcentage",
+        "pyaudio",
         "rclpy",
+        "relim",
         "rplidar",
         "runing",
         "rviz",
         "setpoint",
-        "usvs"
+        "usvs",
+        "xdata",
+        "xlabel",
+        "ydata",
+        "ylabel"
     ],
     "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/common_interfaces"
 }
