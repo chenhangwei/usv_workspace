@@ -410,7 +410,7 @@
          <property name="title">
           <string>usv_info</string>
          </property>
-         <widget class="QWidget" name="">
+         <widget class="QWidget" name="layoutWidget">
           <property name="geometry">
            <rect>
             <x>13</x>
@@ -715,6 +715,7 @@
      <string>Visual</string>
     </property>
     <addaction name="actionrviz2"/>
+    <addaction name="action2D"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuVisual"/>
@@ -728,6 +729,11 @@
   <action name="actionrviz2">
    <property name="text">
     <string>rviz2</string>
+   </property>
+  </action>
+  <action name="action2D">
+   <property name="text">
+    <string>2D</string>
    </property>
   </action>
  </widget>

@@ -16,6 +16,7 @@ from common_interfaces.msg import UsvStatus,UsvSetPoint
 import xml.etree.ElementTree as ET
 import requests
 import json
+from gs_gui.usv_plot_window import UsvPlotWindow
 
 
 
@@ -68,6 +69,10 @@ class MainWindow(QMainWindow):
         # 点击open菜单
         self.ui.actionopen.triggered.connect(self.read_data_from_file)
         self.ui.actionrviz2.triggered.connect(self.rviz_process)
+
+        # 在 __init__ 末尾添加菜单或按钮
+        self.ui.action2D.triggered.connect(self.show_usv_plot_window)
+        # 或者你可以加一个按钮 self.ui.show_usv_plot_pushButton.clicked.connect(self.show_usv_plot_window)
 
 
         # 在线设备列表
@@ -622,6 +627,10 @@ class MainWindow(QMainWindow):
         self.ros_signal.str_command.emit('led4')
         self.ui.info_textEdit.append(f"发送led4命令: led4")
 
+    def show_usv_plot_window(self):
+        # 传递一个获取usv列表的函数，保证窗口里能实时获取最新数据
+        self.usv_plot_window = UsvPlotWindow(lambda: self.usv_online_list, self)
+        self.usv_plot_window.show()
 
 def main(argv=None):
     app = QApplication(sys.argv)

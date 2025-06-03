@@ -69,7 +69,8 @@ class UsvSoundNode(Node):
  
     def post_play_callback(self):
         self.get_logger().info('音频播放后延时 {} 秒执行的任务'.format(self.delay_sec))
-        self.timer_.cancel()  # 取消当前定时器
+        if self.timer_ is not None:
+            self.timer_.cancel()  # 取消当前定时器
 
         self.current_iteration += 1
         if self.current_iteration >= self.max_iterations:

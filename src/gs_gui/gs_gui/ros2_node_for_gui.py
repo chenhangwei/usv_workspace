@@ -201,14 +201,14 @@ class GroundStationNode(Node):
             self.usv_target_number = 0
             self.max_step = max(target.get('step', 1) for target in temp_list) if temp_list else 1
 
-            for ns in temp_list:
-                if not isinstance(ns, dict):
-                    continue
-                usv_id = ns.get('usv_id', None)
-                if usv_id is None:
-                    continue
-                if usv_id in self.usv_states and not self.usv_states[usv_id].get('is_runing', True):
-                    self.usv_target_number += 1
+            # for ns in temp_list:
+            #     if not isinstance(ns, dict):
+            #         continue
+            #     usv_id = ns.get('usv_id', None)
+            #     if usv_id is None:
+            #         continue
+            #     if usv_id in self.usv_states and not self.usv_states[usv_id].get('is_runing', True):
+            #         self.usv_target_number += 1
             
         except Exception as e:
             self.get_logger().error(f"Failed to process cluster target point: {e}")
