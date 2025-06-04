@@ -24,6 +24,7 @@ setup(
             'usv_ultrasonic_node=usv_drivers.usv_ultrasonic_node:main',
             'usv_laserscan_node=usv_drivers.usv_laserscan_node:main',
             'usv_uwb_node=usv_drivers.usv_uwb_node:main',
+            'usv_su04_node=usv_drivers.usv_su04_node:main',
         ],
     },
 )

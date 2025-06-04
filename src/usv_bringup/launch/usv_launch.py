@@ -8,13 +8,13 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-     # 声明命名空间参数
+    # 声明命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
         default_value='usv_01',# 默认命名空间
         description='无人船节点的命名空间'
     )
-      # 声明参数文件路径参数
+    # 声明参数文件路径参数
     param_file_arg = DeclareLaunchArgument(
         'param_file',
         default_value=PathJoinSubstitution([
@@ -27,7 +27,7 @@ def generate_launch_description():
      ) 
     
 
-       # 加载参数文件
+    # 加载参数文件
     param_file = LaunchConfiguration('param_file')
     namespace = LaunchConfiguration('namespace')
 
@@ -52,7 +52,7 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-          # uwb避障
+    #避障
     usv_avoidance_node= Node(
         package='usv_control',
         executable='usv_avoidance_node',
@@ -62,7 +62,7 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-      # mode和arm切换
+    # mode和arm切换
     usv_command_node= Node(
         package='usv_control',
         executable='usv_command_node',
@@ -72,7 +72,7 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-     # 发布器
+    # 控制器
     usv_control_node= Node(
         package='usv_control',
         executable='usv_control_node',
@@ -82,7 +82,7 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-      # uwb发布
+    # uwb发布
     usv_uwb_node= Node(
         package='usv_drivers',
         executable='usv_uwb_node',
@@ -92,7 +92,7 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-    # uwb激光雷达
+    # 激光雷达
     usv_laserscan_node= Node(
         package='usv_drivers',
         executable='usv_laserscan_node',
@@ -102,11 +102,20 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
-      # uwb超声波
+    # 超声波
     usv_ultrasonic_node= Node(
         package='usv_drivers',
         executable='usv_ultrasonic_node',
         name='usv_ultrasonic_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
+    # su04超声波
+    usv_su04_node= Node(
+        package='usv_drivers',
+        executable='usv_su04_node',
+        name='usv_su04_node',
         namespace=namespace ,  # 使用命名空间
         output='screen',
         parameters=[param_file],  # 加载参数文件
@@ -131,7 +140,7 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],  # 加载参数文件
     )
-      # 定义 MAVROS 节点
+    # 定义 MAVROS 节点
     mavros_node = Node(
         package='mavros',
         executable='mavros_node',  
@@ -163,7 +172,7 @@ def generate_launch_description():
             {'frame_id': [TextSubstitution(text='laser_frame_'), LaunchConfiguration('namespace')]}
         ]
     )
-
+    # 启动静态变换发布器
     static_tf_laser_node=Node(
         package='usv_tf',
         executable='static_tf_laser_node',
@@ -172,7 +181,7 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file]
     )
-
+    # 启动 odom 到 TF 的转换节点
     odom_to_tf=Node(
         package='usv_tf',
         executable='odom_to_tf',
@@ -183,22 +192,24 @@ def generate_launch_description():
     )
 
 
+
     return LaunchDescription([
         namespace_arg,
         param_file_arg,  # 添加参数文件声明
         mavros_node,  # 添加 MAVROS 节点   
-        usv_status_node,
-        usv_control_node,
+        usv_status_node,# 状态处理节点
+        usv_control_node,# 控制器节点
         # usv_uwb_node,#不再使用机载计算机读取定位
-        usv_command_node,
-        usv_avoidance_node,
-        # usv_laserscan_node,
-        # usv_ultrasonic_node,
-        auto_set_home_node,
-        # rplidar_node,
-        static_tf_laser_node,
-        odom_to_tf,
-        # usv_led_node,
-        # usv_sound_node,       
+        usv_command_node,# 命令和arm切换节点
+        usv_avoidance_node,# 避障节点
+        # usv_laserscan_node,# 激光雷达节点
+        # usv_ultrasonic_node,# 超声波节点
+        auto_set_home_node,# 自动设置home点节点
+        # rplidar_node,# RPLIDAR 节点
+        static_tf_laser_node,# 静态变换发布器节点
+        odom_to_tf,# odom 到 TF 的转换节点
+        # usv_led_node,# LED 控制节点
+        usv_sound_node, # 声音控制节点
+        usv_su04_node,  # SU04 超声波节点    
     ]
     )
