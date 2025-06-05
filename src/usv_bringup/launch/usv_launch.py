@@ -140,6 +140,17 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],  # 加载参数文件
     )
+
+    # fan控制
+    usv_fan_node = Node(
+        package='usv_fan',
+        executable='usv_fan_node',
+        name='usv_fan_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
+
     # 定义 MAVROS 节点
     mavros_node = Node(
         package='mavros',
@@ -210,6 +221,7 @@ def generate_launch_description():
         odom_to_tf,# odom 到 TF 的转换节点
         # usv_led_node,# LED 控制节点
         usv_sound_node, # 声音控制节点
-        usv_su04_node,  # SU04 超声波节点    
+        usv_su04_node,  # SU04 超声波节点  
+        usv_fan_node,  # 风扇控制节点  
     ]
     )

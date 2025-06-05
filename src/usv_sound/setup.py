@@ -16,8 +16,8 @@ setup(
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='该包为USV（无人船）系统提供声音播放与语音提示功能，实现任务状态、警告等信息的音频播报，提升系统交互性和安全性。This package provides sound playback and voice prompt functions for USV (Unmanned Surface Vehicle) systems, enabling audio broadcasting of task status, warnings, and other information to enhance system interactivity and safety.',
+    license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

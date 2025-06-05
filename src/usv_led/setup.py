@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='该包为USV（无人船）系统提供LED灯控制节点，实现状态指示、任务反馈等功能，便于设备运行状态的可视化。This package provides LED control nodes for USV (Unmanned Surface Vehicle) systems, enabling status indication, task feedback, and visualizing device operation states.',
+    license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

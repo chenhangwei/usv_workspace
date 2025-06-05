@@ -17,7 +17,7 @@ setup(
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='TODO: Package description',
+    description='该包为USV（无人船）系统提供控制相关节点与功能，包括目标点、速度、避障等控制指令的处理与发布，支持多种控制模式和任务需求。This package provides control-related nodes and functions for USV (Unmanned Surface Vehicle) systems, including processing and publishing of setpoints, velocity, and obstacle avoidance commands, supporting various control modes and mission requirements.',
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={

@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='该包为USV（无人船）系统提供风扇控制节点，实现温度监测与自动风扇开关，保障设备安全运行。This package provides a fan control node for USV (Unmanned Surface Vehicle) systems, enabling temperature monitoring and automatic fan switching to ensure safe device operation.',
+    license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [

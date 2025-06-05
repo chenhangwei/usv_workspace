@@ -16,7 +16,7 @@ setup(
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='TODO: Package description',
+    description='该包为USV（无人船）系统提供各类硬件驱动节点，包括激光雷达、超声波、UWB等传感器的接入与数据发布，支持多种底层设备的集成。This package provides various hardware driver nodes for USV (Unmanned Surface Vehicle) systems, including integration and data publishing for sensors such as LiDAR, ultrasonic, and UWB, supporting the connection of multiple underlying devices.',
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
