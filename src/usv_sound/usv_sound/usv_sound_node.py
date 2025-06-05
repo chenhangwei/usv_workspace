@@ -27,6 +27,7 @@ class UsvSoundNode(Node):
         self.max_iterations = 0  # 最大循环次数
         self.delay_sec = 0  # 延时秒数
         self.timer_ = None  # 定时器对象
+        self.sound_type_moon = 'moon_44100'  # 默认音频类型
 
     # 接收地面站的音频播放命令
     def gs_sound_callback(self, msg):
@@ -41,53 +42,53 @@ class UsvSoundNode(Node):
 
         match self.sound_command:
             case 'gaga1':
-                self.sound_loop(2, 1)  # 延时2秒，循环3次
+                self.sound_loop(2, 1,self.sound_type_moon)  # 延时2秒，循环3次,播放 moon_44100.wav
             case 'gaga2':
-                self.sound_loop(2, 2)  # 延时2秒，循环2次
+                self.sound_loop(2, 2,self.sound_type_moon)  # 延时2秒，循环2次，播放 moon_44100.wav
             case 'gaga3':
-               self.sound_loop(2, 3)  # 延时2秒，循环3次
+               self.sound_loop(2, 3,self.sound_type_moon)  # 延时2秒，循环3次，播放 moon_44100.wav
             case 'gaga4':
-                self.sound_loop(2, 4)  # 延时2秒，循环4次
+                self.sound_loop(2, 4,self.sound_type_moon)  # 延时2秒，循环4次，播放 moon_44100.wav
             case 'gaga-stop':
-                self.sound_loop(0, 0)  # 停止循环
+                self.sound_loop(0, 0,self.sound_type_moon)  # 停止循环
 
                 
        
-    def sound_loop(self,sec,num):
+    def sound_loop(self,sec,num, sound_type):
         if num <= 0:
-            self.get_logger().warn('循环次数必须大于 0')
+            # self.get_logger().warn('循环次数必须大于 0')
             return
         if sec < 0:
-            self.get_logger().warn('延时秒数不能为负')
+            # self.get_logger().warn('延时秒数不能为负')
             return
         if self.current_iteration > 0:
-            self.get_logger().warn('已有循环在运行，忽略本次请求')
+            # self.get_logger().warn('已有循环在运行，忽略本次请求')
             return
 
         self.current_iteration = 0
         self.max_iterations = num
         self.delay_sec = sec
-        self.get_logger().info(f'开始循环播放 {num} 次，每次延时 {sec} 秒')
-        self.sound_moon_play('moon_44100')  # 启动第一次播放
+        # self.get_logger().info(f'开始循环播放 {num} 次，每次延时 {sec} 秒')
+        self.sound_moon_play(sound_type)  # 启动第一次播放
  
     def post_play_callback(self):
-        self.get_logger().info('音频播放后延时 {} 秒执行的任务'.format(self.delay_sec))
+        # self.get_logger().info('音频播放后延时 {} 秒执行的任务'.format(self.delay_sec))
         if self.timer_ is not None:
             self.timer_.cancel()  # 取消当前定时器
 
         self.current_iteration += 1
         if self.current_iteration >= self.max_iterations:
-            self.get_logger().info('循环播放完成')
+            # self.get_logger().info('循环播放完成')
             self.current_iteration = 0  # 重置状态
             return
 
         # 触发下一次播放
-        self.get_logger().info(f'第 {self.current_iteration + 1} 次播放')
-        self.sound_moon_play('moon_44100')
+        # self.get_logger().info(f'第 {self.current_iteration + 1} 次播放')
+        self.sound_moon_play(self.sound_type_moon)
 
     def sound_moon_play(self, sound_type, chunk_size=1024):
         if self.is_playing:
-            self.get_logger().warn('另一个音频正在播放，忽略本次请求')
+            # self.get_logger().warn('另一个音频正在播放，忽略本次请求')
             return
         package_name = 'usv_sound'
         package_path = ament_index_python.packages.get_package_share_directory(package_name)
@@ -142,7 +143,7 @@ class UsvSoundNode(Node):
                 self.get_logger().error(f'未知错误: {e}')
 
         threading.Thread(target=_play, daemon=True).start()
-        self.get_logger().info(f'开始播放音频: {filename}')
+        # self.get_logger().info(f'开始播放音频: {filename}')
     def __del__(self):
         self.audio.terminate()
 

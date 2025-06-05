@@ -1,11 +1,13 @@
 from math import sqrt
 from xmlrpc.client import Boolean
+from numpy import float32
+from requests import get
 from sympy import false
 import rclpy
 from rclpy.node import Node
 from mavros_msgs.msg import State,PositionTarget,WaypointReached
 from sensor_msgs.msg import BatteryState
-from std_msgs.msg import String,Bool
+from std_msgs.msg import String,Bool,Float32,Int32
 from common_interfaces.msg import UsvStatus
 from geometry_msgs.msg import TwistStamped,PoseStamped,Vector3,Point
 from tf_transformations import euler_from_quaternion
@@ -32,6 +34,7 @@ class UsvStatusNode(Node):
         )
 
         self.state_publisher=self.create_publisher(UsvStatus,'usv_state',10)
+        self.temperature_publisher=self.create_publisher(Int32,'usv_temperature',10)
 
         
         # 临时目标点，初始化为 [0.0, 0.0, 0.0]
@@ -176,7 +179,18 @@ class UsvStatusNode(Node):
      
         self.state_publisher.publish( self.usv_state_msg)
 
-        
+        temp=Int32()
+        temp.data=self.get_temperature()
+        self.temperature_publisher.publish(temp)
+
+
+
+    def get_temperature(self):
+  
+        with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
+            temp = int(f.read()) 
+        return temp
+
     
 def main():
     rclpy.init()

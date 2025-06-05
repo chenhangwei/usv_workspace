@@ -3,9 +3,10 @@
 <package format="3">
   <name>common_interfaces</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包为USV（无人船）项目提供通用消息、服务和动作接口的定义，便于各功能模块间的标准化通信和集成。
+This package defines common message, service, and action interfaces for the USV (Unmanned Surface Vehicle) project, enabling standardized communication and integration between functional modules.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

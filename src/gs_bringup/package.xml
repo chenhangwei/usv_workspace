@@ -3,7 +3,8 @@
 <package format="3">
   <name>gs_bringup</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包用于USV（无人船）系统的启动与一键集成管理，包含多节点/多模块的统一启动脚本和配置，便于集群或单艇的快速部署和调试。
+This package provides bringup and integrated launch management for USV (Unmanned Surface Vehicle) systems, including unified launch scripts and configurations for multi-node/multi-module deployment, enabling fast deployment and debugging for single or multiple USVs.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
   <license>Apache-2.0</license>
 

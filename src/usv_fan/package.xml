@@ -1,12 +1,15 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>gs_gui</name>
+  <name>usv_fan</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）集群/单艇提供基于PyQt的图形化地面站界面，支持任务调度、状态监控、2D可视化等功能，便于操作与管理。
-This package provides a PyQt-based GUI ground station for USV (Unmanned Surface Vehicle) clusters or single units, supporting mission scheduling, status monitoring, 2D visualization, and convenient operation and management.</description>
+  <description>该包为USV（无人船）系统提供风扇控制节点，实现温度监测与自动风扇开关，保障设备安全运行。
+This package provides a fan control node for USV (Unmanned Surface Vehicle) systems, enabling temperature monitoring and automatic fan switching to ensure safe device operation.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
   <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>std_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

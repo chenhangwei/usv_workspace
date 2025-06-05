@@ -3,9 +3,10 @@
 <package format="3">
   <name>usv_led</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包为USV（无人船）系统提供LED灯控制节点，实现状态指示、任务反馈等功能，便于设备运行状态的可视化。
+This package provides LED control nodes for USV (Unmanned Surface Vehicle) systems, enabling status indication, task feedback, and visualizing device operation states.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>

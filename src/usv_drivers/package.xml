@@ -3,9 +3,10 @@
 <package format="3">
   <name>usv_drivers</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包为USV（无人船）系统提供各类硬件驱动节点，包括激光雷达、超声波、UWB等传感器的接入与数据发布，支持多种底层设备的集成。
+This package provides various hardware driver nodes for USV (Unmanned Surface Vehicle) systems, including integration and data publishing for sensors such as LiDAR, ultrasonic, and UWB, supporting the connection of multiple underlying devices.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>

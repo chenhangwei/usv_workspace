@@ -3,9 +3,10 @@
 <package format="3">
   <name>usv_sound</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包为USV（无人船）系统提供声音播放与语音提示功能，实现任务状态、警告等信息的音频播报，提升系统交互性和安全性。
+This package provides sound playback and voice prompt functions for USV (Unmanned Surface Vehicle) systems, enabling audio broadcasting of task status, warnings, and other information to enhance system interactivity and safety.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>

@@ -3,9 +3,10 @@
 <package format="3">
   <name>usv_control</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>该包为USV（无人船）系统提供控制相关节点与功能，包括目标点、速度、避障等控制指令的处理与发布，支持多种控制模式和任务需求。
+This package provides control-related nodes and functions for USV (Unmanned Surface Vehicle) systems, including processing and publishing of setpoints, velocity, and obstacle avoidance commands, supporting various control modes and mission requirements.</description>
   <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>geometry_msgs</depend>
