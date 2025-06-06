@@ -171,10 +171,10 @@ class UsvStatusNode(Node):
 
         if dist < 1.0:
             self.usv_state_msg.reached_target = True
-            self.get_logger().info(f'到达目标点，当前距离：{dist:.2f} 米')          
+            # self.get_logger().info(f'到达目标点，当前距离：{dist:.2f} 米')          
         else:
             self.usv_state_msg.reached_target = False
-            self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
+            # self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
 
      
         self.state_publisher.publish( self.usv_state_msg)
