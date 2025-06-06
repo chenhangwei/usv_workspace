@@ -597,12 +597,12 @@ class MainWindow(QMainWindow):
             self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")        
 
     def gaga1_command(self):
-        self.ros_signal.str_command.emit('gaga1')
-        self.ui.info_textEdit.append(f"发送gaga1命令: gaga1")
+        self.ros_signal.str_command.emit('gaga_start')
+        self.ui.info_textEdit.append(f"发送命令: gaga_start")
 
     def gaga2_command(self):
-        self.ros_signal.str_command.emit('gaga2')
-        self.ui.info_textEdit.append(f"发送gaga2命令: gaga2")
+        self.ros_signal.str_command.emit('gaga_stop')
+        self.ui.info_textEdit.append(f"发送命令: gaga_stop")
 
     def gaga3_command(self):
         self.ros_signal.str_command.emit('gaga3')
