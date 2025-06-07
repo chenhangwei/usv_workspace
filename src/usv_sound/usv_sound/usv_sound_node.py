@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String, Float32
 from sensor_msgs.msg import BatteryState
 import pyaudio
@@ -12,14 +13,30 @@ import random
 class UsvSoundNode(Node):
     def __init__(self):
         super().__init__('usv_sound_node')
+
+          # 创建 QoS 配置
+        qos = QoSProfile(
+            depth=10,  # 队列大小
+            reliability=QoSReliabilityPolicy.BEST_EFFORT # 可靠性策略
+
+            
+        )
+
+           # 创建 QoS 配置
+        qos_a = QoSProfile(
+            depth=10,  # 队列大小
+            reliability=QoSReliabilityPolicy.RELIABLE # 可靠性策略
+        )
+
         self.subscription = self.create_subscription(
-            String, 'gs_sound_command', self.gs_sound_callback, 10)
+            String, 'gs_sound_command', self.gs_sound_callback, qos_a)
+        
         # 订阅 MAVROS 的电池状态主题
         self.battery_sub = self.create_subscription(
             BatteryState,
             f'battery',  # 使用命名空间
             self.voltage_callback,
-           10
+           qos
         )
         self.get_logger().info('声音播放节点已启动')
         self.audio = pyaudio.PyAudio()

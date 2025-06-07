@@ -2,7 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32
-import RPi.GPIO as GPIO
+import lgpio as GPIO
 
 class UsvFanNode(Node):
     def __init__(self):
@@ -16,9 +16,8 @@ class UsvFanNode(Node):
         )
         # 设置 GPIO
         self.fan_pin = 17  # GPIO17 (Pin 11)
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.fan_pin, GPIO.OUT)
-        GPIO.output(self.fan_pin, GPIO.LOW)  # 初始关闭风扇
+        self.gpio_handle = GPIO.gpiochip_open(0)  # 打开第一个GPIO芯片，通常为0
+        GPIO.gpio_claim_output(self.gpio_handle, self.fan_pin, GPIO.LOW)  # 声明为输出并初始为低电平
         self.fan_state = False  # 风扇状态
         # 温度阈值（单位：毫摄氏度）
         self.temp_threshold_on = 50000  # 50°C
@@ -32,17 +31,18 @@ class UsvFanNode(Node):
 
         # 控制风扇
         if temp >= self.temp_threshold_on and not self.fan_state:
-            GPIO.output(self.fan_pin, GPIO.HIGH)  # 开启风扇
+            GPIO.gpio_write(self.gpio_handle, self.fan_pin, 1)  # 开启风扇
             self.fan_state = True
             self.get_logger().info('Fan turned ON')
         elif temp <= self.temp_threshold_off and self.fan_state:
-            GPIO.output(self.fan_pin, GPIO.LOW)  # 关闭风扇
+            GPIO.gpio_write(self.gpio_handle, self.fan_pin, 0)  # 关闭风扇
             self.fan_state = False
             self.get_logger().info('Fan turned OFF')
 
     def __del__(self):
         # 清理 GPIO
-        GPIO.cleanup()
+        if hasattr(self, 'gpio_handle'):
+            GPIO.gpiochip_close(self.gpio_handle)
         self.get_logger().info('GPIO cleaned up.')
 
 def main(args=None):
