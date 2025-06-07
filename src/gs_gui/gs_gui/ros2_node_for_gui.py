@@ -263,7 +263,7 @@ class GroundStationNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to publish cluster target point: {e}")
 
-    def set_cluster_target_velocity_callback(self, msg):
+   
         self.get_logger().info("接收到集群目标速度")
         try:
             # 假设 msg 是 UsvSetPoint 或 UsvSetPoint 列表
@@ -316,30 +316,7 @@ class GroundStationNode(Node):
                 self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
-
-    def set_departed_target_velocity_callback(self, msg):
-        self.get_logger().info("接收到离群目标速度")
-        try:
-            usv_list = msg.targets if hasattr(msg, 'targets') else msg
-            if not isinstance(usv_list, list):
-                self.get_logger().error(f"usv_list 不是列表: {usv_list}")
-                return
-
-            for ns in usv_list:
-                if not isinstance(ns, dict):
-                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
-                    continue
-                usv_id = ns.get('usv_id', None)
-                if usv_id is None or usv_id not in self.set_usv_target_velocity_pubs:
-                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
-                    continue
-                velocity = ns.get('velocity', 0.0)
-                target_velocity_msg = Float32()
-                target_velocity_msg.data = float(velocity)
-                self.publish_queue.put((self.set_usv_target_velocity_pubs[usv_id], target_velocity_msg))
-        except Exception as e:
-            self.get_logger().error(f"处理离群目标速度失败: {e}")
-
+ 
     def get_usvs_by_step(self, cluster_usv_list, step):
         return [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
 

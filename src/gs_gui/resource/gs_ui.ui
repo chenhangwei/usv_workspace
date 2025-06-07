@@ -199,25 +199,6 @@
                 </item>
                </layout>
               </item>
-              <item>
-               <widget class="QSlider" name="usv_departed_velocity_horizontalSlider">
-                <property name="minimumSize">
-                 <size>
-                  <width>0</width>
-                  <height>30</height>
-                 </size>
-                </property>
-                <property name="maximum">
-                 <number>100</number>
-                </property>
-                <property name="value">
-                 <number>10</number>
-                </property>
-                <property name="orientation">
-                 <enum>Qt::Horizontal</enum>
-                </property>
-               </widget>
-              </item>
              </layout>
             </widget>
            </item>
@@ -293,25 +274,6 @@
                  </widget>
                 </item>
                 <item>
-                 <widget class="QSlider" name="usv_cluster_velocity_horizontalSlider">
-                  <property name="minimumSize">
-                   <size>
-                    <width>0</width>
-                    <height>30</height>
-                   </size>
-                  </property>
-                  <property name="maximum">
-                   <number>100</number>
-                  </property>
-                  <property name="value">
-                   <number>10</number>
-                  </property>
-                  <property name="orientation">
-                   <enum>Qt::Horizontal</enum>
-                  </property>
-                 </widget>
-                </item>
-                <item>
                  <layout class="QHBoxLayout" name="horizontalLayout_5">
                   <property name="leftMargin">
                    <number>5</number>
@@ -326,30 +288,30 @@
                    <number>5</number>
                   </property>
                   <item>
-                   <widget class="QPushButton" name="gaga1_pushButton">
+                   <widget class="QPushButton" name="sound_start_pushButton">
                     <property name="text">
-                     <string>gaga1</string>
+                     <string>sound_start</string>
                     </property>
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="gaga2_pushButton">
+                   <widget class="QPushButton" name="sound_stop_pushButton">
                     <property name="text">
-                     <string>gaga2</string>
+                     <string>sound_stop</string>
                     </property>
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="gaga3_pushButton">
+                   <widget class="QPushButton" name="backup1_pushButton">
                     <property name="text">
-                     <string>gaga3</string>
+                     <string>backup1</string>
                     </property>
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="gaga4_pushButton">
+                   <widget class="QPushButton" name="backup2_pushButton">
                     <property name="text">
-                     <string>gaga4</string>
+                     <string>backup2</string>
                     </property>
                    </widget>
                   </item>
@@ -379,9 +341,9 @@
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="led4_pushButton">
+                   <widget class="QPushButton" name="light_stop_pushButton">
                     <property name="text">
-                     <string>led4</string>
+                     <string>light_stop</string>
                     </property>
                    </widget>
                   </item>

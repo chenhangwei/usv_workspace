@@ -46,24 +46,24 @@ class MainWindow(QMainWindow):
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manaul_command) #离群切换到manual模式
 
         self.ui.send_cluster_point_pushButton.clicked.connect(self.send_cluster_point_command) #集群坐标发送
-        self.ui.usv_cluster_velocity_horizontalSlider.valueChanged.connect(self.cluster_velocity_value_changed)#集群速度发送
+        
 
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)#离群坐标发送
-        self.ui.usv_departed_velocity_horizontalSlider.valueChanged.connect(self.departed_velocity_value_changed)#离群速度发送
+        
 
         self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
         self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)#离开集群list，到离群list
 
 
-        self.ui.gaga1_pushButton.clicked.connect(self.gaga1_command)
-        self.ui.gaga2_pushButton.clicked.connect(self.gaga2_command)
-        self.ui.gaga3_pushButton.clicked.connect(self.gaga3_command)
-        self.ui.gaga4_pushButton.clicked.connect(self.gaga4_command)
+        self.ui.sound_start_pushButton.clicked.connect(self.sound_start_command)
+        self.ui.sound_stop_pushButton.clicked.connect(self.sound_stop_command)
+        self.ui.backup1_pushButton.clicked.connect(self.backup1_command)
+        self.ui.backup2_pushButton.clicked.connect(self.backup2_command)
 
         self.ui.led1_pushButton.clicked.connect(self.led1_command)
         self.ui.led2_pushButton.clicked.connect(self.led2_command)
         self.ui.led3_pushButton.clicked.connect(self.led3_command)
-        self.ui.led4_pushButton.clicked.connect(self.led4_command)
+        self.ui.light_stop_pushButton.clicked.connect(self.light_stop_command)
 
 
         # 点击open菜单
@@ -496,7 +496,7 @@ class MainWindow(QMainWindow):
         self.update_departed_table(self.usv_departed_list)
         self.update_selected_table_row()
         
-   
+   # 更新集群表格
     def update_cluster_table(self, lists):
 
         if lists is None:
@@ -596,20 +596,20 @@ class MainWindow(QMainWindow):
             self.ui.usv_y_label.setText("当前选中 USV Y: Unknown")
             self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")        
 
-    def gaga1_command(self):
+    def sound_start_command(self):
         self.ros_signal.str_command.emit('sound_start')
-        self.ui.info_textEdit.append(f"发送命令: gaga_start")
+        self.ui.info_textEdit.append(f"发送命令: sound_start")
 
-    def gaga2_command(self):
+    def sound_stop_command(self):
         self.ros_signal.str_command.emit('sound_stop')
-        self.ui.info_textEdit.append(f"发送命令: gaga_stop")
+        self.ui.info_textEdit.append(f"发送命令:sound_stop")
 
-    def gaga3_command(self):
-        self.ros_signal.str_command.emit('gaga3')
-        self.ui.info_textEdit.append(f"发送gaga3命令: gaga3")
-    def gaga4_command(self):
-        self.ros_signal.str_command.emit('gaga4')
-        self.ui.info_textEdit.append(f"发送gaga4命令: gaga4")
+    def backup1_command(self):
+        self.ros_signal.str_command.emit('backup1')
+        self.ui.info_textEdit.append(f"发送命令: backup1")
+    def backup2_command(self):
+        self.ros_signal.str_command.emit('backup2')
+        self.ui.info_textEdit.append(f"发送命令: backup2")
 
     def led1_command(self):
         self.ros_signal.str_command.emit('led1')
@@ -623,9 +623,9 @@ class MainWindow(QMainWindow):
         self.ros_signal.str_command.emit('led3')
         self.ui.info_textEdit.append(f"发送led3命令: led3")
 
-    def led4_command(self):
-        self.ros_signal.str_command.emit('led4')
-        self.ui.info_textEdit.append(f"发送led4命令: led4")
+    def light_stop_command(self):
+        self.ros_signal.str_command.emit('light_stop')
+        self.ui.info_textEdit.append(f"发送命令: light_stop")
 
     def show_usv_plot_window(self):
         # 传递一个获取usv列表的函数，保证窗口里能实时获取最新数据
@@ -647,9 +647,9 @@ def main(argv=None):
     ros_signal.disarm_command.connect(node.set_disarming_callback)
 
     ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
-    ros_signal.cluster_target_velocity_command.connect(node.set_cluster_target_velocity_callback)
+ 
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
-    ros_signal.departed_target_velocity_command.connect(node.set_departed_target_velocity_callback)
+ 
 
    
     ros_signal.str_command.connect(node.str_command_callback)
