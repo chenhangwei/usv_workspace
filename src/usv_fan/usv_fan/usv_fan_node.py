@@ -27,7 +27,7 @@ class UsvFanNode(Node):
     def temperature_callback(self, msg):
         temp = msg.data  # 温度（毫摄氏度）
         temp_celsius = temp / 1000.0  # 转换为摄氏度，仅用于日志
-        self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
+        # self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
 
         # 控制风扇
         if temp >= self.temp_threshold_on and not self.fan_state:

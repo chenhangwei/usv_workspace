@@ -38,7 +38,7 @@ class UsvControlNode(Node):
 
         # 订阅避障目标点
         self.avoidance_target_point_sub=self.create_subscription(
-            PoseStamped,'avoidance_position',self.set_avoidance_target_position_callback,qos)
+            PositionTarget,'avoidance_position',self.set_avoidance_target_position_callback,qos)
         
         # 订阅避障标记
         self.avoidance_flag_sub=self.create_subscription(
@@ -49,7 +49,7 @@ class UsvControlNode(Node):
     
         self.current_state = State() # 当前状态
         self.current_target_position =PoseStamped()#目标点
-        self.avoidance_position=PoseStamped()#避障目标点
+        self.avoidance_position=PositionTarget()#避障目标点
         self.avoidance_flag=Bool()#避障标记
 
         self.point_msg = PoseStamped() #初始化目标点 
@@ -78,10 +78,10 @@ class UsvControlNode(Node):
 
     # 订阅避障目标点
     def set_avoidance_target_position_callback(self,msg):
-        if not isinstance(msg,PoseStamped):
+        if not isinstance(msg,PositionTarget):
             self.get_logger().info('避障目标为空，忽略')
             return
-        self.avoidance_position.pose=msg.pose
+        self.avoidance_position.position=msg.position
 
     # 订阅避障标记
     def set_avoidance_flag_callback(self,msg):
@@ -100,7 +100,7 @@ class UsvControlNode(Node):
     def publish_target(self):
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
                 return  
-        if not self.avoidance_flag:    
+        if not self.avoidance_flag.data:    
             px=self.current_target_position.pose.position.x
             py=self.current_target_position.pose.position.y
             pz=self.current_target_position.pose.position.z
@@ -110,14 +110,11 @@ class UsvControlNode(Node):
             oz=self.current_target_position.pose.orientation.z
             ow=self.current_target_position.pose.orientation.w
         else :
-            px=self.avoidance_position.pose.position.x
-            py=self.avoidance_position.pose.position.y
-            pz=self.avoidance_position.pose.position.z  
+            px=self.avoidance_position.position.x
+            py=self.avoidance_position.position.y
+            pz=self.avoidance_position.position.z  
 
-            ox=self.avoidance_position.pose.orientation.x
-            oy=self.avoidance_position.pose.orientation.y
-            oz=self.avoidance_position.pose.orientation.z
-            ow=self.avoidance_position.pose.orientation.w
+            
 
             if px is None or py is None or pz is None :
                 self.get_logger().info('目标点为空，忽略')
