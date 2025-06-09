@@ -197,6 +197,20 @@
                   </property>
                  </widget>
                 </item>
+                <item>
+                 <widget class="QPushButton" name="set_departed_ARCO_pushButton">
+                  <property name="text">
+                   <string>Arco</string>
+                  </property>
+                 </widget>
+                </item>
+                <item>
+                 <widget class="QPushButton" name="set_departed_Steering_pushButton">
+                  <property name="text">
+                   <string>Steering</string>
+                  </property>
+                 </widget>
+                </item>
                </layout>
               </item>
              </layout>
@@ -302,16 +316,16 @@
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="backup1_pushButton">
+                   <widget class="QPushButton" name="neck_swinging_pushButton">
                     <property name="text">
-                     <string>backup1</string>
+                     <string>neck_swinging</string>
                     </property>
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="backup2_pushButton">
+                   <widget class="QPushButton" name="neck_stop_pushButton">
                     <property name="text">
-                     <string>backup2</string>
+                     <string>neck_stop</string>
                     </property>
                    </widget>
                   </item>

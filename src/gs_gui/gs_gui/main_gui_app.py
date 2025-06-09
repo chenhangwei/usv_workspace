@@ -44,21 +44,19 @@ class MainWindow(QMainWindow):
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command) #离群加锁按钮
         self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command) #离群切换到guided模式
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manaul_command) #离群切换到manual模式
+        self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command) #离群切换到ARCO模式
+        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command) #离群切换到Steering模式
 
-        self.ui.send_cluster_point_pushButton.clicked.connect(self.send_cluster_point_command) #集群坐标发送
-        
-
+        self.ui.send_cluster_point_pushButton.clicked.connect(self.send_cluster_point_command) #集群坐标发送        
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)#离群坐标发送
         
-
         self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
         self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)#离开集群list，到离群list
 
-
         self.ui.sound_start_pushButton.clicked.connect(self.sound_start_command)
         self.ui.sound_stop_pushButton.clicked.connect(self.sound_stop_command)
-        self.ui.backup1_pushButton.clicked.connect(self.backup1_command)
-        self.ui.backup2_pushButton.clicked.connect(self.backup2_command)
+        self.ui.neck_swinging_pushButton.clicked.connect(self.neck_swinging_command)
+        self.ui.neck_stop_pushButton.clicked.connect(self.neck_swinging_command)
 
         self.ui.led1_pushButton.clicked.connect(self.led1_command)
         self.ui.led2_pushButton.clicked.connect(self.led2_command)
@@ -94,13 +92,7 @@ class MainWindow(QMainWindow):
 
         # 离群目标点集合
         self.departed_position_list=[]
-
-        # 集群速度
-        self.cluster_velocity=0.0
-
-        # 离群速度
-        self.departed_velocity=0.0
-      
+     
         # 集群表格模型
         self.cluster_table_model=QStandardItemModel(self)
 
@@ -203,8 +195,27 @@ class MainWindow(QMainWindow):
         self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
         self.ui.info_textEdit.append(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()  
-
     
+    # 离群设置ARCO模式命令
+    def set_departed_arco_command (self):
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群设置ARCO模式命令       
+        self.ros_signal.arco_command.emit(f"set_departed_arco_command:{self.usv_departed_namespace_list}")
+        self.ui.info_textEdit.append(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.usv_departed_namespace_list.clear()
+
+    # 离群设置Steering模式命令
+    def set_departed_steering_command (self):
+        for usv_id in self.usv_departed_list:
+            usv_namespace =usv_id.get('namespace', None)
+            self.usv_departed_namespace_list.append(usv_namespace)
+        # 发送离群设置Steering模式命令       
+        self.ros_signal.steering_command.emit(f"set_departed_steering_command:{self.usv_departed_namespace_list}")
+        self.ui.info_textEdit.append(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.usv_departed_namespace_list.clear()
+
     # 从数据文件中读取数据，数据格式xml
     def read_data_from_file(self):
         # 打开文件对话框，选择XML文件
@@ -313,23 +324,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "错误", f"发送失败: {e}")
         else:
             QMessageBox.information(self, "取消", f"发送已取消")
-
-    
-    # 集群速度命令
-    def cluster_velocity_value_changed(self):
-
-        cluster_velocity_list = []
-        self.cluster_velocity=float(self.ui.usv_cluster_velocity_horizontalSlider.value())
-        # 发送集群速度命令
-        for usv_id in self.usv_cluster_list:       
-            cluster_velocity_ = UsvSetPoint()
-            cluster_velocity_.usv_id = usv_id.get('namespace', None)
-            cluster_velocity_.velocity = self.cluster_velocity
-            cluster_velocity_list.append(cluster_velocity_)
-        self.ros_signal.cluster_target_velocity_command.emit( cluster_velocity_list)
-        self.ui.info_textEdit.append(f"集群目标速度: {cluster_velocity_list}")
-        cluster_velocity_list.clear()
-
+   
     # 离群目标点命令
     def send_departed_point_command(self):
         x = self.ui.set_departed_x_doubleSpinBox.value()
@@ -343,21 +338,6 @@ class MainWindow(QMainWindow):
             departed_target_list.append(departed_target)
         self.ros_signal.departed_target_point_command.emit(departed_target_list)
         self.ui.info_textEdit.append(f"发送离群目标点: {departed_target_list}")
-
-    # 离群速度命令 
-    def departed_velocity_value_changed (self):
-        departed_velocity_list = []
-        # 获取离群速度
-        self.departed_velocity=float(self.ui.usv_departed_velocity_horizontalSlider.value())
-        # 发送离群速度命令
-        for usv_id in self.usv_departed_list:
-            departed_velocity_ = UsvSetPoint()
-            departed_velocity_.usv_id = usv_id.get('namespace', None)
-            departed_velocity_.velocity = self.departed_velocity
-            departed_velocity_list.append(departed_velocity_)
-        self.ros_signal.departed_target_velocity_command.emit(departed_velocity_list)
-        self.ui.info_textEdit.append(f"离群目标速度: {departed_velocity_list}")
-
 
     # 添加到集群列表
     def add_cluster_command(self):
@@ -377,7 +357,7 @@ class MainWindow(QMainWindow):
         state = {}
         headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
                 "battery_prcentage", "power_supply_status", "position",
-                "velocity", "yaw", "is_running"]
+                "velocity", "yaw", "is_reached_target"]
         for col, key in enumerate(headers):
             index = model.index(selected_row, col)
             state[key] = model.data(index) or "Unknown"
@@ -398,7 +378,7 @@ class MainWindow(QMainWindow):
             self.ui.info_textEdit.append(f"添加设备 {usv_id} 到集群列表")
         except Exception as e:
             self.ui.info_textEdit.append(f"错误：添加设备失败 - {str(e)}")
-
+   
     # 离开集群列表
     def quit_cluster_command(self):
         self.ui.info_textEdit.append(f"离开集群列表")
@@ -419,7 +399,7 @@ class MainWindow(QMainWindow):
         state = {}
         headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
                 "battery_prcentage", "power_supply_status", "position", 
-                "velocity", "yaw", "is_running"]
+                "velocity", "yaw", "is_reached_target"]
         for col, key in enumerate(headers):
             index = model.index(selected_row, col)
             state[key] = model.data(index) or "Unknown"
@@ -441,8 +421,7 @@ class MainWindow(QMainWindow):
             self.ui.info_textEdit.append(f"添加设备 {usv_id} 到离群列表")
         except Exception as e:
             self.ui.info_textEdit.append(f"错误：移除设备失败 - {str(e)}")
-
-
+    
     # 接收所有在线的usv状态
     def receive_state_callback(self, msg):
         if not isinstance(msg, list):
@@ -494,9 +473,9 @@ class MainWindow(QMainWindow):
         # 更新表格
         self.update_cluster_table(self.usv_cluster_list)
         self.update_departed_table(self.usv_departed_list)
-        self.update_selected_table_row()
-        
-   # 更新集群表格
+        self.update_selected_table_row()       
+   
+    # 更新集群表格
     def update_cluster_table(self, lists):
 
         if lists is None:
@@ -506,7 +485,7 @@ class MainWindow(QMainWindow):
         self.cluster_table_model.setRowCount(len(lists))
         self.cluster_table_model.setColumnCount(11)
         self.cluster_table_model.setHorizontalHeaderLabels(["编号", "当前模式",
-                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否运行中'])
+                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标'])
         for i, state in enumerate(lists):
             # 检查 state 是否为字典
             if isinstance(state, dict):
@@ -520,8 +499,8 @@ class MainWindow(QMainWindow):
                 self.cluster_table_model.setItem(i, 7, QStandardItem(str(state.get('position', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
-                self.cluster_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
-
+                self.cluster_table_model.setItem(i, 10, QStandardItem(str(state.get('is_reached_target', 'Unknown'))))
+    
     # 更新离群表格
     def update_departed_table(self, lists):
         if lists is None:
@@ -529,7 +508,7 @@ class MainWindow(QMainWindow):
         self.departed_table_model.setRowCount(len(lists))
         self.departed_table_model.setColumnCount(11)
         self.departed_table_model.setHorizontalHeaderLabels(["编号",  "当前模式",
-                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否运行中'])
+                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标'])
         for i, state in enumerate(lists):
             if isinstance(state, dict):
                 self.departed_table_model.setItem(i, 0, QStandardItem(str(state.get('namespace', 'Unknown'))))
@@ -542,11 +521,9 @@ class MainWindow(QMainWindow):
                 self.departed_table_model.setItem(i, 7, QStandardItem(str(state.get('position', 'Unknown'))))
                 self.departed_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
                 self.departed_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
-                self.departed_table_model.setItem(i, 10, QStandardItem(str(state.get('is_running', 'Unknown'))))
-
-
-
-
+                self.departed_table_model.setItem(i, 10, QStandardItem(str(state.get('is_reached_target', 'Unknown'))))
+   
+    # 更新选中行数据
     def update_selected_table_row(self):
         try:
             # 获取选中的行
@@ -556,7 +533,7 @@ class MainWindow(QMainWindow):
             state = {}
             headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
                     "battery_prcentage", "power_supply_status", "position",
-                    "velocity", "yaw", "is_running"]
+                    "velocity", "yaw", "is_reached_target"]
                     
             if model is None:
                 self.ui.info_textEdit.append("集群列表为空")
@@ -566,14 +543,19 @@ class MainWindow(QMainWindow):
             state = {}
             headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
                     "battery_prcentage", "power_supply_status", "position", 
-                    "velocity", "yaw", "is_running"]
+                    "velocity", "yaw", "is_reached_target"]
             for col, key in enumerate(headers):
                 index = model.index(selected_row, col)
                 state[key] = model.data(index) or "Unknown"
             self.ui.usv_id_label.setText(f"当前选中 USV ID: {state.get('namespace', 'Unknown')}")
             position_str=state.get('position', 'Unknown')
+
+            print("position_str:", position_str)
             position_ = position_str.split(',')
             yaw_ = state.get('yaw', 'Unknown')
+
+           
+
             if len(position_str) == 3:
                 x = float(position_[0].split('=')[1])
                 y = float(position_[1].split('=')[1])
@@ -595,43 +577,55 @@ class MainWindow(QMainWindow):
             self.ui.usv_x_label.setText("当前选中 USV X: Unknown")
             self.ui.usv_y_label.setText("当前选中 USV Y: Unknown")
             self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")        
-
+    
+    # 声音开始命令
     def sound_start_command(self):
         self.ros_signal.str_command.emit('sound_start')
         self.ui.info_textEdit.append(f"发送命令: sound_start")
-
+    
+    # 声音停止命令
     def sound_stop_command(self):
         self.ros_signal.str_command.emit('sound_stop')
         self.ui.info_textEdit.append(f"发送命令:sound_stop")
+   
+    # 颈部摆动命令
+    def neck_swinging_command(self):
+        self.ros_signal.str_command.emit('neck_swinging')
+        self.ui.info_textEdit.append(f"发送命令: neck_swinging")
 
-    def backup1_command(self):
-        self.ros_signal.str_command.emit('backup1')
-        self.ui.info_textEdit.append(f"发送命令: backup1")
-    def backup2_command(self):
-        self.ros_signal.str_command.emit('backup2')
-        self.ui.info_textEdit.append(f"发送命令: backup2")
-
+   
+    # 颈部停止命令
+    def neck_stop_command(self):
+        self.ros_signal.str_command.emit('neck_stop')
+        self.ui.info_textEdit.append(f"发送命令: neck_stop")
+   
+    # led1命令
     def led1_command(self):
         self.ros_signal.str_command.emit('led1')
         self.ui.info_textEdit.append(f"发送led1命令: led1")
     
+    # led2命令
     def led2_command(self):
         self.ros_signal.str_command.emit('led2')
         self.ui.info_textEdit.append(f"发送led2命令: led2")
-        
+    
+    # led3命令    
     def led3_command(self):
         self.ros_signal.str_command.emit('led3')
         self.ui.info_textEdit.append(f"发送led3命令: led3")
-
+   
+    # 停止灯光命令
     def light_stop_command(self):
         self.ros_signal.str_command.emit('light_stop')
         self.ui.info_textEdit.append(f"发送命令: light_stop")
-
+    
+    # 显示 USV 绘图窗口
     def show_usv_plot_window(self):
         # 传递一个获取usv列表的函数，保证窗口里能实时获取最新数据
         self.usv_plot_window = UsvPlotWindow(lambda: self.usv_online_list, self)
         self.usv_plot_window.show()
 
+# 主函数
 def main(argv=None):
     app = QApplication(sys.argv)
     ros_signal = ROSSignal()
@@ -640,29 +634,24 @@ def main(argv=None):
     rclpy.init(args=None)
     node=GroundStationNode(ros_signal)
 
+    ros_signal.manual_command.connect(node.set_manual_callback) # 手动信号连接到手动回调函数
+  
+    ros_signal.guided_command.connect(node.set_guided_callback)# 切换到guided模式信号连接到guided回调函数
+    ros_signal.arm_command.connect(node.set_arming_callback) # 解锁信号连接到集群解锁回调函数
+    ros_signal.disarm_command.connect(node.set_disarming_callback)# 加锁信号连接到集群加锁回调函数
+    ros_signal.arco_command.connect(node.set_arco_callback) # 切换到arco模式信号连接到arco回调函数
+    ros_signal.steering_command.connect(node.set_steering_callback) # 切换到steering模式信号连接到steering回调函数
 
-    ros_signal.manual_command.connect(node.set_manual_callback)#主线程连接
-    ros_signal.guided_command.connect(node.set_guided_callback)
-    ros_signal.arm_command.connect(node.set_arming_callback)#主线程连接
-    ros_signal.disarm_command.connect(node.set_disarming_callback)
-
-    ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
- 
-    ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
- 
-
+    ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)# 集群目标点信号连接到集群目标点回调函数
+    ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)# 离群目标点信号连接到离群目标点回调函数
    
-    ros_signal.str_command.connect(node.str_command_callback)
+    ros_signal.str_command.connect(node.str_command_callback) # 字符串命令信号连接到字符串命令回调函数
 
-
-
-
-    ros_thread = threading.Thread(target=lambda:rclpy.spin(node), daemon=True)
+    ros_thread = threading.Thread(target=lambda:rclpy.spin(node), daemon=True) # 创建一个线程来运行 ROS 事件循环
     ros_thread.start()
    
-    
     main_window.show()
     sys.exit(app.exec_())
-    
+# 如果这个脚本是主程序入口   
 if __name__ == "__main__":
     main()

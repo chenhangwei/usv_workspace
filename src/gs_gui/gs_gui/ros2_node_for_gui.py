@@ -15,6 +15,7 @@ import queue
 import threading
 
 class GroundStationNode(Node):
+    # 初始化
     def __init__(self, signal):
         super().__init__('groundstationnode')
         self.ros_signal = signal
@@ -44,7 +45,7 @@ class GroundStationNode(Node):
         
         self.update_subscribers_and_publishers()
        
-
+    # 在独立线程中异步处理消息发布队列
     def process_publish_queue(self):
         while rclpy.ok():
             try:
@@ -56,7 +57,8 @@ class GroundStationNode(Node):
                 continue
             except Exception as e:
                 self.get_logger().error(f"发布消息失败: {e}")
-
+    
+    # 获取当前节点的名称和命名空间，为新的 USV 节点创建订阅和发布器
     def update_subscribers_and_publishers(self):
         namespaces = self.get_node_names_and_namespaces()
         current_ns_list = list(set([ns for _, ns in namespaces if ns.startswith('/usv_')]))        
@@ -119,7 +121,7 @@ class GroundStationNode(Node):
                 self.destroy_publisher(self.sound_pubs[usv_id])
                 del self.sound_pubs[usv_id]
             self.get_logger().info(f"Destroying subscribers and publishers for {usv_id}")
-
+    # 处理 USV 状态回调
     def usv_state_callback(self, msg, usv_id):
         if isinstance(msg, UsvStatus):
             state_data = {
@@ -134,13 +136,13 @@ class GroundStationNode(Node):
                 'position': msg.position,
                 'velocity': msg.velocity,
                 'yaw': msg.yaw,
-                'is_runing': msg.reached_target,
+                'is_reached_target': msg.reached_target, # 是否到达目标点
             }
             self.usv_states[usv_id] = state_data
 
-            self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            self.ros_signal.receive_state_list.emit(list(self.usv_states.values())) # 通过Qt信号将所有USV状态推送给界面，触发界面刷新
             
-
+    # 设置 USV 模式回调
     def set_manual_callback(self, msg):
         self.get_logger().info("Received manual mode command")
         usv_list = msg if isinstance(msg, list) else [msg]
@@ -152,7 +154,8 @@ class GroundStationNode(Node):
                 self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
             else:
                 self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
-
+    
+    # 设置 USV 导航模式回调
     def set_guided_callback(self, msg):
         self.get_logger().info("Received guided mode command")
         usv_list = msg if isinstance(msg, list) else [msg]
@@ -164,7 +167,34 @@ class GroundStationNode(Node):
                 self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
             else:
                 self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
+    
+    # 设置 USV ARCO 模式回调
+    def set_arco_callback(self, msg):
+        self.get_logger().info("Received ARCO mode command")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_mode_pubs:
+                mode_msg = String()
+                mode_msg.data = "ARCO"
+                self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
+            else:
+                self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
+   
+    # 设置 USV 舵机模式回调
+    def set_steering_callback(self, msg):
+        self.get_logger().info("Received steering mode command")
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.set_usv_mode_pubs:
+                mode_msg = String()
+                mode_msg.data = "STEERING"
+                self.publish_queue.put((self.set_usv_mode_pubs[usv_id], mode_msg))
+            else:
+                self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
 
+    # 设置 USV 武装回调
     def set_arming_callback(self, msg):
         self.get_logger().info("Received armed command")
         usv_list = msg if isinstance(msg, list) else [msg]
@@ -176,7 +206,8 @@ class GroundStationNode(Node):
                 self.publish_queue.put((self.set_usv_arming_pubs[usv_id], arming_msg))
             else:
                 self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
-
+    
+    # 设置 USV 解除武装回调
     def set_disarming_callback(self, msg):
         self.get_logger().info("Received disarmed command")
         usv_list = msg if isinstance(msg, list) else [msg]
@@ -189,6 +220,7 @@ class GroundStationNode(Node):
             else:
                 self.get_logger().warn(f"Invalid namespace {usv_id}, skip")
 
+    # 设置集群目标点回调
     def set_cluster_target_point_callback(self, msg):
         self.get_logger().info("Received cluster target point")
         try:
@@ -213,6 +245,7 @@ class GroundStationNode(Node):
         except Exception as e:
             self.get_logger().error(f"Failed to process cluster target point: {e}")
 
+    # 发布集群目标点回调
     def publish_cluster_targets_callback(self):
         if not self.current_targets:
             return
@@ -284,6 +317,7 @@ class GroundStationNode(Node):
         except Exception as e:
             self.get_logger().error(f"处理集群目标速度失败: {e}")
 
+    # 设置离群目标点回调
     def set_departed_target_point_callback(self, msg):
         self.get_logger().info("接收到离群目标点")
         try:
@@ -294,19 +328,24 @@ class GroundStationNode(Node):
 
             for ns in usv_list:
                 if not isinstance(ns, dict):
-                    self.get_logger().warn(f"无效的目标格式: {ns}, 跳过")
+                    self.get_logger().warning(f"无效的目标格式: {ns}, 跳过")
                     continue
-                usv_id = ns.get('usv_id', None)
-                if usv_id is None or usv_id not in self.set_usv_target_position_pubs:
-                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
+                usv_id = ns.get('usv_id')
+                if not usv_id or usv_id not in self.set_usv_target_position_pubs:
+                    self.get_logger().warning(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
+                    continue
+
+                pos = ns.get('position', {})
+                if not all(k in pos for k in ('x', 'y', 'z')):
+                    self.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                     continue
 
                 target_point_msg = PoseStamped()
                 target_point_msg.header.frame_id = "map"
                 target_point_msg.header.stamp = self.get_clock().now().to_msg()
-                target_point_msg.pose.position.x = ns.get('position', {}).get('x', 0.0)
-                target_point_msg.pose.position.y = ns.get('position', {}).get('y', 0.0)
-                target_point_msg.pose.position.z = ns.get('position', {}).get('z', 0.0)
+                target_point_msg.pose.position.x = pos.get('x', 0.0)
+                target_point_msg.pose.position.y = pos.get('y', 0.0)
+                target_point_msg.pose.position.z = pos.get('z', 0.0)
                 yaw = ns.get('yaw', 0.0)
                 quaternion = tf_transformations.quaternion_from_euler(0.0, 0.0, yaw)
                 target_point_msg.pose.orientation.x = quaternion[0]
@@ -314,12 +353,15 @@ class GroundStationNode(Node):
                 target_point_msg.pose.orientation.z = quaternion[2]
                 target_point_msg.pose.orientation.w = quaternion[3]
                 self.publish_queue.put((self.set_usv_target_position_pubs[usv_id], target_point_msg))
+                self.get_logger().info(f"已下发目标点到 {usv_id}: {pos}, yaw: {yaw}")
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
- 
+    
+    # 从USV目标列表中筛选出指定步骤(step)的USV目标
     def get_usvs_by_step(self, cluster_usv_list, step):
         return [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
-
+    
+    # 设置 LED 或声音命令回调
     def str_command_callback(self, msg):
         self.get_logger().info(f"接收到 LED 或声音命令: {msg}")
         if not isinstance(msg, str):
@@ -334,6 +376,7 @@ class GroundStationNode(Node):
             if usv_id in self.sound_pubs:
                 self.publish_queue.put((self.sound_pubs[usv_id], command_str))
 
+    # 销毁节点资源
     def destroy_node(self):
         self.get_logger().info("销毁节点资源...")
         for usv_id in list(self.usv_state_subs.keys()):
