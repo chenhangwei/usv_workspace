@@ -20,7 +20,7 @@ class UltrasonicRadarNode(Node):
         self.serial_port = None
         try:
             self.serial_port = serial.Serial(
-                port='/dev/ttyUSB0',
+                port='/dev/ttyUSB1',
                 baudrate=9600,
                 timeout=1
             )

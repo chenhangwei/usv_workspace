@@ -34,6 +34,8 @@
         "buildtool",
         "chenhangwei",
         "fontsize",
+        "gpiochip",
+        "gpiod",
         "groundstationnode",
         "inaxes",
         "lasercan",
