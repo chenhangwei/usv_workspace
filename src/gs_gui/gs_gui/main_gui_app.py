@@ -601,23 +601,35 @@ class MainWindow(QMainWindow):
    
     # led1命令
     def led1_command(self):
-        self.ros_signal.str_command.emit('led1')
-        self.ui.info_textEdit.append(f"发送led1命令: led1")
+        self.ros_signal.str_command.emit('color_switching')
+        self.ui.info_textEdit.append(f"发送命令: color_switching")
     
     # led2命令
     def led2_command(self):
-        self.ros_signal.str_command.emit('led2')
-        self.ui.info_textEdit.append(f"发送led2命令: led2")
+        self.ros_signal.str_command.emit('random_color_change')
+        self.ui.info_textEdit.append(f"发送命令:random_color_change")
     
     # led3命令    
     def led3_command(self):
-        self.ros_signal.str_command.emit('led3')
-        self.ui.info_textEdit.append(f"发送led3命令: led3")
+        color=QColorDialog.getColor() # type: ignore
+        if not color.isValid():
+            self.ui.info_textEdit.append("颜色选择无效")
+            return
+        # 获取颜色的 RGB 值
+        r = color.red()
+        g = color.green()
+        b = color.blue()
+        # 将 RGB 值转换为字符串格式
+        color_str = f"color_select|{r},{g},{b}"
+        # 发送颜色选择命令
+        self.ros_signal.str_command.emit(color_str)
+        # 在信息文本框中显示发送的命令
+        self.ui.info_textEdit.append(f"发送led3命令: {color_str}")
    
     # 停止灯光命令
     def light_stop_command(self):
-        self.ros_signal.str_command.emit('light_stop')
-        self.ui.info_textEdit.append(f"发送命令: light_stop")
+        self.ros_signal.str_command.emit('led_off')
+        self.ui.info_textEdit.append(f"发送命令: led_off")
     
     # 显示 USV 绘图窗口
     def show_usv_plot_window(self):

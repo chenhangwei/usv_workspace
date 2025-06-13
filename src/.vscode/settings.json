@@ -28,8 +28,10 @@
     "python.analysis.autoImportCompletions": true,
     "python.analysis.typeCheckingMode": "standard",
     "cSpell.words": [
+        "AABB",
         "actionopen",
         "actionrviz",
+        "batterystate",
         "bringup",
         "buildtool",
         "chenhangwei",
