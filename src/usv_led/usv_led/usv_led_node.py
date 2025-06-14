@@ -1,4 +1,3 @@
-
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
@@ -34,7 +33,8 @@ class UsvLedNode(Node):
 
 
         # 创建定时器
-        self.timer = self.create_timer(1.0, self.timer_callback)
+        self.timer_period = 1.0   # 当前定时器周期
+        self.timer = self.create_timer(self.timer_period, self.timer_callback)
 
         self.usv_state = BatteryState()  # 初始化 USV 电池状态
         self.is_low_battery_level = False  # 是否处于低电量状态
@@ -65,6 +65,12 @@ class UsvLedNode(Node):
         self.transition_duration = 3.0  # 渐变3秒
         self.hold_duration = 10.0       # 停留10秒
 
+        self.last_sent_rgb = None  # 缓存上一次发送的RGB，避免重复写串口
+        self.last_mode_before_low_battery = None  # 低电压前的模式
+        self.timer_period_high = 0.03  # 高频定时器周期
+        self.timer_period_low = 0.5    # 低频定时器周期
+        self.current_timer_period = self.timer_period_low
+        self.timer = self.create_timer(self.current_timer_period, self.timer_callback)
 
 
     #   构建串口指令
@@ -111,13 +117,19 @@ class UsvLedNode(Node):
 
     def usv_batterystate_callback(self, msg):
         if isinstance(msg, BatteryState):
-            self.usv_state = msg   
+            self.usv_state = msg
             if self.usv_state.voltage < 11.1:
+                if not self.is_low_battery_level:
+                    self.last_mode_before_low_battery = self.mode
+                    self.mode = 'low_battery_breath'
+                    self.get_logger().warn('USV 电池电压低于 11.1V，进入低电量呼吸灯状态')
                 self.is_low_battery_level = True
-                self.get_logger().warn('USV 电池电压低于 11.1V，进入低电量状态') 
             else:
+                if self.is_low_battery_level:
+                    # 恢复原有模式
+                    self.mode = self.last_mode_before_low_battery or 'color_switching'
+                    self.get_logger().info('USV 电池电压恢复，退出低电量呼吸灯')
                 self.is_low_battery_level = False
-                self.get_logger().info('USV 电池电压正常')  
 
     def generate_breath_values(self):
         # 生成红色呼吸亮度序列（0~255~0，步进可调）
@@ -125,38 +137,43 @@ class UsvLedNode(Node):
         down = list(range(255, -1, -6))
         return up + down[1:]  # 去掉重复的255
    
+    def set_timer_period(self, period):
+        # 动态调整定时器周期，避免频繁重建定时器
+        if abs(period - self.current_timer_period) > 1e-3:
+            self.timer.cancel()
+            self.timer = self.create_timer(period, self.timer_callback)
+            self.current_timer_period = period
+
     def timer_callback(self):
         now = time.time()
-        if self.is_low_battery_level:
-               # 计算当前帧间隔
+        rgb_to_send = None
+        # 低电压呼吸灯，强制高频
+        if self.mode == 'low_battery_breath':
+            self.set_timer_period(self.timer_period_high)
             voltage = self.usv_state.voltage if hasattr(self.usv_state, 'voltage') else 12.0
-            base_interval = 0.1  # 100ms
-            min_interval = 0.03  # 30ms
+            if voltage < 11.1:
+                voltage = 10.6
+            base_interval = 0.1
+            min_interval = 0.03
             delta_v = max(0, (11.1 - voltage))
             interval = max(min_interval, base_interval - int(delta_v * 10) * 0.015)
-            now = time.time()
             if now - self.last_breath_time >= interval:
-                # 取当前呼吸亮度
                 r = self.breath_values[self.breath_index % len(self.breath_values)]
                 g = 0
                 b = 0
-                command = self.build_command([r, g, b],60)
-                self.ser.write(command)
+                rgb_to_send = [r, g, b]
                 self.breath_index = (self.breath_index + 1) % len(self.breath_values)
                 self.last_breath_time = now
-
         elif self.mode == 'color_switching':
+            self.set_timer_period(self.timer_period_high)
             if not self.in_transition:
-                # 停留阶段
                 if now - self.last_switch_time >= self.hold_duration:
-                    # 开始渐变到下一个颜色
                     self.in_transition = True
                     self.transition_start_color = self.current_color[:]
                     self.color_index = (self.color_index + 1) % len(self.color_list)
                     self.target_color = self.color_list[self.color_index]
                     self.last_switch_time = now
             else:
-                # 渐变阶段
                 t = min(1.0, (now - self.last_switch_time) / self.transition_duration)
                 self.current_color = [
                     int(self.transition_start_color[i] + (self.target_color[i] - self.transition_start_color[i]) * t)
@@ -165,9 +182,9 @@ class UsvLedNode(Node):
                 if t >= 1.0:
                     self.in_transition = False
                     self.last_switch_time = now
-            command = self.build_command(self.current_color, 60)
-            self.ser.write(command)
+            rgb_to_send = self.current_color
         elif self.mode == 'random_color_change':
+            self.set_timer_period(self.timer_period_high)
             if not self.in_transition:
                 if now - self.last_switch_time >= self.hold_duration:
                     self.in_transition = True
@@ -183,18 +200,22 @@ class UsvLedNode(Node):
                 if t >= 1.0:
                     self.in_transition = False
                     self.last_switch_time = now
-            command = self.build_command(self.current_color, 60)
-            self.ser.write(command)
+            rgb_to_send = self.current_color
         elif self.mode == 'color_select':
-            command = self.build_command(self.current_color, 60)
+            self.set_timer_period(self.timer_period_low)
+            rgb_to_send = self.current_color
+        elif self.mode == 'led_off':
+            self.set_timer_period(self.timer_period_low)
+            rgb_to_send = [0, 0, 0]
+        else:
+            self.set_timer_period(self.timer_period_low)
+            rgb_to_send = [0, 0, 0]
+        # 只有RGB变化时才写串口
+        if rgb_to_send is not None and (self.last_sent_rgb != rgb_to_send):
+            command = self.build_command(rgb_to_send, 60)
             self.ser.write(command)
+            self.last_sent_rgb = rgb_to_send[:]
               
- 
-        
-
-
-                
-
 def main(args=None):
     rclpy.init(args=args)
     node = UsvLedNode()
@@ -203,6 +224,6 @@ def main(args=None):
     rclpy.shutdown()
     
 if __name__ == '__main__':
-    main()        
+    main()
 
-              
+
