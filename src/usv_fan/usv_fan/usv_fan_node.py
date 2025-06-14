@@ -28,17 +28,17 @@ class UsvFanNode(Node):
     def temperature_callback(self, msg):
         temp = msg.data  # 温度（毫摄氏度）
         temp_celsius = temp / 1000.0  # 转换为摄氏度，仅用于日志
-        self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
+        # self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
 
         # 控制风扇
         if temp >= self.temp_threshold_on and not self.fan_state:
             self.line.set_value(1)  # 开启风扇
             self.fan_state = True
-            self.get_logger().info('Fan turned ON')
+            # self.get_logger().info('Fan turned ON')
         elif temp <= self.temp_threshold_off and self.fan_state:
             self.line.set_value(0)  # 关闭风扇（低电平）
             self.fan_state = False
-            self.get_logger().info('Fan turned OFF')
+            # self.get_logger().info('Fan turned OFF')
 
     def __del__(self):
         # 清理 GPIO

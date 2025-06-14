@@ -18,6 +18,8 @@ import requests
 import json
 from gs_gui.usv_plot_window import UsvPlotWindow
 
+import re
+
 
 
 
@@ -525,6 +527,7 @@ class MainWindow(QMainWindow):
    
     # 更新选中行数据
     def update_selected_table_row(self):
+       
         try:
             # 获取选中的行
             selected_indexes = self.ui.cluster_tableView.selectedIndexes()
@@ -544,28 +547,33 @@ class MainWindow(QMainWindow):
             for col, key in enumerate(headers):
                 index = model.index(selected_row, col)
                 state[key] = model.data(index) or "Unknown"
-            self.ui.usv_id_label.setText(f"当前选中 USV ID: {state.get('namespace', 'Unknown')}")
-            position_str = state.get('position', 'Unknown')
-            yaw_str = state.get('yaw', 'Unknown')
-            # 解析 position 字符串，格式如 x=...,y=...,z=...
+            self.ui.usv_id_label.setText(f"{state.get('namespace', 'Unknown')}")
+            position_str = str(state.get('position', 'Unknown'))
+            yaw_str = str(state.get('yaw', 'Unknown'))
+            # 正则提取 x, y, z
+            x = y = z = 'Unknown'
+            pos_match = re.findall(r'([xyz])\s*=\s*([-+]?\d*\.?\d+)', position_str)
+            pos_dict = {k: v for k, v in pos_match}
             try:
-                position_ = [s.strip() for s in position_str.split(',')]
-                if len(position_) == 3 and all('=' in p for p in position_):
-                    x = float(position_[0].split('=')[1])
-                    y = float(position_[1].split('=')[1])
-                    z = float(position_[2].split('=')[1])
-                else:
-                    raise ValueError('位置字段格式错误')
+                x = float(pos_dict['x']) if 'x' in pos_dict else 'Unknown'
+                y = float(pos_dict['y']) if 'y' in pos_dict else 'Unknown'
+                z = float(pos_dict['z']) if 'z' in pos_dict else 'Unknown'
             except Exception:
                 x = y = z = 'Unknown'
-            # 解析 yaw 字符串，格式如 yaw=...
-            try:
-                if '=' in yaw_str:
-                    yaw_val = float(yaw_str.split('=')[1])
-                else:
-                    raise ValueError('yaw字段格式错误')
-            except Exception:
-                yaw_val = 'Unknown'
+            # 正则提取 yaw
+            yaw_val = 'Unknown'
+            yaw_match = re.search(r'yaw\s*=\s*([-+]?\d*\.?\d+)', yaw_str)
+            if yaw_match:
+                try:
+                    yaw_val = float(yaw_match.group(1))
+                except Exception:
+                    yaw_val = 'Unknown'
+            else:
+                # 兼容直接数字
+                try:
+                    yaw_val = float(yaw_str)
+                except Exception:
+                    yaw_val = 'Unknown'
             self.ui.usv_x_label.setText(f"{x}")
             self.ui.usv_y_label.setText(f"{y}")
             self.ui.usv_z_label.setText(f"{z}")

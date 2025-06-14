@@ -52,10 +52,10 @@ class UsvSoundNode(Node):
             self.get_logger().error('收到无效的声音消息类型')
             return
         if msg.data == 'sound_start':
-            self.get_logger().info('收到sound_start，启动循环')
+            # self.get_logger().info('收到sound_start，启动循环')
             self.start_sound_loop()
         elif msg.data == 'sound_stop':
-            self.get_logger().info('收到sound_stop，停止循环')
+            # self.get_logger().info('收到sound_stop，停止循环')
             self.stop_sound_loop()
 
     def voltage_callback(self, msg):
@@ -95,7 +95,7 @@ class UsvSoundNode(Node):
                 sound_type = self.moon_type
             else:
                 sound_type = random.choice(self.sound_types)
-            self.get_logger().info(f'循环播放: {sound_type}.wav, 延时: {sec}s, 次数: {num}')
+            # self.get_logger().info(f'循环播放: {sound_type}.wav, 延时: {sec}s, 次数: {num}')
             for i in range(num):
                 if self.loop_stop_event.is_set():
                     break
