@@ -228,7 +228,7 @@ def generate_launch_description():
         # rplidar_node,# RPLIDAR 节点
         static_tf_laser_node,# 静态变换发布器节点
         odom_to_tf,# odom 到 TF 的转换节点
-        # usv_led_node,# LED 控制节点
+        usv_led_node,# LED 控制节点
         usv_sound_node, # 声音控制节点
         # usv_su04_node,  # SU04 超声波节点  
         usv_fan_node,  # 风扇控制节点  

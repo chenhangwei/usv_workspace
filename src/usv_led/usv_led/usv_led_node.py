@@ -72,26 +72,33 @@ class UsvLedNode(Node):
         self.current_timer_period = self.timer_period_low
         self.timer = self.create_timer(self.current_timer_period, self.timer_callback)
 
+        self.get_logger().info('USV LED 节点启动完成')
+
 
     #   构建串口指令
     def build_command(self, rgb_data, extend_times=60):
         """
-        构建灯带控制串口指令，格式严格按照
-        DD 55 EE 00 00 00 01 00 99 01 00 00 00 [数据长度2字节] [扩展次数2字节] [RGB数组] AA BB
-        :param rgb_data: list 或 bytes，RGB数据（如 [R, G, B] 或 [R1, G1, B1, R2, G2, B2, ...]）
-        :param extend_times: int，扩展次数（2字节）
+        构建灯带控制串口指令，严格按照：
+        DD 55 EE 00 00 00 01 00 99 01 00 00 [数据长度2字节大端] [扩展次数2字节大端] [RGB数据] AA BB
+        :param rgb_data: list 或 bytes，RGB数据（如 [R, G, B] 或 [R1, G1, B1, ...]）
+        :param extend_times: int，扩展次数（2字节，大端）
         """
-        header = bytes.fromhex('DD55EE')
-        fixed1 = bytes.fromhex('000000010099')
-        port = bytes.fromhex('01')
-        fixed2 = bytes.fromhex('00000003')
+        header = bytes.fromhex('DD55EE')  # 帧头
+        group_addr = bytes.fromhex('0000')  # 组地址（全0表示单个设备）
+        device_addr = bytes.fromhex('0001')#  设备地址（全1表示广播）
+        port = bytes.fromhex('00')  # 端口号（0x00表示默认端口）
+        func = bytes.fromhex('99')# 功能码（0x99表示LED控制）
+        led_type = bytes.fromhex('01')# LED类型（0x01表示普通LED）
+        reserved = bytes.fromhex('0000')# 保留字节（2字节，填充为0）
         # 数据长度（2字节，大端）
         data_len = len(rgb_data).to_bytes(2, 'big')
         # 扩展次数（2字节，大端）
         extend_bytes = extend_times.to_bytes(2, 'big')
-        data_bytes = bytes(rgb_data)
+        # 直接使用RGB顺序
+        rgb_bytes = bytes(rgb_data)
         tail = bytes.fromhex('AABB')
-        command = header + fixed1 + port + fixed2 + data_len + extend_bytes + data_bytes + tail
+        command = (header + group_addr + device_addr + port + func + led_type + reserved +
+                   data_len + extend_bytes + rgb_bytes + tail)
         return command
 
 
@@ -214,7 +221,14 @@ class UsvLedNode(Node):
         if rgb_to_send is not None and (self.last_sent_rgb != rgb_to_send):
             command = self.build_command(rgb_to_send, 60)
             self.ser.write(command)
-            self.last_sent_rgb = rgb_to_send[:]
+            # self.get_logger().info(f'发送LED命令：{command.hex()}')
+            # try:
+            #     resp = self.ser.read_all()
+            #     if resp:
+            #         self.get_logger().info(f'串口返回：{resp}')
+            # except Exception as e:
+            #     self.get_logger().warn(f'读取串口返回异常: {e}')
+            # self.last_sent_rgb = rgb_to_send[:]
               
 def main(args=None):
     rclpy.init(args=args)
