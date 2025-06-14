@@ -103,16 +103,55 @@ class UsvLedNode(Node):
 
 
     def gs_led_callback(self, msg):
-        if isinstance(msg, String):
-            if msg.data.startswith('color_select'):
-                # color_select|r,g,b
-                parts = msg.data.split('|')
-                if len(parts) == 2:
-                    rgb = [int(x) for x in parts[1].split(',')]
-                    self.mode = 'color_select'
-                    self.current_color = rgb
-                    self.target_color = rgb
-                    self.in_transition = False
+        if not isinstance(msg, String):
+            return
+        # 低电压优先，禁止切换其他模式
+        if self.is_low_battery_level:
+            self.get_logger().info('低电压状态下，忽略LED模式切换指令')
+            return
+        allowed_modes = [
+            'color_switching',
+            'random_color_change',
+            'led_off',
+            'color_infect',
+        ]
+        if msg.data.startswith('color_select'):
+            # color_select|r,g,b
+            parts = msg.data.split('|')
+            if len(parts) == 2:
+                rgb = [int(x) for x in parts[1].split(',')]
+                self.mode = 'color_select'
+                self.current_color = rgb
+                self.target_color = rgb
+                self.in_transition = False
+        elif msg.data.startswith('color_infect'):
+            # color_infect|r,g,b
+            parts = msg.data.split('|')
+            if len(parts) == 2:
+                rgb = [int(x) for x in parts[1].split(',')]
+                # 记录原有模式和颜色，便于恢复
+                if not hasattr(self, '_infect_backup'):
+                    self._infect_backup = {
+                        'mode': self.mode,
+                        'current_color': self.current_color[:],
+                        'target_color': self.target_color[:],
+                        'in_transition': self.in_transition
+                    }
+                self.mode = 'color_infect'
+                self.target_color = rgb
+                self.in_transition = True
+                self.transition_start_color = self.current_color[:]
+                self.transition_duration = 2.0  # 传染渐变2秒
+                self.last_switch_time = time.time()
+        elif msg.data in allowed_modes:
+            # 其它允许模式
+            # 若之前处于传染，恢复备份
+            if hasattr(self, '_infect_backup'):
+                self.mode = self._infect_backup['mode']
+                self.current_color = self._infect_backup['current_color'][:]
+                self.target_color = self._infect_backup['target_color'][:]
+                self.in_transition = self._infect_backup['in_transition']
+                del self._infect_backup
             else:
                 self.mode = msg.data
                 self.last_switch_time = time.time()
@@ -120,6 +159,10 @@ class UsvLedNode(Node):
                 self.current_color = self.color_list[0]
                 self.target_color = self.color_list[0]
                 self.in_transition = False
+        else:
+            # 其它无关消息内容，忽略，不影响LED
+            self.get_logger().info(f'忽略无关LED指令: {msg.data}')
+            return
 
 
     def usv_batterystate_callback(self, msg):
@@ -154,6 +197,17 @@ class UsvLedNode(Node):
     def timer_callback(self):
         now = time.time()
         rgb_to_send = None
+        if self.mode == 'color_infect':
+            self.set_timer_period(self.timer_period_high)
+            # 渐变到 target_color
+            t = min(1.0, (now - self.last_switch_time) / self.transition_duration)
+            self.current_color = [
+                int(self.transition_start_color[i] + (self.target_color[i] - self.transition_start_color[i]) * t)
+                for i in range(3)
+            ]
+            if t >= 1.0:
+                self.in_transition = False
+            rgb_to_send = self.current_color
         # 低电压呼吸灯，强制高频
         if self.mode == 'low_battery_breath':
             self.set_timer_period(self.timer_period_high)

@@ -2,12 +2,7 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32
-
-
-import gpiod as gpiod # 使用 pgpio 替代 lgpio
-
-#import gpiozero as GPIO
-# 注意：在实际使用中，请确保安装了 gpiozero 库，并且 Raspberry Pi 上的 GPIO 引脚配置正确。
+import gpiod as gpiod # 使用 pgpio 
 
 class UsvFanNode(Node):
     def __init__(self):
@@ -19,13 +14,11 @@ class UsvFanNode(Node):
             self.temperature_callback,
             10
         )
-
-
-          # 设置 GPIO
+        # 设置 GPIO
         self.fan_pin = 17  # BCM编号，GPIO17
-        self.chip = gpiod.Chip('gpiochip4')  # 使用 gpiochip4
+        self.chip = gpiod.Chip('gpiochip4')  # 树莓派5推荐gpiochip4
         self.line = self.chip.get_line(self.fan_pin)
-        self.line.request(consumer='usv_fan', type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])  # 初始为低电平
+        self.line.request(consumer='keep_high', type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])  # 初始为低电平
         self.fan_state = False  # 风扇状态
         # 温度阈值（单位：毫摄氏度）
         self.temp_threshold_on = 50000  # 50°C
@@ -39,7 +32,7 @@ class UsvFanNode(Node):
 
         # 控制风扇
         if temp >= self.temp_threshold_on and not self.fan_state:
-            self.line.set_value(1)  # 开启风扇（高电平）
+            self.line.set_value(1)  # 开启风扇
             self.fan_state = True
             self.get_logger().info('Fan turned ON')
         elif temp <= self.temp_threshold_off and self.fan_state:
@@ -51,7 +44,7 @@ class UsvFanNode(Node):
         # 清理 GPIO
         try:
             if hasattr(self, 'line'):
-                self.line.set_value(0)  # 关闭风扇
+                self.line.set_value(0)
                 self.line.release()
             if hasattr(self, 'chip'):
                 self.chip.close()

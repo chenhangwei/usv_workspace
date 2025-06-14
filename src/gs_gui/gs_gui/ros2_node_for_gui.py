@@ -42,7 +42,11 @@ class GroundStationNode(Node):
         
         self.ns_timer = self.create_timer(2.0, self.update_subscribers_and_publishers)
         self.target_timer = self.create_timer(0.5, self.publish_cluster_targets_callback)
+        self.infect_check_timer = self.create_timer(1.0, self.check_usv_infect)
         
+        self._usv_led_modes = {}  # 记录每个USV的LED原始模式和颜色
+        self._usv_infecting = set()  # 当前处于传染状态的USV对
+
         self.update_subscribers_and_publishers()
        
     # 在独立线程中异步处理消息发布队列
@@ -375,6 +379,63 @@ class GroundStationNode(Node):
                 self.publish_queue.put((self.led_pubs[usv_id], command_str))
             if usv_id in self.sound_pubs:
                 self.publish_queue.put((self.sound_pubs[usv_id], command_str))
+
+    # 检查 USV 之间的传染逻辑
+    def check_usv_infect(self):
+        usv_list = list(self.usv_states.values())
+        n = len(usv_list)
+        if n < 2:
+            return
+        infect_pairs = set()
+        for i in range(n):
+            for j in range(i+1, n):
+                usv_a = usv_list[i]
+                usv_b = usv_list[j]
+                id_a = usv_a['namespace']
+                id_b = usv_b['namespace']
+                pos_a = usv_a.get('position', {})
+                pos_b = usv_b.get('position', {})
+                try:
+                    xa, ya = float(pos_a.get('x', 0)), float(pos_a.get('y', 0))
+                    xb, yb = float(pos_b.get('x', 0)), float(pos_b.get('y', 0))
+                except Exception:
+                    continue
+                dist2 = (xa-xb)**2 + (ya-yb)**2
+                if dist2 <= 4.0:  # 2米内
+                    # 以编号字符串排序，靠前为主
+                    if id_a < id_b:
+                        src, dst = id_a, id_b
+                        src_color = usv_a.get('led_color', [255,0,0])
+                        src_mode = usv_a.get('led_mode', 'color_switching')
+                    else:
+                        src, dst = id_b, id_a
+                        src_color = usv_b.get('led_color', [255,0,0])
+                        src_mode = usv_b.get('led_mode', 'color_switching')
+                    infect_pairs.add((src, dst))
+                    # 记录原始LED模式
+                    if dst not in self._usv_led_modes:
+                        dst_led_mode = usv_b.get('led_mode', 'color_switching') if id_b == dst else usv_a.get('led_mode', 'color_switching')
+                        dst_led_color = usv_b.get('led_color', [255,0,0]) if id_b == dst else usv_a.get('led_color', [255,0,0])
+                        self._usv_led_modes[dst] = (dst_led_mode, dst_led_color)
+                    # 发送 color_infect 指令
+                    infect_cmd = f"color_infect|{src_color[0]},{src_color[1]},{src_color[2]}"
+                    if dst in self.led_pubs:
+                        msg = String()
+                        msg.data = infect_cmd
+                        self.publish_queue.put((self.led_pubs[dst], msg))
+        # 恢复离开2米的USV
+        for dst in list(self._usv_led_modes.keys()):
+            if not any(dst == pair[1] for pair in infect_pairs):
+                mode, color = self._usv_led_modes[dst]
+                if dst in self.led_pubs:
+                    if mode == 'color_select':
+                        cmd = f"color_select|{color[0]},{color[1]},{color[2]}"
+                    else:
+                        cmd = mode
+                    msg = String()
+                    msg.data = cmd
+                    self.publish_queue.put((self.led_pubs[dst], msg))
+                del self._usv_led_modes[dst]
 
     # 销毁节点资源
     def destroy_node(self):
