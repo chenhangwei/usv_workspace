@@ -5,7 +5,7 @@ import threading
 from sympy import Point
 import rclpy
 from PyQt5.QtCore import QProcess
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QTableWidgetItem, QAbstractItemView, QFileDialog, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QTableWidgetItem, QAbstractItemView, QFileDialog, QMessageBox, QColorDialog
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ros2_node_for_gui import GroundStationNode
@@ -527,57 +527,57 @@ class MainWindow(QMainWindow):
     def update_selected_table_row(self):
         try:
             # 获取选中的行
-            selected_row = self.ui.cluster_tableView.selectedIndexes()[0].row()
+            selected_indexes = self.ui.cluster_tableView.selectedIndexes()
+            if not selected_indexes:
+                self.ui.info_textEdit.append("没有选中任何行")
+                return
+            selected_row = selected_indexes[0].row()
             model = self.ui.cluster_tableView.model()
-            # 获取选中行的状态数据
-            state = {}
-            headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
-                    "battery_prcentage", "power_supply_status", "position",
-                    "velocity", "yaw", "is_reached_target"]
-                    
             if model is None:
                 self.ui.info_textEdit.append("集群列表为空")
                 return
-
             # 获取整行状态数据
-            state = {}
             headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
-                    "battery_prcentage", "power_supply_status", "position", 
-                    "velocity", "yaw", "is_reached_target"]
+                       "battery_prcentage", "power_supply_status", "position", 
+                       "velocity", "yaw", "is_reached_target"]
+            state = {}
             for col, key in enumerate(headers):
                 index = model.index(selected_row, col)
                 state[key] = model.data(index) or "Unknown"
             self.ui.usv_id_label.setText(f"当前选中 USV ID: {state.get('namespace', 'Unknown')}")
-            position_str=state.get('position', 'Unknown')
-
-            print("position_str:", position_str)
-            position_ = position_str.split(',')
-            yaw_ = state.get('yaw', 'Unknown')
-
-           
-
-            if len(position_str) == 3:
-                x = float(position_[0].split('=')[1])
-                y = float(position_[1].split('=')[1])
-                z= float(position_[2].split('=')[1])
-                yaw_yaw = float(yaw_.split('=')[1])
-                self.ui.usv_x_label.setText(f" {x}")
-                self.ui.usv_y_label.setText(f" {y}")
-                self.ui.usv_z_label.setText(f"{z}")
-                self.ui.usv_yaw_label.setText(f"{yaw_yaw}")
-            else:
-                self.ui.usv_x_label.setText(f"当前选中 USV X: Unknown")
-                self.ui.usv_y_label.setText(f"当前选中 USV Y: Unknown")
-                self.ui.usv_z_label.setText(f"当前选中 USV Z: Unknown")
-        except IndexError:
-            self.ui.info_textEdit.append("没有选中任何行")
+            position_str = state.get('position', 'Unknown')
+            yaw_str = state.get('yaw', 'Unknown')
+            # 解析 position 字符串，格式如 x=...,y=...,z=...
+            try:
+                position_ = [s.strip() for s in position_str.split(',')]
+                if len(position_) == 3 and all('=' in p for p in position_):
+                    x = float(position_[0].split('=')[1])
+                    y = float(position_[1].split('=')[1])
+                    z = float(position_[2].split('=')[1])
+                else:
+                    raise ValueError('位置字段格式错误')
+            except Exception:
+                x = y = z = 'Unknown'
+            # 解析 yaw 字符串，格式如 yaw=...
+            try:
+                if '=' in yaw_str:
+                    yaw_val = float(yaw_str.split('=')[1])
+                else:
+                    raise ValueError('yaw字段格式错误')
+            except Exception:
+                yaw_val = 'Unknown'
+            self.ui.usv_x_label.setText(f"{x}")
+            self.ui.usv_y_label.setText(f"{y}")
+            self.ui.usv_z_label.setText(f"{z}")
+            self.ui.usv_yaw_label.setText(f"{yaw_val}")
         except Exception as e:
             self.ui.info_textEdit.append(f"错误：获取选中行数据失败 - {str(e)}")
             self.ui.usv_id_label.setText("当前选中 USV ID: Unknown")
             self.ui.usv_x_label.setText("当前选中 USV X: Unknown")
             self.ui.usv_y_label.setText("当前选中 USV Y: Unknown")
-            self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")        
-    
+            self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")
+            self.ui.usv_yaw_label.setText("当前选中 USV Yaw: Unknown")
+   
     # 声音开始命令
     def sound_start_command(self):
         self.ros_signal.str_command.emit('sound_start')
