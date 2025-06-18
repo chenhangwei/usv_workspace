@@ -28,6 +28,7 @@ class GroundStationNode(Node):
         self.set_usv_arming_pubs = {}
         self.led_pubs = {}
         self.sound_pubs = {}
+        self.action_pubs = {}
         self.usv_states = {}
         self.last_ns_list = []
         self.is_runing = False
@@ -84,6 +85,7 @@ class GroundStationNode(Node):
             topic_arming = f"{ns}/set_usv_arming"
             topic_led = f"{ns}/gs_led_command"
             topic_sound = f"{ns}/gs_sound_command"
+            topic_action = f"{ns}/gs_action_command"
             
             self.usv_state_subs[usv_id] = self.create_subscription(
                 UsvStatus, topic_state, lambda msg, id=usv_id: self.usv_state_callback(msg, id), self.qos_a)
@@ -99,6 +101,8 @@ class GroundStationNode(Node):
                 String, topic_led, self.qos_a)
             self.sound_pubs[usv_id] = self.create_publisher(
                 String, topic_sound, self.qos_a)
+            self.action_pubs[usv_id] = self.create_publisher(
+                String, topic_action, self.qos_a)
             self.get_logger().info(f"New subscribers and publishers for {usv_id}")
 
         for ns in removed_ns:
@@ -124,6 +128,9 @@ class GroundStationNode(Node):
             if usv_id in self.sound_pubs:
                 self.destroy_publisher(self.sound_pubs[usv_id])
                 del self.sound_pubs[usv_id]
+            if usv_id in self.action_pubs:
+                self.destroy_publisher(self.action_pubs[usv_id])
+                del self.action_pubs[usv_id]
             self.get_logger().info(f"Destroying subscribers and publishers for {usv_id}")
     # 处理 USV 状态回调
     def usv_state_callback(self, msg, usv_id):
@@ -141,6 +148,7 @@ class GroundStationNode(Node):
                 'velocity': msg.velocity,
                 'yaw': msg.yaw,
                 'is_reached_target': msg.reached_target, # 是否到达目标点
+                'temperature': msg.temperature,# 温度
             }
             self.usv_states[usv_id] = state_data
 
@@ -365,7 +373,7 @@ class GroundStationNode(Node):
     def get_usvs_by_step(self, cluster_usv_list, step):
         return [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
     
-    # 设置 LED 或声音命令回调
+    # 处理 LED ,声音,转头命令回调
     def str_command_callback(self, msg):
         self.get_logger().info(f"接收到 LED 或声音命令: {msg}")
         if not isinstance(msg, str):
@@ -373,12 +381,19 @@ class GroundStationNode(Node):
             return
         command_str = String()
         command_str.data = msg
+
+        is_sound = "sound" in msg.lower() # 是否为声音命令
+        is_led = ("led" in msg.lower()) or ("color" in msg.lower())# 是否为LED命令
+        is_action = "neck" in msg.lower()
+
         for ns in self.last_ns_list:
             usv_id = ns.lstrip('/')
-            if usv_id in self.led_pubs:
+            if is_led and usv_id in self.led_pubs:
                 self.publish_queue.put((self.led_pubs[usv_id], command_str))
-            if usv_id in self.sound_pubs:
+            if is_sound and usv_id in self.sound_pubs:
                 self.publish_queue.put((self.sound_pubs[usv_id], command_str))
+            if is_action and usv_id in self.action_pubs:
+                self.publish_queue.put((self.action_pubs[usv_id], command_str))
 
     # 检查 USV 之间的传染逻辑
     def check_usv_infect(self):
@@ -461,4 +476,7 @@ class GroundStationNode(Node):
         for usv_id in list(self.sound_pubs.keys()):
             self.destroy_publisher(self.sound_pubs[usv_id])
             del self.sound_pubs[usv_id]
+        for usv_id in list(self.action_pubs.keys()):
+            self.destroy_publisher(self.action_pubs[usv_id])
+            del self.action_pubs[usv_id]
         super().destroy_node()

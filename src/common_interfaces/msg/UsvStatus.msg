@@ -14,3 +14,4 @@ geometry_msgs/Point position    # 位置（x, y, z）
 geometry_msgs/Twist velocity    # 速度信息（线速度和角速度）
 float32 yaw                     # 偏航角（单位：弧度）
 bool reached_target                  # 是否到达目标点
+float32 temperature              # 温度（单位：摄氏度）

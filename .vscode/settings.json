@@ -27,10 +27,16 @@
         "/opt/ros/jazzy/lib/python3.12/site-packages"
     ],
     "cSpell.words": [
+        "bringup",
         "chenhangwei",
+        "groundstationnode",
+        "laserscan",
         "MAVROS",
+        "prcentage",
         "pytest",
         "rclpy",
+        "rplidar",
+        "runing",
         "schematypens"
     ]
 }

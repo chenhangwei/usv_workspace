@@ -160,6 +160,16 @@ def generate_launch_description():
         parameters=[param_file],  # 加载参数文件
     )
 
+    # 鸭头转动节点
+    usv_head_action_node = Node(
+        package='usv_action',
+        executable='usv_head_action_node',
+        name='usv_head_action_node',
+        namespace=namespace ,  # 使用命名空间
+        output='screen',
+        parameters=[param_file],  # 加载参数文件
+    )
+
     # 定义 MAVROS 节点
     mavros_node = Node(
         package='mavros',
@@ -226,12 +236,13 @@ def generate_launch_description():
         # usv_ultrasonic_node,# 超声波节点
         auto_set_home_node,# 自动设置home点节点
         # rplidar_node,# RPLIDAR 节点
-        static_tf_laser_node,# 静态变换发布器节点
-        odom_to_tf,# odom 到 TF 的转换节点
+        # static_tf_laser_node,# 静态变换发布器节点
+        # odom_to_tf,# odom 到 TF 的转换节点
         usv_led_node,# LED 控制节点
         usv_sound_node, # 声音控制节点
         # usv_su04_node,  # SU04 超声波节点  
         usv_fan_node,  # 风扇控制节点  
         usv_ultrasonic_radar_node,  # 超声波雷达节点
+        usv_head_action_node,  # 鸭头转动节点
     ]
     )

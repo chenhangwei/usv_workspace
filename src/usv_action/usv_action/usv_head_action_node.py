@@ -4,6 +4,7 @@ from std_msgs.msg import String
 from mavros_msgs.msg import OverrideRCIn
 import time
 import random
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 SERVO_CHANNEL = 8  # MAIN 8通道，MAVROS下标从1开始
 PWM_MID = 1500     # 中位
@@ -14,11 +15,14 @@ PWM_PER_DEGREE = (PWM_MAX - PWM_MID) / 45  # 每度PWM步进
 class UsvHeadActionNode(Node):
     def __init__(self):
         super().__init__('usv_head_action_node')
+                 # 初始化 QoS 策略（根据需要调整）
+        self.qos = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.BEST_EFFORT)
+
         self.subscription = self.create_subscription(
             String,
             'gs_action_command',
             self.listener_callback,
-            10)
+             self.qos)
         self.rc_pub = self.create_publisher(OverrideRCIn, 'rc/override', 10) # MAVROS RC覆盖话题
         self.swinging = False # 是否正在摇摆
         self.next_swing_time = None # 下次摇摆时间

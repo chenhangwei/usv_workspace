@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         self.ui.departed_arming_pushButton.clicked.connect(self.departed_arming_command)  # 离群解锁按钮
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command) #离群加锁按钮
         self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command) #离群切换到guided模式
-        self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manaul_command) #离群切换到manual模式
+        self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command) #离群切换到manual模式
         self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command) #离群切换到ARCO模式
         self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command) #离群切换到Steering模式
 
@@ -130,7 +130,7 @@ class MainWindow(QMainWindow):
         self.ui.info_textEdit.append(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
         self.usv_cluster_namespace_list.clear()
 
-    # 集群设置manaul模式命令
+    # 集群设置manual模式命令
     def set_cluster_manual_command(self):   
         for usv_id in self.usv_cluster_list:
             usv_namespace =usv_id.get('namespace', None)
@@ -178,13 +178,13 @@ class MainWindow(QMainWindow):
         self.ui.info_textEdit.append(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
         self.usv_departed_namespace_list.clear()    
          
-    # 离群设置manaul模式命令
-    def set_departed_manaul_command (self): 
+    # 离群设置manual模式命令
+    def set_departed_manual_command (self): 
         for usv_id in self.usv_departed_list:
             usv_namespace =usv_id.get('namespace', None)
             self.usv_departed_namespace_list.append(usv_namespace)
         # 发送离群设置manual模式命令       
-        self.ros_signal.manaul_command.emit(self.usv_departed_namespace_list) 
+        self.ros_signal.manual_command.emit(self.usv_departed_namespace_list) 
         self.ui.info_textEdit.append(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()
 
@@ -359,7 +359,7 @@ class MainWindow(QMainWindow):
         state = {}
         headers = ["namespace", "mode", "connected", "armed", "battery_voltage",
                 "battery_prcentage", "power_supply_status", "position",
-                "velocity", "yaw", "is_reached_target"]
+                "velocity", "yaw", "is_reached_target","temperature"]
         for col, key in enumerate(headers):
             index = model.index(selected_row, col)
             state[key] = model.data(index) or "Unknown"
@@ -401,7 +401,7 @@ class MainWindow(QMainWindow):
         state = {}
         headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
                 "battery_prcentage", "power_supply_status", "position", 
-                "velocity", "yaw", "is_reached_target"]
+                "velocity", "yaw", "is_reached_target","temperature"]
         for col, key in enumerate(headers):
             index = model.index(selected_row, col)
             state[key] = model.data(index) or "Unknown"
@@ -487,7 +487,7 @@ class MainWindow(QMainWindow):
         self.cluster_table_model.setRowCount(len(lists))
         self.cluster_table_model.setColumnCount(11)
         self.cluster_table_model.setHorizontalHeaderLabels(["编号", "当前模式",
-                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标'])
+                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标','温度'])
         for i, state in enumerate(lists):
             # 检查 state 是否为字典
             if isinstance(state, dict):
@@ -502,6 +502,7 @@ class MainWindow(QMainWindow):
                 self.cluster_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
                 self.cluster_table_model.setItem(i, 10, QStandardItem(str(state.get('is_reached_target', 'Unknown'))))
+                self.cluster_table_model.setItem(i, 11, QStandardItem(str(state.get('temperature', 'Unknown'))))
     
     # 更新离群表格
     def update_departed_table(self, lists):
@@ -510,7 +511,7 @@ class MainWindow(QMainWindow):
         self.departed_table_model.setRowCount(len(lists))
         self.departed_table_model.setColumnCount(11)
         self.departed_table_model.setHorizontalHeaderLabels(["编号",  "当前模式",
-                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标'])
+                                                            "连接状态", "武装状态", '电压V', '电量%', '电池状态', '坐标', '速度', '偏角','是否到达目标','温度'])
         for i, state in enumerate(lists):
             if isinstance(state, dict):
                 self.departed_table_model.setItem(i, 0, QStandardItem(str(state.get('namespace', 'Unknown'))))
@@ -524,6 +525,7 @@ class MainWindow(QMainWindow):
                 self.departed_table_model.setItem(i, 8, QStandardItem(str(state.get('velocity', 'Unknown'))))
                 self.departed_table_model.setItem(i, 9, QStandardItem(str(state.get('yaw', 'Unknown'))))
                 self.departed_table_model.setItem(i, 10, QStandardItem(str(state.get('is_reached_target', 'Unknown'))))
+                self.departed_table_model.setItem(i, 11, QStandardItem(str(state.get('temperature', 'Unknown'))))
    
     # 更新选中行数据
     def update_selected_table_row(self):
@@ -542,7 +544,7 @@ class MainWindow(QMainWindow):
             # 获取整行状态数据
             headers = ["namespace", "mode", "connected", "armed", "battery_voltage", 
                        "battery_prcentage", "power_supply_status", "position", 
-                       "velocity", "yaw", "is_reached_target"]
+                       "velocity", "yaw", "is_reached_target", "temperature"]
             state = {}
             for col, key in enumerate(headers):
                 index = model.index(selected_row, col)
