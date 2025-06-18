@@ -25,5 +25,12 @@
         "/home/chenhangwei/px4_ros_ws/src/install/px4_ros_com/lib/python3.12/site-packages",
         "/home/chenhangwei/px4_ros_ws/src/install/px4_msgs/lib/python3.12/site-packages",
         "/opt/ros/jazzy/lib/python3.12/site-packages"
+    ],
+    "cSpell.words": [
+        "chenhangwei",
+        "MAVROS",
+        "pytest",
+        "rclpy",
+        "schematypens"
     ]
 }
