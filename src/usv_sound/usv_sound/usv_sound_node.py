@@ -43,8 +43,8 @@ class UsvSoundNode(Node):
         self.loop_thread = None
         self.loop_stop_event = threading.Event()
         self.low_voltage = False
-        self.sound_types = ['gaga1', 'gaga2', 'gaga3', 'gaga4']
-        self.moon_type = 'moon'
+        self.sound_types = ['gaga11', 'gaga22', 'gaga33', 'gaga44']
+        self.moon_type = 'moon1'
         self.voltage = 12.0
 
     def gs_sound_callback(self, msg):
@@ -114,6 +114,13 @@ class UsvSoundNode(Node):
         if not os.path.exists(filename):
             self.get_logger().warn(f'文件不存在: {filename}')
             return
+        
+        # 输出所有可用音频输出设备信息
+        for i in range(self.audio.get_device_count()):
+            info = self.audio.get_device_info_by_index(i)
+            self.get_logger().info(f"设备{i}: {info['name']}, 输出通道: {info['maxOutputChannels']}")
+        default_index = self.audio.get_default_output_device_info()['index']    
+
         try:
             with wave.open(filename, 'rb') as wf:
                 try:
@@ -125,7 +132,7 @@ class UsvSoundNode(Node):
                         # rate=44100,              # 44.1 kHz
                         rate=wf.getframerate(),
                         output=True,
-                        output_device_index=None,  # 不指定索引，使用 default
+                        output_device_index= default_index ,  # 不指定索引，使用 default
                         frames_per_buffer=1024  # 添加此参数
 
                     )

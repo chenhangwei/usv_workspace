@@ -1,5 +1,5 @@
 {
-    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/status_interfaces",
+    "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces",
     "python.autoComplete.extraPaths": [
         "/home/chenhangwei/dev_ws/install/usv_drivers/lib/python3.12/site-packages",
         "/home/chenhangwei/dev_ws/install/usv_control/lib/python3.12/site-packages",
@@ -27,16 +27,19 @@
         "/opt/ros/jazzy/lib/python3.12/site-packages"
     ],
     "cSpell.words": [
+        "batterystate",
         "bringup",
         "chenhangwei",
         "groundstationnode",
         "laserscan",
         "MAVROS",
         "prcentage",
+        "pyaudio",
         "pytest",
         "rclpy",
         "rplidar",
         "runing",
-        "schematypens"
+        "schematypens",
+        "setpoint"
     ]
 }

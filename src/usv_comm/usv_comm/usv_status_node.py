@@ -34,7 +34,7 @@ class UsvStatusNode(Node):
         )
 
         self.state_publisher=self.create_publisher(UsvStatus,'usv_state',10)
-        self.temperature_publisher=self.create_publisher(Int32,'usv_temperature',10)
+        self.temperature_publisher=self.create_publisher(Float32,'usv_temperature',10)
 
         
         # 临时目标点，初始化为 [0.0, 0.0, 0.0]
@@ -176,19 +176,22 @@ class UsvStatusNode(Node):
             self.usv_state_msg.reached_target = False
             # self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
 
-     
+        temp=Float32()
+        temp.data=self.get_temperature()
+
+        self.usv_state_msg.temperature=temp.data
+
+        self.temperature_publisher.publish(temp)
         self.state_publisher.publish( self.usv_state_msg)
 
-        temp=Int32()
-        temp.data=self.get_temperature()
-        self.temperature_publisher.publish(temp)
+       
 
 
 
     def get_temperature(self):
   
         with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-            temp = int(f.read()) 
+            temp = float(f.read()) 
         return temp
 
     

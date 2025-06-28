@@ -15,7 +15,7 @@ class UsvLedNode(Node):
         self.qos = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.BEST_EFFORT)
 
         # 声明并获取串口参数 
-        self.declare_parameter('port', '/dev/ttyUSB0') # 默认串口
+        self.declare_parameter('port', '/dev/ttyUSB1') # 默认串口
         self.declare_parameter('baudrate',115200) # 默认波特率 
         port=self.get_parameter('port').get_parameter_value().string_value
         baud=self.get_parameter('baudrate').get_parameter_value().integer_value

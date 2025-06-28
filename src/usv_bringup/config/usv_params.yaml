@@ -4,18 +4,16 @@ mavros_node:
     gcs_url: ""
     tgt_system: 1
     tgt_component: 1
-    vision_pose.enable: true
-    
-
+    vision_pose:
+      enable: true   # 推荐改为嵌套结构，避免使用 . 分隔
 
 usv_status_node:
   ros__parameters:
     dummy_param: true
-   
 
 usv_avoidance_node:
   ros__parameters:
-    in_distance_value : 1.2 # 设置达到避障临时目标点距离为 1.2 米
+    in_distance_value: 1.2
 
 usv_command_node:
   ros__parameters:
@@ -23,15 +21,7 @@ usv_command_node:
 
 usv_control_node:
   ros__parameters:
-     dummy_param: true
-
-# usv_laserscan_node:
-#   ros__parameters:
-#     dummy_param: true
-
-# usv_ultrasonic_node:
-#   ros__parameters:
-#     dummy_param: true
+    dummy_param: true
 
 usv_uwb_node:
   ros__parameters:
@@ -44,3 +34,4 @@ usv_led_node:
 usv_sound_node:
   ros__parameters:
     dummy_param: true
+
