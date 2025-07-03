@@ -6,7 +6,7 @@ import time
 import random
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
-SERVO_CHANNEL = 8  # MAIN 8通道，MAVROS下标从1开始
+SERVO_CHANNEL = 2  # MAIN 2通道，MAVROS下标从1开始
 PWM_MID = 1500     # 中位
 PWM_MIN = 1100
 PWM_MAX = 1900
@@ -47,7 +47,7 @@ class UsvHeadActionNode(Node):
     def timer_callback(self):
         now = self.get_clock().now().nanoseconds / 1e9 # 获取当前时间（秒）
         if self.waiting_to_center:
-            if now >= self.center_time:
+            if self.center_time is not None and now >= self.center_time:
                 self.center()
                 self.waiting_to_center = False
                 self.schedule_next_swing()
@@ -61,7 +61,7 @@ class UsvHeadActionNode(Node):
             else:
                 self.move_angle(angle)
             self.waiting_to_center = True
-            ran = random.choice(2,4)  # 随机2-4秒后回中
+            ran = random.randint(2, 4)  # 随机2-4秒后回中
             self.center_time = now + ran # 设置回中时间
     
     def schedule_next_swing(self): # 安排下次摇摆

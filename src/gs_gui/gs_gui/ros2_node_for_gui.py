@@ -80,7 +80,7 @@ class GroundStationNode(Node):
             usv_id = ns.lstrip('/')
             topic_state = f"{ns}/usv_state"
             topic_position = f"{ns}/set_usv_target_position"
-            topic_velocity = f"{ns}/set_usv_target_velocity"
+            # topic_velocity = f"{ns}/set_usv_target_velocity"
             topic_mode = f"{ns}/set_usv_mode"
             topic_arming = f"{ns}/set_usv_arming"
             topic_led = f"{ns}/gs_led_command"
@@ -91,8 +91,8 @@ class GroundStationNode(Node):
                 UsvStatus, topic_state, lambda msg, id=usv_id: self.usv_state_callback(msg, id), self.qos_a)
             self.set_usv_target_position_pubs[usv_id] = self.create_publisher(
                 PoseStamped, topic_position, self.qos_a)
-            self.set_usv_target_velocity_pubs[usv_id] = self.create_publisher(
-                Float32, topic_velocity, self.qos_a)
+            # self.set_usv_target_velocity_pubs[usv_id] = self.create_publisher(
+            #     Float32, topic_velocity, self.qos_a)
             self.set_usv_mode_pubs[usv_id] = self.create_publisher(
                 String, topic_mode, self.qos_a)
             self.set_usv_arming_pubs[usv_id] = self.create_publisher(
@@ -113,9 +113,9 @@ class GroundStationNode(Node):
             if usv_id in self.set_usv_target_position_pubs:
                 self.destroy_publisher(self.set_usv_target_position_pubs[usv_id])
                 del self.set_usv_target_position_pubs[usv_id]
-            if usv_id in self.set_usv_target_velocity_pubs:
-                self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
-                del self.set_usv_target_velocity_pubs[usv_id]
+            # if usv_id in self.set_usv_target_velocity_pubs:
+            #     self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
+            #     del self.set_usv_target_velocity_pubs[usv_id]
             if usv_id in self.set_usv_mode_pubs:
                 self.destroy_publisher(self.set_usv_mode_pubs[usv_id])
                 del self.set_usv_mode_pubs[usv_id]
@@ -272,7 +272,7 @@ class GroundStationNode(Node):
                     self.run_step += 1
                 return
 
-            arrived_count = sum(1 for usv_id in self.usv_states if not self.usv_states.get(usv_id, {}).get('is_runing', True))
+            arrived_count = sum(1 for usv_id in self.usv_states if not self.usv_states.get(usv_id, {}).get('is_reached_target', True))
             for ns in cluster_usv_list:
                 if not isinstance(ns, dict):
                     self.get_logger().warn(f"Invalid target format: {ns}, skip")
@@ -309,26 +309,7 @@ class GroundStationNode(Node):
             self.get_logger().error(f"Failed to publish cluster target point: {e}")
 
    
-        self.get_logger().info("接收到集群目标速度")
-        try:
-            # 假设 msg 是 UsvSetPoint 或 UsvSetPoint 列表
-            usv_list = [msg] if not isinstance(msg, list) else msg
-            for target in usv_list:
-                if not hasattr(target, 'usv_id'):
-                    self.get_logger().warn(f"无效的目标格式: {target}, 跳过")
-                    continue
-                usv_id = target.usv_id
-                if usv_id not in self.set_usv_target_velocity_pubs:
-                    self.get_logger().warn(f"无效 usv_id 或发布器不存在: {usv_id}, 跳过")
-                    continue
-                velocity = target.velocity
-                target_velocity_msg = Float32()
-                target_velocity_msg.data = float(velocity)
-                self.publish_queue.put((self.set_usv_target_velocity_pubs[usv_id], target_velocity_msg))
-                # self.get_logger().info(f"发布速度到 {usv_id}: {velocity}")
-        except Exception as e:
-            self.get_logger().error(f"处理集群目标速度失败: {e}")
-
+      
     # 设置离群目标点回调
     def set_departed_target_point_callback(self, msg):
         self.get_logger().info("接收到离群目标点")
@@ -461,9 +442,9 @@ class GroundStationNode(Node):
         for usv_id in list(self.set_usv_target_position_pubs.keys()):
             self.destroy_publisher(self.set_usv_target_position_pubs[usv_id])
             del self.set_usv_target_position_pubs[usv_id]
-        for usv_id in list(self.set_usv_target_velocity_pubs.keys()):
-            self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
-            del self.set_usv_target_velocity_pubs[usv_id]
+        # for usv_id in list(self.set_usv_target_velocity_pubs.keys()):
+        #     self.destroy_publisher(self.set_usv_target_velocity_pubs[usv_id])
+        #     del self.set_usv_target_velocity_pubs[usv_id]
         for usv_id in list(self.set_usv_mode_pubs.keys()):
             self.destroy_publisher(self.set_usv_mode_pubs[usv_id])
             del self.set_usv_mode_pubs[usv_id]

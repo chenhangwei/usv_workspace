@@ -6,6 +6,7 @@ import serial
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import time
 import random
+import math
 
 class UsvLedNode(Node):
     def __init__(self):
@@ -79,8 +80,8 @@ class UsvLedNode(Node):
     def build_command(self, rgb_data, extend_times=60):
         """
         构建灯带控制串口指令，严格按照：
-        DD 55 EE 00 00 00 01 00 99 01 00 00 [数据长度2字节大端] [扩展次数2字节大端] [RGB数据] AA BB
-        :param rgb_data: list 或 bytes，RGB数据（如 [R, G, B] 或 [R1, G1, B1, ...]）
+        DD 55 EE 00 00 00 01 00 99 01 00 00 [数据长度2字节大端] [扩展次数2字节大端] [RBG数据] AA BB
+        :param rgb_data: list 或 bytes，RBG数据（如 [R, B, G] 或 [R1, B1, G1, ...]）
         :param extend_times: int，扩展次数（2字节，大端）
         """
         header = bytes.fromhex('DD55EE')  # 帧头
@@ -94,8 +95,15 @@ class UsvLedNode(Node):
         data_len = len(rgb_data).to_bytes(2, 'big')
         # 扩展次数（2字节，大端）
         extend_bytes = extend_times.to_bytes(2, 'big')
-        # 直接使用RGB顺序
-        rgb_bytes = bytes(rgb_data)
+        # 直接使用RBG顺序
+        rbg_data = []
+        # 支持多组颜色
+        for i in range(0, len(rgb_data), 3):
+            r = rgb_data[i]
+            g = rgb_data[i+1]
+            b = rgb_data[i+2]
+            rbg_data.extend([r, b, g])
+        rgb_bytes = bytes(rbg_data)
         tail = bytes.fromhex('AABB')
         command = (header + group_addr + device_addr + port + func + led_type + reserved +
                    data_len + extend_bytes + rgb_bytes + tail)
@@ -168,13 +176,21 @@ class UsvLedNode(Node):
     def usv_batterystate_callback(self, msg):
         if isinstance(msg, BatteryState):
             self.usv_state = msg
-            if self.usv_state.voltage < 11.1:
+            voltage = getattr(self.usv_state, 'voltage', None)
+            # self.get_logger().info(f"收到电池电压: {voltage}")
+            low_threshold = 11.1
+            recover_threshold = 11.6  # 增加恢复阈值
+            # 过滤无效电压
+            if voltage is None or voltage <= 0 or (isinstance(voltage, float) and math.isnan(voltage)):
+                # self.get_logger().warn("收到无效电池电压，忽略本次数据")
+                return
+            if voltage < low_threshold:
                 if not self.is_low_battery_level:
                     self.last_mode_before_low_battery = self.mode
                     self.mode = 'low_battery_breath'
                     self.get_logger().warn('USV 电池电压低于 11.1V，进入低电量呼吸灯状态')
                 self.is_low_battery_level = True
-            else:
+            elif voltage > recover_threshold:
                 if self.is_low_battery_level:
                     # 恢复原有模式
                     self.mode = self.last_mode_before_low_battery or 'color_switching'
@@ -207,9 +223,10 @@ class UsvLedNode(Node):
             ]
             if t >= 1.0:
                 self.in_transition = False
+                self.last_switch_time = now  # 渐变结束后更新时间，保证停留
             rgb_to_send = self.current_color
         # 低电压呼吸灯，强制高频
-        if self.mode == 'low_battery_breath':
+        elif self.mode == 'low_battery_breath':
             self.set_timer_period(self.timer_period_high)
             voltage = self.usv_state.voltage if hasattr(self.usv_state, 'voltage') else 12.0
             if voltage < 11.1:
@@ -228,6 +245,7 @@ class UsvLedNode(Node):
         elif self.mode == 'color_switching':
             self.set_timer_period(self.timer_period_high)
             if not self.in_transition:
+                # 渐变结束后等待 hold_duration 再切换
                 if now - self.last_switch_time >= self.hold_duration:
                     self.in_transition = True
                     self.transition_start_color = self.current_color[:]
@@ -242,11 +260,12 @@ class UsvLedNode(Node):
                 ]
                 if t >= 1.0:
                     self.in_transition = False
-                    self.last_switch_time = now
+                    self.last_switch_time = now  # 渐变结束后更新时间
             rgb_to_send = self.current_color
         elif self.mode == 'random_color_change':
             self.set_timer_period(self.timer_period_high)
             if not self.in_transition:
+                # 渐变结束后等待 hold_duration 再切换
                 if now - self.last_switch_time >= self.hold_duration:
                     self.in_transition = True
                     self.transition_start_color = self.current_color[:]
@@ -260,7 +279,7 @@ class UsvLedNode(Node):
                 ]
                 if t >= 1.0:
                     self.in_transition = False
-                    self.last_switch_time = now
+                    self.last_switch_time = now  # 渐变结束后更新时间
             rgb_to_send = self.current_color
         elif self.mode == 'color_select':
             self.set_timer_period(self.timer_period_low)
@@ -273,8 +292,16 @@ class UsvLedNode(Node):
             rgb_to_send = [0, 0, 0]
         # 只有RGB变化时才写串口
         if rgb_to_send is not None and (self.last_sent_rgb != rgb_to_send):
-            command = self.build_command(rgb_to_send, 60)
+            # 转换为RGB顺序
+            rbg_to_send = []
+            for i in range(0, len(rgb_to_send), 3):
+                r = rgb_to_send[i]
+                g = rgb_to_send[i+1]
+                b = rgb_to_send[i+2]
+                rbg_to_send.extend([r, g, b])
+            command = self.build_command(rbg_to_send, 60)
             self.ser.write(command)
+            self.last_sent_rgb = rgb_to_send[:]  # 及时缓存，防止重复发送
             # self.get_logger().info(f'发送LED命令：{command.hex()}')
             # try:
             #     resp = self.ser.read_all()
@@ -282,7 +309,6 @@ class UsvLedNode(Node):
             #         self.get_logger().info(f'串口返回：{resp}')
             # except Exception as e:
             #     self.get_logger().warn(f'读取串口返回异常: {e}')
-            # self.last_sent_rgb = rgb_to_send[:]
               
 def main(args=None):
     rclpy.init(args=args)

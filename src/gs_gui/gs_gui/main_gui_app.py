@@ -576,10 +576,10 @@ class MainWindow(QMainWindow):
                     yaw_val = float(yaw_str)
                 except Exception:
                     yaw_val = 'Unknown'
-            self.ui.usv_x_label.setText(f"{x}")
-            self.ui.usv_y_label.setText(f"{y}")
-            self.ui.usv_z_label.setText(f"{z}")
-            self.ui.usv_yaw_label.setText(f"{yaw_val}")
+            self.ui.usv_x_label.setText(f"{x:.2f}")
+            self.ui.usv_y_label.setText(f"{y:.2f}")
+            self.ui.usv_z_label.setText(f"{z:.2f}")
+            self.ui.usv_yaw_label.setText(f"{yaw_val:.2f}")
         except Exception as e:
             self.ui.info_textEdit.append(f"错误：获取选中行数据失败 - {str(e)}")
             self.ui.usv_id_label.setText("当前选中 USV ID: Unknown")

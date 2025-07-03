@@ -180,7 +180,7 @@ def generate_launch_description():
         parameters=[
             param_file,  # 加载参数文件
             {'fcu_url': 'serial:///dev/ttyACM0:921600'},  # 飞控串口和波特率
-            {'gcs_url': ''},  # 禁用 GCS 代理
+            {'gcs_url': 'udp://:14550@192.168.68.51:14550'},  # 禁用 GCS 代理
             {'tgt_system': 1},  # 飞控的系统 ID
             {'tgt_component': 1},  # 飞控的组件 ID
             # {'plugin_blacklist': ['global_position']},  # 禁用 global_position 插件        

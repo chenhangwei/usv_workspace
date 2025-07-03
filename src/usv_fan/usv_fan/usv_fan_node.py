@@ -34,7 +34,7 @@ class UsvFanNode(Node):
         if temp >= self.temp_threshold_on and not self.fan_state:
             self.line.set_value(1)  # 开启风扇
             self.fan_state = True
-            # self.get_logger().info('Fan turned ON')
+            self.get_logger().info('Fan turned ON')
         elif temp <= self.temp_threshold_off and self.fan_state:
             self.line.set_value(0)  # 关闭风扇（低电平）
             self.fan_state = False
