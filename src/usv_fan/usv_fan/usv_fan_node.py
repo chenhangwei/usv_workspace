@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int32
+from std_msgs.msg import Float32
 import gpiod as gpiod # 使用 pgpio 
 
 class UsvFanNode(Node):
@@ -9,7 +9,7 @@ class UsvFanNode(Node):
         super().__init__('usv_fan_node')
         # 订阅 usv_temperature 话题
         self.subscription = self.create_subscription(
-            Int32,
+            Float32,
             'usv_temperature',
             self.temperature_callback,
             10
@@ -28,7 +28,7 @@ class UsvFanNode(Node):
     def temperature_callback(self, msg):
         temp = msg.data  # 温度（毫摄氏度）
         temp_celsius = temp / 1000.0  # 转换为摄氏度，仅用于日志
-        # self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
+        self.get_logger().info(f'Received temperature: {temp_celsius:.1f}°C')
 
         # 控制风扇
         if temp >= self.temp_threshold_on and not self.fan_state:

@@ -8,6 +8,7 @@ from std_msgs.msg import Bool, Header,Float32,String
 import math
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import time
+from sensor_msgs.msg import BatteryState
 
 class UsvControlNode(Node):
     def __init__(self):
@@ -31,6 +32,15 @@ class UsvControlNode(Node):
         self.state_sub = self.create_subscription(
             State, 'state', self.state_callback, qos)
         
+        # 订阅 MAVROS 的电池状态主题
+        self.battery_sub = self.create_subscription(
+                BatteryState,
+                f'battery',  # 使用命名空间
+                self.usv_battery_callback,
+                qos
+            )
+   
+        
         # 订阅需要运行的目标点
         self.target_point_sub = self.create_subscription(
             PoseStamped, 'set_usv_target_position', self.set_target_point_callback, qos)
@@ -48,6 +58,7 @@ class UsvControlNode(Node):
         self.publish_target_timer=self.create_timer(0.05,self.publish_target)
     
         self.current_state = State() # 当前状态
+        self.usv_battery=BatteryState() #电池电压信息
         self.current_target_position =PoseStamped()#目标点
         self.avoidance_position=PositionTarget()#避障目标点
         self.avoidance_flag=Bool()#避障标记
@@ -60,6 +71,15 @@ class UsvControlNode(Node):
     def state_callback(self, msg):
         if isinstance(msg, State):
             self.current_state = msg
+
+    def usv_battery_callback(self, msg):
+        if  isinstance(msg, BatteryState):
+            voltage = msg.voltage
+            # 过滤无效电压
+            if voltage is None or voltage <= 0 or (isinstance(voltage, float) and math.isnan(voltage)):
+                # self.get_logger().warn("收到无效电池电压，忽略本次数据")
+                return
+            self.usv_battery=msg
 
     # 订阅到达目标点话题
     def set_target_point_callback(self, msg):
@@ -74,7 +94,7 @@ class UsvControlNode(Node):
         if not isinstance(msg,Float32):
             self.get_logger().info('目标速度为空，忽略')
             return
-        self.speed_value=self.speed_to_pwm(msg.data,0.0,100,1000,2000)
+       
 
     # 订阅避障目标点
     def set_avoidance_target_position_callback(self,msg):
@@ -90,17 +110,17 @@ class UsvControlNode(Node):
             return
         self.avoidance_flag.data=msg.data
 
-    # 限制速度范围    
-    def speed_to_pwm(self, speed, speed_min=0.0, speed_max=100.0, pwm_min=1000, pwm_max=2000):
-        # 限制 speed 范围
-        speed = max(min(speed, speed_max), speed_min)
-        return int(((speed - speed_min) / (speed_max - speed_min)) * (pwm_max - pwm_min) + pwm_min)
-   
+
     # 发布目标点
     def publish_target(self):
         if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
                 return  
-        if not self.avoidance_flag.data:    
+        
+        if self.usv_battery.voltage < 11.1 :
+            px=0.0
+            py=0.0
+            # pz=0.0
+        elif not self.avoidance_flag.data:    
             px=self.current_target_position.pose.position.x
             py=self.current_target_position.pose.position.y
             pz=self.current_target_position.pose.position.z
@@ -109,7 +129,7 @@ class UsvControlNode(Node):
             oy=self.current_target_position.pose.orientation.y
             oz=self.current_target_position.pose.orientation.z
             ow=self.current_target_position.pose.orientation.w
-        else :
+        else:
             px=self.avoidance_position.position.x
             py=self.avoidance_position.position.y
             pz=self.avoidance_position.position.z  

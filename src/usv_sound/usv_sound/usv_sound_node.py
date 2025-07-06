@@ -132,7 +132,7 @@ class UsvSoundNode(Node):
                         # rate=44100,              # 44.1 kHz
                         rate=wf.getframerate(),
                         output=True,
-                        output_device_index= default_index ,  # 不指定索引，使用 default
+                        output_device_index=int(default_index),  # 不指定索引，使用 default
                         frames_per_buffer=1024  # 添加此参数
 
                     )

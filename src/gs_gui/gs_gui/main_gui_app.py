@@ -58,7 +58,7 @@ class MainWindow(QMainWindow):
         self.ui.sound_start_pushButton.clicked.connect(self.sound_start_command)
         self.ui.sound_stop_pushButton.clicked.connect(self.sound_stop_command)
         self.ui.neck_swinging_pushButton.clicked.connect(self.neck_swinging_command)
-        self.ui.neck_stop_pushButton.clicked.connect(self.neck_swinging_command)
+        self.ui.neck_stop_pushButton.clicked.connect(self.neck_stop_command)
 
         self.ui.led1_pushButton.clicked.connect(self.led1_command)
         self.ui.led2_pushButton.clicked.connect(self.led2_command)

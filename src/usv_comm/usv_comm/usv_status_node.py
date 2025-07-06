@@ -12,6 +12,7 @@ from common_interfaces.msg import UsvStatus
 from geometry_msgs.msg import TwistStamped,PoseStamped,Vector3,Point
 from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+import math
 
 class UsvStatusNode(Node):
     def __init__(self):
@@ -113,6 +114,13 @@ class UsvStatusNode(Node):
 
     def usv_battery_callback(self, msg):
         if  isinstance(msg, BatteryState):
+
+            voltage = msg.voltage
+            # 过滤无效电压
+            if voltage is None or voltage <= 0 or (isinstance(voltage, float) and math.isnan(voltage)):
+                # self.get_logger().warn("收到无效电池电压，忽略本次数据")
+                return
+
             self.usv_battery=msg
 
 
@@ -140,6 +148,7 @@ class UsvStatusNode(Node):
 
         self.usv_state_msg.guided=self.usv_state.guided
 
+ 
         self.usv_state_msg.battery_voltage=self.usv_battery.voltage
 
         self.usv_state_msg.battery_percentage=self.usv_battery.percentage
@@ -171,10 +180,10 @@ class UsvStatusNode(Node):
 
         if dist < 1.0:
             self.usv_state_msg.reached_target = True
-            self.get_logger().info(f'到达目标点，当前距离：{dist:.2f} 米')          
+            # self.get_logger().info(f'到达目标点，当前距离：{dist:.2f} 米')          
         else:
             self.usv_state_msg.reached_target = False
-            self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
+            # self.get_logger().info(f'前往目标中，当前距离：{dist:.2f} 米')
 
         temp=Float32()
         temp.data=self.get_temperature()
