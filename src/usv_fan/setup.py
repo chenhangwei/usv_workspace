@@ -1,3 +1,8 @@
+"""
+无人船风扇控制包(usv_fan)的Python打包配置文件
+该文件定义了ROS 2包的元数据和安装要求
+"""
+
 from setuptools import find_packages, setup
 
 package_name = 'usv_fan'
@@ -11,11 +16,17 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+    ],
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='该包为USV（无人船）系统提供风扇控制节点，实现温度监测与自动风扇开关，保障设备安全运行。This package provides a fan control node for USV (Unmanned Surface Vehicle) systems, enabling temperature monitoring and automatic fan switching to ensure safe device operation.',
+    description='Fan control module for Unmanned Surface Vehicles',
+    long_description="""该包提供了USV平台风扇系统的控制接口，
+支持温度调节和船上电子设备的环境控制。
+This package provides control interfaces for fan systems used in USV applications,
+enabling temperature regulation and environmental control for onboard electronics.""",
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
@@ -23,4 +34,15 @@ setup(
             'usv_fan_node = usv_fan.usv_fan_node:main',
         ],
     },
+    classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: Apache Software License',
+        'Programming Language :: Python :: 3',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    ],
+    keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Fan Control'],
+    python_requires='>=3.6',
+    url='https://github.com/chenhangwei/usv_workspace',
 )

@@ -1,3 +1,8 @@
+"""
+无人船坐标变换包(usv_tf)的Python打包配置文件
+该文件定义了ROS 2包的元数据和安装要求
+"""
+
 from setuptools import find_packages, setup
 
 package_name = 'usv_tf'
@@ -11,11 +16,18 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+    ],
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='该包为USV（无人船）系统提供坐标变换与TF广播功能，实现多坐标系（如地图、船体、传感器等）之间的实时转换与关联，支持导航与多传感器融合。This package provides coordinate transformation and TF broadcasting functions for USV (Unmanned Surface Vehicle) systems, enabling real-time conversion and association between multiple coordinate frames (such as map, base, and sensors), supporting navigation and multi-sensor fusion.',
+    description='Coordinate transformation modules for Unmanned Surface Vehicles',
+    long_description="""该包处理USV系统中的TF变换和坐标管理，
+提供车辆中不同组件和参考帧之间 essential 的空间关系定义。
+This package handles TF transformations and coordinate management for USV systems,
+providing essential spatial relationship definitions between different components
+and reference frames in the vehicle.""",
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
@@ -24,4 +36,15 @@ setup(
             'odom_to_tf = usv_tf.odom_to_tf:main',
         ],
     },
+    classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: Apache Software License',
+        'Programming Language :: Python :: 3',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    ],
+    keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'TF', 'Transform'],
+    python_requires='>=3.6',
+    url='https://github.com/chenhangwei/usv_workspace',
 )

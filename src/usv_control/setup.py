@@ -1,3 +1,8 @@
+"""
+无人船控制包(usv_control)的Python打包配置文件
+该文件定义了ROS 2包的元数据和安装要求
+"""
+
 from setuptools import find_packages, setup
 
 package_name = 'usv_control'
@@ -10,21 +15,36 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-
-
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+    ],
     zip_safe=True,
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
-    description='该包为USV（无人船）系统提供控制相关节点与功能，包括目标点、速度、避障等控制指令的处理与发布，支持多种控制模式和任务需求。This package provides control-related nodes and functions for USV (Unmanned Surface Vehicle) systems, including processing and publishing of setpoints, velocity, and obstacle avoidance commands, supporting various control modes and mission requirements.',
+    description='Control algorithms and modules for Unmanned Surface Vehicles',
+    long_description="""该包实现了USV系统的控制算法和模块，
+包括路径规划、避障和自主导航等功能。
+This package implements control algorithms and modules for Unmanned Surface Vehicle systems,
+including path planning, obstacle avoidance, and autonomous navigation functionalities.""",
     license='Apache License 2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'usv_control_node = usv_control.usv_control_node:main',
             'usv_avoidance_node = usv_control.usv_avoidance_node:main',
             'usv_command_node = usv_control.usv_command_node:main',
+            'usv_control_node = usv_control.usv_control_node:main',
         ],
     },
+    classifiers=[
+        'Development Status :: 3 - Alpha',
+        'Intended Audience :: Developers',
+        'License :: OSI Approved :: Apache Software License',
+        'Programming Language :: Python :: 3',
+        'Topic :: Software Development :: Libraries :: Python Modules',
+        'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    ],
+    keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Control'],
+    python_requires='>=3.6',
+    url='https://github.com/chenhangwei/usv_workspace',
 )

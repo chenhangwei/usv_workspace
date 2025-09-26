@@ -3,16 +3,35 @@
 <package format="3">
   <name>usv_bringup</name>
   <version>0.0.0</version>
-  <description>该包用于USV（无人船）系统的启动与集成管理，提供多节点/多模块的一键启动脚本和配置，方便单艇或集群的快速部署和调试。
-This package provides bringup and integrated launch management for USV (Unmanned Surface Vehicle) systems, including unified launch scripts and configurations for multi-node/multi-module deployment, enabling fast deployment and debugging for single or multiple USVs.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    ROS 2 launch package for USV onboard system management.
+    This package provides bringup and integrated launch management for USV 
+    (Unmanned Surface Vehicle) systems, including unified launch scripts and 
+    configurations for multi-node/multi-module deployment, enabling fast 
+    deployment and debugging for single or multiple USVs.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
+  <buildtool_depend>ament_python</buildtool_depend>
+  
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>rplidar_ros</exec_depend>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

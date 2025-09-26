@@ -3,19 +3,27 @@
 <package format="3">
   <name>usv_comm</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供通信相关节点与功能，包括状态信息的组装与发布、自动设置home点等，支持多模块间的数据交互。
-This package provides communication-related nodes and functions for USV (Unmanned Surface Vehicle) systems, including status message assembly and publishing, auto home point setting, and supports data exchange between multiple modules.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Communication modules for Unmanned Surface Vehicles.
+    This package handles communication protocols and data exchange between 
+    different components of the USV system, including sensor data processing, 
+    status monitoring, and command transmission.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>common_interfaces</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

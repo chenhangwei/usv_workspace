@@ -3,21 +3,27 @@
 <package format="3">
   <name>usv_tf</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供坐标变换与TF广播功能，实现多坐标系（如地图、船体、传感器等）之间的实时转换与关联，支持导航与多传感器融合。
-This package provides coordinate transformation and TF broadcasting functions for USV (Unmanned Surface Vehicle) systems, enabling real-time conversion and association between multiple coordinate frames (such as map, base, and sensors), supporting navigation and multi-sensor fusion.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Coordinate transformation modules for Unmanned Surface Vehicles.
+    This package handles TF transformations and coordinate management for USV systems, 
+    providing essential spatial relationship definitions between different components 
+    and reference frames in the vehicle.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>geometry_msgs</depend>
-  <depend>tf_ros</depend>
-  <depend>tf_transformations</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

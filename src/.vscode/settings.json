@@ -29,10 +29,12 @@
     "python.analysis.typeCheckingMode": "standard",
     "cSpell.words": [
         "AABB",
+        "acked",
         "actionopen",
         "actionrviz",
         "batterystate",
         "bringup",
+        "bugtracker",
         "buildtool",
         "chenhangwei",
         "fontsize",
@@ -46,6 +48,7 @@
         "mavros",
         "prcentage",
         "pyaudio",
+        "pytest",
         "rclpy",
         "relim",
         "rosidl",
@@ -61,5 +64,5 @@
         "ydata",
         "ylabel"
     ],
-    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/common_interfaces"
+    "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces"
 }

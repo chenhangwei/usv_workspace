@@ -3,20 +3,26 @@
 <package format="3">
   <name>usv_control</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供控制相关节点与功能，包括目标点、速度、避障等控制指令的处理与发布，支持多种控制模式和任务需求。
-This package provides control-related nodes and functions for USV (Unmanned Surface Vehicle) systems, including processing and publishing of setpoints, velocity, and obstacle avoidance commands, supporting various control modes and mission requirements.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Control algorithms and modules for Unmanned Surface Vehicles.
+    This package implements control logic for USV systems, including path planning, 
+    obstacle avoidance, formation control, and other autonomous navigation capabilities.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>geometry_msgs</depend>
-  <depend>common_interfaces</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

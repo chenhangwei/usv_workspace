@@ -1,37 +1,92 @@
+# =============================================================================
+# USV系统参数配置文件
+# 该文件定义了USV系统中各节点的参数配置
+# =============================================================================
+
+# =============================================================================
+# 飞控通信模块参数 (MAVROS)
+# =============================================================================
 mavros_node:
   ros__parameters:
-    fcu_url: "serial:///dev/ttyACM0:57600"
-    gcs_url: ""
-    tgt_system: 1
-    tgt_component: 1
+    # 视觉定位配置
     vision_pose:
-      enable: true   # 推荐改为嵌套结构，避免使用 . 分隔
+      enable: false                         # 禁用视觉定位
 
+# =============================================================================
+# 通信与状态管理模块参数
+# =============================================================================
 usv_status_node:
   ros__parameters:
-    dummy_param: true
+    # 目标点判断阈值
+    target_reach_threshold: 1.0             # 到达目标点的距离阈值（米）
 
+auto_set_home_node:
+  ros__parameters:
+    # Home点设置延迟
+    set_delay_sec: 3.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
+
+# =============================================================================
+# 控制模块参数
+# =============================================================================
 usv_avoidance_node:
   ros__parameters:
-    in_distance_value: 1.2
+    # 避障距离参数
+    in_distance_value: 1.0                  # 避障触发距离（米）
 
 usv_command_node:
   ros__parameters:
-    dummy_param: true
+    # 支持的飞行模式列表
+    supported_modes: ['GUIDED', 'MANUAL', 'AUTO', 'HOLD', 'ARCO', 'STEERING']
+    # 服务超时时间
+    service_timeout_sec: 5.0                # 服务等待超时时间（秒）
+    # 解锁命令超时时间
+    arming_command_timeout_sec: 10.0        # 解锁命令超时时间（秒）
 
 usv_control_node:
   ros__parameters:
-    dummy_param: true
+    dummy_param: true                       # 占位参数
 
+# =============================================================================
+# 传感器驱动模块参数
+# =============================================================================
 usv_uwb_node:
   ros__parameters:
-    dummy_param: true
+    dummy_param: true                       # 占位参数
+
+# =============================================================================
+# 辅助功能模块参数
+# =============================================================================
+usv_fan_node:
+  ros__parameters:
+    # 风扇控制引脚配置
+    fan_pin: 17                             # BCM编号，GPIO17
+    gpio_chip: gpiochip4                    # GPIO芯片名称
+    # 温度阈值配置（单位：毫摄氏度）
+    temp_threshold_on: 50000                # 风扇开启温度阈值 50°C
+    temp_threshold_off: 45000               # 风扇关闭温度阈值 45°C
 
 usv_led_node:
   ros__parameters:
-    dummy_param: true
+    # LED控制串口配置
+    port: /dev/ttyUSB1                      # 串口设备路径
+    baudrate: 115200                        # 波特率
+    # LED效果配置
+    color_list: [255, 0, 0, 255, 127, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 139, 0, 255]  # 颜色列表 [R,G,B,R,G,B,...]
+    timer_period_high: 0.03                 # 高频定时器周期（秒）
+    timer_period_low: 0.5                   # 低频定时器周期（秒）
+    transition_duration: 3.0                # 颜色渐变持续时间（秒）
+    hold_duration: 10.0                     # 颜色停留时间（秒）
+    low_battery_threshold: 11.1             # 低电量阈值（伏特）
+    recover_battery_threshold: 11.6         # 恢复电量阈值（伏特）
+    breath_step: 6                          # 呼吸灯步进值
 
 usv_sound_node:
   ros__parameters:
-    dummy_param: true
-
+    # 声音播放配置
+    low_voltage_threshold: 11.1             # 低电压阈值（伏特）
+    sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']  # 常规声音类型列表
+    moon_type: 'moon101'                    # 低电压声音类型
+    min_play_interval: 2                    # 最小播放间隔（秒）
+    max_play_interval: 10                   # 最大播放间隔（秒）
+    min_play_count: 1                       # 最小播放次数
+    max_play_count: 3                       # 最大播放次数

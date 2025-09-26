@@ -3,19 +3,27 @@
 <package format="3">
   <name>usv_led</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供LED灯控制节点，实现状态指示、任务反馈等功能，便于设备运行状态的可视化。
-This package provides LED control nodes for USV (Unmanned Surface Vehicle) systems, enabling status indication, task feedback, and visualizing device operation states.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    LED control module for Unmanned Surface Vehicles.
+    This package provides interfaces for controlling LED indicators on USV platforms, 
+    supporting status indication, communication signaling, and visual feedback for 
+    various operational modes.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>std_msgs</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

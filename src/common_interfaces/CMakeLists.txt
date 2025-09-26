@@ -7,8 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-find_package(rclcpp REQUIRED)
-find_package(rclpy REQUIRED)
+# 注意：rclcpp和rclpy在消息包中通常不需要，除非有自定义的C++或Python代码
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
@@ -18,8 +17,8 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/UsvStatus.msg"
-  "msg/UsvSetPoint.msg"
-  DEPENDENCIES std_msgs geometry_msgs
+  "action/NavigateToPoint.action"
+  DEPENDENCIES std_msgs geometry_msgs sensor_msgs
 )
 
 if(BUILD_TESTING)
