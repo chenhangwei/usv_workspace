@@ -157,20 +157,6 @@
                </layout>
               </item>
               <item>
-               <layout class="QHBoxLayout" name="horizontalLayout_17">
-                <item>
-                 <widget class="QLabel" name="label_4">
-                  <property name="text">
-                   <string>z:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QDoubleSpinBox" name="set_departed_z_doubleSpinBox"/>
-                </item>
-               </layout>
-              </item>
-              <item>
                <widget class="QPushButton" name="send_departed_point_pushButton">
                 <property name="text">
                  <string>send point</string>
@@ -298,13 +284,6 @@
                  <widget class="QPushButton" name="send_cluster_point_pushButton">
                   <property name="text">
                    <string>cluster start</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QPushButton" name="stop_cluster_task_pushButton">
-                  <property name="text">
-                   <string>cluster stop</string>
                   </property>
                  </widget>
                 </item>

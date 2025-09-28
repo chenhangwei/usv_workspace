@@ -1,23 +1,17 @@
 from http.client import UNAVAILABLE_FOR_LEGAL_REASONS
 import sys
 import threading
+import weakref  # 添加weakref模块用于弱引用
 
-from sympy import Point
 import rclpy
 from PyQt5.QtCore import QProcess
-from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QTableWidgetItem, QAbstractItemView, QFileDialog, QMessageBox, QColorDialog
+from PyQt5.QtWidgets import QApplication, QMainWindow,  QAbstractItemView, QFileDialog, QMessageBox, QColorDialog
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ros2_node_for_gui import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
-from mavros_msgs.msg import State
-from common_interfaces.msg import UsvStatus
-
 import xml.etree.ElementTree as ET
-import requests
-import json
 from gs_gui.usv_plot_window import UsvPlotWindow
-
 import re
 
 
@@ -47,10 +41,20 @@ class MainWindow(QMainWindow):
 
         self.ros_signal = ros_signal
         
-        # 添加导航状态字典，用于跟踪每个USV的导航状态
+        # 存储USV导航状态
         self.usv_nav_status = {}
+        # 添加集群任务进度信息
+        self.cluster_progress_info = {}
+
+        # 添加集群任务控制状态
+        self.cluster_task_running = False  # 集群任务是否正在运行
+        self.cluster_task_paused = False   # 集群任务是否已暂停
+        
+        # 初始化集群任务按钮状态
+        self.update_cluster_task_button_state()
 
         self.ros_signal.receive_state_list.connect(self.receive_state_callback)  # 连接信号
+        self.ros_signal.cluster_progress_update.connect(self.cluster_progress_callback)  # 连接集群进度信号
 
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)            # 集群解锁按钮
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)      # 集群加锁按钮
@@ -64,7 +68,8 @@ class MainWindow(QMainWindow):
         self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command) #离群切换到ARCO模式
         self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command) #离群切换到Steering模式
 
-        self.ui.send_cluster_point_pushButton.clicked.connect(self.send_cluster_point_command) #集群坐标发送        
+        self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task) # 集群任务运行/暂停切换
+        self.ui.stop_cluster_task_pushButton.clicked.connect(self.stop_cluster_task) # 集群任务停止
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)#离群坐标发送
         
         self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
@@ -134,6 +139,9 @@ class MainWindow(QMainWindow):
 
         # 将模型设置到窗口表格
         self.ui.departed_tableView.setModel(self.departed_table_model)
+
+        # 添加USV绘图窗口的弱引用
+        self.usv_plot_window_ref = None
 
     def _extract_namespaces(self, usv_list):
         """
@@ -312,11 +320,16 @@ class MainWindow(QMainWindow):
                             self.cluster_position_list=usv_list
                             self.ui.info_textEdit.append(f"读取数据成功，共 {len(usv_list)} 个 USV 数据")
                             self.ui.info_textEdit.append(f"数据： {self.cluster_position_list} ")
+                            # 重置任务状态
+                            self.cluster_task_running = False
+                            self.cluster_task_paused = False
+                            self.update_cluster_task_button_state()
                     else:
                         error_msg = "XML文件格式错误：未找到step节点"
                         print(error_msg)
                         self.ui.info_textEdit.append(error_msg)
                         self.cluster_position_list=[]
+                        self.update_cluster_task_button_state()
                     
                 except ET.ParseError as e:
                     error_msg = f"XML解析错误: {e}"
@@ -360,9 +373,39 @@ class MainWindow(QMainWindow):
         self._rviz_process.start("rviz2")
         self.ui.info_textEdit.append(f"启动RViz2")
 
-    # 发送集群目标点命令
-    def send_cluster_point_command(self):  
-        self.ui.info_textEdit.append(f"发送集群目标点命令")
+
+    # 切换集群任务运行状态（运行/暂停）
+    def toggle_cluster_task(self):
+        """
+        切换集群任务的运行状态：运行/暂停
+        """
+        if not self.cluster_task_running and not self.cluster_position_list:
+            self.ui.warning_textEdit.append( "请先导入集群目标点数据")
+            return
+        # 如果任务未开始且有目标点数据，则开始任务
+        if not self.cluster_task_running and self.cluster_position_list:
+            self.start_cluster_task()
+        # 如果任务正在运行，则切换暂停状态
+        elif self.cluster_task_running:
+            self.cluster_task_paused = not self.cluster_task_paused
+            if self.cluster_task_paused:
+                self.ui.send_cluster_point_pushButton.setText("cluster continue")
+                self.ui.info_textEdit.append("集群任务已暂停")
+                # 发送暂停信号给ROS节点（如果需要实现）
+                # 这里可以发送一个特殊的信号或清空目标点列表来暂停任务
+                self.ros_signal.cluster_target_point_command.emit([])  # 发送空列表表示暂停
+            else:
+                self.ui.send_cluster_point_pushButton.setText("cluster pause")
+                self.ui.info_textEdit.append("集群任务已继续")
+                # 重新发送任务数据以恢复任务
+                self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+
+    # 开始集群任务
+    def start_cluster_task(self):
+        """
+        开始执行集群任务
+        """
+        self.ui.info_textEdit.append(f"开始执行集群目标点任务")
         # 检查是否有集群列表
         if not self.cluster_position_list:
             self.ui.warning_textEdit.append("集群列表为空")
@@ -370,7 +413,8 @@ class MainWindow(QMainWindow):
         # 创建副本以避免修改原始列表时的遍历问题
         filtered_list = self.cluster_position_list.copy()
         # 将 usv_departed_list 转换为集合以提高查找效率
-        departed_ids = set(self.usv_departed_list)
+        departed_ids = {item.get('namespace') if isinstance(item, dict) else item 
+                        for item in self.usv_departed_list}
         # 移除匹配 usv_id 的 USV 数据
         filtered_list = [usv for usv in filtered_list if usv.get('usv_id', '') not in departed_ids]
         if not filtered_list:
@@ -379,8 +423,8 @@ class MainWindow(QMainWindow):
         # 弹窗确认
         reply = QMessageBox.question(
             self,
-            f"确认发送",
-            f"即将发送 {len(filtered_list)} 个 USV 的目标点数据。\n是否继续?",
+            f"确认执行",
+            f"即将执行 {len(filtered_list)} 个 USV 的集群任务。\n是否继续?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -388,19 +432,85 @@ class MainWindow(QMainWindow):
             try:
                 # 更新 cluster_position_list
                 self.cluster_position_list = filtered_list
+                # 设置任务状态
+                self.cluster_task_running = True
+                self.cluster_task_paused = False
+                # 更新按钮文本
+                self.ui.send_cluster_point_pushButton.setText("cluster pause")
                 # 发送 ROS 信号
                 self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-                QMessageBox.information(self, "成功", "集群目标点数据已发送！")
+                self.ui.info_textEdit.append("集群任务已开始执行！")
             except Exception as e:
-                QMessageBox.critical(self, "错误", f"发送失败: {e}")
+                QMessageBox.critical(self, "错误", f"任务启动失败: {e}")
+                # 出错时重置状态
+                self.cluster_task_running = False
+                self.cluster_task_paused = False
+                self.update_cluster_task_button_state()
         else:
-            QMessageBox.information(self, "取消", f"发送已取消")
-   
+            QMessageBox.information(self, "取消", f"任务启动已取消")
+    
+    # 停止集群任务
+    def stop_cluster_task(self):
+        """
+        停止集群任务执行
+        """
+        # 如果没有正在运行的集群任务，直接返回
+        if not self.cluster_task_running:
+            self.ui.info_textEdit.append("当前没有正在运行的集群任务")
+            return
+            
+        # 弹窗确认
+        reply = QMessageBox.question(
+            self,
+            f"确认停止",
+            f"确定要停止当前集群任务吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            # 发送停止信号给ROS节点
+            self.ros_signal.cluster_target_point_command.emit([])  # 发送空列表表示停止
+            
+            # 重置任务状态
+            self.cluster_task_running = False
+            self.cluster_task_paused = False
+            # 更新按钮文本
+            self.ui.send_cluster_point_pushButton.setText("cluster start")
+            self.ui.info_textEdit.append("集群任务已停止！")
+            
+            # 清空集群位置列表
+            self.cluster_position_list = []
+        else:
+            self.ui.info_textEdit.append("取消停止操作")
+
+    def is_cluster_task_active(self):
+        """
+        检查集群任务是否处于活动状态（运行中且未暂停）
+        
+        Returns:
+            bool: 如果任务正在运行且未暂停则返回True，否则返回False
+        """
+        return self.cluster_task_running and not self.cluster_task_paused
+
+    def update_cluster_task_button_state(self):
+        """
+        根据任务状态更新集群任务按钮的文本
+        """
+        if not self.cluster_task_running:
+            self.ui.send_cluster_point_pushButton.setText("cluster start")
+        elif self.cluster_task_paused:
+            self.ui.send_cluster_point_pushButton.setText("cluster continue")
+        else:
+            self.ui.send_cluster_point_pushButton.setText("cluster pause")
+
     # 离群目标点命令
     def send_departed_point_command(self):
         x = self.ui.set_departed_x_doubleSpinBox.value()
         y = self.ui.set_departed_y_doubleSpinBox.value() 
-        z = self.ui.set_departed_z_doubleSpinBox.value()  # 添加z坐标
+        z = 0.0  # 默认z坐标为0
+        # 检查是否存在z坐标控件
+        if hasattr(self.ui, 'set_departed_z_doubleSpinBox'):
+            z = self.ui.set_departed_z_doubleSpinBox.value()  # 添加z坐标
         departed_target_list = []
         for usv_item in self.usv_departed_list:
             # 从usv_item中提取usv_id
@@ -512,6 +622,40 @@ class MainWindow(QMainWindow):
             self.ui.info_textEdit.append(error_msg)
             QMessageBox.critical(self, "操作失败", error_msg)
     
+    def cluster_progress_callback(self, progress_info):
+        """
+        处理集群任务进度更新
+        
+        Args:
+            progress_info (dict): 进度信息字典
+        """
+        # 保存进度信息
+        self.cluster_progress_info = progress_info
+        
+        # 更新UI显示
+        current_step = progress_info.get('current_step', 0)
+        total_steps = progress_info.get('total_steps', 0)
+        total_usvs = progress_info.get('total_usvs', 0)
+        acked_usvs = progress_info.get('acked_usvs', 0)
+        ack_rate = progress_info.get('ack_rate', 0)
+        elapsed_time = progress_info.get('elapsed_time', 0)
+        
+        # 更新标签显示
+        progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
+                        f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
+                        f"耗时 {elapsed_time:.1f}s")
+        
+        self.ui.info_textEdit.append(progress_text)
+        
+        # 如果任务已完成，重置按钮状态
+        if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
+            self.cluster_task_running = False
+            self.cluster_task_paused = False
+            self.ui.send_cluster_point_pushButton.setText("cluster start")
+            
+        # 如果有进度条控件，可以在这里更新进度条
+        # 例如: self.ui.cluster_progress_bar.setValue(int(ack_rate * 100))
+
     # 接收所有在线的usv状态
     def receive_state_callback(self, msg):
         """
@@ -761,9 +905,18 @@ class MainWindow(QMainWindow):
     
     # 显示 USV 绘图窗口
     def show_usv_plot_window(self):
-        # 传递一个获取usv列表的函数，保证窗口里能实时获取最新数据
-        self.usv_plot_window = UsvPlotWindow(lambda: self.usv_online_list, self)
-        self.usv_plot_window.show()
+        # 检查是否已经存在绘图窗口实例
+        if self.usv_plot_window_ref and self.usv_plot_window_ref():
+            # 如果存在，将其激活到前台
+            window = self.usv_plot_window_ref()
+            if window:
+                window.raise_()
+                window.activateWindow()
+        else:
+            # 如果不存在，创建新窗口并保存弱引用
+            usv_plot_window = UsvPlotWindow(lambda: self.usv_online_list, self)
+            self.usv_plot_window_ref = weakref.ref(usv_plot_window)
+            usv_plot_window.show()
 
     def refresh_table_header(self):
         """
@@ -792,6 +945,25 @@ class MainWindow(QMainWindow):
         self.update_cluster_table(self.usv_cluster_list)
         self.update_departed_table(self.usv_departed_list)
 
+    def handle_navigation_feedback(self, usv_id, feedback):
+        """
+        处理导航反馈信息
+        
+        Args:
+            usv_id (str): USV标识符
+            feedback: 导航反馈数据
+        """
+        # 在信息文本框中显示导航反馈
+        self.ui.info_textEdit.append(
+            f"USV {usv_id} 导航反馈 - "
+            f"距离目标: {feedback.distance_to_goal:.2f}m, "
+            f"航向误差: {feedback.heading_error:.2f}度, "
+            f"预计剩余时间: {feedback.estimated_time:.2f}秒"
+        )
+        
+        # 如果有专门的进度条或状态显示控件，可以在这里更新
+        # 例如: self.ui.navigation_progress_bar.setValue(int((1 - feedback.distance_to_goal / initial_distance) * 100))
+
 # 主函数
 def main(argv=None):
     app = QApplication(sys.argv)
@@ -816,6 +988,8 @@ def main(argv=None):
 
     # 添加导航状态更新信号连接
     ros_signal.nav_status_update.connect(main_window.update_nav_status)
+    # 添加导航反馈信号连接
+    ros_signal.navigation_feedback.connect(main_window.handle_navigation_feedback)
 
     ros_thread = threading.Thread(target=lambda:rclpy.spin(node), daemon=True) # 创建一个线程来运行 ROS 事件循环
     ros_thread.start()

@@ -33,7 +33,7 @@ class UsvPlotWindow(QDialog):
         # 定时器定期刷新
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_plot)
-        self.timer.start(1000)  # 1秒刷新一次
+        self.timer.start(2000)  # 2秒刷新一次，减少刷新频率
 
         self.show_label_checkbox.stateChanged.connect(self.update_plot)
         self.refresh_btn.clicked.connect(self.update_plot)
@@ -67,7 +67,7 @@ class UsvPlotWindow(QDialog):
             dx_y = arrow_len * cos(yaw + 1.5708)
             dy_y = arrow_len * sin(yaw + 1.5708)
             # 画原点
-            ax.plot(x, y, marker='o', color='b')
+            ax.plot(x, y, marker='o', color='b', markersize=4)  # 减小标记大小
             # 画x轴箭头（红色）
             ax.arrow(x, y, dx_x, dy_x, head_width=0.08, head_length=0.12, fc='r', ec='r', length_includes_head=True)
             # 画y轴箭头（绿色）
@@ -75,7 +75,7 @@ class UsvPlotWindow(QDialog):
             # 标注
             if self.show_label_checkbox.isChecked():
                 label = f"{usv_id}\n({x:.2f},{y:.2f})"
-                ax.text(x, y-0.15, label, fontsize=9, ha='center', va='top')
+                ax.text(x, y-0.15, label, fontsize=8, ha='center', va='top')  # 减小字体大小
             self.usv_points.append({'x': x, 'y': y, 'usv_id': usv_id, 'usv': usv})
         # 自动缩放到所有点
         xs = [p['x'] for p in self.usv_points]

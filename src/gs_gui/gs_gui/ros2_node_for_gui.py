@@ -4,38 +4,19 @@
 包括状态监控、命令发送、导航控制等功能
 """
 
-# 从scipy库导入cluster模块，用于聚类算法
-from scipy import cluster
-# 从sympy库导入Quaternion和public，用于四元数计算
-from sympy import Quaternion, public
-# 导入ROS2 Python客户端库
-import rclpy
-# 从rclpy.node模块导入Node类，用于创建ROS2节点
-from rclpy.node import Node
-# 从std_msgs.msg模块导入String和Float32消息类型
-from std_msgs.msg import String, Float32
-# 从gs_gui.ros_signal模块导入ROSSignal类，用于信号处理
-from gs_gui.ros_signal import ROSSignal
-# 从sensor_msgs.msg模块导入BatteryState消息类型，用于电池状态
-from sensor_msgs.msg import BatteryState
-# 从mavros_msgs.msg模块导入State消息类型，用于飞控状态
-from mavros_msgs.msg import State
-# 从geometry_msgs.msg模块导入PoseStamped消息类型，用于位姿信息
-from geometry_msgs.msg import PoseStamped
-# 从common_interfaces.msg模块导入UsvStatus消息类型
-from common_interfaces.msg import UsvStatus
-# 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-# 从rclpy.action模块导入ActionClient，用于创建动作客户端
-from rclpy.action import ActionClient
-# 从common_interfaces.action模块导入NavigateToPoint动作类型
-from common_interfaces.action import NavigateToPoint
-# 导入tf_transformations库，用于坐标变换计算
-import tf_transformations
-# 导入queue模块，用于创建消息队列
-import queue
-# 导入threading模块，用于多线程处理
-import threading
+import rclpy 
+import rclpy.action
+from rclpy.node import Node  # 从rclpy.node模块导入Node类，用于创建ROS2节点
+from geometry_msgs.msg import PoseStamped  # 从geometry_msgs.msg模块导入PoseStamped消息类型，用于位姿信息
+from common_interfaces.msg import UsvStatus  # 从common_interfaces.msg模块导入UsvStatus消息类型
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy  # 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
+from rclpy.action import ActionClient  # 从rclpy.action模块导入ActionClient，用于创建动作客户端
+from common_interfaces.action import NavigateToPoint  # 从common_interfaces.action模块导入NavigateToPoint动作类型
+import queue  # 导入queue模块，用于创建消息队列
+import threading  # 导入threading模块，用于多线程处理
+from std_msgs.msg import String # 导入 String 消息类型
+import weakref  # 导入weakref模块，用于弱引用
+
 
 
 class GroundStationNode(Node):
@@ -44,19 +25,15 @@ class GroundStationNode(Node):
     继承自rclpy.Node，实现地面站GUI与USV系统通信的核心功能
     """
 
-    # 定义常量：传染检查距离的平方（2米的平方）
-    INFECTION_DISTANCE_SQUARED = 4.0
-    # 定义常量：默认步骤超时时间（秒）
-    DEFAULT_STEP_TIMEOUT = 20.0
-    # 定义常量：默认最大重试次数
-    DEFAULT_MAX_RETRIES = 1
-    # 定义常量：传染检查周期（秒）
-    INFECTION_CHECK_PERIOD = 1.0
-    # 定义常量：命名空间更新周期（秒）
-    NAMESPACE_UPDATE_PERIOD = 2.0
-    # 定义常量：集群目标发布周期（秒）
-    CLUSTER_TARGET_PUBLISH_PERIOD = 0.5
-
+    # 常量定义
+    INFECTION_DISTANCE_SQUARED = 4.0  # 2米距离的平方
+    DEFAULT_STEP_TIMEOUT = 20.0  # 默认步骤超时时间(秒)
+    DEFAULT_MAX_RETRIES = 1      # 默认最大重试次数
+    INFECTION_CHECK_PERIOD = 2.0 # 传染检查周期(秒)，增加周期减少CPU占用
+    NAMESPACE_UPDATE_PERIOD = 5.0 # 命名空间更新周期(秒)，增加周期减少CPU占用
+    CLUSTER_TARGET_PUBLISH_PERIOD = 5 # 集群目标发布周期(秒)，增加周期减少CPU占用
+    MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
+    
     def __init__(self, signal):
         """
         初始化地面站节点
@@ -64,57 +41,57 @@ class GroundStationNode(Node):
         Args:
             signal: ROS信号对象，用于与GUI界面通信
         """
-        # 调用父类Node的初始化方法，设置节点名称为'groundstationnode'
-        super().__init__('groundstationnode')
-        # 保存ROS信号对象引用
-        self.ros_signal = signal
-        # 创建QoS配置对象，深度为10，可靠性策略为可靠传输
-        self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
+        super().__init__('groundstationnode')  # 调用父类Node的初始化方法，设置节点名称为'groundstationnode'
+        self.ros_signal = signal  # 保存ROS信号对象引用
+        self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)  # 创建QoS配置对象，深度为10，可靠性策略为可靠传输
 
         # 初始化ROS发布者和订阅者字典
         self.usv_state_subs = {}  # USV状态订阅者字典
+        self.set_usv_target_position_pubs = {}  # 设置USV目标位置发布者字典
+        self.set_usv_target_velocity_pubs = {}  # 设置USV目标速度发布者字典
         self.set_usv_mode_pubs = {}  # 设置USV模式发布者字典
         self.set_usv_arming_pubs = {}  # 设置USV武装状态发布者字典
         self.led_pubs = {}  # LED控制发布者字典
         self.sound_pubs = {}  # 声音控制发布者字典
         self.action_pubs = {}  # 动作控制发布者字典
-        self.navigate_to_point_clients = {}  # 导航动作客户端字典
+        self.navigate_to_point_clients = {}  # 添加导航动作客户端字典
 
         # 初始化USV状态和目标管理相关变量
         self.usv_states = {}  # USV状态字典
         self.last_ns_list = []  # 上次命名空间列表
-        self.is_runing = False  # 运行状态标志
+        self.is_runing = False
         self.run_step = 0  # 当前运行步骤
         self.usv_target_number = 0  # USV目标编号
         self.max_step = 1  # 最大步骤数
         self.current_targets = []  # 当前目标列表
 
         # 初始化发布队列和线程
-        self.publish_queue = queue.Queue()  # 创建消息发布队列
-        # 创建发布线程，设置为守护线程
-        self.publish_thread = threading.Thread(target=self.process_publish_queue, daemon=True)
-        # 启动发布线程
-        self.publish_thread.start()
+        self.publish_queue = queue.Queue(maxsize=100)  # 创建消息发布队列，限制最大大小
+        self.publish_thread = threading.Thread(target=self.process_publish_queue, daemon=True)  # 创建发布线程，设置为守护线程
+        self.publish_thread.start()  # 启动发布线程
 
         # 初始化集群控制相关变量
         self._usv_ack_map = {}  # USV确认映射表
         self._cluster_start_time = None  # 集群开始时间
         self._step_timeout = self.DEFAULT_STEP_TIMEOUT  # 步骤超时时间
         self._max_retries = self.DEFAULT_MAX_RETRIES  # 最大重试次数
+        self._cluster_task_paused = False  # 集群任务是否已暂停
+
+        #Action 任务跟踪
+        self._usv_active_goals = {} # 跟踪每个 USV 当前活动的 Action 句柄
 
         # 初始化传染机制相关变量
         self._usv_led_modes = {}  # USV LED模式字典
         self._usv_infecting = set()  # 正在传染的USV集合
+        # 维护本地 LED 状态 
+        self._usv_current_led_state = {} # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
+     
 
         # 创建定时器
-        # 命名空间更新定时器，定期更新订阅者和发布者
-        self.ns_timer = self.create_timer(self.NAMESPACE_UPDATE_PERIOD, self.update_subscribers_and_publishers)
-        # 集群目标发布定时器，定期发布集群目标
-        self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)
-        # 传染检查定时器，定期检查USV之间的传染逻辑
-        self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)
-
-        # 立即更新订阅者和发布者
+        self.ns_timer = self.create_timer(self.NAMESPACE_UPDATE_PERIOD, self.update_subscribers_and_publishers)  # 命名空间更新定时器，定期更新订阅者和发布者
+        self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器，定期发布集群目标
+        self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器，定期检查USV之间的传染逻辑
+        
         self.update_subscribers_and_publishers()
 
     # 在独立线程中异步处理消息发布队列
@@ -139,6 +116,16 @@ class GroundStationNode(Node):
             # 如果队列为空，继续循环
             except queue.Empty:
                 continue
+            # 如果队列已满，丢弃旧消息以避免内存堆积
+            except queue.Full:
+                self.get_logger().warn("发布队列已满，丢弃旧消息")
+                try:
+                    # 尝试清空队列中的旧消息
+                    while not self.publish_queue.empty():
+                        self.publish_queue.get_nowait()
+                        self.publish_queue.task_done()
+                except queue.Empty:
+                    pass
             # 捕获其他异常并记录错误日志
             except Exception as e:
                 self.get_logger().error(f"发布消息失败: {e}")
@@ -281,15 +268,29 @@ class GroundStationNode(Node):
                 'battery_voltage': msg.battery_voltage,  # 电池电压
                 'battery_prcentage': msg.battery_percentage,  # 电池电量百分比
                 'power_supply_status': msg.power_supply_status,  # 电源状态
-                'position': msg.position,  # 位置信息
-                'velocity': msg.velocity,  # 速度信息
-                'yaw': msg.yaw,  # 偏航角
-                'temperature': msg.temperature,  # 温度
+                'position': {
+                    'x': round(msg.position.x, 2),  # 保留两位小数减少数据量
+                    'y': round(msg.position.y, 2),
+                    'z': round(msg.position.z, 2)
+                },  # 位置信息
+                'velocity': {
+                    'linear': {
+                        'x': round(msg.velocity.linear.x, 2),
+                        'y': round(msg.velocity.linear.y, 2),
+                        'z': round(msg.velocity.linear.z, 2)
+                    }
+                },  # 速度信息
+                'yaw': round(msg.yaw, 2),  # 偏航角
+                'temperature': round(msg.temperature, 1),  # 温度
             }
-            # 更新USV状态字典
-            self.usv_states[usv_id] = state_data
-            # 发射信号，将更新后的USV状态列表发送给GUI界面
-            self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            
+            # 只有当状态发生变化时才更新和发送信号
+            if usv_id not in self.usv_states or self.usv_states[usv_id] != state_data:
+                # 更新USV状态字典
+                self.usv_states[usv_id] = state_data
+                # 发射信号，将更新后的USV状态列表发送给GUI界面
+                # 限制信号发射频率，避免过于频繁的更新
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
 
     # 通过Action方式发送导航目标点
     def send_nav_goal_via_action(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
@@ -350,6 +351,9 @@ class GroundStationNode(Node):
         # 更新导航状态为执行中
         self.ros_signal.nav_status_update.emit(usv_id, "执行中")
 
+        # 取消旧任务
+        self._cancel_active_goal(usv_id) # 取消旧任务
+
         # 异步发送目标
         send_goal_future = action_client.send_goal_async(
             goal_msg,
@@ -383,6 +387,16 @@ class GroundStationNode(Node):
                 return
 
             self.get_logger().info(f"USV {usv_id} 接受了导航目标")
+
+            # 存储活动的 Action 句柄 ---
+            self._usv_active_goals[usv_id] = goal_handle 
+           
+
+
+
+
+
+
             # 获取结果
             get_result_future = goal_handle.get_result_async()
             # 添加结果回调
@@ -415,17 +429,46 @@ class GroundStationNode(Node):
             # 根据结果更新导航状态
             if result.success:
                 self.ros_signal.nav_status_update.emit(usv_id, "成功")
+                # 标记为已确认
+                if usv_id in self._usv_ack_map:
+                    self._usv_ack_map[usv_id]['acked'] = True
+                    self._usv_ack_map[usv_id]['ack_time'] = self.get_clock().now().nanoseconds / 1e9
             else:
                 self.ros_signal.nav_status_update.emit(usv_id, "失败")
 
             # 可以在这里发射信号通知GUI更新状态
             # self.ros_signal.navigation_completed.emit(usv_id, result.success, result.error_code)
 
+            # 任务完成后清除句柄 ---
+            if usv_id in self._usv_active_goals:
+                 del self._usv_active_goals[usv_id]
+
+
+
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理USV {usv_id} 导航结果时出错: {e}")
             # 更新导航状态为失败
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
+
+    
+    def _cancel_active_goal(self, usv_id):
+        """
+        取消指定 USV 当前活动的 Action 任务
+        """
+        if usv_id in self._usv_active_goals:
+            goal_handle = self._usv_active_goals[usv_id]
+            # 检查句柄是否仍然有效
+            if goal_handle.status in [rclpy.action.client.GoalStatus.STATUS_EXECUTING, rclpy.action.client.GoalStatus.STATUS_ACCEPTED]:
+                self.get_logger().warn(f"正在取消 USV {usv_id} 的上一个导航任务...")
+                cancel_future = goal_handle.cancel_goal_async()
+                
+                # 可选：等待取消结果以确保取消请求已发送，但这里不做阻塞处理
+                # cancel_future.add_done_callback(...)
+                
+            # 无论是否取消成功，都从跟踪字典中删除
+            del self._usv_active_goals[usv_id]
+
 
     # 导航反馈回调
     def nav_feedback_callback(self, feedback_msg, usv_id):
@@ -445,8 +488,8 @@ class GroundStationNode(Node):
                 f"航向误差: {feedback.heading_error:.2f}度, "
                 f"预计剩余时间: {feedback.estimated_time:.2f}秒")
 
-            # 可以在这里发射信号通知GUI更新进度条等
-            # self.ros_signal.navigation_feedback.emit(usv_id, feedback)
+            # 发射信号通知GUI更新进度条等
+            self.ros_signal.navigation_feedback.emit(usv_id, feedback)
 
         # 捕获异常并记录错误日志
         except Exception as e:
@@ -601,6 +644,25 @@ class GroundStationNode(Node):
                 self.get_logger().error("集群目标点格式错误")
                 return
 
+            # 检查是否为空列表，用于暂停/停止任务
+            if not temp_list:
+                self.get_logger().info("接收到空列表，暂停/停止集群任务")
+                # 取消所有活动的Action任务
+                for usv_id in list(self._usv_active_goals.keys()):
+                    self._cancel_active_goal(usv_id)
+                
+                # 清空当前目标列表，结束整个集群任务
+                self.current_targets = []
+                # 重置任务状态
+                self.run_step = 0
+                self.usv_target_number = 0
+                self.max_step = 1
+                # 清空确认状态映射表
+                self._usv_ack_map.clear()
+                # 重置集群开始时间
+                self._cluster_start_time = None
+                return
+
             # 更新目标点和步骤信息，保存当前接收到的目标列表
             self.current_targets = temp_list
             # 初始化运行步骤为1，表示开始执行第一个步骤
@@ -628,7 +690,7 @@ class GroundStationNode(Node):
                 if usv_id is None:
                     continue
                 # 为USV初始化确认状态：未确认、无确认时间、重试次数为0
-                self._usv_ack_map[usv_id] = {'acked': False, 'ack_time': None, 'retry': 0}
+                self._usv_ack_map[usv_id] = {'acked': False, 'last_send_time': None, 'retry': 0}
             # 记录集群操作开始时间，用于超时判断
             self._cluster_start_time = now
 
@@ -648,6 +710,10 @@ class GroundStationNode(Node):
         # 3. 相比直接访问self.current_targets，可以避免AttributeError异常
         if not getattr(self, 'current_targets', None):
             return
+            
+        # 检查任务是否已暂停
+        if self._cluster_task_paused:
+            return
 
         try:
             # 根据当前步骤获取相关的USV列表，确定本步骤需要操作的无人艇
@@ -660,9 +726,18 @@ class GroundStationNode(Node):
                 if self.run_step >= self.max_step:
                     # 清空当前目标列表，结束整个集群任务
                     self.current_targets = []
+                    # 清空确认状态映射表
+                    self._usv_ack_map.clear()
+                    # 重置集群开始时间
+                    self._cluster_start_time = None
+                    # 重置任务暂停状态
+                    self._cluster_task_paused = False
+                    self.get_logger().info("集群任务已完成")
                 else:
                     # 否则进入下一步，增加步骤计数器
                     self.run_step += 1
+                    # 重置集群开始时间
+                    self._cluster_start_time = self.get_clock().now().nanoseconds / 1e9
                 # 处理完空列表情况后直接返回，不执行后续逻辑
                 return
 
@@ -722,7 +797,9 @@ class GroundStationNode(Node):
                 # 1. 'acked': False - 表示尚未确认接收到目标点
                 # 2. 'ack_time': None - 表示尚未记录确认时间
                 # 3. 'retry': 0 - 表示重试次数为0
-                self._usv_ack_map[usv_id] = {'acked': False, 'ack_time': None, 'retry': 0}
+                # 使用 last_send_time 替换 ack_time ---
+                self._usv_ack_map[usv_id] = {'acked': False, 'last_send_time': None, 'retry': 0}
+                # ----------------------------------------------------
                 # 检查集群开始时间是否已设置，只在第一次初始化时设置
                 # 确保集群开始时间记录的是整个集群任务的起始时间
                 if self._cluster_start_time is None:
@@ -752,18 +829,34 @@ class GroundStationNode(Node):
                 # 无效ID则跳过当前循环
                 continue
 
+
+              # 检查该USV是否已经确认过
+            info = self._usv_ack_map[usv_id]
+            if not info['acked']:
+                last_send_time = info.get('last_send_time')
+                
+                #  核心超时逻辑修改 ---
+                # 只有在发送目标后才进行超时检查
+                if last_send_time is not None: 
+                    elapsed = now - last_send_time 
+                    if elapsed > self._step_timeout:
+                        self._handle_usv_timeout(usv_id, ns)
+
             # 由于我们使用Action接口处理导航任务，不再依赖is_reached_target字段
             # Action的反馈和结果机制已经提供了任务完成状态
             # 因此，我们使用内部确认机制跟踪任务状态
             # 检查该USV是否已经确认过
-            if not self._usv_ack_map[usv_id]['acked']:
+            #if not self._usv_ack_map[usv_id]['acked']:
                 # 计算从集群开始到现在的经过时间，用于超时判断
                 # 使用"or now"确保_cluster_start_time为None时不会出现异常
-                elapsed = now - (self._cluster_start_time or now)
+               # elapsed = now - (self._cluster_start_time or now)
                 # 检查是否超过设定的步骤超时时间
-                if elapsed > self._step_timeout:
+                #if elapsed > self._step_timeout:
                     # 调用超时处理函数，执行超时后的相应操作
-                    self._handle_usv_timeout(usv_id, ns)
+                    #self._handle_usv_timeout(usv_id, ns)
+        
+        # 检查是否达到最小确认率阈值，如果是则可以进入下一步
+        self._check_and_proceed_on_ack_rate(cluster_usv_list)
 
     # 处理USV超时
     def _handle_usv_timeout(self, usv_id, ns):
@@ -774,12 +867,21 @@ class GroundStationNode(Node):
             usv_id (str): USV标识符
             ns (dict): USV目标信息
         """
+        now = self.get_clock().now().nanoseconds / 1e9
         # 获取指定USV的确认信息，包含确认状态、确认时间和重试次数
         info = self._usv_ack_map[usv_id]
+
+        # 取消 Action 任务
+        self._cancel_active_goal(usv_id) 
+        
         # 检查重试次数是否小于最大重试次数，决定是否继续重试
         if info['retry'] < self._max_retries:
             # 增加重试次数计数器
             info['retry'] += 1
+
+            # 更新最后发送时间 
+            info['last_send_time'] = now 
+
             # 记录重试日志，包含USV ID和当前重试次数
             self.get_logger().warn(f"{usv_id} 超时，重试第 {info['retry']} 次")
             # 通过Action接口发送导航目标点
@@ -794,7 +896,7 @@ class GroundStationNode(Node):
         else:
             # 达到最大重试次数，标记为已确认并记录日志，不再重试
             info['acked'] = True
-            info['ack_time'] = self.get_clock().now().nanoseconds / 1e9
+            #info['ack_time'] = self.get_clock().now().nanoseconds / 1e9
             # 记录错误日志，说明该USV已超时且达到最大重试次数
             self.get_logger().error(f"{usv_id} 超时且已达最大重试次数，跳过并继续下一步")
 
@@ -809,12 +911,21 @@ class GroundStationNode(Node):
         self.run_step += 1
         # 重置USV目标编号
         self.usv_target_number = 0
-        # 初始化下一步 ack_map
-        self._usv_ack_map.clear()
+        
+        # 取消所有活动的Action任务（无论是否是最后一步）
+        for usv_id in list(self._usv_active_goals.keys()):
+            self._cancel_active_goal(usv_id)
+        
         # 检查是否已完成所有步骤
         if self.run_step > self.max_step:
             # 清空当前目标列表
             self.current_targets = []
+            # 清空确认映射表
+            self._usv_ack_map.clear()
+            # 重置集群开始时间
+            self._cluster_start_time = None
+            # 重置任务暂停状态
+            self._cluster_task_paused = False
             # 记录日志信息
             self.get_logger().info("全部步骤完成")
         else:
@@ -822,14 +933,102 @@ class GroundStationNode(Node):
             next_list = self.get_usvs_by_step(self.current_targets, self.run_step)
             # 获取当前时间
             now = self.get_clock().now().nanoseconds / 1e9
+            # 重置并初始化确认映射表
+            self._usv_ack_map.clear()
             # 为下一步的USV初始化确认映射表
             for ns in next_list:
                 uid = ns.get('usv_id')
                 if uid:
-                    self._usv_ack_map[uid] = {'acked': False, 'ack_time': None, 'retry': 0}
-            # 更新集群开始时间
+                    self._usv_ack_map[uid] = {'acked': False, 'last_send_time': None, 'retry': 0}
+            # 更新集群开始时间为当前时间
             self._cluster_start_time = now
+            
+    def pause_cluster_task(self):
+        """
+        暂停集群任务
+        """
+        self._cluster_task_paused = True
+        # 取消所有活动的Action任务
+        for usv_id in list(self._usv_active_goals.keys()):
+            self._cancel_active_goal(usv_id)
+        self.get_logger().info("集群任务已暂停")
+        
+    def resume_cluster_task(self):
+        """
+        恢复集群任务
+        """
+        if self._cluster_task_paused:
+            self._cluster_task_paused = False
+            # 重置集群开始时间
+            self._cluster_start_time = self.get_clock().now().nanoseconds / 1e9
+            self.get_logger().info("集群任务已恢复")
+        else:
+            self.get_logger().warn("集群任务未处于暂停状态，无需恢复")
+            
+    def is_cluster_task_paused(self):
+        """
+        检查集群任务是否已暂停
+        
+        Returns:
+            bool: 如果任务已暂停返回True，否则返回False
+        """
+        return self._cluster_task_paused
 
+    def _check_and_proceed_on_ack_rate(self, cluster_usv_list):
+        """
+        检查确认率是否达到阈值，如果达到则进入下一步
+        
+        Args:
+            cluster_usv_list (list): 当前步骤的USV列表
+        """
+        # 只有当当前步骤有USV时才进行检查
+        if not cluster_usv_list:
+            return
+            
+        # 计算当前确认率
+        total_usvs = len(cluster_usv_list)
+        acked_usvs = sum(1 for usv in cluster_usv_list 
+                         if isinstance(usv, dict) and 
+                         usv.get('usv_id') in self._usv_ack_map and 
+                         self._usv_ack_map[usv.get('usv_id')]['acked'])
+        
+        # 避免除零错误
+        if total_usvs == 0:
+            return
+            
+        ack_rate = acked_usvs / total_usvs
+        
+        # 发送进度信息到UI
+        progress_info = {
+            'current_step': self.run_step,
+            'total_steps': self.max_step,
+            'total_usvs': total_usvs,
+            'acked_usvs': acked_usvs,
+            'ack_rate': ack_rate,
+            'start_time': self._cluster_start_time,
+            'elapsed_time': (self.get_clock().now().nanoseconds / 1e9) - (self._cluster_start_time or 0)
+        }
+        self.ros_signal.cluster_progress_update.emit(progress_info)
+        
+        # 如果确认率超过阈值且当前步骤尚未完成，则进入下一步
+        if ack_rate >= self.MIN_ACK_RATE_FOR_PROCEED:
+            # 检查是否所有USV都已处理（确认或超时）
+            all_processed = all(
+                isinstance(usv, dict) and 
+                usv.get('usv_id') in self._usv_ack_map and 
+                (self._usv_ack_map[usv.get('usv_id')]['acked'] or 
+                 self._usv_ack_map[usv.get('usv_id')]['retry'] >= self._max_retries)
+                for usv in cluster_usv_list
+            )
+            
+            # 只有当所有USV都已处理时才进入下一步
+            if all_processed and ack_rate >= self.MIN_ACK_RATE_FOR_PROCEED:
+                self.get_logger().info(
+                    f"确认率达到 {ack_rate*100:.1f}% (阈值: {self.MIN_ACK_RATE_FOR_PROCEED*100:.1f}%)，"
+                    f"其中 {acked_usvs}/{total_usvs} 个USV已确认，进入下一步"
+                )
+                self._proceed_to_next_step()
+            
     # 为未确认的USV发布目标点
     def _publish_targets_for_unacked_usvs(self, cluster_usv_list):
         """
@@ -838,6 +1037,7 @@ class GroundStationNode(Node):
         Args:
             cluster_usv_list (list): 当前步骤的USV列表
         """
+        now = self.get_clock().now().nanoseconds / 1e9
         # 遍历USV列表
         for ns in cluster_usv_list:
             # 类型检查
@@ -857,6 +1057,9 @@ class GroundStationNode(Node):
                 if not all(k in pos for k in ('x', 'y')):
                     self.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                     continue
+                # 更新最后发送时间 ---
+                self._usv_ack_map[usv_id]['last_send_time'] = now 
+               
                 # 通过Action接口发送导航目标点
                 yaw = ns.get('yaw', 0.0)
                 # 支持z坐标
@@ -958,6 +1161,8 @@ class GroundStationNode(Node):
             usv_id = ns.lstrip('/')
             # 根据命令类型发送到对应的发布者
             if command_type == 'led' and usv_id in self.led_pubs:
+                # 更新本地 LED 状态 
+                self._update_local_led_state(usv_id, command_str)
                 self.publish_queue.put((self.led_pubs[usv_id], command_str))
             if command_type == 'sound' and usv_id in self.sound_pubs:
                 self.publish_queue.put((self.sound_pubs[usv_id], command_str))
@@ -1018,12 +1223,12 @@ class GroundStationNode(Node):
                 if distance_squared <= self.INFECTION_DISTANCE_SQUARED:
                     # 确定源和目标USV（按ID排序）
                     src_id, dst_id, src_color, src_mode = self._determine_infection_source(
-                        id_a, usv_a, id_b, usv_b)
+                        id_a, id_b)
                     # 添加到传染对集合
                     infect_pairs.add((src_id, dst_id))
 
                     # 记录目标USV的原始LED模式
-                    self._record_original_led_mode(dst_id, usv_a, usv_b, id_b)
+                    self._record_original_led_mode(dst_id)
 
                     # 发送传染指令
                     self._send_infection_command(dst_id, src_color)
@@ -1057,41 +1262,63 @@ class GroundStationNode(Node):
             return float('inf')
 
     # 确定传染源
-    def _determine_infection_source(self, id_a, usv_a, id_b, usv_b):
+    def _determine_infection_source(self, id_a, id_b):
         """
-        确定传染源USV和相关信息
+        确定两个USV之间的LED传染源和目标。
+        传染源基于 USV ID 的字符串排序决定（ID靠前为源）。
+        """
+         # 从本地状态字典中获取 LED 状态 
+        state_a = self._usv_current_led_state.get(id_a, {'mode': 'color_switching', 'color': [255, 0, 0]})
+        state_b = self._usv_current_led_state.get(id_b, {'mode': 'color_switching', 'color': [255, 0, 0]})
         
-        Returns:
-            tuple: (src_id, dst_id, src_color, src_mode)
-        """
-        # 以编号字符串排序，靠前为主
+         # 以编号字符串排序，靠前为主
         if id_a < id_b:
             src_id, dst_id = id_a, id_b
-            src_color = usv_a.get('led_color', [255, 0, 0])
-            src_mode = usv_a.get('led_mode', 'color_switching')
+            src_color = state_a['color'] # 使用本地状态的颜色
+            src_mode = state_a['mode'] # 使用本地状态的模式
         else:
             src_id, dst_id = id_b, id_a
-            src_color = usv_b.get('led_color', [255, 0, 0])
-            src_mode = usv_b.get('led_mode', 'color_switching')
+            src_color = state_b['color'] # 使用本地状态的颜色
+            src_mode = state_b['mode'] # 使用本地状态的模式
+        # 以编号字符串排序，靠前为主
+        #if id_a < id_b:
+            #src_id, dst_id = id_a, id_b
+            #src_color = usv_a.get('led_color', [255, 0, 0])
+           # src_mode = usv_a.get('led_mode', 'color_switching')
+        #else:
+           # src_id, dst_id = id_b, id_a
+            #src_color = usv_b.get('led_color', [255, 0, 0])
+            #src_mode = usv_b.get('led_mode', 'color_switching')
         # 返回传染源信息
         return src_id, dst_id, src_color, src_mode
 
     # 记录原始LED模式
-    def _record_original_led_mode(self, dst_id, usv_a, usv_b, id_b):
+    def _record_original_led_mode(self, dst_id):
         """
-        记录目标USV的原始LED模式
+        在开始传染前，记录目标 USV 的原始 LED 模式和颜色。
         """
-        # 如果目标USV不在LED模式字典中
+        # 从本地状态字典中获取原始 LED 状态 ---
         if dst_id not in self._usv_led_modes:
-            # 根据ID确定目标USV的状态
-            if id_b == dst_id:
-                dst_led_mode = usv_b.get('led_mode', 'color_switching')
-                dst_led_color = usv_b.get('led_color', [255, 0, 0])
-            else:
-                dst_led_mode = usv_a.get('led_mode', 'color_switching')
-                dst_led_color = usv_a.get('led_color', [255, 0, 0])
-            # 记录LED模式
+            # 始终使用本地维护的状态作为原始状态
+            original_state = self._usv_current_led_state.get(dst_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
+            dst_led_mode = original_state['mode']
+            dst_led_color = original_state['color']
+            
             self._usv_led_modes[dst_id] = (dst_led_mode, dst_led_color)
+
+
+
+        # 如果目标USV不在LED模式字典中
+        #if dst_id not in self._usv_led_modes:
+            # 根据ID确定目标USV的状态
+            #if id_b == dst_id:
+                #dst_led_mode = usv_b.get('led_mode', 'color_switching')
+                #dst_led_color = usv_b.get('led_color', [255, 0, 0])
+            #else:
+                #dst_led_mode = usv_a.get('led_mode', 'color_switching')
+                #dst_led_color = usv_a.get('led_color', [255, 0, 0])
+            # 记录LED模式
+            #self._usv_led_modes[dst_id] = (dst_led_mode, dst_led_color)
 
     # 发送传染命令
     def _send_infection_command(self, dst_id, src_color):
@@ -1133,6 +1360,32 @@ class GroundStationNode(Node):
                     self.publish_queue.put((self.led_pubs[dst_id], msg))
                 # 删除记录的LED模式
                 del self._usv_led_modes[dst_id]
+    # 更新本地 LED 状态
+    def _update_local_led_state(self, usv_id, command_str):
+        """
+        根据发送的 LED 命令更新本地维护的状态
+        """
+        if not command_str.data:
+            return
+
+        cmd_parts = command_str.data.split('|')
+        mode = cmd_parts[0].lower()
+        
+        state = self._usv_current_led_state.get(usv_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
+        
+        if mode == 'color_select' and len(cmd_parts) > 1:
+            try:
+                color_parts = [int(c.strip()) for c in cmd_parts[1].split(',')]
+                if len(color_parts) == 3:
+                    state['mode'] = 'color_select'
+                    state['color'] = color_parts
+            except ValueError:
+                self.get_logger().warn(f"解析 {usv_id} 的颜色命令失败: {command_str.data}")
+        elif mode != 'color_infect': # 传染模式不改变基础模式和颜色
+             state['mode'] = mode
+             # 可以根据模式设置默认颜色，这里保持不变
+        
+        self._usv_current_led_state[usv_id] = state
 
     # 销毁节点资源
     def destroy_node(self):

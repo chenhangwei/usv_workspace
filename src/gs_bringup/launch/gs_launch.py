@@ -13,9 +13,11 @@ def generate_launch_description():
         package='gs_gui',
         executable='main_gui_app',
         name='main_gui_app',
-
         output='screen',
-     
+        # 添加参数以优化性能
+        parameters=[{
+            'use_sim_time': False
+        }]
     )
 
 

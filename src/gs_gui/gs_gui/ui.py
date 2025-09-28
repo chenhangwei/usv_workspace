@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-# Form implementation generated from reading ui file 'dev_ws/src/gs_gui/resource/gs_ui.ui'
+# Form implementation generated from reading ui file 'usv_workspace/src/gs_gui/resource/gs_ui.ui'
 #
 # Created by: PyQt5 UI code generator 5.15.10
 #
@@ -84,6 +84,15 @@ class Ui_MainWindow(object):
         self.set_departed_y_doubleSpinBox.setObjectName("set_departed_y_doubleSpinBox")
         self.horizontalLayout_9.addWidget(self.set_departed_y_doubleSpinBox)
         self.verticalLayout_6.addLayout(self.horizontalLayout_9)
+        self.horizontalLayout_17 = QtWidgets.QHBoxLayout()
+        self.horizontalLayout_17.setObjectName("horizontalLayout_17")
+        self.label_4 = QtWidgets.QLabel(self.groupBox_6)
+        self.label_4.setObjectName("label_4")
+        self.horizontalLayout_17.addWidget(self.label_4)
+        self.set_departed_z_doubleSpinBox = QtWidgets.QDoubleSpinBox(self.groupBox_6)
+        self.set_departed_z_doubleSpinBox.setObjectName("set_departed_z_doubleSpinBox")
+        self.horizontalLayout_17.addWidget(self.set_departed_z_doubleSpinBox)
+        self.verticalLayout_6.addLayout(self.horizontalLayout_17)
         self.send_departed_point_pushButton = QtWidgets.QPushButton(self.groupBox_6)
         self.send_departed_point_pushButton.setObjectName("send_departed_point_pushButton")
         self.verticalLayout_6.addWidget(self.send_departed_point_pushButton)
@@ -138,6 +147,9 @@ class Ui_MainWindow(object):
         self.send_cluster_point_pushButton = QtWidgets.QPushButton(self.groupBox_7)
         self.send_cluster_point_pushButton.setObjectName("send_cluster_point_pushButton")
         self.verticalLayout_5.addWidget(self.send_cluster_point_pushButton)
+        self.stop_cluster_task_pushButton = QtWidgets.QPushButton(self.groupBox_7)
+        self.stop_cluster_task_pushButton.setObjectName("stop_cluster_task_pushButton")
+        self.verticalLayout_5.addWidget(self.stop_cluster_task_pushButton)
         self.horizontalLayout_5 = QtWidgets.QHBoxLayout()
         self.horizontalLayout_5.setContentsMargins(5, 5, 5, 5)
         self.horizontalLayout_5.setObjectName("horizontalLayout_5")
@@ -338,6 +350,7 @@ class Ui_MainWindow(object):
         self.groupBox_6.setTitle(_translate("MainWindow", "manual"))
         self.label.setText(_translate("MainWindow", "x:"))
         self.label_2.setText(_translate("MainWindow", "y:"))
+        self.label_4.setText(_translate("MainWindow", "z:"))
         self.send_departed_point_pushButton.setText(_translate("MainWindow", "send point"))
         self.departed_arming_pushButton.setText(_translate("MainWindow", "Arming"))
         self.departed_disarming_pushButton.setText(_translate("MainWindow", "Disarming"))
@@ -351,6 +364,7 @@ class Ui_MainWindow(object):
         self.set_guided_pushButton.setText(_translate("MainWindow", "Guided"))
         self.set_manual_pushButton.setText(_translate("MainWindow", "Manual"))
         self.send_cluster_point_pushButton.setText(_translate("MainWindow", "cluster start"))
+        self.stop_cluster_task_pushButton.setText(_translate("MainWindow", "cluster stop"))
         self.sound_start_pushButton.setText(_translate("MainWindow", "sound_start"))
         self.sound_stop_pushButton.setText(_translate("MainWindow", "sound_stop"))
         self.neck_swinging_pushButton.setText(_translate("MainWindow", "neck_swinging"))

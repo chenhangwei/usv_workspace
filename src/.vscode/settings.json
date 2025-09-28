@@ -58,11 +58,13 @@
         "schematypens",
         "setpoint",
         "UART",
+        "unacked",
         "usvs",
         "xdata",
         "xlabel",
         "ydata",
         "ylabel"
     ],
-    "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces"
+    "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces",
+    "ros.distro": "jazzy"
 }
