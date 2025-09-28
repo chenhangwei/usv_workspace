@@ -61,5 +61,6 @@
         "ydata",
         "ylabel"
     ],
-    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/common_interfaces"
+    "cmake.sourceDirectory": "/home/chenhangwei/dev_ws/src/common_interfaces",
+    "ros.distro": "jazzy"
 }
