@@ -9,6 +9,9 @@ from PyQt5.QtWidgets import QApplication, QMainWindow,  QAbstractItemView, QFile
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ros2_node_for_gui import GroundStationNode
+import os
+import yaml
+from rclpy.parameter import Parameter
 from gs_gui.ui import Ui_MainWindow
 import xml.etree.ElementTree as ET
 from gs_gui.usv_plot_window import UsvPlotWindow
@@ -91,12 +94,52 @@ class MainWindow(QMainWindow):
         self.ui.actionrviz2.triggered.connect(self.rviz_process)
 
         # 在 __init__ 末尾添加菜单或按钮
-        self.ui.action2D.triggered.connect(self.show_usv_plot_window)
+        self.ui.action3D.triggered.connect(self.show_usv_plot_window)
+        # 添加手动标记上电原点的菜单项（不会修改 UI 文件，动态创建）
+        try:
+            from PyQt5.QtWidgets import QAction
+            self._action_set_boot = QAction('Set boot pose', self)
+            self._action_set_boot.triggered.connect(self.set_boot_pose_command)
+            # 批量设置上电原点动作
+            self._action_set_boot_all = QAction('Set all boot poses', self)
+            self._action_set_boot_all.triggered.connect(self.set_all_boot_pose_command)
+            # 尝试将其添加到文件菜单（若存在）否则添加到主窗口菜单栏
+            if hasattr(self.ui, 'menuFile'):
+                try:
+                    self.ui.menuFile.addAction(self._action_set_boot)
+                    self.ui.menuFile.addAction(self._action_set_boot_all)
+                except Exception:
+                    self.menuBar().addAction(self._action_set_boot)
+                    self.menuBar().addAction(self._action_set_boot_all)
+            else:
+                self.menuBar().addAction(self._action_set_boot)
+                self.menuBar().addAction(self._action_set_boot_all)
+        except Exception:
+            pass
         # 或者你可以加一个按钮 self.ui.show_usv_plot_pushButton.clicked.connect(self.show_usv_plot_window)
 
 
         # 在线设备列表
         self.usv_online_list=[]
+        # 缓存：从节点回调收到的最新USV状态（namespace -> state dict），用于定时批量刷新UI
+        self._usv_state_cache = {}
+        # 标志：是否有新状态需要刷新到UI
+        self._usv_state_dirty = False
+        # 使用 QTimer 在 GUI 线程周期性刷新 UI，避免高频直接更新导致卡顿（200ms）
+        from PyQt5.QtCore import QTimer
+        self._ui_refresh_timer = QTimer(self)
+        self._ui_refresh_timer.setInterval(200)
+        self._ui_refresh_timer.timeout.connect(self._flush_state_cache_to_ui)
+        self._ui_refresh_timer.start()
+        # 日志缓冲：用于限制 info_textEdit 的写入速率和最大行数
+        from collections import deque
+        self._info_buffer = deque()
+        self._info_max_lines = 500  # info_textEdit 最大行数
+        self._info_flush_interval_ms = 500
+        self._info_timer = QTimer(self)
+        self._info_timer.setInterval(self._info_flush_interval_ms)
+        self._info_timer.timeout.connect(self._flush_info_buffer)
+        self._info_timer.start()
         # 集群设备列表
         self.usv_cluster_list=[]
 
@@ -168,7 +211,7 @@ class MainWindow(QMainWindow):
         """
         self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
         self.ros_signal.arm_command.emit(self.usv_cluster_namespace_list)
-        self.ui.info_textEdit.append(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
+        self.append_info(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
         self.usv_cluster_namespace_list.clear()
 
     # 集群设置manual模式命令
@@ -178,7 +221,7 @@ class MainWindow(QMainWindow):
         """
         self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
         self.ros_signal.manual_command.emit(self.usv_cluster_namespace_list)
-        self.ui.info_textEdit.append(f"集群设置manual模式命令已发送: {self.usv_cluster_namespace_list}")
+        self.append_info(f"集群设置manual模式命令已发送: {self.usv_cluster_namespace_list}")
         self.usv_cluster_namespace_list.clear()
 
     # 集群加锁命令  
@@ -188,7 +231,7 @@ class MainWindow(QMainWindow):
         """
         self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
         self.ros_signal.disarm_command.emit(self.usv_cluster_namespace_list)
-        self.ui.info_textEdit.append(f"集群加锁命令已发送: {self.usv_cluster_namespace_list}")
+        self.append_info(f"集群加锁命令已发送: {self.usv_cluster_namespace_list}")
         self.usv_cluster_namespace_list.clear()
 
     # 集群设置guided模式命令 
@@ -199,7 +242,7 @@ class MainWindow(QMainWindow):
         self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
         # 发送 guided 模式命令
         self.ros_signal.guided_command.emit(self.usv_cluster_namespace_list)
-        self.ui.info_textEdit.append(f"集群设置guided模式命令已发送: {self.usv_cluster_namespace_list}")
+        self.append_info(f"集群设置guided模式命令已发送: {self.usv_cluster_namespace_list}")
         self.usv_cluster_namespace_list.clear()
 
     # 离群解锁命令
@@ -207,55 +250,72 @@ class MainWindow(QMainWindow):
         """
         发送离群解锁命令给所有离群USV
         """ 
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群解锁命令       
-        self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
-        self.ui.info_textEdit.append(f"离群解锁命令已发送: {self.usv_departed_namespace_list}")
-        self.usv_departed_namespace_list.clear()
+        self.append_info(f"离开集群列表")
+        selected_indexes = self.ui.cluster_tableView.selectedIndexes()
+        self.append_info(f'选中的标签：{selected_indexes}')
 
-    # 离群解锁命令
-    def departed_disarming_command (self):
-        """
-        发送离群加锁命令给所有离群USV
-        """ 
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群加锁命令       
-        self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list) 
-        self.ui.info_textEdit.append(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
-        self.usv_departed_namespace_list.clear()    
-         
-    # 离群设置manual模式命令
-    def set_departed_manual_command (self):
-        """
-        发送离群设置manual模式命令给所有离群USV
-        """ 
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群设置manual模式命令       
-        self.ros_signal.manual_command.emit(self.usv_departed_namespace_list) 
-        self.ui.info_textEdit.append(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}") 
-        self.usv_departed_namespace_list.clear()
+        if not selected_indexes:
+            self.append_info("请先选择一行")
+            return
 
-    # 离群设置guided模式命令
-    def set_departed_guided_command (self):
-        """
-        发送离群设置guided模式命令给所有离群USV
-        """ 
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群设置guided模式命令       
-        self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
-        self.ui.info_textEdit.append(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}") 
-        self.usv_departed_namespace_list.clear()  
-    
-    # 离群设置ARCO模式命令
-    def set_departed_arco_command (self):
+        selected_row = selected_indexes[0].row()
+        model = self.ui.cluster_tableView.model()
+        if model is None:
+            self.append_info("错误：集群表格模型未初始化")
+            return
+
+        # 获取整行状态数据
+        state = {}
+        headers = self.TABLE_HEADERS
+        for col, key in enumerate(headers):
+            index = model.index(selected_row, col)
+            state[key] = model.data(index) or "Unknown"
+
+        usv_id = state.get("编号")  # 编号对应namespace
+        if not usv_id:
+            self.append_info("错误：无法获取 USV ID")
+            return
+
+        try:
+            # 从 usv_cluster_list 移除匹配的字典
+            for item in list(self.usv_cluster_list):
+                if item.get('namespace') == usv_id:
+                    self.usv_cluster_list.remove(item)
+                    self.usv_departed_list.append(item)  # 添加状态字典
+                    break
+            self.update_cluster_table(self.usv_cluster_list)
+            self.update_departed_table(self.usv_departed_list)
+            self.append_info(f"添加设备 {usv_id} 到离群列表")
+            QMessageBox.information(self, "操作成功", f"设备 {usv_id} 已添加到离群列表")
+        except Exception as e:
+            error_msg = f"错误：移除设备失败 - {str(e)}"
+            self.append_info(error_msg)
+            QMessageBox.critical(self, "操作失败", error_msg)
         """
         发送离群设置ARCO模式命令给所有离群USV
         """
         self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
         # 发送离群设置ARCO模式命令       
         self.ros_signal.arco_command.emit(f"set_departed_arco_command:{self.usv_departed_namespace_list}")
-        self.ui.info_textEdit.append(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.append_info(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()
+
+    # 离群加锁命令（补充，避免未绑定信号时报错）
+    def departed_disarming_command(self):
+        """
+        发送离群加锁命令给所有离群USV（与 departed_arming_command 对称）
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群加锁命令失败: {e}")
+        finally:
+            try:
+                self.usv_departed_namespace_list.clear()
+            except Exception:
+                pass
 
     # 离群设置Steering模式命令
     def set_departed_steering_command (self):
@@ -265,8 +325,56 @@ class MainWindow(QMainWindow):
         self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
         # 发送离群设置Steering模式命令       
         self.ros_signal.steering_command.emit(f"set_departed_steering_command:{self.usv_departed_namespace_list}")
-        self.ui.info_textEdit.append(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
+        self.append_info(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()
+
+    def set_departed_guided_command(self):
+        """
+        发送离群设置 guided 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群guided模式命令失败: {e}")
+        finally:
+            try:
+                self.usv_departed_namespace_list.clear()
+            except Exception:
+                pass
+
+    def set_departed_manual_command(self):
+        """
+        发送离群设置 manual 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.manual_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群manual模式命令失败: {e}")
+        finally:
+            try:
+                self.usv_departed_namespace_list.clear()
+            except Exception:
+                pass
+
+    def set_departed_arco_command(self):
+        """
+        发送离群设置 ARCO 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.arco_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群ARCO模式命令失败: {e}")
+        finally:
+            try:
+                self.usv_departed_namespace_list.clear()
+            except Exception:
+                pass
 
     # 从数据文件中读取数据，数据格式xml
     def read_data_from_file(self):
@@ -318,8 +426,8 @@ class MainWindow(QMainWindow):
                                 usv_list.append(usv_data)
 
                             self.cluster_position_list=usv_list
-                            self.ui.info_textEdit.append(f"读取数据成功，共 {len(usv_list)} 个 USV 数据")
-                            self.ui.info_textEdit.append(f"数据： {self.cluster_position_list} ")
+                            self.append_info(f"读取数据成功，共 {len(usv_list)} 个 USV 数据")
+                            self.append_info(f"数据： {self.cluster_position_list} ")
                             # 重置任务状态
                             self.cluster_task_running = False
                             self.cluster_task_paused = False
@@ -327,42 +435,42 @@ class MainWindow(QMainWindow):
                     else:
                         error_msg = "XML文件格式错误：未找到step节点"
                         print(error_msg)
-                        self.ui.info_textEdit.append(error_msg)
+                        self.append_info(error_msg)
                         self.cluster_position_list=[]
                         self.update_cluster_task_button_state()
                     
                 except ET.ParseError as e:
                     error_msg = f"XML解析错误: {e}"
                     print(error_msg)
-                    self.ui.info_textEdit.append(error_msg)
+                    self.append_info(error_msg)
                     QMessageBox.critical(self, "XML解析错误", error_msg)
                     self.cluster_position_list=[]
 
                 except FileNotFoundError:
                     error_msg = f"文件未找到: {xml_file}"
                     print(error_msg)
-                    self.ui.info_textEdit.append(error_msg)
+                    self.append_info(error_msg)
                     QMessageBox.critical(self, "文件错误", error_msg)
                     self.cluster_position_list=[]
 
                 except PermissionError:
                     error_msg = f"没有权限访问文件: {xml_file}"
                     print(error_msg)
-                    self.ui.info_textEdit.append(error_msg)
+                    self.append_info(error_msg)
                     QMessageBox.critical(self, "权限错误", error_msg)
                     self.cluster_position_list=[]
                     
                 except ValueError as e:
                     error_msg = f"数据格式错误: {e}"
                     print(error_msg)
-                    self.ui.info_textEdit.append(error_msg)
+                    self.append_info(error_msg)
                     QMessageBox.critical(self, "数据格式错误", error_msg)
                     self.cluster_position_list=[]
 
                 except Exception as e:
                     error_msg = f"读取文件时发生未知错误: {e}"
                     print(error_msg)
-                    self.ui.info_textEdit.append(error_msg)
+                    self.append_info(error_msg)
                     QMessageBox.critical(self, "未知错误", error_msg)
                     self.cluster_position_list=[]
     
@@ -371,7 +479,53 @@ class MainWindow(QMainWindow):
         # 启动 RViz2
         self._rviz_process = QProcess(self)
         self._rviz_process.start("rviz2")
-        self.ui.info_textEdit.append(f"启动RViz2")
+        self.append_info(f"启动RViz2")
+
+    def set_boot_pose_command(self):
+        """
+        GUI 操作：标记当前选中 USV 的上电原点（发送信号到 GroundStationNode）
+        """
+        selected_indexes = self.ui.cluster_tableView.selectedIndexes()
+        if not selected_indexes:
+            self.append_info("请先在集群表格中选择一个USV来标记 boot pose")
+            return
+        selected_row = selected_indexes[0].row()
+        model = self.ui.cluster_tableView.model()
+        if model is None:
+            self.append_info("集群表格模型未初始化，无法标记 boot pose")
+            return
+        index0 = model.index(selected_row, 0)
+        usv_id = model.data(index0) if index0.isValid() else None
+        if not usv_id:
+            self.append_info("无法获取选中行的 USV ID")
+            return
+        try:
+            # 通过 ros_signal 发出标记 boot pose 的信号
+            self.ros_signal.set_boot_pose.emit(usv_id)
+            self.append_info(f"已请求标记 USV {usv_id} 的 boot_pose（上电原点）")
+        except Exception as e:
+            self.append_info(f"标记 boot_pose 出错: {e}")
+
+    def set_all_boot_pose_command(self):
+        """
+        GUI 操作：对当前集群列表中的所有 USV 一次性标记 boot pose。
+        """
+        try:
+            if not self.usv_cluster_list:
+                self.append_info("集群列表为空，无法批量标记 boot pose")
+                return
+            usv_ids = self._extract_namespaces(self.usv_cluster_list)
+            if not usv_ids:
+                self.append_info("未找到有效的 USV ID，取消批量标记")
+                return
+            # 通过 ros_signal 发出批量标记信号
+            try:
+                self.ros_signal.set_boot_pose_all.emit(usv_ids)
+                self.append_info(f"已请求为以下 USV 批量标记 boot_pose: {usv_ids}")
+            except Exception as e:
+                self.append_info(f"批量标记 boot_pose 出错: {e}")
+        except Exception as e:
+            self.append_info(f"执行批量标记时发生错误: {e}")
 
 
     # 切换集群任务运行状态（运行/暂停）
@@ -390,13 +544,13 @@ class MainWindow(QMainWindow):
             self.cluster_task_paused = not self.cluster_task_paused
             if self.cluster_task_paused:
                 self.ui.send_cluster_point_pushButton.setText("cluster continue")
-                self.ui.info_textEdit.append("集群任务已暂停")
+                self.append_info("集群任务已暂停")
                 # 发送暂停信号给ROS节点（如果需要实现）
                 # 这里可以发送一个特殊的信号或清空目标点列表来暂停任务
                 self.ros_signal.cluster_target_point_command.emit([])  # 发送空列表表示暂停
             else:
                 self.ui.send_cluster_point_pushButton.setText("cluster pause")
-                self.ui.info_textEdit.append("集群任务已继续")
+                self.append_info("集群任务已继续")
                 # 重新发送任务数据以恢复任务
                 self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
 
@@ -405,7 +559,7 @@ class MainWindow(QMainWindow):
         """
         开始执行集群任务
         """
-        self.ui.info_textEdit.append(f"开始执行集群目标点任务")
+        self.append_info(f"开始执行集群目标点任务")
         # 检查是否有集群列表
         if not self.cluster_position_list:
             self.ui.warning_textEdit.append("集群列表为空")
@@ -439,7 +593,7 @@ class MainWindow(QMainWindow):
                 self.ui.send_cluster_point_pushButton.setText("cluster pause")
                 # 发送 ROS 信号
                 self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-                self.ui.info_textEdit.append("集群任务已开始执行！")
+                self.append_info("集群任务已开始执行！")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"任务启动失败: {e}")
                 # 出错时重置状态
@@ -456,7 +610,7 @@ class MainWindow(QMainWindow):
         """
         # 如果没有正在运行的集群任务，直接返回
         if not self.cluster_task_running:
-            self.ui.info_textEdit.append("当前没有正在运行的集群任务")
+            self.append_info("当前没有正在运行的集群任务")
             return
             
         # 弹窗确认
@@ -476,12 +630,12 @@ class MainWindow(QMainWindow):
             self.cluster_task_paused = False
             # 更新按钮文本
             self.ui.send_cluster_point_pushButton.setText("cluster start")
-            self.ui.info_textEdit.append("集群任务已停止！")
+            self.append_info("集群任务已停止！")
             
             # 清空集群位置列表
             self.cluster_position_list = []
         else:
-            self.ui.info_textEdit.append("取消停止操作")
+            self.append_info("取消停止操作")
 
     def is_cluster_task_active(self):
         """
@@ -529,23 +683,23 @@ class MainWindow(QMainWindow):
                     })
         # 发送离群目标点信号，让Node处理Action调用
         self.ros_signal.departed_target_point_command.emit(departed_target_list)
-        self.ui.info_textEdit.append(f"发送离群目标点: x={x}, y={y}, z={z} 到 {len(departed_target_list)} 个USV")
+        self.append_info(f"发送离群目标点: x={x}, y={y}, z={z} 到 {len(departed_target_list)} 个USV")
 
     # 添加到集群列表
     def add_cluster_command(self):
         """
         将选中的离群USV添加到集群列表
         """
-        self.ui.info_textEdit.append(f"添加到集群列表")
+        self.append_info(f"添加到集群列表")
         selected_indexes = self.ui.departed_tableView.selectedIndexes()
         if not selected_indexes:
-            self.ui.info_textEdit.append("请先选择一行")
+            self.append_info("请先选择一行")
             return
 
         selected_row = selected_indexes[0].row()
         model = self.ui.departed_tableView.model()
         if model is None:
-            self.ui.info_textEdit.append("错误：离群表格模型未初始化")
+            self.append_info("错误：离群表格模型未初始化")
             return
 
         # 获取整行状态数据
@@ -557,7 +711,7 @@ class MainWindow(QMainWindow):
 
         usv_id = state.get("编号")  # 编号对应namespace
         if not usv_id:
-            self.ui.info_textEdit.append("错误：无法获取 USV ID")
+            self.append_info("错误：无法获取 USV ID")
             return
 
         try:
@@ -568,11 +722,11 @@ class MainWindow(QMainWindow):
                     self.usv_departed_list.remove(item)               
             self.update_cluster_table(self.usv_cluster_list)
             self.update_departed_table(self.usv_departed_list)
-            self.ui.info_textEdit.append(f"添加设备 {usv_id} 到集群列表")
+            self.append_info(f"添加设备 {usv_id} 到集群列表")
             QMessageBox.information(self, "操作成功", f"设备 {usv_id} 已添加到集群列表")
         except Exception as e:
             error_msg = f"错误：添加设备失败 - {str(e)}"
-            self.ui.info_textEdit.append(error_msg)
+            self.append_info(error_msg)
             QMessageBox.critical(self, "操作失败", error_msg)
    
     # 离开集群列表
@@ -580,18 +734,18 @@ class MainWindow(QMainWindow):
         """
         将选中的集群USV移到离群列表
         """
-        self.ui.info_textEdit.append(f"离开集群列表")
+        self.append_info(f"离开集群列表")
         selected_indexes = self.ui.cluster_tableView.selectedIndexes()
-        self.ui.info_textEdit.append(f'选中的标签：{selected_indexes}')
+        self.append_info(f'选中的标签：{selected_indexes}')
 
         if not selected_indexes:
-            self.ui.info_textEdit.append("请先选择一行")
+            self.append_info("请先选择一行")
             return
 
         selected_row = selected_indexes[0].row()
         model = self.ui.cluster_tableView.model()
         if model is None:
-            self.ui.info_textEdit.append("错误：集群表格模型未初始化")
+            self.append_info("错误：集群表格模型未初始化")
             return
 
         # 获取整行状态数据
@@ -603,7 +757,7 @@ class MainWindow(QMainWindow):
 
         usv_id = state.get("编号")  # 编号对应namespace
         if not usv_id:
-            self.ui.info_textEdit.append("错误：无法获取 USV ID")
+            self.append_info("错误：无法获取 USV ID")
             return
 
         try:
@@ -615,11 +769,11 @@ class MainWindow(QMainWindow):
                     break
             self.update_cluster_table(self.usv_cluster_list)
             self.update_departed_table(self.usv_departed_list)
-            self.ui.info_textEdit.append(f"添加设备 {usv_id} 到离群列表")
+            self.append_info(f"添加设备 {usv_id} 到离群列表")
             QMessageBox.information(self, "操作成功", f"设备 {usv_id} 已添加到离群列表")
         except Exception as e:
             error_msg = f"错误：移除设备失败 - {str(e)}"
-            self.ui.info_textEdit.append(error_msg)
+            self.append_info(error_msg)
             QMessageBox.critical(self, "操作失败", error_msg)
     
     def cluster_progress_callback(self, progress_info):
@@ -645,7 +799,7 @@ class MainWindow(QMainWindow):
                         f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
                         f"耗时 {elapsed_time:.1f}s")
         
-        self.ui.info_textEdit.append(progress_text)
+        self.append_info(progress_text)
         
         # 如果任务已完成，重置按钮状态
         if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
@@ -664,23 +818,18 @@ class MainWindow(QMainWindow):
         Args:
             msg (list): 包含USV状态信息的字典列表
         """
+        # 快速入缓存并返回（保证该回调非常快，避免阻塞 Qt 线程）
         if not isinstance(msg, list):
+            # 可能偶发错误，记录到 warning 区并退出
             self.ui.warning_textEdit.append("接收到的数据类型错误，期望为列表")
             return
-        
-        # 验证并过滤 msg 数据
-        self.usv_online_list = [ns for ns in msg if isinstance(ns, dict) and ns.get('namespace')]
-        
-        # 更新离群列表状态
-        self._update_departed_list_status()
-        
-        # 更新集群列表
-        self._update_cluster_list()
-        
-        # 更新表格
-        self.update_cluster_table(self.usv_cluster_list)
-        self.update_departed_table(self.usv_departed_list)
-        self.update_selected_table_row()
+
+        for ns in msg:
+            if isinstance(ns, dict) and ns.get('namespace'):
+                self._usv_state_cache[ns.get('namespace')] = ns
+
+        # 标记需要刷新 UI（定时器将在 GUI 线程中批量刷新）
+        self._usv_state_dirty = True
     
     def _update_departed_list_status(self):
         """
@@ -695,7 +844,7 @@ class MainWindow(QMainWindow):
                 # 如果离群 USV 已下线，保留现有数据
                 if not isinstance(departed, dict):
                     self.usv_departed_list[i] = {'namespace': departed_id}  # 转换为字典
-                self.ui.info_textEdit.append(f"警告：离群设备 {departed_id} 未在在线列表中")
+                self.append_info(f"警告：离群设备 {departed_id} 未在在线列表中")
     
     def _update_cluster_list(self):
         """
@@ -724,6 +873,117 @@ class MainWindow(QMainWindow):
         for ns in temp_list:
             if ns.get('namespace') not in current_cluster_ids:
                 self.usv_cluster_list.append(ns)
+
+    def _flush_state_cache_to_ui(self):
+        """
+        将缓存中的 USV 状态批量刷新到 UI（在 GUI 线程中由 QTimer 周期性调用）
+        """
+        # 如果没有新的数据，不执行任何操作
+        if not self._usv_state_dirty:
+            return
+
+        # 用缓存构建在线列表（保证顺序无关紧要）
+        try:
+            self.usv_online_list = list(self._usv_state_cache.values())
+
+            # 更新离群和集群列表（复用现有逻辑）
+            self._update_departed_list_status()
+            self._update_cluster_list()
+
+            # 批量更新表格 UI
+            self.update_cluster_table(self.usv_cluster_list)
+            self.update_departed_table(self.usv_departed_list)
+            self.update_selected_table_row()
+
+        except Exception as e:
+            # 出错时在 warning 区提示并清理标志以避免持续异常
+            try:
+                self.ui.warning_textEdit.append(f"刷新 UI 时出错: {e}")
+            except Exception:
+                pass
+        finally:
+            # 清除脏标志（下一轮等待新的回调）
+            self._usv_state_dirty = False
+
+    # --------------------------------------------------
+    # info_textEdit 缓冲写入 API（速率和大小限制）
+    # --------------------------------------------------
+    def append_info(self, text: str):
+        """
+        将文本放入 info 缓冲，由定时器周期性刷新到 UI，避免频繁写入导致卡顿。
+        """
+        try:
+            # 将文本追加到缓冲队列
+            self._info_buffer.append(str(text))
+        except Exception:
+            # 如果缓冲出错，作为回退直接写入（避免递归调用 append_info）
+            try:
+                self.ui.info_textEdit.append(str(text))
+            except Exception:
+                pass
+
+    def _flush_info_buffer(self):
+        """
+        定时器回调：把缓冲中的若干行追加到 info_textEdit，并保持最大行数。
+        """
+        try:
+            if not self._info_buffer:
+                return
+
+            # 合并若干条消息一次性写入，减少 UI 更新次数
+            to_write = []
+            # 每次最多写入 50 条，避免一次性写入太多
+            max_batch = 50
+            for _ in range(min(max_batch, len(self._info_buffer))):
+                to_write.append(self._info_buffer.popleft())
+
+            for line in to_write:
+                try:
+                    self.ui.info_textEdit.append(line)
+                except Exception:
+                    pass
+
+            # 控制最大行数
+            try:
+                doc = self.ui.info_textEdit.document()
+                block_count = None
+                if doc is not None:
+                    bc = getattr(doc, 'blockCount', None)
+                    if callable(bc):
+                        try:
+                            block_count = bc()
+                        except Exception:
+                            block_count = None
+
+                if block_count is not None:
+                    if isinstance(block_count, (int, float, str)):
+                        try:
+                            block_count = int(block_count)
+                        except (ValueError, TypeError):
+                            block_count = None
+                    else:
+                        block_count = None
+
+                if block_count is not None and block_count > self._info_max_lines:
+                    # 删除最旧的若干行，保持大小
+                    cursor = self.ui.info_textEdit.textCursor()
+                    cursor.movePosition(cursor.Start)
+                    # 计算要删除的块数
+                    remove_count = block_count - self._info_max_lines
+                    for _ in range(remove_count):
+                        cursor.select(cursor.LineUnderCursor)
+                        cursor.removeSelectedText()
+                        cursor.deleteChar()  # 删除换行
+            except Exception:
+                # 修剪失败时不影响主流程
+                pass
+
+        except Exception:
+            # 忽略刷新中的异常以保证稳定性
+            try:
+                self._info_buffer.clear()
+            except Exception:
+                pass
     
     def update_cluster_table(self, state_list):
         """
@@ -733,26 +993,103 @@ class MainWindow(QMainWindow):
             state_list: 状态列表
         """
         try:
-            self.cluster_table_model.setRowCount(len(state_list))
-            for i, state in enumerate(state_list):
-                # 填充表格数据
-                self.cluster_table_model.setItem(i, 0, QStandardItem(state.get('namespace', 'Unknown')))
-                self.cluster_table_model.setItem(i, 1, QStandardItem(state.get('mode', 'Unknown')))
-                self.cluster_table_model.setItem(i, 2, QStandardItem(str(state.get('connected', 'Unknown'))))
-                self.cluster_table_model.setItem(i, 3, QStandardItem(str(state.get('armed', 'Unknown'))))
-                self.cluster_table_model.setItem(i, 4, QStandardItem(str(state.get('guided', 'Unknown'))))
-                self.cluster_table_model.setItem(i, 5, QStandardItem(f"{state.get('battery_percentage', 'Unknown'):.1f}%"))
-                self.cluster_table_model.setItem(i, 6, QStandardItem(f"({state.get('position', {}).get('x', 'Unknown'):.2f}, {state.get('position', {}).get('y', 'Unknown'):.2f})"))
-                self.cluster_table_model.setItem(i, 7, QStandardItem(f"({state.get('velocity', {}).get('linear', {}).get('x', 'Unknown'):.2f}, {state.get('velocity', {}).get('linear', {}).get('y', 'Unknown'):.2f})"))
-                self.cluster_table_model.setItem(i, 8, QStandardItem(f"{state.get('yaw', 'Unknown'):.2f}"))
-                # 添加导航状态信息
-                usv_id = state.get('namespace', 'Unknown')
-                nav_status = self.usv_nav_status.get(usv_id, self.NAV_STATUS_IDLE)
-                self.cluster_table_model.setItem(i, 9, QStandardItem(nav_status))
-                self.cluster_table_model.setItem(i, 10, QStandardItem(f"{state.get('temperature', 'Unknown'):.1f}"))
-                
+            model = self.cluster_table_model
+
+            # 构建当前表中 namespace -> row 的映射
+            current_ns_to_row = {}
+            for row in range(model.rowCount()):
+                item = model.item(row, 0)
+                ns = item.text() if item is not None else ''
+                current_ns_to_row[ns] = row
+
+            # 新状态的 namespace 列表与集合
+            new_ns_list = [s.get('namespace') for s in state_list if isinstance(s, dict) and s.get('namespace')]
+            new_ns_set = set(new_ns_list)
+
+            # 删除在当前表中但不在新状态集合的行（从后往前删除以保持索引正确）
+            rows_to_remove = [r for ns, r in current_ns_to_row.items() if ns not in new_ns_set]
+            for r in sorted(rows_to_remove, reverse=True):
+                model.removeRow(r)
+
+            # 重新构建映射（因为删除可能改变索引）
+            current_ns_to_row = {}
+            for row in range(model.rowCount()):
+                item = model.item(row, 0)
+                ns = item.text() if item is not None else ''
+                current_ns_to_row[ns] = row
+
+            # 更新已有行或追加新行
+            for state in state_list:
+                if not isinstance(state, dict):
+                    continue
+                ns = state.get('namespace', 'Unknown')
+                # 格式化各列文本，使用安全转换以避免异常
+                try:
+                    bp = state.get('battery_percentage', 0)
+                    bp_text = f"{float(bp):.1f}%"
+                except Exception:
+                    bp_text = "Unknown"
+
+                try:
+                    px = float(state.get('position', {}).get('x', 0.0))
+                    py = float(state.get('position', {}).get('y', 0.0))
+                    pos_text = f"({px:.2f}, {py:.2f})"
+                except Exception:
+                    pos_text = "(Unknown, Unknown)"
+
+                try:
+                    vx = float(state.get('velocity', {}).get('linear', {}).get('x', 0.0))
+                    vy = float(state.get('velocity', {}).get('linear', {}).get('y', 0.0))
+                    vel_text = f"({vx:.2f}, {vy:.2f})"
+                except Exception:
+                    vel_text = "(Unknown, Unknown)"
+
+                try:
+                    yaw_text = f"{float(state.get('yaw', 0.0)):.2f}"
+                except Exception:
+                    yaw_text = "Unknown"
+
+                nav_text = self.usv_nav_status.get(ns, self.NAV_STATUS_IDLE)
+
+                try:
+                    temp_text = f"{float(state.get('temperature', 0.0)):.1f}"
+                except Exception:
+                    temp_text = "Unknown"
+
+                cells = [
+                    ns,
+                    state.get('mode', 'Unknown'),
+                    str(state.get('connected', 'Unknown')),
+                    str(state.get('armed', 'Unknown')),
+                    str(state.get('guided', 'Unknown')),
+                    bp_text,
+                    pos_text,
+                    vel_text,
+                    yaw_text,
+                    nav_text,
+                    temp_text,
+                ]
+
+                if ns in current_ns_to_row:
+                    row = current_ns_to_row[ns]
+                    # 只更新变化的列，减少重绘
+                    for col, text in enumerate(cells):
+                        existing_item = model.item(row, col)
+                        existing_text = existing_item.text() if existing_item is not None else None
+                        if existing_text != str(text):
+                            model.setItem(row, col, QStandardItem(str(text)))
+                else:
+                    # 追加新行
+                    row = model.rowCount()
+                    model.insertRow(row)
+                    for col, text in enumerate(cells):
+                        model.setItem(row, col, QStandardItem(str(text)))
+
         except Exception as e:
-            self.ui.info_textEdit.append(f"更新集群表格失败: {e}")
+            try:
+                self.append_info(f"更新集群表格失败: {e}")
+            except Exception:
+                pass
 
     def update_departed_table(self, state_list):
         """
@@ -762,97 +1099,181 @@ class MainWindow(QMainWindow):
             state_list: 状态列表
         """
         try:
-            self.departed_table_model.setRowCount(len(state_list))
-            for i, state in enumerate(state_list):
-                # 填充表格数据
-                self.departed_table_model.setItem(i, 0, QStandardItem(state.get('namespace', 'Unknown')))
-                self.departed_table_model.setItem(i, 1, QStandardItem(state.get('mode', 'Unknown')))
-                self.departed_table_model.setItem(i, 2, QStandardItem(str(state.get('connected', 'Unknown'))))
-                self.departed_table_model.setItem(i, 3, QStandardItem(str(state.get('armed', 'Unknown'))))
-                self.departed_table_model.setItem(i, 4, QStandardItem(str(state.get('guided', 'Unknown'))))
-                self.departed_table_model.setItem(i, 5, QStandardItem(f"{state.get('battery_percentage', 'Unknown'):.1f}%"))
-                self.departed_table_model.setItem(i, 6, QStandardItem(f"({state.get('position', {}).get('x', 'Unknown'):.2f}, {state.get('position', {}).get('y', 'Unknown'):.2f})"))
-                self.departed_table_model.setItem(i, 7, QStandardItem(f"({state.get('velocity', {}).get('linear', {}).get('x', 'Unknown'):.2f}, {state.get('velocity', {}).get('linear', {}).get('y', 'Unknown'):.2f})"))
-                self.departed_table_model.setItem(i, 8, QStandardItem(f"{state.get('yaw', 'Unknown'):.2f}"))
-                # 添加导航状态信息
-                usv_id = state.get('namespace', 'Unknown')
-                nav_status = self.usv_nav_status.get(usv_id, self.NAV_STATUS_IDLE)
-                self.departed_table_model.setItem(i, 9, QStandardItem(nav_status))
-                self.departed_table_model.setItem(i, 10, QStandardItem(f"{state.get('temperature', 'Unknown'):.1f}"))
-                
+            model = self.departed_table_model
+
+            # 当前表中 namespace -> row 映射
+            current_ns_to_row = {}
+            for row in range(model.rowCount()):
+                item = model.item(row, 0)
+                ns = item.text() if item is not None else ''
+                current_ns_to_row[ns] = row
+
+            # 新状态 ns 列表与集合
+            new_ns_list = [s.get('namespace') for s in state_list if isinstance(s, dict) and s.get('namespace')]
+            new_ns_set = set(new_ns_list)
+
+            # 删除在表中但不在新数据中的行（倒序删除）
+            rows_to_remove = [r for ns, r in current_ns_to_row.items() if ns not in new_ns_set]
+            for r in sorted(rows_to_remove, reverse=True):
+                model.removeRow(r)
+
+            # 重新构建映射
+            current_ns_to_row = {}
+            for row in range(model.rowCount()):
+                item = model.item(row, 0)
+                ns = item.text() if item is not None else ''
+                current_ns_to_row[ns] = row
+
+            # 更新或追加
+            for state in state_list:
+                if not isinstance(state, dict):
+                    continue
+                ns = state.get('namespace', 'Unknown')
+
+                try:
+                    bp = state.get('battery_percentage', 0)
+                    bp_text = f"{float(bp):.1f}%"
+                except Exception:
+                    bp_text = "Unknown"
+
+                try:
+                    px = float(state.get('position', {}).get('x', 0.0))
+                    py = float(state.get('position', {}).get('y', 0.0))
+                    pos_text = f"({px:.2f}, {py:.2f})"
+                except Exception:
+                    pos_text = "(Unknown, Unknown)"
+
+                try:
+                    vx = float(state.get('velocity', {}).get('linear', {}).get('x', 0.0))
+                    vy = float(state.get('velocity', {}).get('linear', {}).get('y', 0.0))
+                    vel_text = f"({vx:.2f}, {vy:.2f})"
+                except Exception:
+                    vel_text = "(Unknown, Unknown)"
+
+                try:
+                    yaw_text = f"{float(state.get('yaw', 0.0)):.2f}"
+                except Exception:
+                    yaw_text = "Unknown"
+
+                nav_text = self.usv_nav_status.get(ns, self.NAV_STATUS_IDLE)
+
+                try:
+                    temp_text = f"{float(state.get('temperature', 0.0)):.1f}"
+                except Exception:
+                    temp_text = "Unknown"
+
+                cells = [
+                    ns,
+                    state.get('mode', 'Unknown'),
+                    str(state.get('connected', 'Unknown')),
+                    str(state.get('armed', 'Unknown')),
+                    str(state.get('guided', 'Unknown')),
+                    bp_text,
+                    pos_text,
+                    vel_text,
+                    yaw_text,
+                    nav_text,
+                    temp_text,
+                ]
+
+                if ns in current_ns_to_row:
+                    row = current_ns_to_row[ns]
+                    for col, text in enumerate(cells):
+                        existing_item = model.item(row, col)
+                        existing_text = existing_item.text() if existing_item is not None else None
+                        if existing_text != str(text):
+                            model.setItem(row, col, QStandardItem(str(text)))
+                else:
+                    row = model.rowCount()
+                    model.insertRow(row)
+                    for col, text in enumerate(cells):
+                        model.setItem(row, col, QStandardItem(str(text)))
+
         except Exception as e:
-            self.ui.info_textEdit.append(f"更新离群表格失败: {e}")
+            try:
+                self.append_info(f"更新离群表格失败: {e}")
+            except Exception:
+                pass
 
     # 更新选中行数据
     def update_selected_table_row(self):
-       
         try:
-            # 获取选中的行
+            # 获取选中的行并找到对应的 namespace（第一列）
             selected_indexes = self.ui.cluster_tableView.selectedIndexes()
             if not selected_indexes:
-                self.ui.info_textEdit.append("没有选中任何行")
+                # 没有选中时不做任何更新
                 return
             selected_row = selected_indexes[0].row()
             model = self.ui.cluster_tableView.model()
             if model is None:
-                self.ui.info_textEdit.append("集群列表为空")
                 return
-            # 获取整行状态数据
-            headers = ["namespace", "mode", "connected", "armed", "guided", 
-                       "battery_voltage", "battery_prcentage", "power_supply_status", 
-                       "position", "velocity", "yaw", "nav_status", "temperature"]
-            state = {}
-            for col, key in enumerate(headers):
-                index = model.index(selected_row, col)
-                state[key] = model.data(index) or "Unknown"
-            self.ui.usv_id_label.setText(f"{state.get('namespace', 'Unknown')}")
-            position_str = str(state.get('position', 'Unknown'))
-            yaw_str = str(state.get('yaw', 'Unknown'))
-            # 正则提取 x, y, z
-            x = y = z = 'Unknown'
-            pos_match = re.findall(r'([xyz])\s*=\s*([-+]?\d*\.?\d+)', position_str)
-            pos_dict = {k: v for k, v in pos_match}
+
+            index0 = model.index(selected_row, 0)
+            namespace = model.data(index0) if index0.isValid() else None
+            if not namespace:
+                return
+
+            # 优先从缓存获取最新状态，其次从 usv_cluster_list 查找
+            state = self._usv_state_cache.get(namespace)
+            if state is None:
+                state = next((s for s in self.usv_cluster_list if isinstance(s, dict) and s.get('namespace') == namespace), None)
+
+            if state is None:
+                # 无状态数据时清空显示
+                self.ui.usv_id_label.setText("Unknown")
+                self.ui.usv_x_label.setText("Unknown")
+                self.ui.usv_y_label.setText("Unknown")
+                self.ui.usv_z_label.setText("Unknown")
+                self.ui.usv_yaw_label.setText("Unknown")
+                return
+
+            # 直接读取并格式化数值
+            self.ui.usv_id_label.setText(str(state.get('namespace', 'Unknown')))
+            pos = state.get('position', {}) or {}
             try:
-                x = float(pos_dict['x']) if 'x' in pos_dict else 'Unknown'
-                y = float(pos_dict['y']) if 'y' in pos_dict else 'Unknown'
-                z = float(pos_dict['z']) if 'z' in pos_dict else 'Unknown'
+                x = float(pos.get('x', 0.0))
             except Exception:
-                x = y = z = 'Unknown'
-            # 正则提取 yaw
-            yaw_val = 'Unknown'
-            yaw_match = re.search(r'yaw\s*=\s*([-+]?\d*\.?\d+)', yaw_str)
-            if yaw_match:
-                try:
-                    yaw_val = float(yaw_match.group(1))
-                except Exception:
-                    yaw_val = 'Unknown'
-            else:
-                # 兼容直接数字
-                try:
-                    yaw_val = float(yaw_str)
-                except Exception:
-                    yaw_val = 'Unknown'
-            self.ui.usv_x_label.setText(f"{x:.2f}")
-            self.ui.usv_y_label.setText(f"{y:.2f}")
-            self.ui.usv_z_label.setText(f"{z:.2f}")
-            self.ui.usv_yaw_label.setText(f"{yaw_val:.2f}")
+                x = None
+            try:
+                y = float(pos.get('y', 0.0))
+            except Exception:
+                y = None
+            try:
+                z = float(pos.get('z', 0.0))
+            except Exception:
+                z = None
+
+            yaw_val = state.get('yaw')
+            try:
+                yaw_val = float(yaw_val) if yaw_val is not None else None
+            except Exception:
+                yaw_val = None
+
+            self.ui.usv_x_label.setText(f"{x:.2f}" if x is not None else "Unknown")
+            self.ui.usv_y_label.setText(f"{y:.2f}" if y is not None else "Unknown")
+            self.ui.usv_z_label.setText(f"{z:.2f}" if z is not None else "Unknown")
+            self.ui.usv_yaw_label.setText(f"{yaw_val:.2f}" if yaw_val is not None else "Unknown")
+
         except Exception as e:
-            self.ui.info_textEdit.append(f"错误：获取选中行数据失败 - {str(e)}")
-            self.ui.usv_id_label.setText("当前选中 USV ID: Unknown")
-            self.ui.usv_x_label.setText("当前选中 USV X: Unknown")
-            self.ui.usv_y_label.setText("当前选中 USV Y: Unknown")
-            self.ui.usv_z_label.setText("当前选中 USV Z: Unknown")
-            self.ui.usv_yaw_label.setText("当前选中 USV Yaw: Unknown")
+            try:
+                self.append_info(f"错误：获取选中行数据失败 - {str(e)}")
+            except Exception:
+                pass
+            self.ui.usv_id_label.setText("Unknown")
+            self.ui.usv_x_label.setText("Unknown")
+            self.ui.usv_y_label.setText("Unknown")
+            self.ui.usv_z_label.setText("Unknown")
+            self.ui.usv_yaw_label.setText("Unknown")
    
     # 声音开始命令
     def sound_start_command(self):
         self.ros_signal.str_command.emit('sound_start')
-        self.ui.info_textEdit.append(f"发送命令: sound_start")
+        self.append_info(f"发送命令: sound_start")
     
     # 声音停止命令
     def sound_stop_command(self):
         self.ros_signal.str_command.emit('sound_stop')
-        self.ui.info_textEdit.append(f"发送命令:sound_stop")
+        self.append_info(f"发送命令:sound_stop")
    
     # 颈部摆动命令
     def neck_swinging_command(self):
@@ -860,7 +1281,7 @@ class MainWindow(QMainWindow):
         发送颈部摆动命令
         """
         self.ros_signal.str_command.emit('neck_swinging')
-        self.ui.info_textEdit.append(f"发送命令: neck_swinging")
+        self.append_info(f"发送命令: neck_swinging")
 
    
     # 颈部停止命令
@@ -869,39 +1290,64 @@ class MainWindow(QMainWindow):
         发送颈部停止命令
         """
         self.ros_signal.str_command.emit('neck_stop')
-        self.ui.info_textEdit.append(f"发送命令: neck_stop")
+        self.append_info(f"发送命令: neck_stop")
    
     # led1命令
     def led1_command(self):
         self.ros_signal.str_command.emit('color_switching')
-        self.ui.info_textEdit.append(f"发送命令: color_switching")
+        self.append_info(f"发送命令: color_switching")
     
     # led2命令
     def led2_command(self):
         self.ros_signal.str_command.emit('random_color_change')
-        self.ui.info_textEdit.append(f"发送命令:random_color_change")
+        self.append_info(f"发送命令:random_color_change")
     
     # led3命令    
     def led3_command(self):
-        color=QColorDialog.getColor() # type: ignore
-        if not color.isValid():
-            self.ui.info_textEdit.append("颜色选择无效")
-            return
-        # 获取颜色的 RGB 值
-        r = color.red()
-        g = color.green()
-        b = color.blue()
-        # 将 RGB 值转换为字符串格式
-        color_str = f"color_select|{r},{g},{b}"
-        # 发送颜色选择命令
-        self.ros_signal.str_command.emit(color_str)
-        # 在信息文本框中显示发送的命令
-        self.ui.info_textEdit.append(f"发送led3命令: {color_str}")
+        try:
+            # 使用非阻塞的 QColorDialog 实例，以避免阻塞 GUI 事件循环
+            dlg = QColorDialog(self)
+            # 保存对话框引用，避免被垃圾回收
+            self._color_dialog = dlg
+            dlg.setOption(QColorDialog.ShowAlphaChannel, False)
+            # 当用户选择颜色时触发 color_selected_handler
+            dlg.colorSelected.connect(self._color_selected_handler)
+            dlg.open()
+        except Exception:
+            # 回退到同步调用（兼容旧平台）
+            color = QColorDialog.getColor()  # type: ignore
+            if not color.isValid():
+                self.append_info("颜色选择无效")
+                return
+            r = color.red()
+            g = color.green()
+            b = color.blue()
+            color_str = f"color_select|{r},{g},{b}"
+            self.ros_signal.str_command.emit(color_str)
+            self.append_info(f"发送led3命令: {color_str}")
+
+    def _color_selected_handler(self, color):
+        """
+        颜色对话框回调：在 GUI 线程执行，将选中的颜色命令发送到 ROS。
+        """
+        try:
+            if not color.isValid():
+                self.append_info("颜色选择无效")
+                return
+            r = color.red()
+            g = color.green()
+            b = color.blue()
+            color_str = f"color_select|{r},{g},{b}"
+            # 通过信号发送命令（快速，不阻塞）
+            self.ros_signal.str_command.emit(color_str)
+            self.append_info(f"发送led3命令: {color_str}")
+        except Exception as e:
+            self.append_info(f"处理颜色选择时出错: {e}")
    
     # 停止灯光命令
     def light_stop_command(self):
         self.ros_signal.str_command.emit('led_off')
-        self.ui.info_textEdit.append(f"发送命令: led_off")
+        self.append_info(f"发送命令: led_off")
     
     # 显示 USV 绘图窗口
     def show_usv_plot_window(self):
@@ -954,15 +1400,13 @@ class MainWindow(QMainWindow):
             feedback: 导航反馈数据
         """
         # 在信息文本框中显示导航反馈
-        self.ui.info_textEdit.append(
+        self.ui.cluster_navigation_feedback_info_textEdit.append(
             f"USV {usv_id} 导航反馈 - "
             f"距离目标: {feedback.distance_to_goal:.2f}m, "
             f"航向误差: {feedback.heading_error:.2f}度, "
             f"预计剩余时间: {feedback.estimated_time:.2f}秒"
         )
         
-        # 如果有专门的进度条或状态显示控件，可以在这里更新
-        # 例如: self.ui.navigation_progress_bar.setValue(int((1 - feedback.distance_to_goal / initial_distance) * 100))
 
 # 主函数
 def main(argv=None):
@@ -972,6 +1416,52 @@ def main(argv=None):
 
     rclpy.init(args=None)
     node=GroundStationNode(ros_signal)
+
+    # 尝试从 usv_bringup/config/gs_params.yaml 加载参数并设置到 GroundStationNode
+    try:
+        # 构造默认参数文件路径（相对于本文件位置）
+        default_params_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), '..', '..', 'usv_bringup', 'config', 'gs_params.yaml'
+        ))
+        if os.path.isfile(default_params_path):
+            with open(default_params_path, 'r') as f:
+                params = yaml.safe_load(f) or {}
+            # 从 params dict 构造 rclpy Parameter 列表并设置到 node（更稳健）
+            try:
+                param_list = []
+                # 白名单：只设置 GroundStationNode / 状态相关的参数
+                whitelist = (
+                    'step_timeout',
+                    'max_retries',
+                    'min_ack_rate_for_proceed',
+                    'target_reach_threshold',
+                    'distance_mode'
+                )
+                for k in whitelist:
+                    if k in params:
+                        v = params[k]
+                        # 直接使用 Parameter(name, value) 由 rclpy 推断类型，兼容 int/float/str/bool
+                        try:
+                            param_list.append(Parameter(k, value=v))
+                        except Exception:
+                            # 尝试做基础类型转换后再设置
+                            try:
+                                if isinstance(v, str) and v.isdigit():
+                                    val = int(v)
+                                else:
+                                    val = float(v)
+                            except Exception:
+                                val = v
+                            param_list.append(Parameter(k, value=val))
+                if param_list:
+                    node.set_parameters(param_list)
+                    print(f"已加载参数: {[p.name for p in param_list]}")
+            except Exception as e:
+                print(f"设置参数时出错: {e}")
+        else:
+            print(f"gs_params.yaml not found at {default_params_path}, skipping GUI param load")
+    except Exception as e:
+        print(f"加载 gs_params.yaml 时出错: {e}")
 
     ros_signal.manual_command.connect(node.set_manual_callback) # 手动信号连接到手动回调函数
   
@@ -986,6 +1476,41 @@ def main(argv=None):
    
     ros_signal.str_command.connect(node.str_command_callback) # 字符串命令信号连接到字符串命令回调函数
 
+    # GUI 发来的手动标记 boot pose 信号，连接到节点回调（若支持）
+    try:
+        sig = getattr(ros_signal, 'set_boot_pose', None)
+        cb = getattr(node, 'set_boot_pose_callback', None)
+        if sig is not None and cb is not None:
+            sig.connect(cb)
+    except Exception:
+        try:
+            main_window.append_info('警告: 无法将 set_boot_pose 信号连接到 GroundStationNode')
+        except Exception:
+            pass
+
+    # 连接节点->GUI 的反馈信号（node_info）到 GUI 的 append_info
+    try:
+        node_info_sig = getattr(ros_signal, 'node_info', None)
+        if node_info_sig is not None:
+            node_info_sig.connect(main_window.append_info)
+    except Exception:
+        try:
+            main_window.append_info('警告: 无法连接节点反馈信号 node_info')
+        except Exception:
+            pass
+
+    # 连接批量设置 boot pose 的信号
+    try:
+        sig_all = getattr(ros_signal, 'set_boot_pose_all', None)
+        cb_all = getattr(node, 'set_boot_pose_all_callback', None)
+        if sig_all is not None and cb_all is not None:
+            sig_all.connect(cb_all)
+    except Exception:
+        try:
+            main_window.append_info('警告: 无法将 set_boot_pose_all 信号连接到 GroundStationNode')
+        except Exception:
+            pass
+
     # 添加导航状态更新信号连接
     ros_signal.nav_status_update.connect(main_window.update_nav_status)
     # 添加导航反馈信号连接
@@ -995,7 +1520,31 @@ def main(argv=None):
     ros_thread.start()
    
     main_window.show()
-    sys.exit(app.exec_())
+    try:
+        exit_code = app.exec_()
+    finally:
+        # 应用退出，优雅停止 ROS 节点与后台线程
+        try:
+            # 使用 getattr 安全调用 shutdown（若不存在则调用空 lambda）
+            getattr(node, 'shutdown', lambda: None)()
+        except Exception as e:
+            print(f"调用 node.shutdown() 时出错: {e}")
+        try:
+            # 销毁节点并关闭 rclpy
+            node.destroy_node()
+        except Exception as e:
+            print(f"销毁节点时出错: {e}")
+        try:
+            rclpy.shutdown()
+        except Exception as e:
+            print(f"rclpy.shutdown() 时出错: {e}")
+        # 等待 ros 线程退出（短超时），避免阻塞太久
+        try:
+            if ros_thread.is_alive():
+                ros_thread.join(timeout=2.0)
+        except Exception:
+            pass
+    sys.exit(exit_code)
 # 如果这个脚本是主程序入口   
 if __name__ == "__main__":
     main()

@@ -40,13 +40,24 @@ class UsvStatusNode(Node):
         self.state_publisher = self.create_publisher(UsvStatus, 'usv_state', 10)
         self.temperature_publisher = self.create_publisher(Float32, 'usv_temperature', 10)
 
+        # 参数：目标到达阈值（米）与距离计算模式（2d/3d）
+        self.declare_parameter('target_reach_threshold', 1.0)
+        self.declare_parameter('distance_mode', '2d')
+        try:
+            self.target_reach_threshold = float(self.get_parameter('target_reach_threshold').get_parameter_value().double_value)
+        except Exception:
+            self.target_reach_threshold = 1.0
+        try:
+            self.distance_mode = str(self.get_parameter('distance_mode').get_parameter_value().string_value).lower()
+        except Exception:
+            self.distance_mode = '2d'
+
         # 初始化状态变量
         self.target_point = Point()  # 目标点位置
         self.usv_state = State()     # 飞控状态信息
         self.usv_battery = BatteryState()  # 电池状态信息
         self.usv_velocity = TwistStamped()  # 速度信息
         self.usv_pose = PoseStamped()  # 定位信息
-        self.usv_state_msg = UsvStatus()  # 要发布的状态信息
 
         self.get_logger().info('状态报告节点已启动')
 
@@ -145,51 +156,83 @@ class UsvStatusNode(Node):
     def state_timer_callback(self):
         """定时器回调函数，定期发布状态信息"""
         try:
-            # 更新状态消息的时间戳和帧ID
-            self.usv_state_msg.header.stamp = self.usv_state.header.stamp
-            self.usv_state_msg.header.frame_id = self.usv_state.header.frame_id
+            # 每次创建新的消息实例，避免重用导致订阅端读取到中间态
+            msg = UsvStatus()
 
-            # 更新飞控状态信息
-            self.usv_state_msg.armed = self.usv_state.armed
-            self.usv_state_msg.connected = self.usv_state.connected
-            self.usv_state_msg.mode = self.usv_state.mode
-            self.usv_state_msg.guided = self.usv_state.guided
-
-            # 更新电池状态信息
-            self.usv_state_msg.battery_voltage = self.usv_battery.voltage
-            self.usv_state_msg.battery_percentage = self.usv_battery.percentage
-            self.usv_state_msg.power_supply_status = self.usv_battery.power_supply_status
-
-            # 更新速度和位置信息
-            self.usv_state_msg.velocity = self.usv_velocity.twist
-            self.usv_state_msg.position = self.usv_pose.pose.position
-
-            # 计算偏航角（四元数转欧拉角）
-            quaternion = (
-                self.usv_pose.pose.orientation.x,
-                self.usv_pose.pose.orientation.y,
-                self.usv_pose.pose.orientation.z,
-                self.usv_pose.pose.orientation.w
-            )
-            # 转换为欧拉角（roll, pitch, yaw）
-            _, _, yaw = euler_from_quaternion(quaternion)
-            # 赋值给 yaw（单位：弧度）
-            self.usv_state_msg.yaw = float(yaw)
-
-            # 获取并发布温度信息
-            temperature_msg = Float32()
+            # 安全填充 header：优先使用定位 header，否则使用当前时钟
             try:
-                temperature_msg.data = self.get_temperature() / 1000.0  # 转换为摄氏度
-                self.usv_state_msg.temperature = temperature_msg.data
-                self.temperature_publisher.publish(temperature_msg)
-            except Exception as e:
-                self.get_logger().warn(f'获取温度信息失败: {e}')
-                self.usv_state_msg.temperature = 0.0
+                msg.header.stamp = self.usv_pose.header.stamp
+                msg.header.frame_id = self.usv_pose.header.frame_id if self.usv_pose.header.frame_id else 'map'
+            except Exception:
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'map'
 
-            # 发布状态信息
-            self.state_publisher.publish(self.usv_state_msg)
+            # 填写飞控状态信息（存在性检查以防止属性缺失）
+            msg.armed = getattr(self.usv_state, 'armed', False)
+            msg.connected = getattr(self.usv_state, 'connected', False)
+            msg.mode = getattr(self.usv_state, 'mode', '')
+            msg.guided = getattr(self.usv_state, 'guided', False)
 
-            # 记录日志信息
+            # 电池信息
+            msg.battery_voltage = getattr(self.usv_battery, 'voltage', 0.0)
+            msg.battery_percentage = getattr(self.usv_battery, 'percentage', 0.0)
+            msg.power_supply_status = getattr(self.usv_battery, 'power_supply_status', 0)
+
+            # 位置与速度
+            try:
+                msg.position = self.usv_pose.pose.position
+            except Exception:
+                # 为空时使用默认Point
+                msg.position = Point()
+            try:
+                msg.velocity = self.usv_velocity.twist
+            except Exception:
+                pass
+
+            # 计算偏航角
+            try:
+                quaternion = (
+                    self.usv_pose.pose.orientation.x,
+                    self.usv_pose.pose.orientation.y,
+                    self.usv_pose.pose.orientation.z,
+                    self.usv_pose.pose.orientation.w
+                )
+                _, _, yaw = euler_from_quaternion(quaternion)
+                msg.yaw = float(yaw)
+            except Exception:
+                msg.yaw = float(getattr(msg, 'yaw', 0.0))
+
+            # 计算到目标点的距离（支持2D/3D）并记录到本地变量（不写入消息，因为 UsvStatus 中无该字段）
+            try:
+                dx = msg.position.x - self.target_point.x
+                dy = msg.position.y - self.target_point.y
+                dz = msg.position.z - self.target_point.z
+                if self.distance_mode == '3d':
+                    distance = sqrt(dx*dx + dy*dy + dz*dz)
+                else:
+                    distance = sqrt(dx*dx + dy*dy)
+            except Exception:
+                distance = float('inf')
+
+            # 获取并发布温度（安全方式，不抛异常）
+            temp_val = 0.0
+            try:
+                temp_val = float(self.get_temperature())
+            except Exception:
+                temp_val = 0.0
+            # 如果 get_temperature 返回的是毫度级别 (>1000)，尝试转换为摄氏度
+            if temp_val > 1000:
+                try:
+                    temp_val = temp_val / 1000.0
+                except Exception:
+                    pass
+            msg.temperature = temp_val
+            temp_msg = Float32()
+            temp_msg.data = float(temp_val)
+            self.temperature_publisher.publish(temp_msg)
+
+            # 发布状态消息
+            self.state_publisher.publish(msg)
         except Exception as e:
             self.get_logger().error(f'状态信息发布过程中发生错误: {e}')
 
@@ -202,13 +245,24 @@ class UsvStatusNode(Node):
         Raises:
             IOError: 无法读取温度文件时抛出
         """
-        try:
-            with open('/sys/class/thermal/thermal_zone0/temp', 'r') as f:
-                temp = float(f.read())
-            return temp
-        except Exception as e:
-            self.get_logger().warn(f'读取温度文件失败: {e}')
-            raise IOError(f'无法读取系统温度: {e}')
+        # 尝试多个常见路径以提高兼容性，若均失败则返回0.0
+        candidates = [
+            '/sys/class/thermal/thermal_zone0/temp',
+            '/sys/class/hwmon/hwmon0/temp1_input'
+        ]
+        for path in candidates:
+            try:
+                with open(path, 'r') as f:
+                    raw = f.read().strip()
+                    if not raw:
+                        continue
+                    val = float(raw)
+                    return val
+            except Exception:
+                continue
+        # 如果所有路径均失败，记录并返回0.0
+        self.get_logger().warn('无法读取系统温度，返回0.0')
+        return 0.0
 
 
 def main():

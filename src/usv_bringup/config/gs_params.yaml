@@ -1,0 +1,19 @@
+# Ground station and cluster related parameters
+# These parameters configure per-step timeouts and retry behavior for the GroundStationNode
+# and also configure USV state node distance calculation options.
+
+# GroundStationNode behavior
+step_timeout: 20.0            # seconds before considering a per-USV step as timed out
+max_retries: 1                # number of retries before skipping a USV
+min_ack_rate_for_proceed: 0.8 # fraction of USVs that must ack to proceed (0.0-1.0)
+
+# UsvStatusNode behavior
+target_reach_threshold: 1.0   # meters used to decide if target is reached (listener internal)
+distance_mode: '2d'           # '2d' or '3d' distance computation mode
+
+# area center: the mission coordinate frame origin in the global 'map' frame
+# Set these to the global coordinates (map) of the area center (e.g., stadium center or lake center)
+area_center_x: 0.0
+area_center_y: 0.0
+area_center_z: 0.0
+area_center_frame: 'map'

@@ -98,7 +98,9 @@ class NavigateToPointServer(Node):
         Returns:
             NavigateToPoint.Result: Action执行结果
         """
-        self.get_logger().info(f'接收到导航目标点: {goal_handle.request.goal.pose.position}')
+        self.get_logger().info(f'接收到导航目标点: x={goal_handle.request.goal.pose.position.x:.2f}, '
+                              f'y={goal_handle.request.goal.pose.position.y:.2f}, '
+                              f'z={goal_handle.request.goal.pose.position.z:.2f}')
         
         # 获取目标点和超时设置
         target_pose = goal_handle.request.goal
@@ -143,7 +145,8 @@ class NavigateToPointServer(Node):
                 # 计算距离与航向
                 dx = target_pose.pose.position.x - self.current_pose.pose.position.x
                 dy = target_pose.pose.position.y - self.current_pose.pose.position.y
-                distance_to_goal = math.hypot(dx, dy)
+                dz = target_pose.pose.position.z - self.current_pose.pose.position.z
+                distance_to_goal = math.sqrt(dx*dx + dy*dy + dz*dz)
                 
                 # 简化的航向误差计算（实际应用中可能需要更复杂的计算）
                 heading_error = 0.0

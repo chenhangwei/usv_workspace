@@ -53,6 +53,17 @@ def generate_launch_description():
         ]),
         description='设备站的参数文件路径'
     )
+
+    # 可选的 groundstation / cluster 参数文件
+    gs_param_file_arg = DeclareLaunchArgument(
+        'gs_param_file',
+        default_value=PathJoinSubstitution([
+            FindPackageShare('usv_bringup'),
+            'config',
+            'gs_params.yaml'
+        ]),
+        description='GroundStation/cluster 的参数文件路径'
+    )
     
     # 飞控串口参数
     fcu_url_arg = DeclareLaunchArgument(
@@ -94,6 +105,7 @@ def generate_launch_description():
     # =============================================================================
 
     param_file = LaunchConfiguration('param_file')
+    gs_param_file = LaunchConfiguration('gs_param_file')
     namespace = LaunchConfiguration('namespace')
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
@@ -112,7 +124,7 @@ def generate_launch_description():
         name='usv_status_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, gs_param_file]
     )
 
     # 自动设置home点节点

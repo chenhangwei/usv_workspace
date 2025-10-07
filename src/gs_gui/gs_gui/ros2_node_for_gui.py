@@ -16,6 +16,8 @@ import queue  # 导入queue模块，用于创建消息队列
 import threading  # 导入threading模块，用于多线程处理
 from std_msgs.msg import String # 导入 String 消息类型
 import weakref  # 导入weakref模块，用于弱引用
+import tf2_ros
+from geometry_msgs.msg import TransformStamped
 
 
 
@@ -58,6 +60,8 @@ class GroundStationNode(Node):
 
         # 初始化USV状态和目标管理相关变量
         self.usv_states = {}  # USV状态字典
+        # 存储每艘USV的上电（boot）位姿，用于将全局任务点转换为本地坐标
+        self.usv_boot_pose = {}
         self.last_ns_list = []  # 上次命名空间列表
         self.is_runing = False
         self.run_step = 0  # 当前运行步骤
@@ -73,9 +77,42 @@ class GroundStationNode(Node):
         # 初始化集群控制相关变量
         self._usv_ack_map = {}  # USV确认映射表
         self._cluster_start_time = None  # 集群开始时间
-        self._step_timeout = self.DEFAULT_STEP_TIMEOUT  # 步骤超时时间
-        self._max_retries = self.DEFAULT_MAX_RETRIES  # 最大重试次数
+        # 将超时/重试等参数化，支持通过参数/launch调整
+        self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
+        self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
+        self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
+        # area center 参数（任务坐标系原点在全局 map 中的位置）
+        self.declare_parameter('area_center_x', 0.0)
+        self.declare_parameter('area_center_y', 0.0)
+        self.declare_parameter('area_center_z', 0.0)
+        self.declare_parameter('area_center_frame', 'map')
+        # 从参数服务器读取当前值（可被 launch/参数文件覆盖）
+        try:
+            self._step_timeout = float(self.get_parameter('step_timeout').get_parameter_value().double_value)
+        except Exception:
+            self._step_timeout = float(self.DEFAULT_STEP_TIMEOUT)
+        try:
+            self._max_retries = int(self.get_parameter('max_retries').get_parameter_value().integer_value)
+        except Exception:
+            self._max_retries = int(self.DEFAULT_MAX_RETRIES)
+        try:
+            self.MIN_ACK_RATE_FOR_PROCEED = float(self.get_parameter('min_ack_rate_for_proceed').get_parameter_value().double_value)
+        except Exception:
+            pass
+
+        # 读取 area_center 参数
+        try:
+            ax = float(self.get_parameter('area_center_x').get_parameter_value().double_value)
+            ay = float(self.get_parameter('area_center_y').get_parameter_value().double_value)
+            az = float(self.get_parameter('area_center_z').get_parameter_value().double_value)
+            afr = str(self.get_parameter('area_center_frame').get_parameter_value().string_value)
+            self._area_center = {'x': ax, 'y': ay, 'z': az, 'frame': afr}
+        except Exception:
+            self._area_center = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'frame': 'map'}
+
         self._cluster_task_paused = False  # 集群任务是否已暂停
+        # 用于通知后台线程退出的事件
+        self._stop_event = threading.Event()
 
         #Action 任务跟踪
         self._usv_active_goals = {} # 跟踪每个 USV 当前活动的 Action 句柄
@@ -94,6 +131,21 @@ class GroundStationNode(Node):
         
         self.update_subscribers_and_publishers()
 
+        # TF2: Buffer/Listener for transforms and static broadcaster for boot poses
+        try:
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        except Exception:
+            self.tf_buffer = None
+            self.tf_listener = None
+            self.static_broadcaster = None
+
+        # 用于接收来自 GUI 的字符串命令的队列（由 GUI 线程快速入队，节点线程定期处理）
+        self._incoming_str_commands = queue.Queue(maxsize=200)
+        # 在节点线程中周期性处理入队的字符串命令，避免在 GUI 线程执行节点逻辑
+        self._str_command_timer = self.create_timer(0.1, self._process_incoming_str_commands)
+
     # 在独立线程中异步处理消息发布队列
     def process_publish_queue(self):
         """
@@ -102,8 +154,8 @@ class GroundStationNode(Node):
         该方法在单独的线程中运行，从发布队列中取出消息并发布
         这样可以避免在主ROS循环中进行耗时的发布操作
         """
-        # 当ROS仍在运行时持续处理队列
-        while rclpy.ok():
+        # 当ROS仍在运行且未收到停止事件时持续处理队列
+        while rclpy.ok() and not getattr(self, '_stop_event', threading.Event()).is_set():
             try:
                 # 从队列中获取发布任务，超时时间为1秒
                 pub, msg = self.publish_queue.get(timeout=1.0)
@@ -129,6 +181,113 @@ class GroundStationNode(Node):
             # 捕获其他异常并记录错误日志
             except Exception as e:
                 self.get_logger().error(f"发布消息失败: {e}")
+        # 线程退出前做简单清理（如果队列中还有消息，这里不再处理）
+        self.get_logger().debug('process_publish_queue 线程退出')
+
+    def set_boot_pose_callback(self, usv_id: str):
+        """
+        外部（GUI）请求：把当前 usv 的位姿记录为 boot_pose（上电原点），并发布一个静态 transform 以供 tf2 使用。
+        """
+        try:
+            st = self.usv_states.get(usv_id)
+            if not st:
+                self.get_logger().warn(f"无法标记 boot_pose: 未找到 {usv_id} 的状态信息")
+                return False
+            bp = {
+                'x': float(st.get('position', {}).get('x', 0.0)),
+                'y': float(st.get('position', {}).get('y', 0.0)),
+                'z': float(st.get('position', {}).get('z', 0.0)),
+                'yaw': float(st.get('yaw', 0.0))
+            }
+            self.usv_boot_pose[usv_id] = bp
+            self.get_logger().info(f"已设置 {usv_id} 的 boot_pose: {bp}")
+            # 向 GUI 反馈结果（若 ros_signal 可用）
+            try:
+                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
+                    self.ros_signal.node_info.emit(f"已设置 {usv_id} 的 boot_pose: {bp}")
+            except Exception:
+                pass
+
+            # 发布静态 transform: frame_id = area_center.frame (通常 map)， child = f"{usv_id}_boot"
+            if self.static_broadcaster is not None:
+                t = TransformStamped()
+                t.header.stamp = self.get_clock().now().to_msg()
+                t.header.frame_id = self._area_center.get('frame', 'map')
+                t.child_frame_id = f"{usv_id}_boot"
+                t.transform.translation.x = bp['x']
+                t.transform.translation.y = bp['y']
+                t.transform.translation.z = bp['z']
+                # convert yaw to quaternion
+                from tf_transformations import quaternion_from_euler
+                q = quaternion_from_euler(0, 0, bp['yaw'])
+                t.transform.rotation.x = q[0]
+                t.transform.rotation.y = q[1]
+                t.transform.rotation.z = q[2]
+                t.transform.rotation.w = q[3]
+                try:
+                    self.static_broadcaster.sendTransform([t])
+                    self.get_logger().info(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
+                    try:
+                        if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
+                            self.ros_signal.node_info.emit(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
+                    except Exception:
+                        pass
+                except Exception as e:
+                    self.get_logger().warn(f"发布静态 transform 失败: {e}")
+                    try:
+                        if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
+                            self.ros_signal.node_info.emit(f"发布静态 transform 失败: {e}")
+                    except Exception:
+                        pass
+
+            return True
+        except Exception as e:
+            self.get_logger().error(f"设置 boot_pose 失败: {e}")
+            return False
+
+    def set_boot_pose_all_callback(self, usv_id_list: list):
+        """
+        批量设置多个 USV 的 boot pose。接受 USV id 列表，逐个调用 set_boot_pose_callback。
+        返回一个字典汇总每个 USV 的结果。
+        """
+        results = {}
+        try:
+            for usv_id in usv_id_list:
+                try:
+                    ok = self.set_boot_pose_callback(usv_id)
+                    results[usv_id] = 'ok' if ok else 'fail'
+                except Exception as e:
+                    results[usv_id] = f'error: {e}'
+            # 汇总反馈
+            try:
+                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
+                    self.ros_signal.node_info.emit(f"批量设置 boot_pose 完成: {results}")
+            except Exception:
+                pass
+        except Exception as e:
+            self.get_logger().error(f"批量设置 boot_pose 失败: {e}")
+            try:
+                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
+                    self.ros_signal.node_info.emit(f"批量设置 boot_pose 遇到错误: {e}")
+            except Exception:
+                pass
+        return results
+
+    def shutdown(self):
+        """
+        优雅停止 GroundStationNode 的后台线程并做最小清理。
+
+        说明：该方法不会销毁节点本身（destroy_node），调用者应在需要时负责调用
+        node.destroy_node() 与 rclpy.shutdown()。
+        """
+        self.get_logger().info('GroundStationNode 正在关闭，通知后台线程退出')
+        try:
+            # 通知线程退出并等待其结束
+            self._stop_event.set()
+            if hasattr(self, 'publish_thread') and self.publish_thread.is_alive():
+                self.publish_thread.join(timeout=2.0)
+        except Exception as e:
+            self.get_logger().warn(f'关闭后台线程时发生异常: {e}')
 
     # 获取当前节点的名称和命名空间，为新的 USV 节点创建订阅和发布器
     def update_subscribers_and_publishers(self):
@@ -285,9 +444,19 @@ class GroundStationNode(Node):
             }
             
             # 只有当状态发生变化时才更新和发送信号
-            if usv_id not in self.usv_states or self.usv_states[usv_id] != state_data:
+            first_time = usv_id not in self.usv_states
+            if first_time or self.usv_states.get(usv_id) != state_data:
                 # 更新USV状态字典
                 self.usv_states[usv_id] = state_data
+                # 如果是首次收到该USV的状态，记录为 boot pose（上电时的原点）
+                if first_time:
+                    try:
+                        bp = state_data.get('position', {})
+                        byaw = float(state_data.get('yaw', 0.0))
+                        self.usv_boot_pose[usv_id] = {'x': float(bp.get('x', 0.0)), 'y': float(bp.get('y', 0.0)), 'z': float(bp.get('z', 0.0)), 'yaw': byaw}
+                        self.get_logger().info(f"记录 USV {usv_id} 的 boot_pose: {self.usv_boot_pose[usv_id]}")
+                    except Exception:
+                        pass
                 # 发射信号，将更新后的USV状态列表发送给GUI界面
                 # 限制信号发射频率，避免过于频繁的更新
                 self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
@@ -900,6 +1069,58 @@ class GroundStationNode(Node):
             # 记录错误日志，说明该USV已超时且达到最大重试次数
             self.get_logger().error(f"{usv_id} 超时且已达最大重试次数，跳过并继续下一步")
 
+    # 坐标转换辅助函数：将相对于 area_center 的点转换为全局坐标
+    def _area_to_global(self, p_area):
+        """
+        将相对于 area_center 的点转换为全局坐标（使用 self._area_center）。
+        p_area: dict 包含 x,y,z
+        返回 dict {'x','y','z'}
+        """
+        try:
+            ax = float(self._area_center.get('x', 0.0))
+            ay = float(self._area_center.get('y', 0.0))
+            az = float(self._area_center.get('z', 0.0))
+            gx = ax + float(p_area.get('x', 0.0))
+            gy = ay + float(p_area.get('y', 0.0))
+            gz = az + float(p_area.get('z', 0.0))
+            return {'x': gx, 'y': gy, 'z': gz}
+        except Exception:
+            return {'x': float(p_area.get('x', 0.0)), 'y': float(p_area.get('y', 0.0)), 'z': float(p_area.get('z', 0.0))}
+
+    # 坐标转换辅助函数：将全局坐标转换为 USV 本地坐标（以 usv 启动时的位置与航向为基准）
+    def _global_to_usv_local(self, usv_id, p_global):
+        """
+        将全局坐标转换为指定 usv 的本地坐标。
+        如果 usv 的 boot pose 不存在，则返回 p_global 作为回退。
+        """
+        try:
+            # 优先使用 boot pose（上电时记录的原点），若不存在则退回到最新状态
+            bp = self.usv_boot_pose.get(usv_id)
+            if bp:
+                bx = float(bp.get('x', 0.0))
+                by = float(bp.get('y', 0.0))
+                bz = float(bp.get('z', 0.0))
+                theta = float(bp.get('yaw', 0.0))
+            else:
+                st = self.usv_states.get(usv_id)
+                if not st:
+                    return p_global
+                bx = float(st.get('position', {}).get('x', 0.0))
+                by = float(st.get('position', {}).get('y', 0.0))
+                bz = float(st.get('position', {}).get('z', 0.0))
+                theta = float(st.get('yaw', 0.0))
+
+            dx = float(p_global.get('x', 0.0)) - bx
+            dy = float(p_global.get('y', 0.0)) - by
+            import math
+            ct = math.cos(-theta); stt = math.sin(-theta)
+            lx = ct * dx - stt * dy
+            ly = stt * dx + ct * dy
+            lz = float(p_global.get('z', 0.0)) - bz
+            return {'x': lx, 'y': ly, 'z': lz}
+        except Exception:
+            return p_global
+
     # 推进到下一步
     def _proceed_to_next_step(self):
         """
@@ -1051,10 +1272,10 @@ class GroundStationNode(Node):
             # 检查USV是否已确认且是首次尝试（retry == 0）
             info = self._usv_ack_map.get(usv_id, {})
             if not info.get('acked', False) and info.get('retry', 0) == 0:
-                # 获取位置信息
+                # 获取位置信息（文件里的点可能是相对于 area_center）
                 pos = ns.get('position', {})
-                # 检查位置信息是否完整
-                if not all(k in pos for k in ('x', 'y')):
+                # 检查位置信息是否完整（包含x,y,z）
+                if not all(k in pos for k in ('x', 'y', 'z')):
                     self.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                     continue
                 # 更新最后发送时间 ---
@@ -1062,8 +1283,11 @@ class GroundStationNode(Node):
                
                 # 通过Action接口发送导航目标点
                 yaw = ns.get('yaw', 0.0)
+                # 将 area-relative 转为全局，再转换为 usv 本地坐标（以 usv 启动点为0,0,0）
+                p_global = self._area_to_global(pos)
+                p_local = self._global_to_usv_local(usv_id, p_global)
                 # 支持z坐标
-                self.send_nav_goal_via_action(usv_id, pos.get('x', 0.0), pos.get('y', 0.0), pos.get('z', 0.0), yaw, 300.0)
+                self.send_nav_goal_via_action(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
 
     # 设置离群目标点回调
     def set_departed_target_point_callback(self, msg):
@@ -1101,18 +1325,20 @@ class GroundStationNode(Node):
 
                 # 获取位置信息
                 pos = ns.get('position', {})
-                # 检查位置信息是否完整
-                if not all(k in pos for k in ('x', 'y')):
+                # 检查位置信息是否完整（包含x,y,z）
+                if not all(k in pos for k in ('x', 'y', 'z')):
                     # 记录警告日志
                     self.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                     continue
 
-                # 通过Action接口发送导航目标点
+                # 通过Action接口发送导航目标点（先转换坐标系）
                 yaw = ns.get('yaw', 0.0)
+                p_global = self._area_to_global(pos)
+                p_local = self._global_to_usv_local(usv_id, p_global)
                 # 支持z坐标
-                self.send_nav_goal_via_action(usv_id, pos.get('x', 0.0), pos.get('y', 0.0), pos.get('z', 0.0), yaw, 300.0)
-                # 记录日志信息
-                self.get_logger().info(f"已下发目标点到 {usv_id}: {pos}, yaw: {yaw}")
+                self.send_nav_goal_via_action(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
+                # 记录日志信息（记录全局和本地坐标以便调试）
+                self.get_logger().info(f"已下发目标点到 {usv_id}: global={p_global}, local={p_local}, yaw: {yaw}")
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
@@ -1140,34 +1366,12 @@ class GroundStationNode(Node):
         Args:
             msg (str): 命令字符串
         """
-        # 记录日志信息
-        self.get_logger().info(f"接收到命令: {msg}")
-        # 类型检查
-        if not isinstance(msg, str):
-            # 记录警告日志
-            self.get_logger().warn("命令不是字符串，跳过")
-            return
-
-        # 创建命令消息
-        command_str = String()
-        command_str.data = msg
-
-        # 识别命令类型
-        command_type = self._identify_command_type(msg)
-
-        # 遍历命名空间列表
-        for ns in self.last_ns_list:
-            # 提取USV ID
-            usv_id = ns.lstrip('/')
-            # 根据命令类型发送到对应的发布者
-            if command_type == 'led' and usv_id in self.led_pubs:
-                # 更新本地 LED 状态 
-                self._update_local_led_state(usv_id, command_str)
-                self.publish_queue.put((self.led_pubs[usv_id], command_str))
-            if command_type == 'sound' and usv_id in self.sound_pubs:
-                self.publish_queue.put((self.sound_pubs[usv_id], command_str))
-            if command_type == 'action' and usv_id in self.action_pubs:
-                self.publish_queue.put((self.action_pubs[usv_id], command_str))
+        # 只把命令快速放入队列，由节点线程的定时器处理，避免在 GUI 线程执行节点逻辑
+        try:
+            self._incoming_str_commands.put_nowait(msg)
+        except queue.Full:
+            # 如果队列已满，丢弃并记录日志
+            self.get_logger().warn("incoming str_command 队列已满，丢弃命令")
 
     # 识别命令类型
     def _identify_command_type(self, msg):
@@ -1191,6 +1395,61 @@ class GroundStationNode(Node):
             return 'action'
         else:
             return 'unknown'
+
+    def _process_incoming_str_commands(self):
+        """
+        在节点线程中处理从 GUI 入队的字符串命令。
+        该方法将原先的 `str_command_callback` 的实际处理逻辑移到节点线程中执行，
+        包括识别命令类型、更新本地 LED 状态并将消息放入发布队列。
+        """
+        try:
+            # 处理若干命令以避免单次循环占用过多时间
+            max_process = 20
+            processed = 0
+            while processed < max_process:
+                try:
+                    msg = self._incoming_str_commands.get_nowait()
+                except queue.Empty:
+                    break
+
+                # 记录日志（在节点线程中）
+                self.get_logger().info(f"处理入队命令: {msg}")
+                # 类型检查
+                if not isinstance(msg, str):
+                    self.get_logger().warn("命令不是字符串，跳过")
+                    continue
+
+                # 创建命令消息
+                command_str = String()
+                command_str.data = msg
+
+                # 识别命令类型
+                command_type = self._identify_command_type(msg)
+
+                # 遍历命名空间列表（在节点线程访问 last_ns_list 是安全的）
+                for ns in list(self.last_ns_list):
+                    usv_id = ns.lstrip('/')
+                    if command_type == 'led' and usv_id in self.led_pubs:
+                        self._update_local_led_state(usv_id, command_str)
+                        # 使用发布队列异步发布
+                        try:
+                            self.publish_queue.put_nowait((self.led_pubs[usv_id], command_str))
+                        except queue.Full:
+                            self.get_logger().warn('发布队列已满，无法发送 LED 命令')
+                    if command_type == 'sound' and usv_id in self.sound_pubs:
+                        try:
+                            self.publish_queue.put_nowait((self.sound_pubs[usv_id], command_str))
+                        except queue.Full:
+                            self.get_logger().warn('发布队列已满，无法发送声音命令')
+                    if command_type == 'action' and usv_id in self.action_pubs:
+                        try:
+                            self.publish_queue.put_nowait((self.action_pubs[usv_id], command_str))
+                        except queue.Full:
+                            self.get_logger().warn('发布队列已满，无法发送动作命令')
+
+                processed += 1
+        except Exception as e:
+            self.get_logger().error(f"处理入队字符串命令时出错: {e}")
 
     # 检查 USV 之间的传染逻辑
     def check_usv_infect(self):

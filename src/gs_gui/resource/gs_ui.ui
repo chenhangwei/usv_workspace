@@ -401,7 +401,7 @@
       <property name="title">
        <string>message</string>
       </property>
-      <layout class="QVBoxLayout" name="verticalLayout_10" stretch="3,4,2">
+      <layout class="QVBoxLayout" name="verticalLayout_10" stretch="4,2,4,2">
        <item>
         <widget class="QGroupBox" name="groupBox_3">
          <property name="title">
@@ -664,6 +664,18 @@
         </widget>
        </item>
        <item>
+        <widget class="QGroupBox" name="groupBox_8">
+         <property name="title">
+          <string>cluster navigation feedback</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayout_12">
+          <item>
+           <widget class="QTextEdit" name="cluster_navigation_feedback_info_textEdit"/>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
         <widget class="QGroupBox" name="groupBox_9">
          <property name="title">
           <string>info</string>
@@ -712,7 +724,7 @@
      <string>Visual</string>
     </property>
     <addaction name="actionrviz2"/>
-    <addaction name="action2D"/>
+    <addaction name="action3D"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuVisual"/>
@@ -728,9 +740,9 @@
     <string>rviz2</string>
    </property>
   </action>
-  <action name="action2D">
+  <action name="action3D">
    <property name="text">
-    <string>2D</string>
+    <string>3D</string>
    </property>
   </action>
  </widget>
