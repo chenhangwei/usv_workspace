@@ -104,16 +104,24 @@ class MainWindow(QMainWindow):
             self._action_set_boot_all = QAction('Set all boot poses', self)
             self._action_set_boot_all.triggered.connect(self.set_all_boot_pose_command)
             # 尝试将其添加到文件菜单（若存在）否则添加到主窗口菜单栏
-            if hasattr(self.ui, 'menuFile'):
+            menu_bar = None
+            try:
+                if hasattr(self.ui, 'menuFile') and getattr(self.ui, 'menuFile') is not None:
+                    try:
+                        self.ui.menuFile.addAction(self._action_set_boot)
+                        self.ui.menuFile.addAction(self._action_set_boot_all)
+                    except Exception:
+                        menu_bar = self.menuBar()
+                else:
+                    menu_bar = self.menuBar()
+            except Exception:
+                menu_bar = None
+            if menu_bar is not None:
                 try:
-                    self.ui.menuFile.addAction(self._action_set_boot)
-                    self.ui.menuFile.addAction(self._action_set_boot_all)
+                    menu_bar.addAction(self._action_set_boot)
+                    menu_bar.addAction(self._action_set_boot_all)
                 except Exception:
-                    self.menuBar().addAction(self._action_set_boot)
-                    self.menuBar().addAction(self._action_set_boot_all)
-            else:
-                self.menuBar().addAction(self._action_set_boot)
-                self.menuBar().addAction(self._action_set_boot_all)
+                    pass
         except Exception:
             pass
         # 或者你可以加一个按钮 self.ui.show_usv_plot_pushButton.clicked.connect(self.show_usv_plot_window)
@@ -324,7 +332,7 @@ class MainWindow(QMainWindow):
         """
         self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
         # 发送离群设置Steering模式命令       
-        self.ros_signal.steering_command.emit(f"set_departed_steering_command:{self.usv_departed_namespace_list}")
+        self.ros_signal.steering_command.emit(self.usv_departed_namespace_list)
         self.append_info(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()
 
@@ -1413,6 +1421,38 @@ def main(argv=None):
     app = QApplication(sys.argv)
     ros_signal = ROSSignal()
     main_window = MainWindow(ros_signal)
+
+    # 全局异常处理：把未捕获的异常输出到 GUI 的 info 面板，便于调试运行时错误
+    def _excepthook(type_, value, traceback_):
+        try:
+            msg = f"未捕获异常: {type_.__name__}: {value}"
+            try:
+                main_window.append_info(msg)
+            except Exception:
+                print(msg)
+        finally:
+            # 仍然调用默认行为
+            sys.__excepthook__(type_, value, traceback_)
+
+    sys.excepthook = _excepthook
+
+    # 设置持久化日志（可滚动），便于在运行后分析问题
+    try:
+        import logging
+        from logging.handlers import RotatingFileHandler
+        log_dir = os.path.abspath(os.path.join(os.getcwd(), '.logs'))
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'gs_gui.log')
+        handler = RotatingFileHandler(log_file, maxBytes=5 * 1024 * 1024, backupCount=5, encoding='utf-8')
+        fmt = logging.Formatter('%(asctime)s %(levelname)s %(name)s: %(message)s')
+        handler.setFormatter(fmt)
+        root_logger = logging.getLogger()
+        if not any(isinstance(h, RotatingFileHandler) and getattr(h, 'baseFilename', None) == log_file for h in root_logger.handlers):
+            root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
+        root_logger.info('gs_gui 启动，日志记录到 %s' % log_file)
+    except Exception:
+        print('无法设置持久化日志')
 
     rclpy.init(args=None)
     node=GroundStationNode(ros_signal)

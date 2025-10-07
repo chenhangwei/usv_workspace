@@ -201,6 +201,11 @@ class GroundStationNode(Node):
             }
             self.usv_boot_pose[usv_id] = bp
             self.get_logger().info(f"已设置 {usv_id} 的 boot_pose: {bp}")
+            try:
+                import logging
+                logging.getLogger('gs_gui').info(f"已设置 {usv_id} 的 boot_pose: {bp}")
+            except Exception:
+                pass
             # 向 GUI 反馈结果（若 ros_signal 可用）
             try:
                 if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
@@ -227,6 +232,11 @@ class GroundStationNode(Node):
                 try:
                     self.static_broadcaster.sendTransform([t])
                     self.get_logger().info(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
+                    try:
+                        import logging
+                        logging.getLogger('gs_gui').info(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
+                    except Exception:
+                        pass
                     try:
                         if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
                             self.ros_signal.node_info.emit(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
@@ -262,6 +272,11 @@ class GroundStationNode(Node):
             try:
                 if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
                     self.ros_signal.node_info.emit(f"批量设置 boot_pose 完成: {results}")
+                    try:
+                        import logging
+                        logging.getLogger('gs_gui').info(f"批量设置 boot_pose 完成: {results}")
+                    except Exception:
+                        pass
             except Exception:
                 pass
         except Exception as e:

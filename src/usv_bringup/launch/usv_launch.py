@@ -6,8 +6,10 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
+import os
 
 
 def generate_launch_description():
@@ -57,11 +59,8 @@ def generate_launch_description():
     # 可选的 groundstation / cluster 参数文件
     gs_param_file_arg = DeclareLaunchArgument(
         'gs_param_file',
-        default_value=PathJoinSubstitution([
-            FindPackageShare('usv_bringup'),
-            'config',
-            'gs_params.yaml'
-        ]),
+        # 默认优先使用 workspace 下的 src 配置（便于源码直接运行）
+        default_value=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'gs_params.yaml')),
         description='GroundStation/cluster 的参数文件路径'
     )
     
@@ -116,6 +115,23 @@ def generate_launch_description():
     # =============================================================================
     # 通信与状态管理节点
     # =============================================================================
+
+    def _resolve_gs_param_file(context, *args, **kwargs):
+        try:
+            pkg_share = FindPackageShare('usv_bringup').perform(context)
+            candidate = os.path.join(pkg_share, 'config', 'gs_params.yaml')
+            if os.path.isfile(candidate):
+                return [SetLaunchConfiguration('gs_param_file', candidate)]
+        except Exception:
+            pass
+        try:
+            wd = os.getcwd()
+            candidate2 = os.path.abspath(os.path.join(wd, 'src', 'usv_bringup', 'config', 'gs_params.yaml'))
+            if os.path.isfile(candidate2):
+                return [SetLaunchConfiguration('gs_param_file', candidate2)]
+        except Exception:
+            pass
+        return []
 
     # 状态处理节点
     usv_status_node = Node(
