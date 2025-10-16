@@ -56,13 +56,7 @@ def generate_launch_description():
         description='设备站的参数文件路径'
     )
 
-    # 可选的 groundstation / cluster 参数文件
-    gs_param_file_arg = DeclareLaunchArgument(
-        'gs_param_file',
-        # 默认优先使用 workspace 下的 src 配置（便于源码直接运行）
-        default_value=os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'config', 'gs_params.yaml')),
-        description='GroundStation/cluster 的参数文件路径'
-    )
+ 
     
     # 飞控串口参数
     fcu_url_arg = DeclareLaunchArgument(
@@ -74,7 +68,7 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14550@192.168.68.51:14550',
+        default_value='udp://:14550@192.168.68.53:14550',
         description='地面站通信地址'
     )
     
@@ -104,7 +98,7 @@ def generate_launch_description():
     # =============================================================================
 
     param_file = LaunchConfiguration('param_file')
-    gs_param_file = LaunchConfiguration('gs_param_file')
+
     namespace = LaunchConfiguration('namespace')
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
@@ -116,22 +110,7 @@ def generate_launch_description():
     # 通信与状态管理节点
     # =============================================================================
 
-    def _resolve_gs_param_file(context, *args, **kwargs):
-        try:
-            pkg_share = FindPackageShare('usv_bringup').perform(context)
-            candidate = os.path.join(pkg_share, 'config', 'gs_params.yaml')
-            if os.path.isfile(candidate):
-                return [SetLaunchConfiguration('gs_param_file', candidate)]
-        except Exception:
-            pass
-        try:
-            wd = os.getcwd()
-            candidate2 = os.path.abspath(os.path.join(wd, 'src', 'usv_bringup', 'config', 'gs_params.yaml'))
-            if os.path.isfile(candidate2):
-                return [SetLaunchConfiguration('gs_param_file', candidate2)]
-        except Exception:
-            pass
-        return []
+  
 
     # 状态处理节点
     usv_status_node = Node(
@@ -140,7 +119,7 @@ def generate_launch_description():
         name='usv_status_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file, gs_param_file]
+        parameters=[param_file]
     )
 
     # 自动设置home点节点
@@ -383,7 +362,7 @@ def generate_launch_description():
         usv_led_node,          # LED控制
         usv_sound_node,        # 声音控制
         usv_fan_node,          # 风扇控制
-        usv_ultrasonic_radar_node,  # 超声波雷达
+        #usv_ultrasonic_radar_node,  # 超声波雷达
         usv_head_action_node,       # 鸭头动作控制
         
         # 可选节点（根据硬件配置启用）

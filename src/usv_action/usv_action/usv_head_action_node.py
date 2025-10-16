@@ -1,94 +1,127 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-from mavros_msgs.msg import OverrideRCIn
 import time
 import random
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
-SERVO_CHANNEL = 2  # MAIN 2通道，MAVROS下标从1开始
-PWM_MID = 1500     # 中位
-PWM_MIN = 1100
-PWM_MAX = 1900
-PWM_PER_DEGREE = (PWM_MAX - PWM_MID) / 45  # 每度PWM步进
+from board import SCL, SDA
+import busio
+from adafruit_pca9685 import PCA9685
+
+SERVO_CHANNEL = 0  # PCA9685的通道号，通常为0-15
+RC_OVERRIDE_FREQ = 50  # 50Hz 舵机刷新频率
+
+# 占空比范围：5% (0度) ~ 10% (180度)
+MIN_DUTY = 0.05
+MAX_DUTY = 0.10
+
+def angle_to_duty(angle):
+    angle = max(0, min(180, angle))
+    pulse_percent = MIN_DUTY + (angle / 180.0) * (MAX_DUTY - MIN_DUTY)
+    return int(pulse_percent * 0xFFFF)
 
 class UsvHeadActionNode(Node):
     def __init__(self):
         super().__init__('usv_head_action_node')
-                 # 初始化 QoS 策略（根据需要调整）
-        self.qos = QoSProfile(depth=10,reliability= QoSReliabilityPolicy.BEST_EFFORT)
-
+        self.qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         self.subscription = self.create_subscription(
-            String,
-            'gs_action_command',
-            self.listener_callback,
-             self.qos)
-        self.rc_pub = self.create_publisher(OverrideRCIn, 'rc/override', 10) # MAVROS RC覆盖话题
-        self.swinging = False # 是否正在摇摆
-        self.next_swing_time = None # 下次摇摆时间
-        self.timer = self.create_timer(1.0, self.timer_callback)  # 每秒检查一次
-        self.waiting_to_center = False # 是否等待回中
-        self.center_time = None # 回中时间
-        self.get_logger().info('摇摆器控制器节点已启动。')
+            String, 'gs_action_command', self.listener_callback, self.qos)
+
+        i2c = busio.I2C(SCL, SDA)
+        self.pca = PCA9685(i2c)
+        self.pca.frequency = 50
+
+        self.swinging = False
+        self.current_angle = 90
+        self.target_angle = 90
+        self.angle_step = 2
+        self.swing_phase = 'idle'
+        self.swing_hold_until = None
+        self.waiting_to_center = False
+        self.center_time = None
+
+        self.timer = self.create_timer(1.0 / RC_OVERRIDE_FREQ, self.timer_callback)
+        self.get_logger().info('摇摆器控制器（CircuitPython版）节点已启动。')
+
+    def set_servo_angle(self, channel, angle):
+        duty = angle_to_duty(angle)
+        self.pca.channels[channel].duty_cycle = duty
+
+    def timer_callback(self):
+        now = self.get_clock().now().nanoseconds / 1e9
+
+        if self.current_angle != self.target_angle:
+            diff = self.target_angle - self.current_angle
+            step = self.angle_step
+            if abs(diff) <= step:
+                self.current_angle = self.target_angle
+            else:
+                self.current_angle += step if diff > 0 else -step
+            self.set_servo_angle(SERVO_CHANNEL, self.current_angle)
+            return
+
+        if self.swinging:
+            if self.swing_phase == 'idle':
+                self.target_angle = 90
+                self.swing_phase = 'to_center_start'
+            elif self.swing_phase == 'to_center_start':
+                if self.current_angle == 90:
+                    direction = random.choice(['left', 'right'])
+                    angle = random.uniform(20, 45)
+                    if direction == 'left':
+                        self.target_angle = 90 - angle
+                    else:
+                        self.target_angle = 90 + angle
+                    self.swing_phase = 'to_target'
+                    self.get_logger().info(f'开始摇摆: {direction} {angle:.1f}° (目标角度: {self.target_angle:.1f}°)')
+            elif self.swing_phase == 'to_target':
+                if self.current_angle == self.target_angle:
+                    self.swing_hold_until = now + random.uniform(2, 4)
+                    self.swing_phase = 'hold'
+            elif self.swing_phase == 'hold':
+                if now >= self.swing_hold_until:
+                    self.target_angle = 90
+                    self.swing_phase = 'to_center'
+            elif self.swing_phase == 'to_center':
+                if self.current_angle == 90:
+                    self.swing_phase = 'idle'
+        elif self.waiting_to_center:
+            self.target_angle = 90
+            if self.center_time is not None and now >= self.center_time:
+                self.waiting_to_center = False
+        else:
+            self.set_servo_angle(SERVO_CHANNEL, self.current_angle)
+
+    def move_angle(self, angle):
+        angle = max(0, min(180, angle))
+        self.target_angle = angle
+        self.get_logger().info(f'转动到 {angle:.1f}°')
+
+    def center(self):
+        self.target_angle = 90
+        self.get_logger().info('舵机回中 (90°)')
 
     def listener_callback(self, msg):
         cmd = msg.data.strip()
         if cmd == 'neck_swinging':
             if not self.swinging:
                 self.swinging = True
-                self.schedule_next_swing()
+                self.swing_phase = 'idle'
                 self.get_logger().info('开始摇摆')
         elif cmd == 'neck_stop':
             self.swinging = False
-            self.waiting_to_center = False
+            self.swing_phase = 'idle'
+            self.waiting_to_center = True
+            self.center_time = self.get_clock().now().nanoseconds / 1e9
             self.center()
             self.get_logger().info('停止摇摆并回中')
-
-    def timer_callback(self):
-        now = self.get_clock().now().nanoseconds / 1e9 # 获取当前时间（秒）
-        if self.waiting_to_center:
-            if self.center_time is not None and now >= self.center_time:
-                self.center()
-                self.waiting_to_center = False
-                self.schedule_next_swing()
-            return
-
-        if self.swinging and self.next_swing_time is not None and now >= self.next_swing_time: 
-            direction = random.choice(['left', 'right'])
-            angle = random.uniform(20, 45)
-            if direction == 'left':
-                self.move_angle(-angle)
-            else:
-                self.move_angle(angle)
-            self.waiting_to_center = True
-            ran = random.randint(2, 4)  # 随机2-4秒后回中
-            self.center_time = now + ran # 设置回中时间
-    
-    def schedule_next_swing(self): # 安排下次摇摆
-        now = self.get_clock().now().nanoseconds / 1e9
-        self.next_swing_time = now + random.uniform(60, 90) # 随机60-90秒后摇摆
-
-    def move_angle(self, angle):
-        pwm = int(PWM_MID + angle * PWM_PER_DEGREE) # 计算PWM值
-            # 设置PWM上下限
-      
-        pwm = max(PWM_MIN, min(PWM_MAX, pwm))
-        self.send_pwm(pwm)
-        self.get_logger().info(f'Move neck to {angle:.1f}° (PWM: {pwm})')
-    
-    def center(self):
-        self.send_pwm(PWM_MID)
-        self.get_logger().info('Center neck (0°)')
-
-    def send_pwm(self, pwm_value):
-        msg = OverrideRCIn()
-        msg.channels = [65535] * 18  # 18通道，65535为不覆盖
-        msg.channels[SERVO_CHANNEL - 1] = pwm_value
-        self.rc_pub.publish(msg)
 
     def destroy_node(self):
         self.center()
         time.sleep(0.5)
+        self.pca.channels[SERVO_CHANNEL].duty_cycle = 0
+        self.get_logger().info('释放PCA9685通道')
         super().destroy_node()
 
 def main(args=None):

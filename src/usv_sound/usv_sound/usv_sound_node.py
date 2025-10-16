@@ -109,7 +109,8 @@ class UsvSoundNode(Node):
                 return
                 
             self.voltage = msg.voltage if hasattr(msg, 'voltage') else 12.0
-            
+            if self.voltage ==0.0:
+                return          
             # 检查是否为低电压状态
             if self.voltage < 11.1:
                 if not self.low_voltage:
