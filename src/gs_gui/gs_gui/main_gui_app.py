@@ -8,7 +8,8 @@ from PyQt5.QtCore import QProcess
 from PyQt5.QtWidgets import QApplication, QMainWindow,  QAbstractItemView, QFileDialog, QMessageBox, QColorDialog
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from gs_gui.ros_signal import ROSSignal
-from gs_gui.ros2_node_for_gui import GroundStationNode
+# 更新导入语句，使用新的模块结构
+from gs_gui.ground_station_node import GroundStationNode
 import os
 import yaml
 from rclpy.parameter import Parameter
@@ -178,6 +179,8 @@ class MainWindow(QMainWindow):
 
         # 将模型设置到窗口表格
         self.ui.cluster_tableView.setModel(self.cluster_table_model)
+        # 启用表格排序功能
+        self.ui.cluster_tableView.setSortingEnabled(True)
 
         # 离群表格模型
         self.departed_table_model=QStandardItemModel(self)
@@ -190,9 +193,14 @@ class MainWindow(QMainWindow):
 
         # 将模型设置到窗口表格
         self.ui.departed_tableView.setModel(self.departed_table_model)
+        # 启用表格排序功能
+        self.ui.departed_tableView.setSortingEnabled(True)
 
         # 添加USV绘图窗口的弱引用
         self.usv_plot_window_ref = None
+
+        # 在 __init__ 的最后添加这行
+        self.refresh_table_header()
 
     def _extract_namespaces(self, usv_list):
         """
@@ -257,55 +265,12 @@ class MainWindow(QMainWindow):
     def departed_arming_command (self):
         """
         发送离群解锁命令给所有离群USV
-        """ 
-        self.append_info(f"离开集群列表")
-        selected_indexes = self.ui.cluster_tableView.selectedIndexes()
-        self.append_info(f'选中的标签：{selected_indexes}')
-
-        if not selected_indexes:
-            self.append_info("请先选择一行")
-            return
-
-        selected_row = selected_indexes[0].row()
-        model = self.ui.cluster_tableView.model()
-        if model is None:
-            self.append_info("错误：集群表格模型未初始化")
-            return
-
-        # 获取整行状态数据
-        state = {}
-        headers = self.TABLE_HEADERS
-        for col, key in enumerate(headers):
-            index = model.index(selected_row, col)
-            state[key] = model.data(index) or "Unknown"
-
-        usv_id = state.get("编号")  # 编号对应namespace
-        if not usv_id:
-            self.append_info("错误：无法获取 USV ID")
-            return
-
-        try:
-            # 从 usv_cluster_list 移除匹配的字典
-            for item in list(self.usv_cluster_list):
-                if item.get('namespace') == usv_id:
-                    self.usv_cluster_list.remove(item)
-                    self.usv_departed_list.append(item)  # 添加状态字典
-                    break
-            self.update_cluster_table(self.usv_cluster_list)
-            self.update_departed_table(self.usv_departed_list)
-            self.append_info(f"添加设备 {usv_id} 到离群列表")
-            QMessageBox.information(self, "操作成功", f"设备 {usv_id} 已添加到离群列表")
-        except Exception as e:
-            error_msg = f"错误：移除设备失败 - {str(e)}"
-            self.append_info(error_msg)
-            QMessageBox.critical(self, "操作失败", error_msg)
         """
-        发送离群设置ARCO模式命令给所有离群USV
-        """
+        # 发送离群解锁命令给所有离群USV
         self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群设置ARCO模式命令       
-        self.ros_signal.arco_command.emit(f"set_departed_arco_command:{self.usv_departed_namespace_list}")
-        self.append_info(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}") 
+        # 发送离群解锁命令       
+        self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
+        self.append_info(f"离群解锁命令已发送: {self.usv_departed_namespace_list}") 
         self.usv_departed_namespace_list.clear()
 
     # 离群加锁命令（补充，避免未绑定信号时报错）
@@ -1377,11 +1342,13 @@ class MainWindow(QMainWindow):
         刷新表格表头
         """
         # 更新集群表格表头
-        cluster_headers = ["命名空间", "模式", "连接状态", "解锁状态", "引导状态", "电池电量", "位置", "速度", "偏航角", "导航状态", "温度"]
+        cluster_headers = ["编号", "当前模式", "连接状态", "武装状态", '电压V', '电量%', 
+                        '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
         self.cluster_table_model.setHorizontalHeaderLabels(cluster_headers)
         
         # 更新离群表格表头
-        departed_headers = ["命名空间", "模式", "连接状态", "解锁状态", "引导状态", "电池电量", "位置", "速度", "偏航角", "导航状态", "温度"]
+        departed_headers = ["编号", "当前模式", "连接状态", "武装状态", '电压V', '电量%', 
+                        '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
         self.departed_table_model.setHorizontalHeaderLabels(departed_headers)
 
     def update_nav_status(self, usv_id, status):
