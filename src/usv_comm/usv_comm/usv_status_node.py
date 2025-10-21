@@ -43,6 +43,9 @@ class UsvStatusNode(Node):
         # 参数：目标到达阈值（米）与距离计算模式（2d/3d）
         self.declare_parameter('target_reach_threshold', 1.0)
         self.declare_parameter('distance_mode', '2d')
+        # 根据节点命名空间推断 usv_id（例如 /usv_02 -> usv_02），允许通过参数覆盖
+        ns_guess = self.get_namespace().lstrip('/') if self.get_namespace() else 'usv_01'
+        self.declare_parameter('usv_id', ns_guess)
         try:
             self.target_reach_threshold = float(self.get_parameter('target_reach_threshold').get_parameter_value().double_value)
         except Exception:
@@ -51,6 +54,20 @@ class UsvStatusNode(Node):
             self.distance_mode = str(self.get_parameter('distance_mode').get_parameter_value().string_value).lower()
         except Exception:
             self.distance_mode = '2d'
+
+        # 读取 usv_id 参数（已声明），优先使用显式参数，回退为命名空间推断值
+        try:
+            usv_id_val = self.get_parameter('usv_id').get_parameter_value().string_value
+            self.usv_id = usv_id_val.lstrip('/') if usv_id_val else ns_guess
+        except Exception:
+            self.usv_id = ns_guess
+        # 若参数与命名空间不一致，记录警告以提醒用户
+        try:
+            ns_now = self.get_namespace().lstrip('/') if self.get_namespace() else ''
+            if ns_now and ns_now != self.usv_id:
+                self.get_logger().warn(f"usv_id 参数 ({self.usv_id}) 与节点命名空间 ({ns_now}) 不一致；优先使用参数值。若想按命名空间自动设置，请移除该参数。")
+        except Exception:
+            pass
 
         # 初始化状态变量
         self.target_point = Point()  # 目标点位置
@@ -160,6 +177,11 @@ class UsvStatusNode(Node):
             msg = UsvStatus()
 
             # 安全填充 header：优先使用定位 header，否则使用当前时钟
+            # 使用初始化时缓存的 usv_id，避免每次查询参数
+            try:
+                msg.usv_id = getattr(self, 'usv_id', None) or str(self.get_parameter('usv_id').get_parameter_value().string_value)
+            except Exception:
+                msg.usv_id = 'usv_01'
             try:
                 msg.header.stamp = self.usv_pose.header.stamp
                 msg.header.frame_id = self.usv_pose.header.frame_id if self.usv_pose.header.frame_id else 'map'

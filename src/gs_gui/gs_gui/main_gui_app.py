@@ -2,9 +2,10 @@ from http.client import UNAVAILABLE_FOR_LEGAL_REASONS
 import sys
 import threading
 import weakref  # 添加weakref模块用于弱引用
+from collections import deque
 
 import rclpy
-from PyQt5.QtCore import QProcess
+from PyQt5.QtCore import QProcess, QTimer
 from PyQt5.QtWidgets import QApplication, QMainWindow,  QAbstractItemView, QFileDialog, QMessageBox, QColorDialog
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
 from gs_gui.ros_signal import ROSSignal
@@ -20,21 +21,6 @@ import re
 
 
 class MainWindow(QMainWindow):
-    # 表格列标题常量
-    TABLE_HEADERS = ["编号", "当前模式", "连接状态", "武装状态", '电压V', '电量%', 
-                    '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
-    
-    # 命名空间列表常量
-    CLUSTER_NAMESPACE_LIST = "cluster"
-    DEPARTED_NAMESPACE_LIST = "departed"
-    
-    # 添加导航状态常量
-    NAV_STATUS_UNKNOWN = "未知"
-    NAV_STATUS_IDLE = "空闲"
-    NAV_STATUS_ACTIVE = "执行中"
-    NAV_STATUS_SUCCEEDED = "成功"
-    NAV_STATUS_FAILED = "失败"
-    
     def __init__(self,ros_signal):
         super().__init__()
         self.ui=Ui_MainWindow()        
@@ -45,21 +31,103 @@ class MainWindow(QMainWindow):
 
         self.ros_signal = ros_signal
         
+        # 表格列标题
+        self.TABLE_HEADERS = ["编号", "当前模式", "连接状态", "武装状态", "引导模式状态", '电压V', '电量%', 
+                             '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
+
+        # 导航状态常量
+        self.NAV_STATUS_UNKNOWN = "未知"
+        self.NAV_STATUS_IDLE = "空闲"
+        self.NAV_STATUS_ACTIVE = "执行中"
+        self.NAV_STATUS_SUCCEEDED = "成功"
+        self.NAV_STATUS_FAILED = "失败"
+
+        # 命名空间列表
+        self.CLUSTER_NAMESPACE_LIST = "cluster"
+        self.DEPARTED_NAMESPACE_LIST = "departed"
+        
         # 存储USV导航状态
         self.usv_nav_status = {}
         # 添加集群任务进度信息
         self.cluster_progress_info = {}
 
+        # 添加USV列表
+        self.usv_cluster_list = []      # 集群USV列表
+        self.usv_departed_list = []     # 离群USV列表
+        self.usv_online_list = []       # 在线USV列表
+        
+        # 添加集群位置列表
+        self.cluster_position_list = []  # 集群位置列表
+        self.departed_position_list = []  # 离群目标点集合
+        
+        # 集群设备namespace列表
+        self.usv_cluster_namespace_list = []
+        # 离群设备namespace列表
+        self.usv_departed_namespace_list = []
+
+        # 初始化表格模型
+        self.cluster_table_model = QStandardItemModel(self)
+        self.departed_table_model = QStandardItemModel(self)
+        
+        # 设置表格模型
+        self.ui.cluster_tableView.setModel(self.cluster_table_model)
+        self.ui.departed_tableView.setModel(self.departed_table_model)
+        
+        # 设置表头
+        self.cluster_table_model.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        self.departed_table_model.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        
+        # 启用表格排序功能
+        self.ui.cluster_tableView.setSortingEnabled(True)
+        self.ui.departed_tableView.setSortingEnabled(True)
+        
         # 添加集群任务控制状态
         self.cluster_task_running = False  # 集群任务是否正在运行
         self.cluster_task_paused = False   # 集群任务是否已暂停
         
+        # 添加USV状态缓存
+        self._usv_state_cache = {}  # USV状态缓存
+        self._usv_state_dirty = False  # USV状态是否需要更新标志
+
+        # 使用 QTimer 在 GUI 线程周期性刷新 UI，避免高频直接更新导致卡顿
+        self._ui_refresh_timer = QTimer(self)
+        self._ui_refresh_timer.setInterval(200)  # 每200毫秒检查一次更新
+        self._ui_refresh_timer.timeout.connect(self._flush_state_cache_to_ui)
+        self._ui_refresh_timer.start()
+
+        # 日志缓冲：用于限制 info_textEdit 的写入速率和最大行数
+
+        self._info_buffer = deque()
+        self._info_max_lines = 500  # info_textEdit 最大行数
+        self._info_flush_interval_ms = 500
+        self._info_timer = QTimer(self)
+        self._info_timer.setInterval(self._info_flush_interval_ms)
+        self._info_timer.timeout.connect(self._flush_info_buffer)
+        self._info_timer.start()
+        
+        # 设置表格为单行选择模式
+        self.ui.cluster_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.ui.departed_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
+        
+        # 设置表格为行选择模式
+        self.ui.cluster_tableView.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.ui.departed_tableView.setSelectionBehavior(QAbstractItemView.SelectRows)
+        
+        # 设置表格为只读
+        self.ui.cluster_tableView.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.ui.departed_tableView.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+        # 添加USV绘图窗口的弱引用
+        self.usv_plot_window_ref = None
+
         # 初始化集群任务按钮状态
         self.update_cluster_task_button_state()
 
-        self.ros_signal.receive_state_list.connect(self.receive_state_callback)  # 连接信号
-        self.ros_signal.cluster_progress_update.connect(self.cluster_progress_callback)  # 连接集群进度信号
+        # 连接信号
+        self.ros_signal.receive_state_list.connect(self.receive_state_callback)
+        self.ros_signal.cluster_progress_update.connect(self.cluster_progress_callback)
 
+        # 连接按钮信号
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)            # 集群解锁按钮
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)      # 集群加锁按钮
         self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)    # 集群切换到guided模式
@@ -70,14 +138,12 @@ class MainWindow(QMainWindow):
         self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command) #离群切换到guided模式
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command) #离群切换到manual模式
         self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command) #离群切换到ARCO模式
-        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command) #离群切换到Steering模式
 
-        self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task) # 集群任务运行/暂停切换
-        self.ui.stop_cluster_task_pushButton.clicked.connect(self.stop_cluster_task) # 集群任务停止
+        self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task) # 集群坐标发送        
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)#离群坐标发送
         
-        self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)#添加到集群list
-        self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)#离开集群list，到离群list
+        self.ui.add_cluster_pushButton.clicked.connect(self.add_cluster_command)
+        self.ui.quit_cluster_pushButton.clicked.connect(self.quit_cluster_command)
 
         self.ui.sound_start_pushButton.clicked.connect(self.sound_start_command)
         self.ui.sound_stop_pushButton.clicked.connect(self.sound_stop_command)
@@ -89,115 +155,10 @@ class MainWindow(QMainWindow):
         self.ui.led3_pushButton.clicked.connect(self.led3_command)
         self.ui.light_stop_pushButton.clicked.connect(self.light_stop_command)
 
-
-        # 点击open菜单
+        # 菜单操作
         self.ui.actionopen.triggered.connect(self.read_data_from_file)
         self.ui.actionrviz2.triggered.connect(self.rviz_process)
-
-        # 在 __init__ 末尾添加菜单或按钮
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
-        # 添加手动标记上电原点的菜单项（不会修改 UI 文件，动态创建）
-        try:
-            from PyQt5.QtWidgets import QAction
-            self._action_set_boot = QAction('Set boot pose', self)
-            self._action_set_boot.triggered.connect(self.set_boot_pose_command)
-            # 批量设置上电原点动作
-            self._action_set_boot_all = QAction('Set all boot poses', self)
-            self._action_set_boot_all.triggered.connect(self.set_all_boot_pose_command)
-            # 尝试将其添加到文件菜单（若存在）否则添加到主窗口菜单栏
-            menu_bar = None
-            try:
-                if hasattr(self.ui, 'menuFile') and getattr(self.ui, 'menuFile') is not None:
-                    try:
-                        self.ui.menuFile.addAction(self._action_set_boot)
-                        self.ui.menuFile.addAction(self._action_set_boot_all)
-                    except Exception:
-                        menu_bar = self.menuBar()
-                else:
-                    menu_bar = self.menuBar()
-            except Exception:
-                menu_bar = None
-            if menu_bar is not None:
-                try:
-                    menu_bar.addAction(self._action_set_boot)
-                    menu_bar.addAction(self._action_set_boot_all)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        # 或者你可以加一个按钮 self.ui.show_usv_plot_pushButton.clicked.connect(self.show_usv_plot_window)
-
-
-        # 在线设备列表
-        self.usv_online_list=[]
-        # 缓存：从节点回调收到的最新USV状态（namespace -> state dict），用于定时批量刷新UI
-        self._usv_state_cache = {}
-        # 标志：是否有新状态需要刷新到UI
-        self._usv_state_dirty = False
-        # 使用 QTimer 在 GUI 线程周期性刷新 UI，避免高频直接更新导致卡顿（200ms）
-        from PyQt5.QtCore import QTimer
-        self._ui_refresh_timer = QTimer(self)
-        self._ui_refresh_timer.setInterval(200)
-        self._ui_refresh_timer.timeout.connect(self._flush_state_cache_to_ui)
-        self._ui_refresh_timer.start()
-        # 日志缓冲：用于限制 info_textEdit 的写入速率和最大行数
-        from collections import deque
-        self._info_buffer = deque()
-        self._info_max_lines = 500  # info_textEdit 最大行数
-        self._info_flush_interval_ms = 500
-        self._info_timer = QTimer(self)
-        self._info_timer.setInterval(self._info_flush_interval_ms)
-        self._info_timer.timeout.connect(self._flush_info_buffer)
-        self._info_timer.start()
-        # 集群设备列表
-        self.usv_cluster_list=[]
-
-        # 集群设备namespace列表
-        self.usv_cluster_namespace_list=[]
-
-        # 离群设备列表
-        self.usv_departed_list=[]
-
-        # 离群设备namespace列表
-        self.usv_departed_namespace_list=[]
-
-        # 集群目标点集合
-        self.cluster_position_list=[]
-
-        # 离群目标点集合
-        self.departed_position_list=[]
-     
-        # 集群表格模型
-        self.cluster_table_model=QStandardItemModel(self)
-
-        # 设置表格为单行选择模式
-        self.ui.cluster_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
-        # 设置表格为行选择模式
-        self.ui.cluster_tableView.setSelectionBehavior(QAbstractItemView.SelectRows)
-        # 设置表格为只读
-        self.ui.cluster_tableView.setEditTriggers(QAbstractItemView.NoEditTriggers)
-
-        # 将模型设置到窗口表格
-        self.ui.cluster_tableView.setModel(self.cluster_table_model)
-        # 启用表格排序功能
-        self.ui.cluster_tableView.setSortingEnabled(True)
-
-        # 离群表格模型
-        self.departed_table_model=QStandardItemModel(self)
-        # 设置表格为只读
-        self.ui.departed_tableView.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        # 设置表格为单行选择模式
-        self.ui.departed_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
-        # 设置表格为行选择模式
-        self.ui.departed_tableView.setSelectionBehavior(QAbstractItemView.SelectRows)
-
-        # 将模型设置到窗口表格
-        self.ui.departed_tableView.setModel(self.departed_table_model)
-        # 启用表格排序功能
-        self.ui.departed_tableView.setSortingEnabled(True)
-
-        # 添加USV绘图窗口的弱引用
-        self.usv_plot_window_ref = None
 
         # 在 __init__ 的最后添加这行
         self.refresh_table_header()
@@ -207,147 +168,46 @@ class MainWindow(QMainWindow):
         从USV列表中提取命名空间列表
         
         Args:
-            usv_list (list): 包含USV信息的字典列表
+            usv_list: USV列表，每个元素是一个包含'namespace'键的字典
             
         Returns:
-            list: USV命名空间列表
+            list: 命名空间列表
         """
         namespaces = []
-        for usv_info in usv_list:
-            if isinstance(usv_info, dict):
-                namespace = usv_info.get('namespace')
-                if namespace:
-                    namespaces.append(namespace)
+        for item in usv_list:
+            if isinstance(item, dict) and 'namespace' in item:
+                namespaces.append(item['namespace'])
         return namespaces
 
-    # 集群解锁命令
-    def set_cluster_arming_command(self):   
+    def _update_tables_if_dirty(self):
         """
-        发送集群解锁命令给所有集群USV
+        如果有新的USV状态数据，更新表格显示
         """
-        self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
-        self.ros_signal.arm_command.emit(self.usv_cluster_namespace_list)
-        self.append_info(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
-        self.usv_cluster_namespace_list.clear()
+        if self._usv_state_dirty:
+            self._flush_state_cache_to_ui()
 
-    # 集群设置manual模式命令
-    def set_cluster_manual_command(self):   
+    def map_power_supply_status(self, status):
         """
-        发送集群设置manual模式命令给所有集群USV
+        将电池状态数字映射成文字
+        0:未知 1:充电 2:放电 3:充满 4:未充电
+        
+        Args:
+            status: 电池状态数字
+            
+        Returns:
+            str: 对应的文字描述
         """
-        self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
-        self.ros_signal.manual_command.emit(self.usv_cluster_namespace_list)
-        self.append_info(f"集群设置manual模式命令已发送: {self.usv_cluster_namespace_list}")
-        self.usv_cluster_namespace_list.clear()
-
-    # 集群加锁命令  
-    def cluster_disarming_command(self):
-        """
-        发送集群加锁命令给所有集群USV
-        """
-        self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
-        self.ros_signal.disarm_command.emit(self.usv_cluster_namespace_list)
-        self.append_info(f"集群加锁命令已发送: {self.usv_cluster_namespace_list}")
-        self.usv_cluster_namespace_list.clear()
-
-    # 集群设置guided模式命令 
-    def set_cluster_guided_command(self):
-        """
-        发送集群设置guided模式命令给所有集群USV
-        """
-        self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
-        # 发送 guided 模式命令
-        self.ros_signal.guided_command.emit(self.usv_cluster_namespace_list)
-        self.append_info(f"集群设置guided模式命令已发送: {self.usv_cluster_namespace_list}")
-        self.usv_cluster_namespace_list.clear()
-
-    # 离群解锁命令
-    def departed_arming_command (self):
-        """
-        发送离群解锁命令给所有离群USV
-        """
-        # 发送离群解锁命令给所有离群USV
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群解锁命令       
-        self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
-        self.append_info(f"离群解锁命令已发送: {self.usv_departed_namespace_list}") 
-        self.usv_departed_namespace_list.clear()
-
-    # 离群加锁命令（补充，避免未绑定信号时报错）
-    def departed_disarming_command(self):
-        """
-        发送离群加锁命令给所有离群USV（与 departed_arming_command 对称）
-        """
+        status_map = {
+            0: "未知",
+            1: "充电",
+            2: "放电",
+            3: "充满",
+            4: "未充电"
+        }
         try:
-            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-            self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list)
-            self.append_info(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
-        except Exception as e:
-            self.append_info(f"发送离群加锁命令失败: {e}")
-        finally:
-            try:
-                self.usv_departed_namespace_list.clear()
-            except Exception:
-                pass
-
-    # 离群设置Steering模式命令
-    def set_departed_steering_command (self):
-        """
-        发送离群设置Steering模式命令给所有离群USV
-        """
-        self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-        # 发送离群设置Steering模式命令       
-        self.ros_signal.steering_command.emit(self.usv_departed_namespace_list)
-        self.append_info(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
-        self.usv_departed_namespace_list.clear()
-
-    def set_departed_guided_command(self):
-        """
-        发送离群设置 guided 模式命令给所有离群 USV
-        """
-        try:
-            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-            self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
-            self.append_info(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}")
-        except Exception as e:
-            self.append_info(f"发送离群guided模式命令失败: {e}")
-        finally:
-            try:
-                self.usv_departed_namespace_list.clear()
-            except Exception:
-                pass
-
-    def set_departed_manual_command(self):
-        """
-        发送离群设置 manual 模式命令给所有离群 USV
-        """
-        try:
-            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-            self.ros_signal.manual_command.emit(self.usv_departed_namespace_list)
-            self.append_info(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}")
-        except Exception as e:
-            self.append_info(f"发送离群manual模式命令失败: {e}")
-        finally:
-            try:
-                self.usv_departed_namespace_list.clear()
-            except Exception:
-                pass
-
-    def set_departed_arco_command(self):
-        """
-        发送离群设置 ARCO 模式命令给所有离群 USV
-        """
-        try:
-            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
-            self.ros_signal.arco_command.emit(self.usv_departed_namespace_list)
-            self.append_info(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}")
-        except Exception as e:
-            self.append_info(f"发送离群ARCO模式命令失败: {e}")
-        finally:
-            try:
-                self.usv_departed_namespace_list.clear()
-            except Exception:
-                pass
+            return status_map.get(int(status), "未知")
+        except (ValueError, TypeError):
+            return "未知"
 
     # 从数据文件中读取数据，数据格式xml
     def read_data_from_file(self):
@@ -526,6 +386,56 @@ class MainWindow(QMainWindow):
                 self.append_info("集群任务已继续")
                 # 重新发送任务数据以恢复任务
                 self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+
+    # 发送集群目标点命令
+    def send_cluster_point_command(self):
+        """
+        发送集群目标点命令
+        """
+        # 检查是否有集群列表
+        if not self.cluster_position_list:
+            self.ui.warning_textEdit.append("集群列表为空")
+            return
+            
+        # 创建副本以避免修改原始列表时的遍历问题
+        filtered_list = self.cluster_position_list.copy()
+        # 将 usv_departed_list 转换为集合以提高查找效率
+        departed_ids = {item.get('namespace') if isinstance(item, dict) else item 
+                        for item in self.usv_departed_list}
+        # 移除匹配 usv_id 的 USV 数据
+        filtered_list = [usv for usv in filtered_list if usv.get('usv_id', '') not in departed_ids]
+        if not filtered_list:
+            self.ui.warning_textEdit.append("集群列表为空（所有 USV 均在离群列表中）")          
+            return 
+            
+        # 弹窗确认
+        reply = QMessageBox.question(
+            self,
+            f"确认执行",
+            f"即将执行 {len(filtered_list)} 个 USV 的集群任务。\n是否继续?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            try:
+                # 更新 cluster_position_list
+                self.cluster_position_list = filtered_list
+                # 设置任务状态
+                self.cluster_task_running = True
+                self.cluster_task_paused = False
+                # 更新按钮文本
+                self.ui.send_cluster_point_pushButton.setText("cluster pause")
+                # 发送 ROS 信号
+                self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+                self.append_info("集群任务已开始执行！")
+            except Exception as e:
+                QMessageBox.critical(self, "错误", f"任务启动失败: {e}")
+                # 出错时重置状态
+                self.cluster_task_running = False
+                self.cluster_task_paused = False
+                self.update_cluster_task_button_state()
+        else:
+            QMessageBox.information(self, "取消", f"任务启动已取消")
 
     # 开始集群任务
     def start_cluster_task(self):
@@ -797,9 +707,12 @@ class MainWindow(QMainWindow):
             self.ui.warning_textEdit.append("接收到的数据类型错误，期望为列表")
             return
 
+        # 将来自后端的列表视为“全量快照”，用其覆盖本地缓存，确保下线 USV 行能及时移除
+        new_cache = {}
         for ns in msg:
             if isinstance(ns, dict) and ns.get('namespace'):
-                self._usv_state_cache[ns.get('namespace')] = ns
+                new_cache[ns.get('namespace')] = ns
+        self._usv_state_cache = new_cache
 
         # 标记需要刷新 UI（定时器将在 GUI 线程中批量刷新）
         self._usv_state_dirty = True
@@ -840,9 +753,11 @@ class MainWindow(QMainWindow):
         self.usv_cluster_list = []
         for item in current_cluster:
             if isinstance(item, dict) and item.get('namespace'):
+                # 仅在仍在线时保留该 USV（下线则从集群列表移除）
                 state = next((ns for ns in self.usv_online_list 
-                             if ns.get('namespace') == item.get('namespace')), item)
-                self.usv_cluster_list.append(state)
+                             if ns.get('namespace') == item.get('namespace')), None)
+                if state is not None:
+                    self.usv_cluster_list.append(state)
         for ns in temp_list:
             if ns.get('namespace') not in current_cluster_ids:
                 self.usv_cluster_list.append(ns)
@@ -958,6 +873,44 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
     
+    def get_battery_status_text(self, status_value):
+        """
+        将电池状态数字映射为文字描述
+        
+        Args:
+            status_value: 电池状态值（数字或字符串）
+            
+        Returns:
+            str: 电池状态文字描述
+        """
+        # 定义数字到文字的映射表
+        status_map = {
+            0: "未知",
+            1: "放电",
+            2: "充电",
+            3: "充满",
+            4: "异常"
+        }
+        
+        # 处理输入值，尝试转换为整数
+        try:
+            if isinstance(status_value, str):
+                # 如果是"true"/"false"这样的字符串，先转为数字
+                if status_value.lower() == 'true':
+                    status_value = 1
+                elif status_value.lower() == 'false':
+                    status_value = 0
+                else:
+                    status_value = int(float(status_value))
+            elif isinstance(status_value, bool):
+                status_value = 1 if status_value else 0
+            else:
+                status_value = int(float(status_value))
+        except (ValueError, TypeError):
+            return "未知"
+            
+        return status_map.get(status_value, "未知")
+
     def update_cluster_table(self, state_list):
         """
         更新集群表格
@@ -1003,19 +956,27 @@ class MainWindow(QMainWindow):
                 except Exception:
                     bp_text = "Unknown"
 
+                voltage = state.get('battery_voltage', 'Unknown')
+                try:
+                    voltage_text = f"{float(voltage):.1f}"
+                except Exception:
+                    voltage_text = str(voltage) if voltage is not None else "Unknown"
+
                 try:
                     px = float(state.get('position', {}).get('x', 0.0))
                     py = float(state.get('position', {}).get('y', 0.0))
-                    pos_text = f"({px:.2f}, {py:.2f})"
+                    pz = float(state.get('position', {}).get('z', 0.0))
+                    pos_text = f"({px:.2f}, {py:.2f}, {pz:.2f})"
                 except Exception:
-                    pos_text = "(Unknown, Unknown)"
+                    pos_text = "(Unknown, Unknown, Unknown)"
 
                 try:
                     vx = float(state.get('velocity', {}).get('linear', {}).get('x', 0.0))
                     vy = float(state.get('velocity', {}).get('linear', {}).get('y', 0.0))
-                    vel_text = f"({vx:.2f}, {vy:.2f})"
+                    vz = float(state.get('velocity', {}).get('linear', {}).get('z', 0.0))
+                    vel_text = f"({vx:.2f}, {vy:.2f}, {vz:.2f})"
                 except Exception:
-                    vel_text = "(Unknown, Unknown)"
+                    vel_text = "(Unknown, Unknown, Unknown)"
 
                 try:
                     yaw_text = f"{float(state.get('yaw', 0.0)):.2f}"
@@ -1029,18 +990,24 @@ class MainWindow(QMainWindow):
                 except Exception:
                     temp_text = "Unknown"
 
+                # 获取电池状态文字描述
+                power_status = state.get('power_supply_status', 0)
+                power_status_text = self.map_power_supply_status(power_status)
+
                 cells = [
                     ns,
                     state.get('mode', 'Unknown'),
                     str(state.get('connected', 'Unknown')),
                     str(state.get('armed', 'Unknown')),
-                    str(state.get('guided', 'Unknown')),
-                    bp_text,
-                    pos_text,
-                    vel_text,
-                    yaw_text,
-                    nav_text,
-                    temp_text,
+                    str(state.get('guided', 'Unknown')),  # 引导模式状态
+                    voltage_text,  # 电压V
+                    bp_text,  # 电量%
+                    power_status_text,  # 电池状态
+                    pos_text,  # 坐标
+                    vel_text,  # 速度
+                    yaw_text,  # 偏角
+                    nav_text,  # 导航状态
+                    temp_text,  # 温度
                 ]
 
                 if ns in current_ns_to_row:
@@ -1109,19 +1076,27 @@ class MainWindow(QMainWindow):
                 except Exception:
                     bp_text = "Unknown"
 
+                voltage = state.get('battery_voltage', 'Unknown')
+                try:
+                    voltage_text = f"{float(voltage):.1f}"
+                except Exception:
+                    voltage_text = str(voltage) if voltage is not None else "Unknown"
+
                 try:
                     px = float(state.get('position', {}).get('x', 0.0))
                     py = float(state.get('position', {}).get('y', 0.0))
-                    pos_text = f"({px:.2f}, {py:.2f})"
+                    pz = float(state.get('position', {}).get('z', 0.0))
+                    pos_text = f"({px:.2f}, {py:.2f}, {pz:.2f})"
                 except Exception:
-                    pos_text = "(Unknown, Unknown)"
+                    pos_text = "(Unknown, Unknown, Unknown)"
 
                 try:
                     vx = float(state.get('velocity', {}).get('linear', {}).get('x', 0.0))
                     vy = float(state.get('velocity', {}).get('linear', {}).get('y', 0.0))
-                    vel_text = f"({vx:.2f}, {vy:.2f})"
+                    vz = float(state.get('velocity', {}).get('linear', {}).get('z', 0.0))
+                    vel_text = f"({vx:.2f}, {vy:.2f}, {vz:.2f})"
                 except Exception:
-                    vel_text = "(Unknown, Unknown)"
+                    vel_text = "(Unknown, Unknown, Unknown)"
 
                 try:
                     yaw_text = f"{float(state.get('yaw', 0.0)):.2f}"
@@ -1135,18 +1110,24 @@ class MainWindow(QMainWindow):
                 except Exception:
                     temp_text = "Unknown"
 
+                # 获取电池状态文字描述
+                power_status = state.get('power_supply_status', 0)
+                power_status_text = self.map_power_supply_status(power_status)
+
                 cells = [
                     ns,
                     state.get('mode', 'Unknown'),
                     str(state.get('connected', 'Unknown')),
                     str(state.get('armed', 'Unknown')),
-                    str(state.get('guided', 'Unknown')),
-                    bp_text,
-                    pos_text,
-                    vel_text,
-                    yaw_text,
-                    nav_text,
-                    temp_text,
+                    str(state.get('guided', 'Unknown')),  # 引导模式状态
+                    voltage_text,  # 电压V
+                    bp_text,  # 电量%
+                    power_status_text,  # 电池状态
+                    pos_text,  # 坐标
+                    vel_text,  # 速度
+                    yaw_text,  # 偏角
+                    nav_text,  # 导航状态
+                    temp_text,  # 温度
                 ]
 
                 if ns in current_ns_to_row:
@@ -1341,15 +1322,9 @@ class MainWindow(QMainWindow):
         """
         刷新表格表头
         """
-        # 更新集群表格表头
-        cluster_headers = ["编号", "当前模式", "连接状态", "武装状态", '电压V', '电量%', 
-                        '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
-        self.cluster_table_model.setHorizontalHeaderLabels(cluster_headers)
-        
-        # 更新离群表格表头
-        departed_headers = ["编号", "当前模式", "连接状态", "武装状态", '电压V', '电量%', 
-                        '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
-        self.departed_table_model.setHorizontalHeaderLabels(departed_headers)
+        # 使用统一的 TABLE_HEADERS 类变量来设置表头
+        self.cluster_table_model.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        self.departed_table_model.setHorizontalHeaderLabels(self.TABLE_HEADERS)
 
     def update_nav_status(self, usv_id, status):
         """
@@ -1382,6 +1357,132 @@ class MainWindow(QMainWindow):
             f"预计剩余时间: {feedback.estimated_time:.2f}秒"
         )
         
+    # 集群解锁命令 
+    def set_cluster_arming_command(self):
+        """
+        发送集群解锁命令给所有集群USV
+        """
+        try:
+            self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
+            self.ros_signal.arm_command.emit(self.usv_cluster_namespace_list)
+            self.append_info(f"集群解锁命令已发送: {self.usv_cluster_namespace_list}")
+        except Exception as e:
+            error_msg = f"发送集群解锁命令失败: {e}"
+            self.append_info(error_msg)
+
+    # 集群设置manual模式命令
+    def set_cluster_manual_command(self):   
+        """
+        发送集群设置manual模式命令给所有集群USV
+        """
+        try:
+            self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
+            self.ros_signal.manual_command.emit(self.usv_cluster_namespace_list)
+            self.append_info(f"集群设置manual模式命令已发送: {self.usv_cluster_namespace_list}")
+        except Exception as e:
+            error_msg = f"发送集群manual模式命令失败: {e}"
+            self.append_info(error_msg)
+
+    # 集群加锁命令  
+    def cluster_disarming_command(self):
+        """
+        发送集群加锁命令给所有集群USV
+        """
+        try:
+            self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
+            self.ros_signal.disarm_command.emit(self.usv_cluster_namespace_list)
+            self.append_info(f"集群加锁命令已发送: {self.usv_cluster_namespace_list}")
+        except Exception as e:
+            error_msg = f"发送集群加锁命令失败: {e}"
+            self.append_info(error_msg)
+
+    # 集群设置guided模式命令 
+    def set_cluster_guided_command(self):
+        """
+        发送集群设置guided模式命令给所有集群USV
+        """
+        try:
+            self.usv_cluster_namespace_list = self._extract_namespaces(self.usv_cluster_list)
+            # 发送 guided 模式命令
+            self.ros_signal.guided_command.emit(self.usv_cluster_namespace_list)
+            self.append_info(f"集群设置guided模式命令已发送: {self.usv_cluster_namespace_list}")
+        except Exception as e:
+            error_msg = f"发送集群guided模式命令失败: {e}"
+            self.append_info(error_msg)
+
+    # 离群解锁命令
+    def departed_arming_command(self):
+        """
+        发送离群解锁命令给所有离群USV
+        """
+        try:
+            # 发送离群解锁命令给所有离群USV
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            # 发送离群解锁命令       
+            self.ros_signal.arm_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群解锁命令已发送: {self.usv_departed_namespace_list}") 
+        except Exception as e:
+            error_msg = f"发送离群解锁命令失败: {e}"
+            self.append_info(error_msg)
+
+    # 离群加锁命令
+    def departed_disarming_command(self):
+        """
+        发送离群加锁命令给所有离群USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.disarm_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群加锁命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群加锁命令失败: {e}")
+
+    # 离群设置Steering模式命令
+    def set_departed_steering_command(self):
+        """
+        发送离群设置Steering模式命令给所有离群USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            # 发送离群设置Steering模式命令       
+            self.ros_signal.steering_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置Steering模式命令已发送: {self.usv_departed_namespace_list}") 
+        except Exception as e:
+            error_msg = f"发送离群Steering模式命令失败: {e}"
+            self.append_info(error_msg)
+
+    def set_departed_guided_command(self):
+        """
+        发送离群设置 guided 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.guided_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置guided模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群guided模式命令失败: {e}")
+
+    def set_departed_manual_command(self):
+        """
+        发送离群设置 manual 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.manual_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置manual模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群manual模式命令失败: {e}")
+
+    def set_departed_arco_command(self):
+        """
+        发送离群设置 ARCO 模式命令给所有离群 USV
+        """
+        try:
+            self.usv_departed_namespace_list = self._extract_namespaces(self.usv_departed_list)
+            self.ros_signal.arco_command.emit(self.usv_departed_namespace_list)
+            self.append_info(f"离群设置ARCO模式命令已发送: {self.usv_departed_namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群ARCO模式命令失败: {e}")
 
 # 主函数
 def main(argv=None):

@@ -68,7 +68,7 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14550@192.168.68.53:14550',
+        default_value='udp://:14560@192.168.68.53:14550',
         description='地面站通信地址'
     )
     
@@ -105,6 +105,32 @@ def generate_launch_description():
     lidar_port = LaunchConfiguration('lidar_port')
     tgt_system = LaunchConfiguration('tgt_system')
     tgt_component = LaunchConfiguration('tgt_component')
+
+    # =============================================================================
+    # 基于 namespace 自动推断 tgt_system（安全回退 1）
+    # - 仅当用户未主动设置（仍是默认 '1'）时才从 namespace 提取数字覆盖
+    # - 支持形如 'usv_02' 提取到 2；异常情况回退为 1
+    # =============================================================================
+
+    def derive_tgt_system_from_namespace(context, *args, **kwargs):
+        ns_str = LaunchConfiguration('namespace').perform(context)
+        cur_tgt = LaunchConfiguration('tgt_system').perform(context)
+        # 如果用户已显式传入（不等于默认 '1'），则尊重用户参数
+        if cur_tgt and cur_tgt != '1':
+            return []
+        sysid = '1'
+        try:
+            # 从末尾下划线后取数字
+            tail = ns_str.split('_')[-1]
+            num = int(tail)
+            if num > 0:
+                sysid = str(num)
+        except Exception:
+            sysid = '1'
+        # 写回到 LaunchConfiguration
+        return [SetLaunchConfiguration('tgt_system', sysid)]
+
+    derive_sysid_action = OpaqueFunction(function=derive_tgt_system_from_namespace)
 
     # =============================================================================
     # 通信与状态管理节点
@@ -279,8 +305,15 @@ def generate_launch_description():
             {
                 'fcu_url': fcu_url,
                 'gcs_url': gcs_url,
+                # 保留旧键以兼容（若 MAVROS 忽略将无害）
                 'tgt_system': tgt_system,
-                'tgt_component': tgt_component
+                'tgt_component': tgt_component,
+                # ROS 2 MAVROS 常用参数名：设置自身与目标的 MAVLink ID
+                'system_id': tgt_system,
+                'component_id': tgt_component,
+                # 兼容某些版本用于目标 FCU 的参数命名
+                'target_system_id': tgt_system,
+                'target_component_id': tgt_component
             }
         ]
     )
@@ -349,6 +382,8 @@ def generate_launch_description():
         tgt_system_arg,
         tgt_component_arg,
         lidar_port_arg,
+        # 先根据 namespace 推断 sysid（若未显式设置）
+        derive_sysid_action,
         
         # 核心功能节点
         mavros_node,           # 飞控通信

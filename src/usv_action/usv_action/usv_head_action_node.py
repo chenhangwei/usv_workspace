@@ -4,10 +4,20 @@ from std_msgs.msg import String
 import time
 import random
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from typing import Any, cast
 
-from board import SCL, SDA
-import busio
-from adafruit_pca9685 import PCA9685
+# 可选硬件依赖（无则进入无硬件模式）
+HARDWARE_AVAILABLE = True
+busio = None
+SCL = None
+SDA = None
+PCA9685 = None
+try:
+    from board import SCL, SDA
+    import busio
+    from adafruit_pca9685 import PCA9685
+except Exception:
+    HARDWARE_AVAILABLE = False
 
 SERVO_CHANNEL = 0  # PCA9685的通道号，通常为0-15
 RC_OVERRIDE_FREQ = 50  # 50Hz 舵机刷新频率
@@ -28,9 +38,37 @@ class UsvHeadActionNode(Node):
         self.subscription = self.create_subscription(
             String, 'gs_action_command', self.listener_callback, self.qos)
 
-        i2c = busio.I2C(SCL, SDA)
-        self.pca = PCA9685(i2c)
-        self.pca.frequency = 50
+        # 允许用参数关停硬件控制（默认启用）
+        self.declare_parameter('enable_head_actuator', True)
+        # PWM 频率可配置（默认 50Hz）
+        self.declare_parameter('pwm_frequency', 50)
+        try:
+            self.enable_hw = bool(self.get_parameter('enable_head_actuator').get_parameter_value().bool_value)
+        except Exception:
+            self.enable_hw = True
+        try:
+            self.pwm_frequency = int(self.get_parameter('pwm_frequency').get_parameter_value().integer_value)
+            if self.pwm_frequency <= 0:
+                raise ValueError('pwm_frequency must be > 0')
+        except Exception:
+            self.pwm_frequency = 50
+
+        self.pca = None
+        if self.enable_hw and HARDWARE_AVAILABLE:
+            try:
+                # busio/PCA9685 在缺少依赖时会为 None，这里已由 HARDWARE_AVAILABLE 保证可用
+                i2c = cast(Any, busio).I2C(SCL, SDA)  # type: ignore[attr-defined]
+                self.pca = cast(Any, PCA9685)(i2c)    # type: ignore[call-arg]
+                # 设置 PWM 频率，加入重试降低 I2C 短暂忙碌导致的告警
+                self._set_pwm_frequency_with_retry(self.pwm_frequency)
+            except Exception as e:
+                self.get_logger().warn(f'I2C/PCA9685 初始化失败，切换到无硬件模式: {e}')
+                self.pca = None
+        else:
+            if not HARDWARE_AVAILABLE:
+                self.get_logger().warn('未找到板卡依赖(board/busio/adafruit_pca9685)，以无硬件模式运行')
+            if not self.enable_hw:
+                self.get_logger().info('参数 enable_head_actuator=false，以无硬件模式运行')
 
         self.swinging = False
         self.current_angle = 90
@@ -40,13 +78,39 @@ class UsvHeadActionNode(Node):
         self.swing_hold_until = None
         self.waiting_to_center = False
         self.center_time = None
-
+        # 定时器与启动日志（修正缩进，必须在 __init__ 内）
         self.timer = self.create_timer(1.0 / RC_OVERRIDE_FREQ, self.timer_callback)
-        self.get_logger().info('摇摆器控制器（CircuitPython版）节点已启动。')
+        mode = '硬件控制' if self.pca is not None else '无硬件模式'
+        self.get_logger().info(f'摇摆器控制器节点已启动（{mode}）。')
+
+    def _set_pwm_frequency_with_retry(self, freq: int, attempts: int = 3, delay: float = 0.1):
+        if self.pca is None:
+            return
+        last_err = None
+        for i in range(1, attempts + 1):
+            try:
+                self.pca.frequency = freq
+                if i > 1:
+                    self.get_logger().info(f'PCA9685 频率设置在第 {i} 次重试成功: {freq}Hz')
+                return
+            except Exception as e:
+                last_err = e
+                # 常见为 EAGAIN 资源忙，短暂等待重试
+                try:
+                    time.sleep(delay)
+                except Exception:
+                    pass
+        self.get_logger().warn(f'I2C 设置 PWM 频率失败（尝试 {attempts} 次），继续以默认值运行: {last_err}')
 
     def set_servo_angle(self, channel, angle):
+        if self.pca is None:
+            self.get_logger().debug(f'[NO-HW] set_servo_angle ch={channel} angle={angle}')
+            return
         duty = angle_to_duty(angle)
-        self.pca.channels[channel].duty_cycle = duty
+        try:
+            self.pca.channels[channel].duty_cycle = duty
+        except Exception as e:
+            self.get_logger().warn(f'设置舵机角度失败: {e}')
 
     def timer_callback(self):
         now = self.get_clock().now().nanoseconds / 1e9
@@ -80,7 +144,7 @@ class UsvHeadActionNode(Node):
                     self.swing_hold_until = now + random.uniform(2, 4)
                     self.swing_phase = 'hold'
             elif self.swing_phase == 'hold':
-                if now >= self.swing_hold_until:
+                if (self.swing_hold_until is not None) and (now >= self.swing_hold_until):
                     self.target_angle = 90
                     self.swing_phase = 'to_center'
             elif self.swing_phase == 'to_center':
@@ -118,10 +182,17 @@ class UsvHeadActionNode(Node):
             self.get_logger().info('停止摇摆并回中')
 
     def destroy_node(self):
-        self.center()
-        time.sleep(0.5)
-        self.pca.channels[SERVO_CHANNEL].duty_cycle = 0
-        self.get_logger().info('释放PCA9685通道')
+        try:
+            self.center()
+            time.sleep(0.5)
+            if self.pca is not None:
+                try:
+                    self.pca.channels[SERVO_CHANNEL].duty_cycle = 0
+                except Exception:
+                    pass
+                self.get_logger().info('释放PCA9685通道')
+        except Exception as e:
+            self.get_logger().warn(f'释放资源时出现问题: {e}')
         super().destroy_node()
 
 def main(args=None):

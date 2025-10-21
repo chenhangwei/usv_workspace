@@ -81,6 +81,7 @@ class GroundStationNode(Node):
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
+        self.declare_parameter('offline_grace_period', 20.0)
         # area center 参数（任务坐标系原点在全局 map 中的位置）
         self.declare_parameter('area_center_x', 0.0)
         self.declare_parameter('area_center_y', 0.0)
@@ -110,6 +111,12 @@ class GroundStationNode(Node):
         except Exception:
             self._area_center = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'frame': 'map'}
 
+        try:
+            self._ns_offline_grace_period = float(self.get_parameter('offline_grace_period').get_parameter_value().double_value)
+        except Exception:
+            self._ns_offline_grace_period = 20.0
+        # 离线判定的宽限期（秒），在此时间内即便 ROS 图暂时看不到也不移除
+
         self._cluster_task_paused = False  # 集群任务是否已暂停
         # 用于通知后台线程退出的事件
         self._stop_event = threading.Event()
@@ -123,6 +130,10 @@ class GroundStationNode(Node):
         # 维护本地 LED 状态 
         self._usv_current_led_state = {} # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
      
+        # 初始化命名空间检测历史记录
+        self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
+        # 记录每个 USV 最后一次收到状态消息的时间戳（秒）
+        self._ns_last_seen = {}
 
         # 创建定时器
         self.ns_timer = self.create_timer(self.NAMESPACE_UPDATE_PERIOD, self.update_subscribers_and_publishers)  # 命名空间更新定时器，定期更新订阅者和发布者
@@ -314,29 +325,108 @@ class GroundStationNode(Node):
         为断开的USV销毁订阅者和发布者
         """
         # 获取当前系统中的节点名称和命名空间
-        namespaces = self.get_node_names_and_namespaces()
-        # 筛选出以'/usv_'开头的命名空间
-        current_ns_list = list(set([ns for _, ns in namespaces if ns.startswith('/usv_')]))
-        # 如果命名空间列表没有变化，直接返回
-        if current_ns_list == self.last_ns_list:
+        node_names_and_namespaces = self.get_node_names_and_namespaces()
+
+        # 筛选出命名空间以 '/usv_' 开头的节点（忽略进一步的子命名空间），这些命名空间代表在线 USV
+        current_nodes_info = []
+        for name, ns in node_names_and_namespaces:
+            if not ns.startswith('/usv_'):
+                continue
+            # 仅保留一级命名空间（例如 /usv_01），避免嵌套命名空间干扰
+            if ns.count('/') > 1:
+                continue
+            current_nodes_info.append((name, ns))
+        # 提取唯一的 USV 命名空间列表
+        current_ns_list = list({ns for _, ns in current_nodes_info})
+        
+        # 添加稳定性检测机制：多次检测相同结果才确认变化
+        # 记录当前检测结果到历史记录中
+        self._ns_detection_history.append(set(current_ns_list))
+        # 限制历史记录长度，避免列表无限增长
+        if len(self._ns_detection_history) > 5:
+            self._ns_detection_history.pop(0)
+
+        # 需要连续多次检测得到一致结果才进行变更处理
+        required_samples = 3
+        if len(self._ns_detection_history) < required_samples:
             return
 
-        # 更新上次命名空间列表
-        self.last_ns_list = current_ns_list
+        recent_ns_sets = self._ns_detection_history[-required_samples:]
+        reference_set = recent_ns_sets[0]
+        if not all(ns_set == reference_set for ns_set in recent_ns_sets[1:]):
+            return
+
+        # 使用稳定的结果进行后续处理
+        stable_ns_set = set(reference_set)
+        ns_map = {ns.lstrip('/'): ns for ns in stable_ns_set}
+        normalized_ns_list = list(ns_map.keys())
+
+        previous_last_ns = list(self.last_ns_list)
+
+        # 如果命名空间列表没有变化，直接返回
+        if set(normalized_ns_list) == set(self.last_ns_list):
+            return
+
+        # 记录节点发现日志
+        for node_name, ns in current_nodes_info:
+            norm_ns = ns.lstrip('/')
+            if norm_ns in normalized_ns_list and norm_ns not in self.last_ns_list:
+                self.get_logger().info(f"发现新的USV节点: {node_name} 命名空间: {ns}")
+        
         # 获取已存在的命名空间集合
         existing_ns = set(self.usv_manager.usv_state_subs.keys())
         # 计算新增的命名空间集合
-        new_ns = set(current_ns_list) - existing_ns
+        new_ns = set(normalized_ns_list) - existing_ns
         # 计算移除的命名空间集合
-        removed_ns = existing_ns - set(current_ns_list)
+        removed_ns = existing_ns - set(normalized_ns_list)
 
         # 处理新增的USV命名空间
-        for ns in new_ns:
+        for usv_id in new_ns:
+            ns = ns_map.get(usv_id, f"/{usv_id}")
             self.usv_manager.add_usv_namespace(ns)
+            # 记录当前时间，避免刚加入后立刻因为没有状态消息被误判离线
+            try:
+                now_sec = self.get_clock().now().nanoseconds / 1e9
+            except Exception:
+                now_sec = 0.0
+            self._ns_last_seen[usv_id] = now_sec
 
         # 处理移除的USV命名空间
-        for ns in removed_ns:
-            self.usv_manager.remove_usv_namespace(ns)
+        safe_removed_ns = []
+        for usv_id in removed_ns:
+            last_seen = self._ns_last_seen.get(usv_id)
+            allow_remove = False
+            if last_seen is None:
+                # 从未收到过状态消息，说明订阅尚未建立成功，可以直接移除
+                allow_remove = True
+            else:
+                try:
+                    now_sec = self.get_clock().now().nanoseconds / 1e9
+                except Exception:
+                    now_sec = last_seen
+                elapsed = now_sec - last_seen
+                if elapsed >= self._ns_offline_grace_period:
+                    allow_remove = True
+                else:
+                    # 在宽限期内仍有状态消息，暂不移除，等待后续检测
+                    self.get_logger().debug(
+                        f"命名空间 {usv_id} 暂未从 ROS 图中检测到，但在 {elapsed:.1f}s 前仍有状态更新，延迟移除")
+            if allow_remove:
+                ns = ns_map.get(usv_id, f"/{usv_id}")
+                self.usv_manager.remove_usv_namespace(ns)
+                self._ns_last_seen.pop(usv_id, None)
+                safe_removed_ns.append(ns)
+                self.get_logger().info(f"USV节点断开连接，已移除命名空间: {ns}")
+
+        # 计算最终的逻辑在线列表：稳定检测结果 + 当前仍在宽限期内的命名空间
+        removed_now = {ns.lstrip('/') for ns in safe_removed_ns}
+        postponed_ns = removed_ns - removed_now
+        effective_ns = list(normalized_ns_list)
+        if postponed_ns:
+            for ns in previous_last_ns:
+                if ns in postponed_ns and ns not in effective_ns:
+                    effective_ns.append(ns)
+        self.last_ns_list = effective_ns
 
     # 通过Action方式发送导航目标点
     def send_nav_goal_via_action(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):

@@ -1,7 +1,7 @@
 # UsvStatus.msg
 # 该消息用于表示无人水面艇（USV）的状态信息
 # 包含命名空间、飞控模式、连接状态、解锁状态、引导状态、电池电量、位置、速度和偏航角等信息
-string usv_id                    # USV标识符（如 "usv1"）
+string usv_id                    # USV标识符（如 "usv_01"）
 std_msgs/Header header           # 消息头，包含时间戳和帧ID
 string mode                      # 当前飞控模式（如 "MANUAL", "GUIDED", "AUTO"）
 bool connected                   # 是否连接（来自飞控心跳）

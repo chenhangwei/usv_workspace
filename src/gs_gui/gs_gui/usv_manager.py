@@ -65,7 +65,7 @@ class UsvManager:
         # 为每个USV创建一个NavigateToPoint动作客户端
         self.navigate_to_point_clients[usv_id] = ActionClient(self.node, NavigateToPoint, action_server_name)
         # 记录日志信息
-        self.node.get_logger().info(f"添加新的USV命名空间: {usv_id}")
+        self.node.get_logger().info(f"为USV {usv_id} 添加订阅者和发布者")
 
     # 移除USV命名空间
     def remove_usv_namespace(self, ns):
@@ -105,7 +105,20 @@ class UsvManager:
         if usv_id in self.navigate_to_point_clients:
             del self.navigate_to_point_clients[usv_id]
         # 记录日志信息
-        self.node.get_logger().info(f"移除USV命名空间: {usv_id}")
+        self.node.get_logger().info(f"移除USV {usv_id} 的订阅者和发布者")
+
+        # 额外：从节点的 usv_states 中移除该 USV，并通知 GUI 刷新列表
+        try:
+            # 清理状态与辅助记录
+            if usv_id in getattr(self.node, 'usv_states', {}):
+                del self.node.usv_states[usv_id]
+            if hasattr(self.node, 'usv_boot_pose'):
+                self.node.usv_boot_pose.pop(usv_id, None)
+            # 若 GUI 信号可用，发射最新状态列表，触发表格行删除
+            if hasattr(self.node, 'ros_signal') and getattr(self.node.ros_signal, 'receive_state_list', None) is not None:
+                self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))
+        except Exception as e:
+            self.node.get_logger().warn(f"清理 {usv_id} 状态或通知 GUI 失败: {e}")
 
     # USV状态回调
     def usv_state_callback(self, msg, usv_id):
@@ -118,6 +131,12 @@ class UsvManager:
         """
         # 检查消息类型是否正确
         if isinstance(msg, UsvStatus):
+            # 更新最后一次收到状态的时间戳，供离线判定逻辑使用
+            try:
+                now_sec = self.node.get_clock().now().nanoseconds / 1e9
+            except Exception:
+                now_sec = 0.0
+            self.node._ns_last_seen[usv_id] = now_sec
             # 构造状态数据字典
             state_data = {
                 'namespace': usv_id,  # 命名空间
