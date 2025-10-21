@@ -1,3 +1,10 @@
+"""
+无人船激光雷达节点
+
+该节点负责读取激光雷达数据并通过ROS 2 LaserScan消息发布。
+支持多种激光雷达设备，通过串口通信获取数据。
+"""
+
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
@@ -5,9 +12,18 @@ from std_msgs.msg import Header
 import serial
 import time
 
+
 class UsvLaserScanNode(Node):
+    """
+    无人船激光雷达节点类
+    
+    该节点实现激光雷达数据读取和发布功能，通过串口与激光雷达设备通信，
+    将读取到的数据转换为LaserScan消息格式并发布。
+    """
+
     def __init__(self):
-        super().__init__('usv_lasercan_node')
+        """初始化无人船激光雷达节点"""
+        super().__init__('usv_laserscan_node')
         
         # 创建 LaserScan 消息发布者，发布到 'laser_scan' 话题，队列大小为 10
         self.radar_pub = self.create_publisher(LaserScan, 'laser_scan', 10)
@@ -17,32 +33,36 @@ class UsvLaserScanNode(Node):
         self.baud_rate = 115200            # 波特率
         self.timeout = 1                   # 超时时间（秒）
         
-        # # 尝试打开串口
-        # try:
-        #     self.ser = serial.Serial(
-        #         port=self.serial_port,
-        #         baudrate=self.baud_rate,
-        #         timeout=self.timeout
-        #     )
-        #     self.get_logger().info(f'串口 {self.serial_port} 打开成功')
-        # except serial.SerialException as e:
-        #     self.get_logger().error(f'打开串口失败: {e}')
-        #     raise
+        # 尝试打开串口
+        try:
+            self.ser = serial.Serial(
+                port=self.serial_port,
+                baudrate=self.baud_rate,
+                timeout=self.timeout
+            )
+            self.get_logger().info(f'串口 {self.serial_port} 打开成功')
+        except serial.SerialException as e:
+            self.get_logger().error(f'打开串口失败: {e}')
+            raise
         
-        # # LaserScan 参数（根据雷达规格调整）
-        # self.angle_min = 0.0              # 最小角度（弧度）
-        # self.angle_max = 3.14159          # 最大角度（180度，弧度）
-        # self.angle_increment = 0.0174533  # 角度增量（1度，弧度）
-        # self.range_min = 0.1              # 最小距离（米）
-        # self.range_max = 10.0             # 最大距离（米）
-        # # 根据角度范围和增量计算采样点数
-        # self.num_readings = int((self.angle_max - self.angle_min) / self.angle_increment) + 1
+        # LaserScan 参数（根据雷达规格调整）
+        self.angle_min = 0.0              # 最小角度（弧度）
+        self.angle_max = 3.14159          # 最大角度（180度，弧度）
+        self.angle_increment = 0.0174533  # 角度增量（1度，弧度）
+        self.range_min = 0.1              # 最小距离（米）
+        self.range_max = 10.0             # 最大距离（米）
+        # 根据角度范围和增量计算采样点数
+        self.num_readings = int((self.angle_max - self.angle_min) / self.angle_increment) + 1
         
-        # # 创建定时器，10Hz 定时发布雷达数据（每 0.1 秒调用一次）
-        # self.timer = self.create_timer(0.1, self.publish_radar_data)
+        # 创建定时器，10Hz 定时发布雷达数据（每 0.1 秒调用一次）
+        self.timer = self.create_timer(0.1, self.publish_radar_data)
 
     def publish_radar_data(self):
-        """读取串口数据并发布 LaserScan 消息"""
+        """
+        读取串口数据并发布 LaserScan 消息
+        
+        从串口读取激光雷达数据，转换为LaserScan消息格式并发布。
+        """
         try:
             # 调用读取雷达数据函数，获取一帧数据（列表格式）
             ranges = self.read_laser_frame()
@@ -66,7 +86,7 @@ class UsvLaserScanNode(Node):
 
             # 发布 LaserScan 消息
             self.radar_pub.publish(scan)
-            self.get_logger().info('已发布雷达扫描数据')
+            self.get_logger().debug('已发布雷达扫描数据')
         except Exception as e:
             self.get_logger().error(f'发布雷达数据出错: {e}')
 
@@ -74,6 +94,9 @@ class UsvLaserScanNode(Node):
         """
         从串口读取一帧雷达数据
         假设每行数据的格式为 "angle:distance"，角度单位为度，距离单位为米
+        
+        Returns:
+            list: 包含距离数据的列表，如果读取失败则返回None
         """
         # 初始化距离列表，初始值为无穷大（表示无数据）
         ranges = [float('inf')] * self.num_readings
@@ -104,7 +127,16 @@ class UsvLaserScanNode(Node):
             self.ser.close()
             self.get_logger().info('串口已关闭')
 
+
 def main(args=None):
+    """
+    主函数
+    
+    初始化ROS 2节点并开始处理消息。
+    
+    Args:
+        args: 命令行参数
+    """
     rclpy.init(args=args)
     node = UsvLaserScanNode()
     try:
@@ -114,6 +146,7 @@ def main(args=None):
     finally:
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()

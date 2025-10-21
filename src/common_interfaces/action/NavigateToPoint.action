@@ -1,0 +1,15 @@
+# 目标点
+geometry_msgs/PoseStamped goal           # 目标位置（ENU 或 NED）
+float32 timeout                          # 超时秒数（可选，不填则默认）
+
+---
+# Result 任务结束结果
+bool success                             # true=到达，false=失败/超时
+uint8 error_code                         # 0=OK,1=timeout,2=invalid_goal,3=aborted...
+string message                           # 附加信息
+
+---
+# Feedback 过程反馈
+float32 distance_to_goal                 # 距离目标点（m）
+float32 heading_error                    # 航向误差（deg）
+float32 estimated_time                   # 预计剩余时间（s）

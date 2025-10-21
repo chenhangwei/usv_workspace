@@ -3,16 +3,29 @@
 <package format="3">
   <name>gs_gui</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）集群/单艇提供基于PyQt的图形化地面站界面，支持任务调度、状态监控、2D可视化等功能，便于操作与管理。
-This package provides a PyQt-based GUI ground station for USV (Unmanned Surface Vehicle) clusters or single units, supporting mission scheduling, status monitoring, 2D visualization, and convenient operation and management.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Ground Station GUI for USV project.
+    This package provides a PyQt5-based graphical user interface for monitoring 
+    and controlling Unmanned Surface Vehicles, featuring real-time status display, 
+    mission planning, and command execution capabilities.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
+  <depend>common_interfaces</depend>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

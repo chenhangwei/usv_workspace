@@ -3,11 +3,12 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from PyQt5.QtCore import QTimer
 from math import cos, sin
+import mpl_toolkits.mplot3d.art3d  # 用于3D绘图
 
 class UsvPlotWindow(QDialog):
     def __init__(self, get_usv_list_func, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("USV 2D 坐标显示")
+        self.setWindowTitle("USV 3D 坐标显示")
         self.resize(800, 650)
         main_layout = QVBoxLayout(self)
 
@@ -33,7 +34,7 @@ class UsvPlotWindow(QDialog):
         # 定时器定期刷新
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_plot)
-        self.timer.start(1000)  # 1秒刷新一次
+        self.timer.start(2000)  # 2秒刷新一次，减少刷新频率
 
         self.show_label_checkbox.stateChanged.connect(self.update_plot)
         self.refresh_btn.clicked.connect(self.update_plot)
@@ -47,42 +48,46 @@ class UsvPlotWindow(QDialog):
     def update_plot(self):
         usv_list = self.get_usv_list_func()
         self.figure.clear()
-        ax = self.figure.add_subplot(111)
+        ax = self.figure.add_subplot(111, projection='3d')
         ax.set_xlabel('X')
         ax.set_ylabel('Y')
-        ax.set_title('USV 2D')
-        ax.grid(True)
+        ax.set_zlabel('Z')
+        ax.set_title('USV 3D')
         self.usv_points = []
         arrow_len = 0.5  # 箭头长度，可调整
         for usv in usv_list:
             pos = usv.get('position', {})
             x = pos.get('x', 0.0)
             y = pos.get('y', 0.0)
+            z = pos.get('z', 0.0)  # 添加z坐标支持
             usv_id = usv.get('usv_id', usv.get('namespace', ''))
             yaw = usv.get('yaw', 0.0)
-            # 计算yaw方向的x轴箭头
-            dx_x = arrow_len * cos(yaw)
-            dy_x = arrow_len * sin(yaw)
-            # y轴箭头比x轴多90度
-            dx_y = arrow_len * cos(yaw + 1.5708)
-            dy_y = arrow_len * sin(yaw + 1.5708)
+            
             # 画原点
-            ax.plot(x, y, marker='o', color='b')
-            # 画x轴箭头（红色）
-            ax.arrow(x, y, dx_x, dy_x, head_width=0.08, head_length=0.12, fc='r', ec='r', length_includes_head=True)
-            # 画y轴箭头（绿色）
-            ax.arrow(x, y, dx_y, dy_y, head_width=0.08, head_length=0.12, fc='g', ec='g', length_includes_head=True)
+            ax.scatter(x, y, z, marker='o', color='b', s=50)  # 使用scatter绘制3D点
+            
+            # 绘制方向箭头（简化版本，仅显示yaw方向）
+            arrow_len = 0.5
+            dx = arrow_len * cos(yaw)
+            dy = arrow_len * sin(yaw)
+            # 在3D中绘制箭头
+            ax.quiver(x, y, z, dx, dy, 0, color='r', length=arrow_len, arrow_length_ratio=0.3)
+            
             # 标注
             if self.show_label_checkbox.isChecked():
-                label = f"{usv_id}\n({x:.2f},{y:.2f})"
-                ax.text(x, y-0.15, label, fontsize=9, ha='center', va='top')
-            self.usv_points.append({'x': x, 'y': y, 'usv_id': usv_id, 'usv': usv})
+                label = f"{usv_id}\n({x:.2f}, {y:.2f}, {z:.2f})"
+                ax.text(x, y, z, label, fontsize=8)
+                
+            self.usv_points.append({'x': x, 'y': y, 'z': z, 'usv_id': usv_id, 'usv': usv})
         # 自动缩放到所有点
-        xs = [p['x'] for p in self.usv_points]
-        ys = [p['y'] for p in self.usv_points]
-        if xs and ys:
-            ax.relim()
-            ax.autoscale_view()
+        if self.usv_points:
+            xs = [p['x'] for p in self.usv_points]
+            ys = [p['y'] for p in self.usv_points]
+            zs = [p['z'] for p in self.usv_points]
+            if xs and ys and zs:
+                ax.set_xlim(min(xs), max(xs))
+                ax.set_ylim(min(ys), max(ys))
+                ax.set_zlim(min(zs), max(zs))
         self.canvas.draw()
 
     def on_click(self, event):

@@ -3,22 +3,27 @@
 <package format="3">
   <name>usv_drivers</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供各类硬件驱动节点，包括激光雷达、超声波、UWB等传感器的接入与数据发布，支持多种底层设备的集成。
-This package provides various hardware driver nodes for USV (Unmanned Surface Vehicle) systems, including integration and data publishing for sensors such as LiDAR, ultrasonic, and UWB, supporting the connection of multiple underlying devices.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Hardware drivers for Unmanned Surface Vehicle sensors and actuators.
+    This package provides ROS 2 drivers for various sensors and actuators used 
+    in USV systems, including LiDAR, ultrasonic sensors, UWB positioning modules, 
+    and motor controllers.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>std_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>sensor_msgs</depend>
-  <depend>common_interfaces</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

@@ -3,19 +3,26 @@
 <package format="3">
   <name>usv_fan</name>
   <version>0.0.0</version>
-  <description>该包为USV（无人船）系统提供风扇控制节点，实现温度监测与自动风扇开关，保障设备安全运行。
-This package provides a fan control node for USV (Unmanned Surface Vehicle) systems, enabling temperature monitoring and automatic fan switching to ensure safe device operation.</description>
-  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <description>
+    Fan control module for Unmanned Surface Vehicles.
+    This package provides control interfaces for fan systems used in USV applications, 
+    enabling temperature regulation and environmental control for onboard electronics.
+  </description>
+  
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
-
-  <depend>rclpy</depend>
-  <depend>std_msgs</depend>
-
+  
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+  
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
+  
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
-
+  
   <export>
     <build_type>ament_python</build_type>
   </export>

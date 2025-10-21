@@ -157,20 +157,6 @@
                </layout>
               </item>
               <item>
-               <layout class="QHBoxLayout" name="horizontalLayout_17">
-                <item>
-                 <widget class="QLabel" name="label_4">
-                  <property name="text">
-                   <string>z:</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QDoubleSpinBox" name="set_departed_z_doubleSpinBox"/>
-                </item>
-               </layout>
-              </item>
-              <item>
                <widget class="QPushButton" name="send_departed_point_pushButton">
                 <property name="text">
                  <string>send point</string>
@@ -302,13 +288,6 @@
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="stop_cluster_task_pushButton">
-                  <property name="text">
-                   <string>cluster stop</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
                  <layout class="QHBoxLayout" name="horizontalLayout_5">
                   <property name="leftMargin">
                    <number>5</number>
@@ -401,7 +380,7 @@
       <property name="title">
        <string>message</string>
       </property>
-      <layout class="QVBoxLayout" name="verticalLayout_10" stretch="4,2,4,2">
+      <layout class="QVBoxLayout" name="verticalLayout_10" stretch="3,4,2">
        <item>
         <widget class="QGroupBox" name="groupBox_3">
          <property name="title">
@@ -664,18 +643,6 @@
         </widget>
        </item>
        <item>
-        <widget class="QGroupBox" name="groupBox_8">
-         <property name="title">
-          <string>cluster navigation feedback</string>
-         </property>
-         <layout class="QVBoxLayout" name="verticalLayout_12">
-          <item>
-           <widget class="QTextEdit" name="cluster_navigation_feedback_info_textEdit"/>
-          </item>
-         </layout>
-        </widget>
-       </item>
-       <item>
         <widget class="QGroupBox" name="groupBox_9">
          <property name="title">
           <string>info</string>
@@ -724,7 +691,7 @@
      <string>Visual</string>
     </property>
     <addaction name="actionrviz2"/>
-    <addaction name="action3D"/>
+    <addaction name="action2D"/>
    </widget>
    <addaction name="menuFile"/>
    <addaction name="menuVisual"/>
@@ -740,9 +707,9 @@
     <string>rviz2</string>
    </property>
   </action>
-  <action name="action3D">
+  <action name="action2D">
    <property name="text">
-    <string>3D</string>
+    <string>2D</string>
    </property>
   </action>
  </widget>

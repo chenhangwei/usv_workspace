@@ -1,20 +1,51 @@
+"""
+无人船(Ultra Short Wave Vehicle, USV)启动文件
+该文件用于启动完整的USV系统，包括飞控通信、传感器驱动、控制逻辑等模块
+"""
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression, TextSubstitution
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
-
-
+import os
 
 
 def generate_launch_description():
-    # 声明命名空间参数
+    """
+    生成USV系统启动描述
+    
+    该函数定义了完整的USV系统启动配置，包括：
+    1. 基础参数配置（命名空间、参数文件）
+    2. 飞控通信模块（MAVROS）
+    3. 状态管理模块
+    4. 控制模块
+    5. 传感器驱动模块
+    6. 辅助功能模块（LED、声音、风扇等）
+    
+    可配置参数：
+    - namespace: 节点命名空间
+    - param_file: 参数文件路径
+    - fcu_url: 飞控通信串口
+    - gcs_url: 地面站通信地址
+    - lidar_port: 激光雷达串口路径
+    
+    Returns:
+        LaunchDescription: 包含所有节点和参数的启动描述对象
+    """
+    # =============================================================================
+    # 参数声明
+    # =============================================================================
+
+    # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_01',# 默认命名空间
+        default_value='usv_01',
         description='无人船节点的命名空间'
     )
-    # 声明参数文件路径参数
+    
+    # 参数文件路径参数
     param_file_arg = DeclareLaunchArgument(
         'param_file',
         default_value=PathJoinSubstitution([
@@ -23,187 +54,300 @@ def generate_launch_description():
             'usv_params.yaml'
         ]),
         description='设备站的参数文件路径'
+    )
 
-     ) 
+ 
     
+    # 飞控串口参数
+    fcu_url_arg = DeclareLaunchArgument(
+        'fcu_url',
+        default_value='serial:///dev/ttyACM0:921600',
+        description='飞控通信串口和波特率'
+    )
+    
+    # 地面站通信参数
+    gcs_url_arg = DeclareLaunchArgument(
+        'gcs_url',
+        default_value='udp://:14560@192.168.68.53:14550',
+        description='地面站通信地址'
+    )
+    
+    # MAVROS目标系统ID参数
+    tgt_system_arg = DeclareLaunchArgument(
+        'tgt_system',
+        default_value='1',
+        description='MAVROS目标系统ID'
+    )
+    
+    # MAVROS目标组件ID参数
+    tgt_component_arg = DeclareLaunchArgument(
+        'tgt_component',
+        default_value='1',
+        description='MAVROS目标组件ID'
+    )
+    
+    # 激光雷达串口参数
+    lidar_port_arg = DeclareLaunchArgument(
+        'lidar_port',
+        default_value='/dev/ttyUSB0',
+        description='激光雷达串口路径'
+    )
 
-    # 加载参数文件
+    # =============================================================================
+    # 参数配置加载
+    # =============================================================================
+
     param_file = LaunchConfiguration('param_file')
+
     namespace = LaunchConfiguration('namespace')
+    fcu_url = LaunchConfiguration('fcu_url')
+    gcs_url = LaunchConfiguration('gcs_url')
+    lidar_port = LaunchConfiguration('lidar_port')
+    tgt_system = LaunchConfiguration('tgt_system')
+    tgt_component = LaunchConfiguration('tgt_component')
 
-    
+    # =============================================================================
+    # 基于 namespace 自动推断 tgt_system（安全回退 1）
+    # - 仅当用户未主动设置（仍是默认 '1'）时才从 namespace 提取数字覆盖
+    # - 支持形如 'usv_02' 提取到 2；异常情况回退为 1
+    # =============================================================================
 
-    #状态处理
+    def derive_tgt_system_from_namespace(context, *args, **kwargs):
+        ns_str = LaunchConfiguration('namespace').perform(context)
+        cur_tgt = LaunchConfiguration('tgt_system').perform(context)
+        # 如果用户已显式传入（不等于默认 '1'），则尊重用户参数
+        if cur_tgt and cur_tgt != '1':
+            return []
+        sysid = '1'
+        try:
+            # 从末尾下划线后取数字
+            tail = ns_str.split('_')[-1]
+            num = int(tail)
+            if num > 0:
+                sysid = str(num)
+        except Exception:
+            sysid = '1'
+        # 写回到 LaunchConfiguration
+        return [SetLaunchConfiguration('tgt_system', sysid)]
+
+    derive_sysid_action = OpaqueFunction(function=derive_tgt_system_from_namespace)
+
+    # =============================================================================
+    # 通信与状态管理节点
+    # =============================================================================
+
+  
+
+    # 状态处理节点
     usv_status_node = Node(
         package='usv_comm',
         executable='usv_status_node',
         name='usv_status_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
-    # 自动设置home点
+
+    # 自动设置home点节点
     auto_set_home_node = Node(
         package='usv_comm',
         executable='auto_set_home_node',
         name='auto_set_home_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    #避障
-    usv_avoidance_node= Node(
+    # =============================================================================
+    # 控制相关节点
+    # =============================================================================
+
+    # 避障节点
+    usv_avoidance_node = Node(
         package='usv_control',
         executable='usv_avoidance_node',
         name='usv_avoidance_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # mode和arm切换
-    usv_command_node= Node(
+    # mode和arm切换节点
+    usv_command_node = Node(
         package='usv_control',
         executable='usv_command_node',
         name='usv_command_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # 控制器
-    usv_control_node= Node(
+    # 控制器节点
+    usv_control_node = Node(
         package='usv_control',
         executable='usv_control_node',
         name='usv_control_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # uwb发布
-    usv_uwb_node= Node(
+    # =============================================================================
+    # 传感器驱动节点
+    # =============================================================================
+
+    # UWB定位节点
+    usv_uwb_node = Node(
         package='usv_drivers',
         executable='usv_uwb_node',
         name='usv_uwb_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # 激光雷达
-    usv_laserscan_node= Node(
+    # 激光雷达节点
+    usv_laserscan_node = Node(
         package='usv_drivers',
         executable='usv_laserscan_node',
         name='usv_laserscan_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # 超声波
-    usv_ultrasonic_node= Node(
+    # 超声波传感器节点
+    usv_ultrasonic_node = Node(
         package='usv_drivers',
         executable='usv_ultrasonic_node',
         name='usv_ultrasonic_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
-    # su04超声波
-    usv_su04_node= Node(
+
+    # SU04超声波传感器节点
+    usv_su04_node = Node(
         package='usv_drivers',
         executable='usv_su04_node',
         name='usv_su04_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    #  LED控制
-    usv_led_node = Node(
-        package='usv_led',
-        executable='usv_led_node',
-        name='usv_led_node',
-        namespace=namespace ,  # 使用命名空间
-        output='screen',
-        parameters=[param_file],  # 加载参数文件
-    )
-
-    # 声音控制
-    usv_sound_node = Node(
-        package='usv_sound',
-        executable='usv_sound_node',
-        name='usv_sound_node',
-        namespace=namespace ,  # 使用命名空间
-        output='screen',
-        parameters=[param_file],  # 加载参数文件
-    )
-
-    # fan控制
-    usv_fan_node = Node(
-        package='usv_fan',
-        executable='usv_fan_node',
-        name='usv_fan_node',
-        namespace=namespace ,  # 使用命名空间
-        output='screen',
-        parameters=[param_file],  # 加载参数文件
-    )
     # 超声波雷达节点
     usv_ultrasonic_radar_node = Node(
         package='usv_drivers',
         executable='usv_ultrasonic_radar_node',
         name='usv_ultrasonic_radar_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # 鸭头转动节点
+    # =============================================================================
+    # 辅助功能节点
+    # =============================================================================
+
+    # LED控制节点
+    usv_led_node = Node(
+        package='usv_led',
+        executable='usv_led_node',
+        name='usv_led_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
+    # 声音控制节点
+    usv_sound_node = Node(
+        package='usv_sound',
+        executable='usv_sound_node',
+        name='usv_sound_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
+    # 风扇控制节点
+    usv_fan_node = Node(
+        package='usv_fan',
+        executable='usv_fan_node',
+        name='usv_fan_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
+    # 鸭头动作控制节点
     usv_head_action_node = Node(
         package='usv_action',
         executable='usv_head_action_node',
         name='usv_head_action_node',
-        namespace=namespace ,  # 使用命名空间
+        namespace=namespace,
         output='screen',
-        parameters=[param_file],  # 加载参数文件
+        parameters=[param_file]
     )
 
-    # 定义 MAVROS 节点
+    # =============================================================================
+    # 飞控通信节点
+    # =============================================================================
+
+    # MAVROS节点
     mavros_node = Node(
         package='mavros',
-        executable='mavros_node',  
-        #name='mavros',      
-        namespace=namespace ,  # 使用相同的命名空间
+        executable='mavros_node',
+        namespace=namespace,
         output='screen',
         parameters=[
-            param_file,  # 加载参数文件
-            {'fcu_url': 'serial:///dev/ttyACM0:921600'},  # 飞控串口和波特率
-            {'gcs_url': 'udp://:14550@192.168.68.51:14550'},  # 禁用 GCS 代理
-            {'tgt_system': 1},  # 飞控的系统 ID
-            {'tgt_component': 1},  # 飞控的组件 ID
-            # {'plugin_blacklist': ['global_position']},  # 禁用 global_position 插件        
+            param_file,
+            {
+                'fcu_url': fcu_url,
+                'gcs_url': gcs_url,
+                # 保留旧键以兼容（若 MAVROS 忽略将无害）
+                'tgt_system': tgt_system,
+                'tgt_component': tgt_component,
+                # ROS 2 MAVROS 常用参数名：设置自身与目标的 MAVLink ID
+                'system_id': tgt_system,
+                'component_id': tgt_component,
+                # 兼容某些版本用于目标 FCU 的参数命名
+                'target_system_id': tgt_system,
+                'target_component_id': tgt_component
+            }
         ]
     )
 
-    # 启动 RPLIDAR 节点
+    # =============================================================================
+    # 传感器相关节点
+    # =============================================================================
+
+    # RPLIDAR节点
     rplidar_node = Node(
         package='rplidar_ros',
-        # executable='rplidar_node',
         executable='rplidar_node',
         name='rplidar_composition',
-        namespace=namespace ,  # 使用相同的命名空间
+        namespace=namespace,
         output='screen',
         parameters=[
-            {'serial_port': '/dev/ttyUSB0'},
-            {'serial_baudrate': 115200},
-            {'scan_frequency': 10.0},
-            {'frame_id': [TextSubstitution(text='laser_frame_'), LaunchConfiguration('namespace')]}
+            {
+                'serial_port': lidar_port,
+                'serial_baudrate': 115200,
+                'scan_frequency': 10.0,
+                'frame_id': [
+                    TextSubstitution(text='laser_frame_'), 
+                    LaunchConfiguration('namespace')
+                ]
+            }
         ]
     )
-    # 启动静态变换发布器
-    static_tf_laser_node=Node(
+
+    # =============================================================================
+    # 坐标变换节点
+    # =============================================================================
+
+    # 静态坐标变换发布器
+    static_tf_laser_node = Node(
         package='usv_tf',
         executable='static_tf_laser_node',
         name='static_tf_laser_node',
@@ -211,8 +355,9 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file]
     )
-    # 启动 odom 到 TF 的转换节点
-    odom_to_tf=Node(
+
+    # 里程计到TF转换节点
+    odom_to_tf = Node(
         package='usv_tf',
         executable='odom_to_tf',
         name='odom_to_tf',
@@ -221,28 +366,46 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
+    # =============================================================================
+    # 启动描述配置
+    # =============================================================================
 
-
+    # 当前启用的节点列表
+    # 注意：部分节点被注释是因为在当前部署环境中不使用
+    # 如需启用，请取消相应注释并确保硬件连接正确
     return LaunchDescription([
+        # 基础参数配置
         namespace_arg,
-        param_file_arg,  # 添加参数文件声明
-        mavros_node,  # 添加 MAVROS 节点   
-        usv_status_node,# 状态处理节点
-        usv_control_node,# 控制器节点
-        # usv_uwb_node,#不再使用机载计算机读取定位
-        usv_command_node,# 命令和arm切换节点
-        usv_avoidance_node,# 避障节点
-        # usv_laserscan_node,# 激光雷达节点
-        # usv_ultrasonic_node,# 超声波节点
-        auto_set_home_node,# 自动设置home点节点
-        # rplidar_node,# RPLIDAR 节点
-        # static_tf_laser_node,# 静态变换发布器节点
-        # odom_to_tf,# odom 到 TF 的转换节点
-        usv_led_node,# LED 控制节点
-        usv_sound_node, # 声音控制节点
-        # usv_su04_node,  # SU04 超声波节点  
-        usv_fan_node,  # 风扇控制节点  
-        usv_ultrasonic_radar_node,  # 超声波雷达节点
-        usv_head_action_node,  # 鸭头转动节点
-    ]
-    )
+        param_file_arg,
+        fcu_url_arg,
+        gcs_url_arg,
+        tgt_system_arg,
+        tgt_component_arg,
+        lidar_port_arg,
+        # 先根据 namespace 推断 sysid（若未显式设置）
+        derive_sysid_action,
+        
+        # 核心功能节点
+        mavros_node,           # 飞控通信
+        usv_status_node,       # 状态管理
+        usv_control_node,      # 核心控制器
+        usv_command_node,      # 命令处理
+        usv_avoidance_node,    # 避障功能
+        auto_set_home_node,    # 自动设置home点
+        
+        # 辅助功能节点
+        usv_led_node,          # LED控制
+        usv_sound_node,        # 声音控制
+        usv_fan_node,          # 风扇控制
+        #usv_ultrasonic_radar_node,  # 超声波雷达
+        usv_head_action_node,       # 鸭头动作控制
+        
+        # 可选节点（根据硬件配置启用）
+        # usv_uwb_node,             # UWB定位
+        # usv_laserscan_node,       # 激光雷达
+        # usv_ultrasonic_node,      # 超声波传感器
+        # usv_su04_node,            # SU04超声波传感器
+        # rplidar_node,             # RPLIDAR激光雷达
+        # static_tf_laser_node,     # 激光雷达坐标变换
+        # odom_to_tf,               # 里程计坐标变换
+    ])
