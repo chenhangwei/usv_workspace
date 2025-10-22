@@ -78,6 +78,8 @@ class UsvHeadActionNode(Node):
         self.swing_hold_until = None
         self.waiting_to_center = False
         self.center_time = None
+        self.next_swing_direction = None  # 记录下一次摇摆的方向
+        self.next_swing_angle = None      # 记录下一次摇摆的角度
         # 定时器与启动日志（修正缩进，必须在 __init__ 内）
         self.timer = self.create_timer(1.0 / RC_OVERRIDE_FREQ, self.timer_callback)
         mode = '硬件控制' if self.pca is not None else '无硬件模式'
@@ -127,18 +129,26 @@ class UsvHeadActionNode(Node):
 
         if self.swinging:
             if self.swing_phase == 'idle':
+                # 在idle阶段就决定下一次摇摆的方向和角度
+                self.next_swing_direction = random.choice(['left', 'right'])
+                self.next_swing_angle = random.uniform(20, 45)
                 self.target_angle = 90
                 self.swing_phase = 'to_center_start'
+                self.get_logger().info(f'准备摇摆: {self.next_swing_direction} {self.next_swing_angle:.1f}°')
             elif self.swing_phase == 'to_center_start':
                 if self.current_angle == 90:
-                    direction = random.choice(['left', 'right'])
-                    angle = random.uniform(20, 45)
-                    if direction == 'left':
-                        self.target_angle = 90 - angle
+                    # 使用预先决定的方向和角度（确保已初始化）
+                    if self.next_swing_direction is None or self.next_swing_angle is None:
+                        self.get_logger().warn('摇摆参数未初始化，重新生成')
+                        self.next_swing_direction = random.choice(['left', 'right'])
+                        self.next_swing_angle = random.uniform(20, 45)
+                    
+                    if self.next_swing_direction == 'left':
+                        self.target_angle = 90 - self.next_swing_angle
                     else:
-                        self.target_angle = 90 + angle
+                        self.target_angle = 90 + self.next_swing_angle
                     self.swing_phase = 'to_target'
-                    self.get_logger().info(f'开始摇摆: {direction} {angle:.1f}° (目标角度: {self.target_angle:.1f}°)')
+                    self.get_logger().info(f'开始摇摆: {self.next_swing_direction} {self.next_swing_angle:.1f}° (目标角度: {self.target_angle:.1f}°)')
             elif self.swing_phase == 'to_target':
                 if self.current_angle == self.target_angle:
                     self.swing_hold_until = now + random.uniform(2, 4)

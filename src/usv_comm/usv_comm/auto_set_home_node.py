@@ -34,6 +34,12 @@ class AutoSetHomeNode(Node):
         self.declare_parameter('set_delay_sec', 3.0)
         self.set_delay_sec = self.get_parameter('set_delay_sec').get_parameter_value().double_value
         self.set_home_sent = False
+        
+        # 重试相关状态变量
+        self.retry_count = 0
+        self.max_retries = 30
+        self.retry_interval = 1.0  # 秒
+        self.retry_timer = None
 
         # 订阅本地位置信息
         self.pose_sub = self.create_subscription(
@@ -67,13 +73,50 @@ class AutoSetHomeNode(Node):
             self.create_timer(self.set_delay_sec, self.set_home)
 
     def set_home(self):
-        """设置EKF原点"""
-        # 检查服务是否可用
-        if not self.set_home_cli.service_is_ready():
-            self.get_logger().warn('Service /mavros/cmd/set_home not ready, retrying...')
-            self.set_home_sent = False
+        """设置EKF原点的入口函数,启动非阻塞重试定时器"""
+        self.retry_count = 0
+        self._try_set_home()
+    
+    def _try_set_home(self):
+        """尝试设置EKF原点,使用非阻塞定时器实现重试"""
+        # 检查服务是否就绪
+        if self.set_home_cli.service_is_ready():
+            self.get_logger().info(
+                f'Service /mavros/cmd/set_home is ready (attempt {self.retry_count + 1}/{self.max_retries})'
+            )
+            self._send_set_home_request()
             return
-
+        
+        # 服务未就绪,记录并准备重试
+        self.retry_count += 1
+        self.get_logger().warn(
+            f'Service /mavros/cmd/set_home not ready, will retry... ({self.retry_count}/{self.max_retries})'
+        )
+        
+        # 检查是否达到最大重试次数
+        if self.retry_count >= self.max_retries:
+            self.get_logger().error(
+                f'❌ Service /mavros/cmd/set_home not available after {self.max_retries} attempts. '
+                'Please check MAVROS connection.'
+            )
+            return
+        
+        # 创建定时器在指定间隔后重试
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+        
+        self.retry_timer = self.create_timer(self.retry_interval, self._retry_callback)
+    
+    def _retry_callback(self):
+        """重试定时器回调"""
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.retry_timer = None
+        
+        self._try_set_home()
+    
+    def _send_set_home_request(self):
+        """发送设置Home点的服务请求"""
         # 创建服务请求
         req = CommandHome.Request()
         req.current_gps = True
@@ -83,10 +126,10 @@ class AutoSetHomeNode(Node):
 
         # 异步调用服务
         future = self.set_home_cli.call_async(req)
-        
-        # 等待服务响应
-        rclpy.spin_until_future_complete(self, future)
-
+        future.add_done_callback(self._handle_set_home_response)
+    
+    def _handle_set_home_response(self, future):
+        """处理设置Home点的服务响应"""
         try:
             result = future.result()
             if result is not None and getattr(result, 'success', False):

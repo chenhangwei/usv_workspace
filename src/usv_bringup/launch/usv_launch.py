@@ -41,7 +41,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_01',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -68,14 +68,14 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14560@192.168.68.53:14550',
+        default_value='udp://:14580@192.168.68.53:14550',
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='1',
+        default_value='3',
         description='MAVROS目标系统ID'
     )
     
