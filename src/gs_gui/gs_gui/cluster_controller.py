@@ -304,33 +304,15 @@ class ClusterController:
     def _global_to_usv_local(self, usv_id, p_global):
         """
         将全局坐标转换为指定 usv 的本地坐标。
-        如果 usv 的 boot pose 不存在，则返回 p_global 作为回退。
+        直接使用 USV 上电时的位置作为本地坐标系原点。
+        
+        注意：系统假设 USV 飞控在上电时将当前位置设为本地坐标原点 (0,0,0)
+        因此这里直接返回全局坐标，飞控会自动处理本地转换。
         """
         try:
-            # 优先使用 boot pose（上电时记录的原点），若不存在则退回到最新状态
-            bp = self.node.usv_boot_pose.get(usv_id)
-            if bp:
-                bx = float(bp.get('x', 0.0))
-                by = float(bp.get('y', 0.0))
-                bz = float(bp.get('z', 0.0))
-                theta = float(bp.get('yaw', 0.0))
-            else:
-                st = self.node.usv_states.get(usv_id)
-                if not st:
-                    return p_global
-                bx = float(st.get('position', {}).get('x', 0.0))
-                by = float(st.get('position', {}).get('y', 0.0))
-                bz = float(st.get('position', {}).get('z', 0.0))
-                theta = float(st.get('yaw', 0.0))
-
-            dx = float(p_global.get('x', 0.0)) - bx
-            dy = float(p_global.get('y', 0.0)) - by
-            import math
-            ct = math.cos(-theta); stt = math.sin(-theta)
-            lx = ct * dx - stt * dy
-            ly = stt * dx + ct * dy
-            lz = float(p_global.get('z', 0.0)) - bz
-            return {'x': lx, 'y': ly, 'z': lz}
+            # 直接返回全局坐标
+            # 飞控会根据自己的上电位置自动转换为本地坐标
+            return p_global
         except Exception:
             return p_global
 

@@ -207,33 +207,3 @@ class USVCommandHandler:
         """停止LED灯光命令"""
         self.ros_signal.str_command.emit('led_off')
         self.append_info("发送命令: led_off")
-    
-    # ============== Boot Pose命令 ==============
-    def set_boot_pose(self, usv_id):
-        """
-        标记单个USV的boot pose
-        
-        Args:
-            usv_id: USV ID
-        """
-        try:
-            self.ros_signal.set_boot_pose.emit(usv_id)
-            self.append_info(f"已请求标记 USV {usv_id} 的 boot_pose（上电原点）")
-        except Exception as e:
-            self.append_info(f"标记 boot_pose 出错: {e}")
-    
-    def set_boot_pose_all(self, usv_ids):
-        """
-        批量标记所有USV的boot pose
-        
-        Args:
-            usv_ids: USV ID列表
-        """
-        try:
-            if not usv_ids:
-                self.append_info("USV ID列表为空，无法批量标记")
-                return
-            self.ros_signal.set_boot_pose_all.emit(usv_ids)
-            self.append_info(f"已请求为以下 USV 批量标记 boot_pose: {usv_ids}")
-        except Exception as e:
-            self.append_info(f"批量标记 boot_pose 出错: {e}")

@@ -13,7 +13,7 @@ from logging.handlers import RotatingFileHandler
 import rclpy
 from rclpy.parameter import Parameter
 from PyQt5.QtCore import QProcess, QTimer
-from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QMessageBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
@@ -25,6 +25,7 @@ from gs_gui.cluster_task_manager import ClusterTaskManager
 from gs_gui.usv_list_manager import USVListManager
 from gs_gui.state_handler import StateHandler
 from gs_gui.ui_utils import UIUtils
+from gs_gui.area_offset_dialog import AreaOffsetDialog
 
 
 class MainWindow(QMainWindow):
@@ -42,6 +43,9 @@ class MainWindow(QMainWindow):
         
         # 初始化UI工具
         self.ui_utils = UIUtils(self.ui, self)
+
+        # 初始化额外菜单
+        self._init_custom_menu()
         
         # 初始化表格管理器
         self.table_manager = TableManager(
@@ -123,6 +127,7 @@ class MainWindow(QMainWindow):
         self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command)
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command)
         self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command)
+        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command)
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)
         
         # ============== 集群列表管理按钮 ==============
@@ -145,6 +150,14 @@ class MainWindow(QMainWindow):
         self.ui.actionopen.triggered.connect(self.task_manager.read_data_from_file)
         self.ui.actionrviz2.triggered.connect(self.ui_utils.start_rviz)
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
+        self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
+
+    def _init_custom_menu(self):
+        """在菜单栏中增加坐标偏移设置入口"""
+        # 坐标系设置菜单
+        coord_menu = self.ui.menubar.addMenu("坐标系设置")
+        self.action_set_area_offset = QAction("设置任务坐标系偏移量", self)
+        coord_menu.addAction(self.action_set_area_offset)
     
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):
@@ -183,6 +196,10 @@ class MainWindow(QMainWindow):
     def set_departed_arco_command(self):
         """离群设置ARCO模式"""
         self.command_handler.set_departed_arco(self.list_manager.usv_departed_list)
+    
+    def set_departed_steering_command(self):
+        """离群设置Steering模式"""
+        self.command_handler.set_departed_steering(self.list_manager.usv_departed_list)
     
     # ============== 集群任务控制 ==============
     def toggle_cluster_task(self):
@@ -251,28 +268,25 @@ class MainWindow(QMainWindow):
         else:
             self.ui_utils.append_info("请先选择一行")
     
-    # ============== Boot Pose 命令 ==============
-    def set_boot_pose_command(self):
-        """标记当前选中 USV 的上电原点"""
-        usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
-        if usv_info:
-            self.command_handler.set_boot_pose(usv_info['namespace'])
-        else:
-            self.ui_utils.append_info("请先在集群表格中选择一个USV来标记 boot pose")
-    
-    def set_all_boot_pose_command(self):
-        """对当前集群列表中的所有 USV 一次性标记 boot pose"""
+    # ============== 坐标系设置命令 ==============
+    def set_area_offset_command(self):
+        """设置任务坐标系偏移量（Area Center）"""
         try:
-            if not self.list_manager.usv_cluster_list:
-                self.ui_utils.append_info("集群列表为空，无法批量标记 boot pose")
-                return
-            usv_ids = self.list_manager.extract_namespaces(self.list_manager.usv_cluster_list)
-            if not usv_ids:
-                self.ui_utils.append_info("未找到有效的 USV ID，取消批量标记")
-                return
-            self.command_handler.set_boot_pose_all(usv_ids)
+            # 获取当前的偏移量（从参数文件或默认值）
+            current_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            
+            # 显示对话框
+            dialog = AreaOffsetDialog(self, current_offset)
+            if dialog.exec_() == QDialog.Accepted:
+                new_offset = dialog.get_offset()
+                # 发送更新信号到ROS节点
+                self.ros_signal.update_area_center.emit(new_offset)
+                self.ui_utils.append_info(
+                    f"已更新任务坐标系偏移量: X={new_offset['x']:.2f}m, "
+                    f"Y={new_offset['y']:.2f}m, Z={new_offset['z']:.2f}m"
+                )
         except Exception as e:
-            self.ui_utils.append_info(f"执行批量标记时发生错误: {e}")
+            self.ui_utils.append_info(f"设置坐标偏移量时发生错误: {e}")
     
     # ============== 导航反馈处理 ==============
     def handle_navigation_feedback(self, usv_id, feedback):
@@ -391,18 +405,6 @@ def main(argv=None):
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
     ros_signal.str_command.connect(node.str_command_callback)
     
-    # 连接boot pose信号
-    try:
-        sig = getattr(ros_signal, 'set_boot_pose', None)
-        cb = getattr(node, 'set_boot_pose_callback', None)
-        if sig is not None and cb is not None:
-            sig.connect(cb)
-    except Exception:
-        try:
-            main_window.ui_utils.append_info('警告: 无法将 set_boot_pose 信号连接到 GroundStationNode')
-        except Exception:
-            pass
-    
     # 连接节点信息信号
     try:
         node_info_sig = getattr(ros_signal, 'node_info', None)
@@ -414,15 +416,15 @@ def main(argv=None):
         except Exception:
             pass
     
-    # 连接批量设置boot pose信号
+    # 连接坐标系偏移量更新信号
     try:
-        sig_all = getattr(ros_signal, 'set_boot_pose_all', None)
-        cb_all = getattr(node, 'set_boot_pose_all_callback', None)
-        if sig_all is not None and cb_all is not None:
-            sig_all.connect(cb_all)
+        sig_offset = getattr(ros_signal, 'update_area_center', None)
+        cb_offset = getattr(node, 'update_area_center_callback', None)
+        if sig_offset is not None and cb_offset is not None:
+            sig_offset.connect(cb_offset)
     except Exception:
         try:
-            main_window.ui_utils.append_info('警告: 无法将 set_boot_pose_all 信号连接到 GroundStationNode')
+            main_window.ui_utils.append_info('警告: 无法将 update_area_center 信号连接到 GroundStationNode')
         except Exception:
             pass
     

@@ -7,6 +7,7 @@
 import rclpy 
 import rclpy.action
 from rclpy.node import Node  # 从rclpy.node模块导入Node类，用于创建ROS2节点
+from rclpy.parameter import Parameter  # 导入Parameter类，用于参数设置
 from geometry_msgs.msg import PoseStamped  # 从geometry_msgs.msg模块导入PoseStamped消息类型，用于位姿信息
 from common_interfaces.msg import UsvStatus  # 从common_interfaces.msg模块导入UsvStatus消息类型
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy  # 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
@@ -60,8 +61,6 @@ class GroundStationNode(Node):
 
         # 初始化USV状态和目标管理相关变量
         self.usv_states = {}  # USV状态字典
-        # 存储每艘USV的上电（boot）位姿，用于将全局任务点转换为本地坐标
-        self.usv_boot_pose = {}
         self.last_ns_list = []  # 上次命名空间列表
         self.is_runing = False
         self.run_step = 0  # 当前运行步骤
@@ -142,7 +141,7 @@ class GroundStationNode(Node):
         
         self.update_subscribers_and_publishers()
 
-        # TF2: Buffer/Listener for transforms and static broadcaster for boot poses
+        # TF2: Buffer/Listener for coordinate transforms
         try:
             self.tf_buffer = tf2_ros.Buffer()
             self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -195,109 +194,7 @@ class GroundStationNode(Node):
         # 线程退出前做简单清理（如果队列中还有消息，这里不再处理）
         self.get_logger().debug('process_publish_queue 线程退出')
 
-    def set_boot_pose_callback(self, usv_id: str):
-        """
-        外部（GUI）请求：把当前 usv 的位姿记录为 boot_pose（上电原点），并发布一个静态 transform 以供 tf2 使用。
-        """
-        try:
-            st = self.usv_states.get(usv_id)
-            if not st:
-                self.get_logger().warn(f"无法标记 boot_pose: 未找到 {usv_id} 的状态信息")
-                return False
-            bp = {
-                'x': float(st.get('position', {}).get('x', 0.0)),
-                'y': float(st.get('position', {}).get('y', 0.0)),
-                'z': float(st.get('position', {}).get('z', 0.0)),
-                'yaw': float(st.get('yaw', 0.0))
-            }
-            self.usv_boot_pose[usv_id] = bp
-            self.get_logger().info(f"已设置 {usv_id} 的 boot_pose: {bp}")
-            try:
-                import logging
-                logging.getLogger('gs_gui').info(f"已设置 {usv_id} 的 boot_pose: {bp}")
-            except Exception:
-                pass
-            # 向 GUI 反馈结果（若 ros_signal 可用）
-            try:
-                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
-                    self.ros_signal.node_info.emit(f"已设置 {usv_id} 的 boot_pose: {bp}")
-            except Exception:
-                pass
-
-            # 发布静态 transform: frame_id = area_center.frame (通常 map)， child = f"{usv_id}_boot"
-            if self.static_broadcaster is not None:
-                t = TransformStamped()
-                t.header.stamp = self.get_clock().now().to_msg()
-                t.header.frame_id = self._area_center.get('frame', 'map')
-                t.child_frame_id = f"{usv_id}_boot"
-                t.transform.translation.x = bp['x']
-                t.transform.translation.y = bp['y']
-                t.transform.translation.z = bp['z']
-                # convert yaw to quaternion
-                from tf_transformations import quaternion_from_euler
-                q = quaternion_from_euler(0, 0, bp['yaw'])
-                t.transform.rotation.x = q[0]
-                t.transform.rotation.y = q[1]
-                t.transform.rotation.z = q[2]
-                t.transform.rotation.w = q[3]
-                try:
-                    self.static_broadcaster.sendTransform([t])
-                    self.get_logger().info(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
-                    try:
-                        import logging
-                        logging.getLogger('gs_gui').info(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
-                    except Exception:
-                        pass
-                    try:
-                        if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
-                            self.ros_signal.node_info.emit(f"发布静态 transform {t.child_frame_id} <- {t.header.frame_id}")
-                    except Exception:
-                        pass
-                except Exception as e:
-                    self.get_logger().warn(f"发布静态 transform 失败: {e}")
-                    try:
-                        if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
-                            self.ros_signal.node_info.emit(f"发布静态 transform 失败: {e}")
-                    except Exception:
-                        pass
-
-            return True
-        except Exception as e:
-            self.get_logger().error(f"设置 boot_pose 失败: {e}")
-            return False
-
-    def set_boot_pose_all_callback(self, usv_id_list: list):
-        """
-        批量设置多个 USV 的 boot pose。接受 USV id 列表，逐个调用 set_boot_pose_callback。
-        返回一个字典汇总每个 USV 的结果。
-        """
-        results = {}
-        try:
-            for usv_id in usv_id_list:
-                try:
-                    ok = self.set_boot_pose_callback(usv_id)
-                    results[usv_id] = 'ok' if ok else 'fail'
-                except Exception as e:
-                    results[usv_id] = f'error: {e}'
-            # 汇总反馈
-            try:
-                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
-                    self.ros_signal.node_info.emit(f"批量设置 boot_pose 完成: {results}")
-                    try:
-                        import logging
-                        logging.getLogger('gs_gui').info(f"批量设置 boot_pose 完成: {results}")
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        except Exception as e:
-            self.get_logger().error(f"批量设置 boot_pose 失败: {e}")
-            try:
-                if hasattr(self, 'ros_signal') and getattr(self.ros_signal, 'node_info', None) is not None:
-                    self.ros_signal.node_info.emit(f"批量设置 boot_pose 遇到错误: {e}")
-            except Exception:
-                pass
-        return results
+    # Boot Pose 功能已删除 - 系统直接使用 USV 当前状态进行坐标转换
 
     def shutdown(self):
         """
@@ -743,12 +640,51 @@ class GroundStationNode(Node):
     # 添加缺失的str_command_callback方法
     def str_command_callback(self, msg):
         """
-        处理字符串命令（LED、声音、转头等）
+        字符串命令回调函数
         
         Args:
-            msg (str): 命令字符串
+            msg: 字符串命令消息
         """
         self.command_processor.str_command_callback(msg)
+    
+    def update_area_center_callback(self, offset_dict):
+        """
+        更新任务坐标系偏移量（Area Center）
+        
+        Args:
+            offset_dict: 偏移量字典 {'x': float, 'y': float, 'z': float}
+        """
+        try:
+            # 更新内部存储的area_center
+            self._area_center['x'] = float(offset_dict.get('x', 0.0))
+            self._area_center['y'] = float(offset_dict.get('y', 0.0))
+            self._area_center['z'] = float(offset_dict.get('z', 0.0))
+            
+            self.get_logger().info(
+                f"已更新 Area Center 偏移量: "
+                f"X={self._area_center['x']:.2f}, "
+                f"Y={self._area_center['y']:.2f}, "
+                f"Z={self._area_center['z']:.2f}"
+            )
+            
+            # 可选：将新偏移量保存到参数服务器
+            try:
+                self.set_parameters([
+                    Parameter('area_center_x', 
+                        Parameter.Type.DOUBLE, 
+                        self._area_center['x']),
+                    Parameter('area_center_y', 
+                        Parameter.Type.DOUBLE, 
+                        self._area_center['y']),
+                    Parameter('area_center_z', 
+                        Parameter.Type.DOUBLE, 
+                        self._area_center['z'])
+                ])
+            except Exception as e:
+                self.get_logger().warn(f"更新参数服务器失败: {e}")
+                
+        except Exception as e:
+            self.get_logger().error(f"更新 Area Center 偏移量失败: {e}")
 
     # 销毁节点资源
     def destroy_node(self):

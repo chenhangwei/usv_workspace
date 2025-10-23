@@ -39,10 +39,9 @@ class ROSSignal(QObject):
 
     # 通用字符串命令信号
     str_command = pyqtSignal(str)          # 通用字符串命令，参数：命令字符串
-    # 标记上电原点（GUI -> node）
-    set_boot_pose = pyqtSignal(str)        # 参数：usv_id
-    # 批量标记上电原点（GUI -> node）
-    set_boot_pose_all = pyqtSignal(list)   # 参数：USV id 列表
     # 节点 -> GUI 的信息反馈
     node_info = pyqtSignal(str)            # 参数：信息字符串，供节点向 GUI 发送状态/反馈
+    
+    # 坐标系偏移量设置信号
+    update_area_center = pyqtSignal(dict)  # 更新任务坐标系偏移量，参数：{'x': float, 'y': float, 'z': float}
 

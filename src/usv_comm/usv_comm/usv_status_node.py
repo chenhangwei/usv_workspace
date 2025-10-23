@@ -150,6 +150,8 @@ class UsvStatusNode(Node):
             msg (BatteryState): 包含电池状态的消息
         """
         if isinstance(msg, BatteryState):
+            if msg.voltage <= 0.1 and not msg.location:
+                return
             self.usv_battery = msg
 
     def usv_velocity_callback(self, msg):

@@ -109,11 +109,9 @@ class UsvManager:
 
         # 额外：从节点的 usv_states 中移除该 USV，并通知 GUI 刷新列表
         try:
-            # 清理状态与辅助记录
+            # 清理状态记录
             if usv_id in getattr(self.node, 'usv_states', {}):
                 del self.node.usv_states[usv_id]
-            if hasattr(self.node, 'usv_boot_pose'):
-                self.node.usv_boot_pose.pop(usv_id, None)
             # 若 GUI 信号可用，发射最新状态列表，触发表格行删除
             if hasattr(self.node, 'ros_signal') and getattr(self.node.ros_signal, 'receive_state_list', None) is not None:
                 self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))
@@ -168,15 +166,6 @@ class UsvManager:
             if first_time or self.node.usv_states.get(usv_id) != state_data:
                 # 更新USV状态字典
                 self.node.usv_states[usv_id] = state_data
-                # 如果是首次收到该USV的状态，记录为 boot pose（上电时的原点）
-                if first_time:
-                    try:
-                        bp = state_data.get('position', {})
-                        byaw = float(state_data.get('yaw', 0.0))
-                        self.node.usv_boot_pose[usv_id] = {'x': float(bp.get('x', 0.0)), 'y': float(bp.get('y', 0.0)), 'z': float(bp.get('z', 0.0)), 'yaw': byaw}
-                        self.node.get_logger().info(f"记录 USV {usv_id} 的 boot_pose: {self.node.usv_boot_pose[usv_id]}")
-                    except Exception:
-                        pass
                 # 发射信号，将更新后的USV状态列表发送给GUI界面
                 # 限制信号发射频率，避免过于频繁的更新
                 self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))

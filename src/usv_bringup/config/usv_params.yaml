@@ -11,6 +11,14 @@ mavros_node:
     # 视觉定位配置
     vision_pose:
       enable: false                         # 禁用视觉定位
+    # 仅加载系统实际使用到的 MAVROS 插件，减少启动阻塞
+    plugin_allowlist:
+      - sys_status          # /state、/battery 等系统状态
+      - sys_time            # 时钟同步，避免 time drift
+      - command             # /cmd/arming、/set_mode、/cmd/set_home 服务
+      - param               # 参数交互，部分命令依赖
+      - local_position      # /local_position/pose、/velocity_local 数据
+      - setpoint_raw        # /setpoint_raw/local 位置指令发布
 
 # =============================================================================
 # 通信与状态管理模块参数

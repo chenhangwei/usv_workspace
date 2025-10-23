@@ -6,10 +6,8 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
-import os
 
 
 def generate_launch_description():
@@ -41,7 +39,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_03',
+        default_value='usv_01',
         description='无人船节点的命名空间'
     )
     
@@ -68,14 +66,14 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14580@192.168.68.53:14550',
+        default_value='udp://:14550@192.168.68.53:14550',
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='3',
+        default_value='1',
         description='MAVROS目标系统ID'
     )
     
@@ -87,11 +85,11 @@ def generate_launch_description():
     )
     
     # 激光雷达串口参数
-    lidar_port_arg = DeclareLaunchArgument(
-        'lidar_port',
-        default_value='/dev/ttyUSB0',
-        description='激光雷达串口路径'
-    )
+   # lidar_port_arg = DeclareLaunchArgument(
+      #  'lidar_port',
+      #  default_value='/dev/ttyUSB0',
+      #  description='激光雷达串口路径'
+    #)
 
     # =============================================================================
     # 参数配置加载
@@ -102,35 +100,9 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
-    lidar_port = LaunchConfiguration('lidar_port')
+    #lidar_port = LaunchConfiguration('lidar_port')
     tgt_system = LaunchConfiguration('tgt_system')
     tgt_component = LaunchConfiguration('tgt_component')
-
-    # =============================================================================
-    # 基于 namespace 自动推断 tgt_system（安全回退 1）
-    # - 仅当用户未主动设置（仍是默认 '1'）时才从 namespace 提取数字覆盖
-    # - 支持形如 'usv_02' 提取到 2；异常情况回退为 1
-    # =============================================================================
-
-    def derive_tgt_system_from_namespace(context, *args, **kwargs):
-        ns_str = LaunchConfiguration('namespace').perform(context)
-        cur_tgt = LaunchConfiguration('tgt_system').perform(context)
-        # 如果用户已显式传入（不等于默认 '1'），则尊重用户参数
-        if cur_tgt and cur_tgt != '1':
-            return []
-        sysid = '1'
-        try:
-            # 从末尾下划线后取数字
-            tail = ns_str.split('_')[-1]
-            num = int(tail)
-            if num > 0:
-                sysid = str(num)
-        except Exception:
-            sysid = '1'
-        # 写回到 LaunchConfiguration
-        return [SetLaunchConfiguration('tgt_system', sysid)]
-
-    derive_sysid_action = OpaqueFunction(function=derive_tgt_system_from_namespace)
 
     # =============================================================================
     # 通信与状态管理节点
@@ -331,7 +303,7 @@ def generate_launch_description():
         output='screen',
         parameters=[
             {
-                'serial_port': lidar_port,
+                #'serial_port': lidar_port,
                 'serial_baudrate': 115200,
                 'scan_frequency': 10.0,
                 'frame_id': [
@@ -374,16 +346,14 @@ def generate_launch_description():
     # 注意：部分节点被注释是因为在当前部署环境中不使用
     # 如需启用，请取消相应注释并确保硬件连接正确
     return LaunchDescription([
-        # 基础参数配置
-        namespace_arg,
-        param_file_arg,
-        fcu_url_arg,
-        gcs_url_arg,
-        tgt_system_arg,
-        tgt_component_arg,
-        lidar_port_arg,
-        # 先根据 namespace 推断 sysid（若未显式设置）
-        derive_sysid_action,
+    # 基础参数配置
+    namespace_arg,
+    param_file_arg,
+    fcu_url_arg,
+    gcs_url_arg,
+    tgt_system_arg,
+    tgt_component_arg,
+    #lidar_port_arg,
         
         # 核心功能节点
         mavros_node,           # 飞控通信
