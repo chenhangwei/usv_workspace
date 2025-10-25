@@ -27,6 +27,10 @@ usv_status_node:
   ros__parameters:
     # 目标点判断阈值
     target_reach_threshold: 1.0             # 到达目标点的距离阈值（米）
+    
+    # 电池电压范围配置（基于实际电池特性）
+    battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
+    battery_voltage_empty: 11.1             # 空电电压（V）- 电量显示0%，需要充电
 
 auto_set_home_node:
   ros__parameters:

@@ -13,6 +13,9 @@ setup(
     name=package_name,
     version='0.0.0',
     packages=[package_name],
+    package_data={
+        package_name: ['resource/*.qss', 'resource/*.ui', 'resource/*.xml'],
+    },
     data_files=[
         # ① 安装ROS包索引标记文件
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
@@ -23,7 +26,7 @@ setup(
         # ③ 安装 launch 文件（如果有）
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
 
-        # ④ 安装 resource 文件夹（包含静态标记文件）
+        # ④ 安装 resource 文件夹（包含静态标记文件、UI文件、样式表等）
         (os.path.join('share', package_name, 'resource'), glob('resource/*')),
     ],
     install_requires=[

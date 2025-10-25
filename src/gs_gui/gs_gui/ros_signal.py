@@ -44,4 +44,8 @@ class ROSSignal(QObject):
     
     # 坐标系偏移量设置信号
     update_area_center = pyqtSignal(dict)  # 更新任务坐标系偏移量，参数：{'x': float, 'y': float, 'z': float}
+    
+    # LED传染模式控制信号
+    led_infection_mode_changed = pyqtSignal(bool)  # LED传染模式开关，参数：True开启/False关闭
+
 

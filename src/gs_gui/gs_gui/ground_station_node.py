@@ -38,7 +38,7 @@ class GroundStationNode(Node):
     DEFAULT_STEP_TIMEOUT = 20.0  # 默认步骤超时时间(秒)
     DEFAULT_MAX_RETRIES = 1      # 默认最大重试次数
     INFECTION_CHECK_PERIOD = 2.0 # 传染检查周期(秒)，增加周期减少CPU占用
-    NAMESPACE_UPDATE_PERIOD = 5.0 # 命名空间更新周期(秒)，增加周期减少CPU占用
+    NAMESPACE_UPDATE_PERIOD = 2.0 # 命名空间更新周期(秒)，从 5.0 减少到 2.0，加快离线检测
     CLUSTER_TARGET_PUBLISH_PERIOD = 5 # 集群目标发布周期(秒)，增加周期减少CPU占用
     MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
     
@@ -80,7 +80,7 @@ class GroundStationNode(Node):
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
-        self.declare_parameter('offline_grace_period', 20.0)
+        self.declare_parameter('offline_grace_period', 5.0)  # 从 20.0 减少到 5.0 秒，加快移除速度
         # area center 参数（任务坐标系原点在全局 map 中的位置）
         self.declare_parameter('area_center_x', 0.0)
         self.declare_parameter('area_center_y', 0.0)
@@ -113,7 +113,7 @@ class GroundStationNode(Node):
         try:
             self._ns_offline_grace_period = float(self.get_parameter('offline_grace_period').get_parameter_value().double_value)
         except Exception:
-            self._ns_offline_grace_period = 20.0
+            self._ns_offline_grace_period = 5.0  # 从 20.0 减少到 5.0 秒，加快移除速度
         # 离线判定的宽限期（秒），在此时间内即便 ROS 图暂时看不到也不移除
 
         self._cluster_task_paused = False  # 集群任务是否已暂停
@@ -128,6 +128,8 @@ class GroundStationNode(Node):
         self._usv_infecting = set()  # 正在传染的USV集合
         # 维护本地 LED 状态 
         self._usv_current_led_state = {} # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
+        # LED传染模式开关（默认开启）
+        self._led_infection_enabled = True
      
         # 初始化命名空间检测历史记录
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
@@ -244,7 +246,7 @@ class GroundStationNode(Node):
             self._ns_detection_history.pop(0)
 
         # 需要连续多次检测得到一致结果才进行变更处理
-        required_samples = 3
+        required_samples = 2  # 从 3 减少到 2，加快检测确认速度
         if len(self._ns_detection_history) < required_samples:
             return
 
@@ -263,12 +265,6 @@ class GroundStationNode(Node):
         # 如果命名空间列表没有变化，直接返回
         if set(normalized_ns_list) == set(self.last_ns_list):
             return
-
-        # 记录节点发现日志
-        for node_name, ns in current_nodes_info:
-            norm_ns = ns.lstrip('/')
-            if norm_ns in normalized_ns_list and norm_ns not in self.last_ns_list:
-                self.get_logger().info(f"发现新的USV节点: {node_name} 命名空间: {ns}")
         
         # 获取已存在的命名空间集合
         existing_ns = set(self.usv_manager.usv_state_subs.keys())
@@ -277,16 +273,28 @@ class GroundStationNode(Node):
         # 计算移除的命名空间集合
         removed_ns = existing_ns - set(normalized_ns_list)
 
-        # 处理新增的USV命名空间
-        for usv_id in new_ns:
-            ns = ns_map.get(usv_id, f"/{usv_id}")
-            self.usv_manager.add_usv_namespace(ns)
-            # 记录当前时间，避免刚加入后立刻因为没有状态消息被误判离线
-            try:
-                now_sec = self.get_clock().now().nanoseconds / 1e9
-            except Exception:
-                now_sec = 0.0
-            self._ns_last_seen[usv_id] = now_sec
+        # 处理新增的USV命名空间 - 只显示汇总日志
+        if new_ns:
+            # 统计该 USV 下有多少个节点
+            node_counts = {}
+            for node_name, ns in current_nodes_info:
+                norm_ns = ns.lstrip('/')
+                if norm_ns in new_ns:
+                    node_counts[norm_ns] = node_counts.get(norm_ns, 0) + 1
+            
+            # 为每个新 USV 输出一条汇总日志
+            for usv_id in new_ns:
+                ns = ns_map.get(usv_id, f"/{usv_id}")
+                node_count = node_counts.get(usv_id, 0)
+                self.usv_manager.add_usv_namespace(ns)
+                # 记录当前时间，避免刚加入后立刻因为没有状态消息被误判离线
+                try:
+                    now_sec = self.get_clock().now().nanoseconds / 1e9
+                except Exception:
+                    now_sec = 0.0
+                self._ns_last_seen[usv_id] = now_sec
+                # 输出简洁的汇总日志
+                self.get_logger().info(f"✅ USV上线: {ns} (检测到 {node_count} 个节点)")
 
         # 处理移除的USV命名空间
         safe_removed_ns = []
@@ -609,7 +617,27 @@ class GroundStationNode(Node):
         self.command_processor.process_incoming_str_commands()
 
     def check_usv_infect(self):
-        self.led_infection_handler.check_usv_infect()
+        """定时检查USV传染逻辑（只有在传染模式开启时才执行）"""
+        if self._led_infection_enabled:
+            self.led_infection_handler.check_usv_infect()
+        else:
+            # 如果传染模式关闭，清理所有传染相关状态
+            if self._usv_led_modes:
+                # 恢复所有被传染USV的原始LED状态
+                for dst_id in list(self._usv_led_modes.keys()):
+                    mode, color = self._usv_led_modes[dst_id]
+                    if dst_id in self.usv_manager.led_pubs:
+                        if mode == 'color_select':
+                            cmd = f"color_select|{color[0]},{color[1]},{color[2]}"
+                        else:
+                            cmd = mode
+                        from std_msgs.msg import String
+                        msg = String()
+                        msg.data = cmd
+                        self.publish_queue.put((self.usv_manager.led_pubs[dst_id], msg))
+                # 清空传染状态字典
+                self._usv_led_modes.clear()
+                self._usv_infecting.clear()
 
     def _update_local_led_state(self, usv_id, command_str):
         """
@@ -637,7 +665,6 @@ class GroundStationNode(Node):
         
         self._usv_current_led_state[usv_id] = state
 
-    # 添加缺失的str_command_callback方法
     def str_command_callback(self, msg):
         """
         字符串命令回调函数
@@ -685,6 +712,40 @@ class GroundStationNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f"更新 Area Center 偏移量失败: {e}")
+    
+    def set_led_infection_mode_callback(self, enabled):
+        """
+        设置LED传染模式开关
+        
+        Args:
+            enabled: True开启传染模式，False关闭传染模式
+        """
+        try:
+            self._led_infection_enabled = bool(enabled)
+            status = "已开启" if self._led_infection_enabled else "已关闭"
+            self.get_logger().info(f"LED传染模式{status}")
+            
+            # 如果关闭传染模式，恢复所有被传染USV的原始LED状态
+            if not self._led_infection_enabled and self._usv_led_modes:
+                self.get_logger().info("正在恢复所有被传染USV的原始LED状态...")
+                for dst_id in list(self._usv_led_modes.keys()):
+                    mode, color = self._usv_led_modes[dst_id]
+                    if dst_id in self.usv_manager.led_pubs:
+                        if mode == 'color_select':
+                            cmd = f"color_select|{color[0]},{color[1]},{color[2]}"
+                        else:
+                            cmd = mode
+                        from std_msgs.msg import String
+                        msg = String()
+                        msg.data = cmd
+                        self.publish_queue.put((self.usv_manager.led_pubs[dst_id], msg))
+                        self.get_logger().info(f"已恢复 {dst_id} 的LED状态: {cmd}")
+                # 清空传染状态
+                self._usv_led_modes.clear()
+                self._usv_infecting.clear()
+                
+        except Exception as e:
+            self.get_logger().error(f"设置LED传染模式失败: {e}")
 
     # 销毁节点资源
     def destroy_node(self):

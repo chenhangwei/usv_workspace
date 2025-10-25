@@ -244,7 +244,10 @@ class TableManager:
         nav_text = usv_nav_status.get(ns, self.NAV_STATUS_IDLE)
 
         try:
-            temp_text = f"{float(state.get('temperature', 0.0)):.1f}"
+            # 温度值除以1000转换为摄氏度
+            temp_raw = float(state.get('temperature', 0.0))
+            temp_celsius = temp_raw / 1000.0
+            temp_text = f"{temp_celsius:.1f}"
         except Exception:
             temp_text = "Unknown"
 

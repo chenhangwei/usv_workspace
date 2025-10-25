@@ -11,6 +11,7 @@ class LedInfectionHandler:
     def check_usv_infect(self):
         """
         检查USV之间的LED传染逻辑
+        传染模式下，被传染的USV会实时跟随传染源的LED颜色变化
         """
         # 获取USV状态列表
         usv_list = list(self.node.usv_states.values())
@@ -42,10 +43,10 @@ class LedInfectionHandler:
                     # 添加到传染对集合
                     infect_pairs.add((src_id, dst_id))
 
-                    # 记录目标USV的原始LED模式
+                    # 记录目标USV的原始LED模式（仅在首次传染时记录）
                     self._record_original_led_mode(dst_id)
 
-                    # 发送传染指令
+                    # 发送传染指令（实时跟随传染源的颜色）
                     self._send_infection_command(dst_id, src_color)
 
         # 恢复离开传染范围的USV

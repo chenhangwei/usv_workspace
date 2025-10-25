@@ -8,6 +8,7 @@ main_gui_app:
     step_timeout: 20.0            # seconds before considering a per-USV step as timed out
     max_retries: 1                # number of retries before skipping a USV
     min_ack_rate_for_proceed: 0.8 # fraction of USVs that must ack to proceed (0.0-1.0)
+    offline_grace_period: 5.0     # seconds to wait before removing offline USV from GUI (reduced from 20.0)
 
     # UsvStatusNode behavior
     target_reach_threshold: 1.0   # meters used to decide if target is reached (listener internal)

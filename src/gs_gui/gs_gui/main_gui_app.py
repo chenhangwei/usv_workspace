@@ -26,6 +26,8 @@ from gs_gui.usv_list_manager import USVListManager
 from gs_gui.state_handler import StateHandler
 from gs_gui.ui_utils import UIUtils
 from gs_gui.area_offset_dialog import AreaOffsetDialog
+from gs_gui.usv_info_panel import UsvInfoPanel
+from gs_gui.style_manager import StyleManager
 
 
 class MainWindow(QMainWindow):
@@ -41,11 +43,18 @@ class MainWindow(QMainWindow):
         
         self.ros_signal = ros_signal
         
+        # 初始化样式管理器并加载现代化主题
+        self.style_manager = StyleManager(self)
+        self.style_manager.load_theme('modern_dark')
+        
         # 初始化UI工具
         self.ui_utils = UIUtils(self.ui, self)
 
         # 初始化额外菜单
         self._init_custom_menu()
+        
+        # 初始化 USV 信息面板并替换原有的 groupBox_3
+        self._init_usv_info_panel()
         
         # 初始化表格管理器
         self.table_manager = TableManager(
@@ -149,15 +158,55 @@ class MainWindow(QMainWindow):
         # ============== 菜单操作 ==============
         self.ui.actionopen.triggered.connect(self.task_manager.read_data_from_file)
         self.ui.actionrviz2.triggered.connect(self.ui_utils.start_rviz)
+        
+        # ============== 表格选择信号 ==============
+        # 连接集群表格和离群表格的选择改变信号
+        self.ui.cluster_tableView.selectionModel().selectionChanged.connect(
+            lambda: self.update_usv_info_display(is_cluster=True)
+        )
+        self.ui.departed_tableView.selectionModel().selectionChanged.connect(
+            lambda: self.update_usv_info_display(is_cluster=False)
+        )
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
+        self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
 
     def _init_custom_menu(self):
-        """在菜单栏中增加坐标偏移设置入口"""
+        """在菜单栏中增加坐标偏移设置入口和LED传染模式开关"""
         # 坐标系设置菜单
         coord_menu = self.ui.menubar.addMenu("坐标系设置")
         self.action_set_area_offset = QAction("设置任务坐标系偏移量", self)
         coord_menu.addAction(self.action_set_area_offset)
+        
+        # LED设置菜单
+        led_menu = self.ui.menubar.addMenu("LED设置")
+        self.action_led_infection_mode = QAction("LED传染模式", self)
+        self.action_led_infection_mode.setCheckable(True)
+        self.action_led_infection_mode.setChecked(True)  # 默认打开
+        led_menu.addAction(self.action_led_infection_mode)
+    
+    def _init_usv_info_panel(self):
+        """初始化 USV 信息面板，替换原有的 groupBox_3"""
+        # 创建 USV 信息面板
+        self.usv_info_panel = UsvInfoPanel()
+        
+        # 获取原有的 groupBox_3 的父布局
+        # groupBox_3 在 verticalLayout_10 中
+        parent_layout = self.ui.groupBox_3.parent().layout()
+        
+        if parent_layout is not None:
+            # 找到 groupBox_3 在布局中的索引
+            index = parent_layout.indexOf(self.ui.groupBox_3)
+            
+            # 移除并隐藏原有的 groupBox_3
+            parent_layout.removeWidget(self.ui.groupBox_3)
+            self.ui.groupBox_3.hide()
+            
+            # 在相同位置插入新的信息面板
+            if index >= 0:
+                parent_layout.insertWidget(index, self.usv_info_panel)
+            else:
+                parent_layout.addWidget(self.usv_info_panel)
     
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):
@@ -288,6 +337,15 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.ui_utils.append_info(f"设置坐标偏移量时发生错误: {e}")
     
+    # ============== LED传染模式开关 ==============
+    def toggle_led_infection_mode(self):
+        """切换LED传染模式开关"""
+        is_enabled = self.action_led_infection_mode.isChecked()
+        self.ros_signal.led_infection_mode_changed.emit(is_enabled)
+        status_text = "已开启" if is_enabled else "已关闭"
+        self.ui_utils.append_info(f"LED传染模式{status_text}")
+        QMessageBox.information(self, "LED传染模式", f"LED传染模式{status_text}")
+    
     # ============== 导航反馈处理 ==============
     def handle_navigation_feedback(self, usv_id, feedback):
         """
@@ -312,6 +370,37 @@ class MainWindow(QMainWindow):
     def update_selected_table_row(self):
         """更新选中行数据"""
         self.ui_utils.update_selected_table_row(self.table_manager, self.state_handler)
+    
+    def update_usv_info_display(self, is_cluster=True):
+        """
+        更新USV详细信息显示
+        
+        Args:
+            is_cluster: True表示从集群表格选择，False表示从离群表格选择
+        """
+        try:
+            # 获取选中的USV信息
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster)
+            
+            if not usv_info:
+                # 没有选中时清空显示
+                self.usv_info_panel.update_state(None)
+                return
+            
+            # 获取 USV 的详细状态
+            namespace = usv_info.get('namespace')
+            state = self.state_handler.get_usv_state(namespace)
+            
+            # 更新信息面板
+            self.usv_info_panel.update_state(state)
+                
+        except Exception as e:
+            # 出错时清空显示
+            try:
+                self.ui_utils.append_info(f"更新USV信息显示时出错: {e}")
+            except Exception:
+                pass
+            self.usv_info_panel.update_state(None)
 
 
 def main(argv=None):
@@ -425,6 +514,18 @@ def main(argv=None):
     except Exception:
         try:
             main_window.ui_utils.append_info('警告: 无法将 update_area_center 信号连接到 GroundStationNode')
+        except Exception:
+            pass
+    
+    # 连接LED传染模式控制信号
+    try:
+        sig_led_infection = getattr(ros_signal, 'led_infection_mode_changed', None)
+        cb_led_infection = getattr(node, 'set_led_infection_mode_callback', None)
+        if sig_led_infection is not None and cb_led_infection is not None:
+            sig_led_infection.connect(cb_led_infection)
+    except Exception:
+        try:
+            main_window.ui_utils.append_info('警告: 无法将 led_infection_mode_changed 信号连接到 GroundStationNode')
         except Exception:
             pass
     
