@@ -39,7 +39,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_02',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -66,14 +66,14 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14570@192.168.68.53:14550',
+        default_value='udp://:14580@192.168.68.53:14550',
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='2',
+        default_value='3',
         description='MAVROS目标系统ID'
     )
     
@@ -273,40 +273,44 @@ def generate_launch_description():
         namespace=namespace,
         output='screen',
         parameters=[
-            param_file,
             {
                 'fcu_url': fcu_url,
                 'gcs_url': gcs_url,
-                # 保留旧键以兼容（若 MAVROS 忽略将无害）
-                'tgt_system': tgt_system,
-                'tgt_component': tgt_component,
-                # ROS 2 MAVROS 常用参数名：设置自身与目标的 MAVLink ID
+                # ROS 2 MAVROS 参数名：设置自身与目标的 MAVLink ID
                 'system_id': tgt_system,
                 'component_id': tgt_component,
-                # 兼容某些版本用于目标 FCU 的参数命名
                 'target_system_id': tgt_system,
                 'target_component_id': tgt_component,
                 
                 # ==================== 性能优化：只加载必需的插件 ====================
-                # 插件白名单配置，大幅减少启动时间（从55秒降至3-5秒）
+                # 插件白名单配置，大幅减少启动时间（从97秒降至5秒）
                 # 只加载 USV 控制必需的插件，避免加载 60+ 个不需要的插件
                 'plugin_allowlist': [
                     'sys_status',      # 系统状态（必需）
                     'sys_time',        # 时间同步（必需）
                     'command',         # 命令接口（解锁/模式切换）
-                    'param',           # 参数读写
                     'local_position',  # 本地位置（导航必需）
                     'setpoint_raw',    # 原始设定点（控制必需）
-                    'global_position', # GPS 全局位置（新增）
-                    'gps_status',      # GPS 状态和卫星数（新增）
-                    # 'altitude',      # 高度信息（可选，已包含在 global_position 中）
-                    # 'imu',           # IMU 数据（可选）
+                    'global_position', # GPS 全局位置
+                    'gps_status',      # GPS 状态和卫星数
                 ],
                 
-                # 禁用视觉定位（如不使用外部定位系统）
-                'vision_pose.enable': False
+                # 禁用参数同步，避免启动时读取 900+ 个参数造成超时
+                'param.use_mission_item_int': False,
+                
+                # 禁用视觉定位
+                'vision_pose.enable': False,
+                
+                # 连接优化（ArduPilot 4.7 原生支持）
+                'conn.timeout': 5.0,
+                'conn.heartbeat_mav_type': 'MAV_TYPE_SURFACE_BOAT',
+                
+                # MAVLink 2.0 优化（ArduPilot 4.7 完全支持）
+                'conn.use_mavlink2': True,  # 强制使用 MAVLink 2.0
+                'sys.disable_diag': False,  # 启用系统诊断（4.7 支持）
                 # ==================== END 性能优化 ====================
-            }
+            },
+            param_file  # 最后加载 param_file，使其可以覆盖上述默认值
         ]
     )
 

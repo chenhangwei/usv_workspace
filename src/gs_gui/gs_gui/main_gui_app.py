@@ -43,6 +43,9 @@ class MainWindow(QMainWindow):
         
         self.ros_signal = ros_signal
         
+        # 优雅关闭标志：避免重复发送关闭命令
+        self._shutdown_commands_sent = False
+        
         # 初始化样式管理器并加载现代化主题
         self.style_manager = StyleManager(self)
         self.style_manager.load_theme('modern_dark')
@@ -77,11 +80,12 @@ class MainWindow(QMainWindow):
         # 初始化USV列表管理器
         self.list_manager = USVListManager(self.ui_utils.append_info)
         
-        # 初始化状态处理器
+        # 初始化状态处理器（传入信息面板更新回调）
         self.state_handler = StateHandler(
             self.table_manager,
             self.list_manager,
-            self.ui_utils.append_warning
+            self.ui_utils.append_warning,
+            self._refresh_selected_usv_info  # 传入更新回调
         )
         
         # 初始化命令处理器
@@ -373,12 +377,27 @@ class MainWindow(QMainWindow):
     
     def update_usv_info_display(self, is_cluster=True):
         """
-        更新USV详细信息显示
+        更新USV详细信息显示（由表格选择改变时调用）
         
         Args:
             is_cluster: True表示从集群表格选择，False表示从离群表格选择
         """
+        # 保存当前选择的表格类型
+        self._current_selected_table = 'cluster' if is_cluster else 'departed'
+        
+        # 刷新显示
+        self._refresh_selected_usv_info()
+    
+    def _refresh_selected_usv_info(self):
+        """
+        刷新当前选中USV的详细信息（由状态更新定时器调用）
+        
+        该方法会根据当前选中的表格和行，实时更新USV信息面板
+        """
         try:
+            # 确定当前选中的是哪个表格
+            is_cluster = getattr(self, '_current_selected_table', 'cluster') == 'cluster'
+            
             # 获取选中的USV信息
             usv_info = self.table_manager.get_selected_usv_info(is_cluster)
             
@@ -387,7 +406,7 @@ class MainWindow(QMainWindow):
                 self.usv_info_panel.update_state(None)
                 return
             
-            # 获取 USV 的详细状态
+            # 获取 USV 的详细状态（实时从缓存中获取最新状态）
             namespace = usv_info.get('namespace')
             state = self.state_handler.get_usv_state(namespace)
             
@@ -401,6 +420,74 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.usv_info_panel.update_state(None)
+
+    def closeEvent(self, event):
+        """
+        窗口关闭事件处理器
+        
+        在关闭地面站之前，先发送关闭命令到所有在线USV：
+        1. 关闭LED灯光
+        2. 停止声音
+        3. 停止扭头动作
+        
+        然后接受关闭事件
+        
+        Args:
+            event: QCloseEvent对象
+        """
+        try:
+            # 如果已经发送过关闭命令，直接接受关闭事件
+            if self._shutdown_commands_sent:
+                event.accept()
+                return
+            
+            # 获取所有在线USV列表
+            online_usvs = self.list_manager.usv_online_list
+            
+            if online_usvs:
+                self.ui_utils.append_info("正在关闭所有USV外设（LED、声音、扭头）...")
+                
+                # 为所有在线USV发送关闭命令
+                # 1. 关闭LED灯光
+                try:
+                    self.ros_signal.str_command.emit('led_off')
+                except Exception as e:
+                    print(f"发送LED关闭命令失败: {e}")
+                
+                # 2. 停止声音
+                try:
+                    self.ros_signal.str_command.emit('sound_stop')
+                except Exception as e:
+                    print(f"发送声音停止命令失败: {e}")
+                
+                # 3. 停止扭头动作
+                try:
+                    self.ros_signal.str_command.emit('neck_stop')
+                except Exception as e:
+                    print(f"发送扭头停止命令失败: {e}")
+                
+                self.ui_utils.append_info("已发送外设关闭命令")
+                
+                # 标记已发送关闭命令，避免重复发送
+                self._shutdown_commands_sent = True
+                
+                # 等待短暂时间确保命令被发送
+                # 使用QTimer的singleShot来避免阻塞GUI线程
+                from PyQt5.QtCore import QTimer
+                QTimer.singleShot(500, lambda: self.close())
+                event.ignore()  # 暂时忽略关闭事件，等待500ms后再关闭
+            else:
+                # 没有在线USV，直接接受关闭事件
+                event.accept()
+                
+        except Exception as e:
+            # 发生错误时也允许关闭
+            print(f"closeEvent处理出错: {e}")
+            try:
+                self.ui_utils.append_info(f"关闭前处理出错: {e}，将直接关闭")
+            except Exception:
+                pass
+            event.accept()
 
 
 def main(argv=None):

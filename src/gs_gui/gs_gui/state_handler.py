@@ -15,7 +15,7 @@ class StateHandler:
     NAV_STATUS_SUCCEEDED = "成功"
     NAV_STATUS_FAILED = "失败"
     
-    def __init__(self, table_manager, list_manager, warning_callback):
+    def __init__(self, table_manager, list_manager, warning_callback, info_panel_update_callback=None):
         """
         初始化状态处理器
         
@@ -23,10 +23,12 @@ class StateHandler:
             table_manager: 表格管理器
             list_manager: 列表管理器
             warning_callback: 警告输出回调
+            info_panel_update_callback: USV信息面板更新回调（可选）
         """
         self.table_manager = table_manager
         self.list_manager = list_manager
         self.append_warning = warning_callback
+        self.info_panel_update_callback = info_panel_update_callback
         
         # USV状态缓存
         self._usv_state_cache = {}
@@ -87,6 +89,13 @@ class StateHandler:
                 self.list_manager.usv_departed_list,
                 self.usv_nav_status
             )
+            
+            # 🔥 新增：刷新选中的 USV 信息面板
+            if self.info_panel_update_callback:
+                try:
+                    self.info_panel_update_callback()
+                except Exception as e:
+                    self.append_warning(f"更新USV信息面板时出错: {e}")
         
         except Exception as e:
             try:

@@ -9,6 +9,8 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.srv import CommandHome
+from mavros_msgs.msg import State
+from sensor_msgs.msg import NavSatFix
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 
@@ -40,6 +42,11 @@ class AutoSetHomeNode(Node):
         self.max_retries = 30
         self.retry_interval = 1.0  # 秒
         self.retry_timer = None
+        
+        # GPS 和系统状态
+        self.gps_fix_type = 0  # 0=无定位, 2=2D, 3=3D
+        self.system_connected = False
+        self.first_pose_received = False
 
         # 订阅本地位置信息
         self.pose_sub = self.create_subscription(
@@ -48,29 +55,80 @@ class AutoSetHomeNode(Node):
             self.local_position_callback,
             qos_best_effort
         )
+        
+        # 订阅 GPS 状态
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            'global_position/global',
+            self.gps_callback,
+            qos_best_effort
+        )
+        
+        # 订阅 MAVROS 状态
+        self.state_sub = self.create_subscription(
+            State,
+            'state',
+            self.state_callback,
+            qos_best_effort
+        )
 
         # 创建设置Home点的服务客户端
         self.set_home_cli = self.create_client(CommandHome, 'cmd/set_home')
 
         self.get_logger().info(
-            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, waiting for vision pose...'
+            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, waiting for GPS fix...'
         )
+    
+    def gps_callback(self, msg):
+        """GPS 状态回调"""
+        self.gps_fix_type = msg.status.status
+        # status: -1=无服务, 0=无定位, 1=GPS定位, 2=DGPS定位
+        # 我们需要至少 GPS 定位 (status >= 0)
+    
+    def state_callback(self, msg):
+        """MAVROS 状态回调"""
+        self.system_connected = msg.connected
 
     def local_position_callback(self, msg):
         """
         本地位置回调函数
         
-        当接收到第一个本地位置消息时，启动定时器在指定延迟后设置EKF原点。
+        当接收到第一个本地位置消息时，标记状态并等待 GPS 就绪。
         
         Args:
             msg (PoseStamped): 包含本地位置信息的消息
         """
-        if not self.set_home_sent:
-            self.set_home_sent = True
+        if not self.first_pose_received:
+            self.first_pose_received = True
+            self.get_logger().info('Received first local_position, waiting for GPS fix...')
+            # 启动定期检查定时器
+            self.create_timer(1.0, self.check_and_set_home)
+    
+    def check_and_set_home(self):
+        """检查 GPS 和系统状态，满足条件后设置 Home 点"""
+        if self.set_home_sent:
+            return  # 已经设置过，不再重复
+        
+        # 检查系统是否连接
+        if not self.system_connected:
+            self.get_logger().debug('Waiting for MAVROS connection...')
+            return
+        
+        # 检查 GPS 定位状态
+        # NavSatFix.status.status: -1=无服务, 0=无定位, 1=GPS定位, 2=DGPS
+        if self.gps_fix_type < 0:
             self.get_logger().info(
-                f'Received first local_position, will set EKF origin in {self.set_delay_sec:.1f} sec...'
+                f'Waiting for GPS fix (current: {self.gps_fix_type}, need >= 0)...'
             )
-            self.create_timer(self.set_delay_sec, self.set_home)
+            return
+        
+        # 所有条件满足，设置 Home 点
+        self.get_logger().info(
+            f'✅ GPS fix obtained (type: {self.gps_fix_type}), system connected. '
+            f'Setting Home point in {self.set_delay_sec:.1f}s...'
+        )
+        self.set_home_sent = True
+        self.create_timer(self.set_delay_sec, self.set_home)
 
     def set_home(self):
         """设置EKF原点的入口函数,启动非阻塞重试定时器"""
