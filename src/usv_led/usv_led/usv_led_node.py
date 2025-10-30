@@ -49,6 +49,7 @@ class UsvLedNode(Node):
         self.declare_parameter('low_battery_threshold', 11.1)  # 低电量阈值（伏特）
         self.declare_parameter('recover_battery_threshold', 11.6)  # 恢复电量阈值（伏特）
         self.declare_parameter('breath_step', 6)  # 呼吸灯步进值
+        self.declare_parameter('color_select_transition_duration', 2.0)  # 单个颜色命令的渐变时间
         
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
@@ -104,9 +105,14 @@ class UsvLedNode(Node):
         
         # 获取定时器和过渡参数
         self.transition_duration = self.get_parameter('transition_duration').get_parameter_value().double_value
+        self.default_transition_duration = self.transition_duration
         self.hold_duration = self.get_parameter('hold_duration').get_parameter_value().double_value
         self.timer_period_high = self.get_parameter('timer_period_high').get_parameter_value().double_value
         self.timer_period_low = self.get_parameter('timer_period_low').get_parameter_value().double_value
+        self.color_select_transition_duration = self.get_parameter('color_select_transition_duration').get_parameter_value().double_value
+        self._color_select_transition_active = False
+        self._color_select_transition_start = None
+        self._color_select_start_color = self.current_color[:]
 
         self.last_sent_rgb = None  # 缓存上一次发送的RGB，避免重复写串口
         self.last_mode_before_low_battery = None  # 低电压前的模式
@@ -194,11 +200,25 @@ class UsvLedNode(Node):
                 # color_select|r,g,b
                 parts = msg.data.split('|')
                 if len(parts) == 2:
-                    rgb = [int(x) for x in parts[1].split(',')]
+                    try:
+                        rgb = [max(0, min(255, int(x.strip()))) for x in parts[1].split(',')]
+                    except (ValueError, TypeError):
+                        self.get_logger().warn(f'解析 color_select 命令失败: {msg.data}')
+                        return
+                    if len(rgb) != 3:
+                        self.get_logger().warn(f'color_select 命令参数数量错误: {msg.data}')
+                        return
+                    self._exit_infect_mode_restore()
                     self.mode = 'color_select'
-                    self.current_color = rgb
                     self.target_color = rgb
-                    self.in_transition = False
+                    self._color_select_start_color = self.current_color[:]
+                    self._color_select_transition_start = time.time()
+                    self._color_select_transition_active = (self._color_select_start_color != self.target_color)
+                    if not self._color_select_transition_active:
+                        self.current_color = rgb[:]
+                    self.set_timer_period(self.timer_period_high if self._color_select_transition_active else self.timer_period_low)
+                    self.last_switch_time = time.time()
+                    self.last_sent_rgb = None
             elif msg.data.startswith('color_infect'):
                 # color_infect|r,g,b
                 parts = msg.data.split('|')
@@ -210,7 +230,11 @@ class UsvLedNode(Node):
                             'mode': self.mode,
                             'current_color': self.current_color[:],
                             'target_color': self.target_color[:],
-                            'in_transition': self.in_transition
+                            'in_transition': self.in_transition,
+                            'transition_duration': self.transition_duration,
+                            '_color_select_transition_active': self._color_select_transition_active,
+                            '_color_select_start_color': self._color_select_start_color[:],
+                            '_color_select_transition_start': self._color_select_transition_start
                         }
                     self.mode = 'color_infect'
                     self.target_color = rgb
@@ -218,28 +242,53 @@ class UsvLedNode(Node):
                     self.transition_start_color = self.current_color[:]
                     self.transition_duration = 2.0  # 传染渐变2秒
                     self.last_switch_time = time.time()
+                    self._color_select_transition_active = False
             elif msg.data in allowed_modes:
                 # 其它允许模式
+                if msg.data == 'led_off':
+                    self._color_select_transition_active = False
                 # 若之前处于传染，恢复备份
                 if hasattr(self, '_infect_backup'):
                     self.mode = self._infect_backup['mode']
                     self.current_color = self._infect_backup['current_color'][:]
                     self.target_color = self._infect_backup['target_color'][:]
                     self.in_transition = self._infect_backup['in_transition']
+                    self.transition_duration = self._infect_backup.get('transition_duration', self.default_transition_duration)
+                    self._color_select_transition_active = self._infect_backup.get('_color_select_transition_active', False)
+                    self._color_select_start_color = self._infect_backup.get('_color_select_start_color', self.current_color[:])
+                    self._color_select_transition_start = self._infect_backup.get('_color_select_transition_start', None)
                     del self._infect_backup
                 else:
                     self.mode = msg.data
                     self.last_switch_time = time.time()
                     self.color_index = 0
-                    self.current_color = self.color_list[0]
-                    self.target_color = self.color_list[0]
+                    if self.color_list:
+                        self.current_color = self.color_list[0][:]
+                        self.target_color = self.color_list[0][:]
                     self.in_transition = False
+                    self.transition_duration = self.default_transition_duration
+                    self._color_select_transition_active = False
+                    self._color_select_start_color = self.current_color[:]
+                    self._color_select_transition_start = None
             else:
                 # 其它无关消息内容，忽略，不影响LED
                 self.get_logger().info(f'忽略无关LED指令: {msg.data}')
                 return
         except Exception as e:
             self.get_logger().error(f'处理LED命令时发生错误: {e}')
+
+    def _exit_infect_mode_restore(self):
+        """退出传染模式时恢复之前的状态"""
+        if hasattr(self, '_infect_backup'):
+            self.mode = self._infect_backup['mode']
+            self.current_color = self._infect_backup['current_color'][:]
+            self.target_color = self._infect_backup['target_color'][:]
+            self.in_transition = self._infect_backup['in_transition']
+            self.transition_duration = self._infect_backup.get('transition_duration', self.default_transition_duration)
+            self._color_select_transition_active = self._infect_backup.get('_color_select_transition_active', False)
+            self._color_select_start_color = self._infect_backup.get('_color_select_start_color', self.current_color[:])
+            self._color_select_transition_start = self._infect_backup.get('_color_select_transition_start', None)
+            del self._infect_backup
 
     def usv_batterystate_callback(self, msg):
         """
@@ -266,6 +315,7 @@ class UsvLedNode(Node):
                         self.last_mode_before_low_battery = self.mode
                         self.mode = 'low_battery_breath'
                         self.get_logger().warn(f'USV 电池电压低于 {low_threshold}V，进入低电量呼吸灯状态')
+                    self._color_select_transition_active = False
                     self.is_low_battery_level = True
                 elif voltage > recover_threshold:
                     if self.is_low_battery_level:
@@ -385,7 +435,20 @@ class UsvLedNode(Node):
                 rgb_to_send = self.current_color
                 
             elif self.mode == 'color_select':
-                self.set_timer_period(self.timer_period_low)
+                if self._color_select_transition_active and self._color_select_transition_start is not None:
+                    self.set_timer_period(self.timer_period_high)
+                    duration = max(0.1, self.color_select_transition_duration)
+                    t = min(1.0, (now - self._color_select_transition_start) / duration)
+                    self.current_color = [
+                        int(self._color_select_start_color[i] + (self.target_color[i] - self._color_select_start_color[i]) * t)
+                        for i in range(3)
+                    ]
+                    if t >= 1.0:
+                        self._color_select_transition_active = False
+                        self.current_color = self.target_color[:]
+                else:
+                    self.set_timer_period(self.timer_period_low)
+                    self.current_color = self.target_color[:]
                 rgb_to_send = self.current_color
                 
             elif self.mode == 'led_off':
@@ -438,13 +501,14 @@ def main(args=None):
         args: 命令行参数
     """
     rclpy.init(args=args)
+    node = None
     try:
         node = UsvLedNode()
         rclpy.spin(node)
     except Exception as e:
         print(f'节点运行时发生错误: {e}')
     finally:
-        if 'node' in locals():
+        if node is not None:
             node.destroy_node()
         rclpy.shutdown()
 

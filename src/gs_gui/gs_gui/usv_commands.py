@@ -2,6 +2,7 @@
 USV命令模块
 负责处理所有USV控制命令的发送
 """
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QColorDialog
 
 
@@ -19,6 +20,22 @@ class USVCommandHandler:
         self.ros_signal = ros_signal
         self.append_info = info_callback
         self._color_dialog = None
+
+        # 预定义七色彩虹颜色，按照红→橙→黄→绿→青→蓝→紫的顺序
+        self._rainbow_colors = [
+            (255, 0, 0),      # 红
+            (255, 127, 0),    # 橙
+            (255, 255, 0),    # 黄
+            (0, 255, 0),      # 绿
+            (0, 255, 255),    # 青
+            (0, 0, 255),      # 蓝
+            (148, 0, 211),    # 紫
+        ]
+        self._rainbow_index = 0
+        self._rainbow_timer = QTimer()
+        self._rainbow_timer.setInterval(5000)  # 5 秒间隔
+        self._rainbow_timer.setSingleShot(False)
+        self._rainbow_timer.timeout.connect(self._send_next_rainbow_color)
     
     def _extract_namespaces(self, usv_list):
         """
@@ -152,12 +169,30 @@ class USVCommandHandler:
     
     # ============== LED命令 ==============
     def led_color_switching(self):
-        """LED颜色切换命令"""
-        self.ros_signal.str_command.emit('color_switching')
-        self.append_info("发送命令: color_switching")
+        """切换LED彩虹循环，返回当前是否处于循环状态"""
+        try:
+            if self._rainbow_timer.isActive():
+                self._stop_rainbow_cycle(log_stop=True)
+                return False
+
+            if not self._rainbow_colors:
+                self.append_info("彩虹颜色列表为空，无法启动循环")
+                return False
+
+            self._rainbow_index = 0
+            # 立即发送首个颜色，然后开启定时器周期发送
+            self._send_next_rainbow_color()
+            self._rainbow_timer.start()
+            self.append_info("LED彩虹循环已启动，每 5 秒同步更新一次颜色")
+            return True
+        except Exception as exc:
+            self.append_info(f"启动LED彩虹循环失败: {exc}")
+            self._stop_rainbow_cycle()
+            return False
     
     def led_random_color(self):
         """LED随机颜色命令"""
+        self._stop_rainbow_cycle()
         self.ros_signal.str_command.emit('random_color_change')
         self.append_info("发送命令: random_color_change")
     
@@ -170,6 +205,7 @@ class USVCommandHandler:
         """
         try:
             # 使用非阻塞的 QColorDialog 实例
+            self._stop_rainbow_cycle()
             dlg = QColorDialog(parent_widget)
             self._color_dialog = dlg
             dlg.setOption(QColorDialog.ShowAlphaChannel, False)
@@ -177,6 +213,7 @@ class USVCommandHandler:
             dlg.open()
         except Exception:
             # 回退到同步调用
+            self._stop_rainbow_cycle()
             color = QColorDialog.getColor()
             if not color.isValid():
                 self.append_info("颜色选择无效")
@@ -205,5 +242,32 @@ class USVCommandHandler:
     
     def led_off(self):
         """停止LED灯光命令"""
+        self._stop_rainbow_cycle()
         self.ros_signal.str_command.emit('led_off')
         self.append_info("发送命令: led_off")
+
+    # ============== 内部辅助方法 ==============
+    def _send_next_rainbow_color(self):
+        """向所有在线 USV 发送下一个彩虹颜色命令"""
+        try:
+            if not self._rainbow_colors:
+                return
+
+            color = self._rainbow_colors[self._rainbow_index]
+            command = f"color_select|{color[0]},{color[1]},{color[2]}"
+            self.ros_signal.str_command.emit(command)
+            self.append_info(f"发送彩虹颜色: {command}")
+
+            # 更新索引，准备下一个颜色
+            self._rainbow_index = (self._rainbow_index + 1) % len(self._rainbow_colors)
+        except Exception as exc:
+            self.append_info(f"发送彩虹颜色失败: {exc}")
+            self._stop_rainbow_cycle()
+
+    def _stop_rainbow_cycle(self, log_stop=False):
+        """停止彩虹循环并重置索引"""
+        if self._rainbow_timer.isActive():
+            self._rainbow_timer.stop()
+            if log_stop:
+                self.append_info("LED彩虹循环已停止")
+        self._rainbow_index = 0

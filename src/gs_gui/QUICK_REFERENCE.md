@@ -44,6 +44,14 @@ self.ui.your_button.clicked.connect(self.your_new_command_wrapper)
 
 ---
 
+### LED 控制快捷操作
+
+- `led1` 按钮现在可在 GUI 中启动/停止 **彩虹循环**：点击一次立即向所有在线 USV 同步下发红色并启动 5 秒间隔的彩虹颜色轮替，再次点击或点击“停止灯”即可停止循环。
+- `led2`（随机颜色）和 `led3`（手动选色）在使用时会自动停止彩虹循环，防止多种效果互相冲突。
+- 所有 LED 命令依旧通过 `str_command` 信号广播，USV 端需根据 `color_select|R,G,B` 指令自行处理渐变效果。
+
+---
+
 ### 修改表格显示
 
 **位置**: `table_manager.py`

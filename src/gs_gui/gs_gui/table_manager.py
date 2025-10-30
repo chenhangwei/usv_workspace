@@ -284,12 +284,21 @@ class TableManager:
             dict: USV信息字典，包含namespace等信息，如果没有选中则返回None
         """
         table_view = self.cluster_table_view if is_cluster else self.departed_table_view
-        selected_indexes = table_view.selectedIndexes()
-        
-        if not selected_indexes:
+        if table_view is None:
             return None
-        
-        selected_row = selected_indexes[0].row()
+        selection_model = table_view.selectionModel()
+        if selection_model is None:
+            return None
+
+        current_index = selection_model.currentIndex()
+        if not current_index.isValid():
+            # 回退到首个选中项
+            selected_indexes = table_view.selectedIndexes()
+            if not selected_indexes:
+                return None
+            current_index = selected_indexes[0]
+
+        selected_row = current_index.row()
         model = table_view.model()
         if model is None:
             return None

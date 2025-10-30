@@ -40,6 +40,12 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Ground Station GUI")
         self.resize(1024, 512)
         self.setGeometry(100, 100, 1124, 612)
+
+        # 更新按钮文本以匹配新的彩虹循环行为
+        try:
+            self.ui.led1_pushButton.setText("彩虹循环")
+        except Exception:
+            pass
         
         self.ros_signal = ros_signal
         
@@ -154,10 +160,10 @@ class MainWindow(QMainWindow):
         self.ui.neck_stop_pushButton.clicked.connect(self.command_handler.neck_stop)
         
         # ============== LED按钮 ==============
-        self.ui.led1_pushButton.clicked.connect(self.command_handler.led_color_switching)
-        self.ui.led2_pushButton.clicked.connect(self.command_handler.led_random_color)
-        self.ui.led3_pushButton.clicked.connect(lambda: self.command_handler.led_select_color(self))
-        self.ui.light_stop_pushButton.clicked.connect(self.command_handler.led_off)
+        self.ui.led1_pushButton.clicked.connect(self.toggle_led_rainbow_cycle)
+        self.ui.led2_pushButton.clicked.connect(self.trigger_led_random_color)
+        self.ui.led3_pushButton.clicked.connect(self.trigger_led_select_color)
+        self.ui.light_stop_pushButton.clicked.connect(self.stop_all_led_effects)
         
         # ============== 菜单操作 ==============
         self.ui.actionopen.triggered.connect(self.task_manager.read_data_from_file)
@@ -170,6 +176,12 @@ class MainWindow(QMainWindow):
         )
         self.ui.departed_tableView.selectionModel().selectionChanged.connect(
             lambda: self.update_usv_info_display(is_cluster=False)
+        )
+        self.ui.cluster_tableView.clicked.connect(
+            lambda index: self._handle_table_clicked(index, is_cluster=True)
+        )
+        self.ui.departed_tableView.clicked.connect(
+            lambda index: self._handle_table_clicked(index, is_cluster=False)
         )
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
@@ -349,6 +361,27 @@ class MainWindow(QMainWindow):
         status_text = "已开启" if is_enabled else "已关闭"
         self.ui_utils.append_info(f"LED传染模式{status_text}")
         QMessageBox.information(self, "LED传染模式", f"LED传染模式{status_text}")
+
+    def toggle_led_rainbow_cycle(self):
+        """切换LED彩虹循环并更新按钮文本"""
+        is_active = self.command_handler.led_color_switching()
+        new_label = "停止彩虹" if is_active else "彩虹循环"
+        self.ui.led1_pushButton.setText(new_label)
+
+    def trigger_led_random_color(self):
+        """触发随机颜色并确保停止彩虹循环"""
+        self.command_handler.led_random_color()
+        self.ui.led1_pushButton.setText("彩虹循环")
+
+    def trigger_led_select_color(self):
+        """弹出颜色选择器并确保停止彩虹循环"""
+        self.command_handler.led_select_color(self)
+        self.ui.led1_pushButton.setText("彩虹循环")
+
+    def stop_all_led_effects(self):
+        """停止所有LED效果并重置按钮文本"""
+        self.command_handler.led_off()
+        self.ui.led1_pushButton.setText("彩虹循环")
     
     # ============== 导航反馈处理 ==============
     def handle_navigation_feedback(self, usv_id, feedback):
@@ -420,6 +453,29 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.usv_info_panel.update_state(None)
+
+    def _handle_table_clicked(self, index, is_cluster):
+        """处理表格单击事件，确保仅选中当前行并刷新详情"""
+        try:
+            table_view = self.ui.cluster_tableView if is_cluster else self.ui.departed_tableView
+            if index is None or not index.isValid():
+                return
+
+            # 清理旧选择并强制选中当前行，避免残留多选状态
+            selection_model = table_view.selectionModel()
+            if selection_model is None:
+                return
+            selection_model.clearSelection()
+            table_view.selectRow(index.row())
+
+            # 记录当前表格并刷新详情
+            self._current_selected_table = 'cluster' if is_cluster else 'departed'
+            self._refresh_selected_usv_info()
+        except Exception as exc:
+            try:
+                self.ui_utils.append_info(f"处理行选择时出错: {exc}")
+            except Exception:
+                pass
 
     def closeEvent(self, event):
         """

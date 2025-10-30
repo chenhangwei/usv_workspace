@@ -9,6 +9,7 @@
 - **集群 vs 离群**：USV 分为集群（协同工作）和离群（独立操作）两种状态
 - **地面站-机载分离**：`gs_*` 包运行在地面站，`usv_*` 包运行在机载计算机
 - **消息接口统一**：`common_interfaces` 包定义所有共享消息和动作类型
+- **Manager 模式**：各功能模块封装为独立 Manager 类（如 `TableManager`, `ResourceManager`, `ErrorHandler`），通过回调注入实现解耦
 
 ## 关键架构决策
 
@@ -62,22 +63,37 @@ MAVROS (飞控) → usv_status_node → UsvStatus.msg → GroundStationNode → 
 
 ### 4. GUI 模块化设计（gs_gui 重构后架构）
 
-**2025-10 重构**：从 70KB 单文件拆分为 7 个职责明确的模块：
+**2025-10 重构**：从 70KB 单文件拆分为 13+ 个职责明确的模块：
 
 ```
 MainWindow (main_gui_app.py) - 协调者
-├── UIUtils (ui_utils.py) - 日志缓冲、绘图窗口
-├── TableManager (table_manager.py) - 集群/离群表格
-├── USVListManager (usv_list_manager.py) - 三个列表（集群/离群/在线）
-├── StateHandler (state_handler.py) - 状态缓存和刷新
-├── USVCommandHandler (usv_commands.py) - 命令封装
-└── ClusterTaskManager (cluster_task_manager.py) - XML任务管理
+├── 核心模块
+│   ├── UIUtils (ui_utils.py) - 日志缓冲、绘图窗口
+│   ├── TableManager (table_manager.py) - 集群/离群表格
+│   ├── USVListManager (usv_list_manager.py) - 三个列表（集群/离群/在线）
+│   ├── StateHandler (state_handler.py) - 状态缓存和刷新
+│   ├── USVCommandHandler (usv_commands.py) - 命令封装
+│   └── ClusterTaskManager (cluster_task_manager.py) - XML任务管理
+├── 基础设施模块
+│   ├── ResourceManager (resource_manager.py) - 资源管理（线程、队列、清理）
+│   ├── ErrorHandler (error_handler.py) - 错误处理和恢复
+│   ├── StyleManager (style_manager.py) - QSS 样式管理
+│   └── LoggerConfig (logger_config.py) - 统一日志配置
+├── 功能扩展模块
+│   ├── LedInfectionHandler (led_infection.py) - LED "感染"模式
+│   └── CommandProcessor (command_processor.py) - 命令解析和验证
+└── ROS 集成
+    ├── GroundStationNode (ground_station_node.py) - ROS 2 节点
+    ├── UsvManager (usv_manager.py) - USV 发布者/订阅者管理
+    └── ClusterController (cluster_controller.py) - 集群导航控制
 ```
 
 **关键模式：**
 - **回调注入**：子模块通过回调函数与主窗口通信，避免循环依赖
 - **信号驱动**：`ROSSignal` (PyQt Signal) 作为 ROS 线程和 GUI 线程的桥梁
-- **性能优化**：日志 500ms 批量输出、状态 200ms 定时刷新
+- **资源生命周期管理**：`ResourceManager` 统一管理线程、队列等资源的创建和清理
+- **错误分类与恢复**：`ErrorHandler` 区分错误类型（网络/参数/状态），支持自动重试和降级
+- **性能优化**：日志 500ms 批量输出、状态 200ms 定时刷新、差量 UI 更新
 
 ## 开发工作流
 
@@ -708,14 +724,18 @@ qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFF
 
 地面站通过 `get_node_names_and_namespaces()` 检测在线 USV，实现了**稳定性检测机制**：
 - 需要连续 3 次检测结果一致才确认变化
-- 离线判定有 20 秒宽限期（`offline_grace_period`）
+- 离线判定有 5 秒宽限期（`offline_grace_period`，已从 20 秒优化）
 - **Why**: 避免网络抖动或 ROS 图暂时不可见导致误判离线
+
+**详见**：`gs_gui/OFFLINE_DETECTION_OPTIMIZATION.md`
 
 ### 2. 坐标系混淆
 
 - XML 任务文件使用 **Area 坐标系**（相对坐标）
 - MAVROS 使用 **USV 本地坐标系**（以 boot pose 为原点）
 - 导航目标必须经过 `_area_to_global` → `_global_to_usv_local` 转换
+
+**详见**：`gs_gui/AREA_OFFSET_GUIDE.md`
 
 ### 3. GUI 线程安全
 
@@ -740,27 +760,86 @@ def _cancel_active_goal(self, usv_id):
         del self._usv_active_goals[usv_id]
 ```
 
-### 5. 硬件依赖处理
+### 5. 资源清理和错误处理
 
-机载节点（如 `usv_head_action_node.py`）支持**无硬件模式**：
+**使用 ResourceManager 管理资源生命周期：**
 ```python
-HARDWARE_AVAILABLE = True
-try:
-    from board import SCL, SDA
-    import busio
-    from adafruit_pca9685 import PCA9685
-except Exception:
-    HARDWARE_AVAILABLE = False
+# 初始化资源管理器
+self.resource_manager = ResourceManager(self.get_logger())
 
-# 参数控制
-self.declare_parameter('enable_head_actuator', True)
-if self.enable_hw and HARDWARE_AVAILABLE:
-    # 初始化硬件
-else:
-    self.get_logger().warn('以无硬件模式运行')
+# 注册资源（线程、队列等）
+self.resource_manager.register_resource(
+    "publish_queue",
+    self.publish_queue,
+    cleanup_func=lambda q: self._cleanup_queue(q)
+)
+
+# 在 shutdown() 中自动清理
+self.resource_manager.cleanup_all()
 ```
 
-**Why**: 便于开发和测试，无需实际硬件连接。
+**使用 ErrorHandler 进行健壮的错误处理：**
+```python
+from .error_handler import RobustErrorHandler, ErrorCategory, ErrorSeverity
+
+# 初始化错误处理器
+self.error_handler = RobustErrorHandler(self.get_logger())
+
+# 处理错误并尝试恢复
+self.error_handler.handle_error(
+    exception,
+    context="发送导航目标",
+    severity=ErrorSeverity.ERROR,
+    category=ErrorCategory.NETWORK
+)
+```
+
+**详见**：`OPTIMIZATION_GUIDE.md`, `OPTIMIZATION_SUMMARY.md`
+
+### 6. MAVROS 启动优化
+
+**问题**：默认 MAVROS 启动耗时 ~97 秒（加载 60+ 插件 + 同步 900+ 参数）
+
+**解决方案**（在 `usv_launch.py` 中配置）：
+```python
+'plugin_allowlist': [
+    'sys_status',      # 系统状态（必需）
+    'sys_time',        # 时间同步（必需）
+    'command',         # 命令接口（解锁/模式切换）
+    'local_position',  # 本地位置（导航必需）
+    'setpoint_raw',    # 原始设定点（控制必需）
+    'global_position', # GPS 全局位置
+    'gps_status',      # GPS 状态和卫星数
+]
+# 移除 param 插件，避免参数同步阻塞
+```
+
+**效果**：启动时间从 97 秒降至 10-15 秒（节省 ~82 秒）
+
+**详见**：`usv_bringup/MAVROS_STARTUP_OPTIMIZATION.md`
+
+### 7. 优雅关闭机制
+
+地面站关闭时自动向所有在线 USV 发送外设关闭命令：
+```python
+def closeEvent(self, event):
+    """窗口关闭事件处理器"""
+    online_usvs = self.list_manager.usv_online_list
+    if online_usvs:
+        # 发送关闭命令
+        self.ros_signal.str_command.emit('led_off')
+        self.ros_signal.str_command.emit('sound_stop')
+        self.ros_signal.str_command.emit('neck_stop')
+        # 等待 500ms 确保命令发送
+        QTimer.singleShot(500, lambda: event.accept())
+        event.ignore()
+    else:
+        event.accept()
+```
+
+**Why**: 确保 USV 外设处于安全状态，避免 LED/声音/舵机遗留在激活状态
+
+**详见**：`gs_gui/GRACEFUL_SHUTDOWN.md`
 
 ## 调试技巧
 
@@ -782,14 +861,41 @@ ros2 topic pub /usv_01/gs_led_command std_msgs/msg/String "data: 'color_select|2
 
 # 查看 tf 树
 ros2 run tf2_tools view_frames
+
+# 查看系统日志（集中式日志配置后）
+tail -f ~/.logs/gs_gui.log
+tail -f ~/.logs/gs_gui_error.log  # 仅错误日志
 ```
 
 ## 文档资源
 
-- **gs_gui 详细架构**: `gs_gui/MODULE_ARCHITECTURE.md`
-- **快速参考**: `gs_gui/QUICK_REFERENCE.md`
-- **测试指南**: `gs_gui/TEST_GUIDE.md`
-- **重构总结**: `gs_gui/REFACTOR_SUMMARY.md`
+### 核心架构和快速开始
+- **项目概览**: `QUICK_START.md` - 快速开始指南
+- **Markdown 管理**: `MARKDOWN_FILES_MANAGEMENT.md` - 文档索引和管理
+
+### GUI 模块（gs_gui/）
+- **详细架构**: `gs_gui/MODULE_ARCHITECTURE.md` - 模块关系和数据流
+- **快速参考**: `gs_gui/QUICK_REFERENCE.md` - 常用操作速查
+- **测试指南**: `gs_gui/TEST_GUIDE.md` - 测试框架和实践
+- **重构总结**: `gs_gui/REFACTOR_SUMMARY.md` - 重构成果和改进
+- **优雅关闭**: `gs_gui/GRACEFUL_SHUTDOWN.md` - 关闭流程和外设管理
+- **坐标系统**: `gs_gui/AREA_OFFSET_GUIDE.md` - Area 坐标偏移设置
+- **离线检测**: `gs_gui/OFFLINE_DETECTION_OPTIMIZATION.md` - 检测机制优化
+- **LED 感染**: `gs_gui/LED_INFECTION_MODE.md` - LED 感染模式实现
+- **温度滞后**: `gs_gui/TEMPERATURE_HYSTERESIS_UPDATE.md` - 温度监控优化
+- **UI 现代化**: `gs_gui/UI_MODERNIZATION_GUIDE.md` - UI 设计指南
+- **响应式设计**: `gs_gui/UI_RESPONSIVE_DESIGN.md` - 响应式布局
+- **滚动实现**: `gs_gui/UI_SCROLL_IMPLEMENTATION.md` - 滚动区域实现
+
+### 机载系统（usv_*/）
+- **MAVROS 优化**: `usv_bringup/MAVROS_STARTUP_OPTIMIZATION.md` - 启动时间优化
+- **电池百分比**: `usv_comm/BATTERY_PERCENTAGE_FIX.md` - 电池显示修复
+
+### 系统优化
+- **优化指南**: `OPTIMIZATION_GUIDE.md` - 完整优化方案
+- **优化总结**: `OPTIMIZATION_SUMMARY.md` - 代码质量评估
+- **MAVLink 超时**: `MAVLINK_COMMAND_TIMEOUT_GUIDE.md` - 命令超时处理
+- **启动差异**: `USV_STARTUP_DIFFERENCES_ANALYSIS.md` - USV 启动对比
 
 ## 关键外部依赖
 
@@ -801,4 +907,4 @@ ros2 run tf2_tools view_frames
 
 ---
 
-**最后更新**: 2025-10-22 | **工作空间版本**: ROS 2 Humble/Iron
+**最后更新**: 2025-10-25 | **工作空间版本**: ROS 2 Humble/Iron
