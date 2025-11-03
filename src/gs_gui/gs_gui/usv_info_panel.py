@@ -4,7 +4,8 @@ USV 信息面板模块
 """
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                               QGroupBox, QGridLayout, QFrame, QProgressBar,
-                              QScrollArea, QSizePolicy)
+                              QScrollArea, QSizePolicy, QPushButton,
+                              QListWidget, QListWidgetItem, QAbstractItemView)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
 
@@ -97,6 +98,10 @@ class UsvInfoPanel(QWidget):
         basic_group = self._create_basic_info_group()
         content_layout.addWidget(basic_group)
         
+        # ==================== Ready 状态组 ====================
+        readiness_group = self._create_readiness_group()
+        content_layout.addWidget(readiness_group)
+
         # ==================== 位置信息组 ====================
         position_group = self._create_position_info_group()
         content_layout.addWidget(position_group)
@@ -112,6 +117,10 @@ class UsvInfoPanel(QWidget):
         # ==================== 速度信息组 ====================
         velocity_group = self._create_velocity_info_group()
         content_layout.addWidget(velocity_group)
+
+        # ==================== 飞控消息组 ====================
+        messages_group = self._create_vehicle_message_group()
+        content_layout.addWidget(messages_group)
         
         # 添加弹性空间（自动填充剩余空间）
         content_layout.addStretch()
@@ -238,6 +247,53 @@ class UsvInfoPanel(QWidget):
         layout.addWidget(self.armed_label, 3, 1)
         
         layout.setColumnStretch(1, 1)
+        group.setLayout(layout)
+        return group
+
+    def _create_readiness_group(self):
+        """创建 Ready 状态展示组"""
+        group = QGroupBox("🚦 Ready 检查")
+        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#16a085"))
+
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+        layout.setContentsMargins(10, 12, 10, 10)
+
+        # Ready 按钮（仅显示用途）
+        self.ready_button = QPushButton("等待数据…")
+        self.ready_button.setEnabled(False)
+        self.ready_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.ready_button.setMinimumHeight(44)
+        self._apply_button_style(self.ready_button, "#95a5a6")
+        layout.addWidget(self.ready_button)
+
+        # Ready 摘要信息
+        self.ready_summary_label = QLabel("未接收到预检数据")
+        self.ready_summary_label.setWordWrap(True)
+        try:
+            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        except AttributeError:
+            alignment = AlignLeft | AlignVCenter
+        self.ready_summary_label.setAlignment(alignment)  # type: ignore[arg-type]
+        self.ready_summary_label.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        layout.addWidget(self.ready_summary_label)
+
+        # 传感器状态列表
+        layout.addWidget(self._create_section_label("传感器状态"))
+        self.sensor_list = QListWidget()
+        self._configure_list_widget(self.sensor_list)
+        self.sensor_list.setFixedHeight(120)
+        layout.addWidget(self.sensor_list)
+        self._set_list_placeholder(self.sensor_list, "等待传感器数据")
+
+        # PreArm 警告列表
+        layout.addWidget(self._create_section_label("PreArm 警告"))
+        self.warning_list = QListWidget()
+        self._configure_list_widget(self.warning_list)
+        self.warning_list.setFixedHeight(100)
+        layout.addWidget(self.warning_list)
+        self._set_list_placeholder(self.warning_list, "无预检警告")
+
         group.setLayout(layout)
         return group
     
@@ -383,11 +439,33 @@ class UsvInfoPanel(QWidget):
         layout.setColumnStretch(1, 1)
         group.setLayout(layout)
         return group
+
+    def _create_vehicle_message_group(self):
+        """创建飞控消息展示组"""
+        group = QGroupBox("📣 飞控消息")
+        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#34495e"))
+
+        layout = QVBoxLayout()
+        layout.setSpacing(6)
+        layout.setContentsMargins(10, 12, 10, 10)
+
+        self.message_list = QListWidget()
+        self._configure_list_widget(self.message_list)
+        self.message_list.setMinimumHeight(160)
+        layout.addWidget(self.message_list)
+        self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
+
+        group.setLayout(layout)
+        return group
     
     def _create_key_label(self, text):
         """创建键标签（紧凑版）"""
         label = QLabel(text)
-        label.setAlignment(AlignRight | AlignVCenter)
+        if hasattr(Qt, "AlignmentFlag"):
+            alignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        else:
+            alignment = AlignRight | AlignVCenter
+        label.setAlignment(alignment)  # type: ignore[arg-type]
         label.setStyleSheet("""
             QLabel {
                 color: #7f8c8d;
@@ -401,7 +479,11 @@ class UsvInfoPanel(QWidget):
     def _create_value_label(self, text, large=False):
         """创建值标签（响应式字体）"""
         label = QLabel(text)
-        label.setAlignment(AlignLeft | AlignVCenter)
+        if hasattr(Qt, "AlignmentFlag"):
+            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        else:
+            alignment = AlignLeft | AlignVCenter
+        label.setAlignment(alignment)  # type: ignore[arg-type]
         if large:
             label.setStyleSheet("""
                 QLabel {
@@ -419,6 +501,74 @@ class UsvInfoPanel(QWidget):
                 }
             """)
         return label
+
+    def _create_section_label(self, text):
+        """创建分组内的小节标题"""
+        label = QLabel(text)
+        try:
+            alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        except AttributeError:
+            alignment = AlignLeft | AlignVCenter
+        label.setAlignment(alignment)  # type: ignore[arg-type]
+        label.setStyleSheet("color: #2c3e50; font-size: 11px; font-weight: bold; margin-top: 4px;")
+        return label
+
+    def _configure_list_widget(self, widget):
+        """统一配置列表控件样式"""
+        try:
+            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        except AttributeError:
+            widget.setFocusPolicy(Qt.NoFocus)  # type: ignore[attr-defined]
+        try:
+            widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        except AttributeError:
+            widget.setSelectionMode(QListWidget.NoSelection)
+        widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        try:
+            widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        except AttributeError:
+            widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        widget.setAlternatingRowColors(False)
+        widget.setWordWrap(True)
+        widget.setStyleSheet("""
+            QListWidget {
+                background-color: #ffffff;
+                border: 1px solid #ecf0f1;
+                border-radius: 6px;
+            }
+            QListWidget::item {
+                padding: 6px 8px;
+            }
+        """)
+
+    def _set_list_placeholder(self, widget, text):
+        """在列表内显示占位提示"""
+        widget.clear()
+        placeholder = QListWidgetItem(text)
+        try:
+            placeholder.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        except AttributeError:
+            placeholder.setFlags(Qt.ItemIsEnabled)  # type: ignore[attr-defined]
+        placeholder.setForeground(QColor("#7f8c8d"))
+        widget.addItem(placeholder)
+
+    def _apply_button_style(self, button, background, text_color="#ffffff"):
+        """统一按钮样式"""
+        button.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {background};
+                color: {text_color};
+                font-weight: bold;
+                font-size: 13px;
+                border: none;
+                border-radius: 6px;
+                padding: 10px 14px;
+            }}
+            QPushButton:disabled {{
+                color: {text_color};
+                background-color: {background};
+            }}
+        """)
     
     def update_state(self, state):
         """
@@ -434,6 +584,11 @@ class UsvInfoPanel(QWidget):
         self._current_state = state
         
         try:
+            vehicle_messages = state.get('vehicle_messages') or []
+            prearm_warnings = state.get('prearm_warnings') or []
+            sensor_status = state.get('sensor_status') or []
+            prearm_ready = bool(state.get('prearm_ready', False))
+
             # 更新基本信息
             self.id_label.setText(str(state.get('namespace', '--')))
             
@@ -441,8 +596,13 @@ class UsvInfoPanel(QWidget):
             self.mode_label.setText(str(mode))
             self._update_mode_style(mode)
             
-            # 连接状态作为 status
+            # Ready 指示与连接状态
             connected = state.get('connected', False)
+            self._update_ready_view(prearm_ready, prearm_warnings, connected)
+            self._update_sensor_list(sensor_status)
+            self._update_vehicle_messages(vehicle_messages)
+
+            # 连接状态作为 status 显示
             status = "在线" if connected else "离线"
             self.status_label.setText(str(status))
             self._update_status_style(status)
@@ -473,21 +633,33 @@ class UsvInfoPanel(QWidget):
             voltage = state.get('battery_voltage', '--')
             self.voltage_label.setText(self._format_float(voltage, precision=2))
             
-            # 电流字段不存在，显示为 --
-            self.current_label.setText("--")
+            current = state.get('battery_current', None)
+            self.current_label.setText(self._format_float(current, precision=1))
             
-            # 温度信息（除以1000转换为摄氏度）
+            # 温度信息
             try:
-                temp_raw = float(state.get('temperature', 0.0))
-                temp_celsius = temp_raw / 1000.0
+                temp_celsius = float(state.get('temperature'))
+            except (ValueError, TypeError):
+                temp_celsius = None
+            if temp_celsius is not None:
                 self.temperature_label.setText(self._format_float(temp_celsius, precision=1))
                 self._update_temperature_style(temp_celsius)
-            except (ValueError, TypeError):
+            else:
                 self.temperature_label.setText("--")
+                self.temperature_label.setStyleSheet("")
+                self._is_high_temperature = False
             
-            # GPS 信息字段不存在，显示为 --
-            self.satellite_label.setText("--")
-            self.gps_accuracy_label.setText("--")
+            sat_count = state.get('gps_satellites_visible')
+            if sat_count is None:
+                self.satellite_label.setText("--")
+            else:
+                try:
+                    self.satellite_label.setText(str(int(sat_count)))
+                except (ValueError, TypeError):
+                    self.satellite_label.setText(self._format_float(sat_count, precision=0))
+            self._update_satellite_style(sat_count)
+
+            self.gps_accuracy_label.setText(self._format_float(state.get('gps_eph'), precision=1))
             
             # 更新速度信息（从 velocity 计算）
             vel = state.get('velocity', {}) or {}
@@ -541,6 +713,19 @@ class UsvInfoPanel(QWidget):
         self._is_high_temperature = False
         
         self._current_state = None
+
+        if hasattr(self, 'ready_button'):
+            self.ready_button.setText("等待数据…")
+            self._apply_button_style(self.ready_button, "#95a5a6")
+        if hasattr(self, 'ready_summary_label'):
+            self.ready_summary_label.setText("未接收到预检数据")
+            self.ready_summary_label.setToolTip("")
+        if hasattr(self, 'sensor_list'):
+            self._set_list_placeholder(self.sensor_list, "等待传感器数据")
+        if hasattr(self, 'warning_list'):
+            self._set_list_placeholder(self.warning_list, "无预检警告")
+        if hasattr(self, 'message_list'):
+            self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
     
     def _format_float(self, value, precision=2):
         """格式化浮点数"""
@@ -615,6 +800,96 @@ class UsvInfoPanel(QWidget):
                 border-radius: 4px;
             }}
         """)
+
+    def _update_ready_view(self, ready, warnings, connected):
+        """根据预检结果更新 Ready 按钮和警告列表"""
+        if not hasattr(self, 'ready_button'):
+            return
+
+        if not connected:
+            button_text = "USV 离线"
+            summary = "车辆离线，等待连接..."
+            button_bg, button_fg = "#95a5a6", "#ffffff"
+        elif ready:
+            button_text = "Ready to Sail"
+            summary = "所有预检检查通过"
+            button_bg, button_fg = "#27ae60", "#ffffff"
+        elif warnings:
+            button_text = "PreArm Checks Required"
+            summary = f"{len(warnings)} 条预检警告待处理"
+            button_bg, button_fg = "#e67e22", "#ffffff"
+        else:
+            button_text = "等待预检结果…"
+            summary = "等待飞控返回预检结论"
+            button_bg, button_fg = "#f1c40f", "#2c3e50"
+
+        self.ready_button.setText(button_text)
+        self._apply_button_style(self.ready_button, button_bg, button_fg)
+        self.ready_summary_label.setText(summary)
+        tooltip_lines = warnings[:8]
+        self.ready_summary_label.setToolTip("\n".join(tooltip_lines) if tooltip_lines else "")
+
+        if warnings:
+            self.warning_list.clear()
+            warning_bg, warning_fg = self._level_to_palette('error')
+            for warning_text in warnings:
+                item = QListWidgetItem(warning_text)
+                item.setToolTip(warning_text)
+                item.setBackground(QColor(warning_bg))
+                item.setForeground(QColor(warning_fg))
+                self.warning_list.addItem(item)
+        else:
+            placeholder = "无预检警告" if connected else "等待预检数据"
+            self._set_list_placeholder(self.warning_list, placeholder)
+
+    def _update_sensor_list(self, sensor_status):
+        """更新传感器健康列表"""
+        if not hasattr(self, 'sensor_list'):
+            return
+
+        if not sensor_status:
+            self._set_list_placeholder(self.sensor_list, "等待传感器数据")
+            return
+
+        self.sensor_list.clear()
+        for entry in sensor_status:
+            name = entry.get('name', 'Sensor')
+            status_text = entry.get('status', '--')
+            detail = entry.get('detail')
+            combined = f"{name}: {status_text}"
+            if detail:
+                combined += f"  ({detail})"
+            item = QListWidgetItem(combined)
+            if detail:
+                item.setToolTip(detail)
+            bg_color, fg_color = self._level_to_palette(entry.get('level'))
+            item.setBackground(QColor(bg_color))
+            item.setForeground(QColor(fg_color))
+            self.sensor_list.addItem(item)
+
+    def _update_vehicle_messages(self, messages):
+        """更新飞控消息列表"""
+        if not hasattr(self, 'message_list'):
+            return
+
+        if not messages:
+            self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
+            return
+
+        self.message_list.clear()
+        max_items = 30
+        for entry in messages[:max_items]:
+            severity = entry.get('severity', 6)
+            label = entry.get('severity_label') or f"LEVEL {severity}"
+            time_str = entry.get('time') or "--:--:--"
+            text = entry.get('text', '')
+            combined = f"[{time_str}] {label}: {text}"
+            item = QListWidgetItem(combined)
+            item.setToolTip(text)
+            bg_color, fg_color = self._severity_palette(severity)
+            item.setBackground(QColor(bg_color))
+            item.setForeground(QColor(fg_color))
+            self.message_list.addItem(item)
     
     def _update_battery_style(self, percentage):
         """根据电池百分比更新进度条样式"""
@@ -712,6 +987,35 @@ class UsvInfoPanel(QWidget):
                     font-weight: 600;
                 }
             """)
+
+    def _level_to_palette(self, level):
+        """根据 level 返回背景/前景颜色"""
+        key = str(level).lower() if level is not None else ''
+        mapping = {
+            'ok': ("#ecfdf3", "#1d8348"),
+            'warn': ("#fff6e5", "#b9770e"),
+            'warning': ("#fff6e5", "#b9770e"),
+            'error': ("#fdecea", "#c0392b"),
+            'critical': ("#fdecea", "#c0392b"),
+        }
+        return mapping.get(key, ("#f4f6f7", "#2c3e50"))
+
+    def _severity_palette(self, severity):
+        """根据 MAVROS severity 返回配色"""
+        try:
+            sev = int(severity)
+        except (ValueError, TypeError):
+            sev = 6
+
+        if sev <= 2:
+            return "#fdecea", "#c0392b"
+        if sev in (3, 4):
+            return "#fef5e6", "#b9770e"
+        if sev == 5:
+            return "#ebf5fb", "#1f618d"
+        if sev == 6:
+            return "#f4f6f7", "#2c3e50"
+        return "#f4f6f7", "#2c3e50"
     
     def _update_dynamic_styles(self):
         """更新动态样式（由定时器调用）"""

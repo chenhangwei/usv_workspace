@@ -50,7 +50,7 @@ class UsvStatusNode(Node):
         
         # 电池电压范围参数
         self.declare_parameter('battery_voltage_full', 12.6)   # 满电电压（V）
-        self.declare_parameter('battery_voltage_empty', 11.1)  # 空电电压（V）
+        self.declare_parameter('battery_voltage_empty', 10.8)  # 空电电压（V）
         
         # 根据节点命名空间推断 usv_id
         ns_guess = self.get_namespace().lstrip('/') if self.get_namespace() else 'usv_01'

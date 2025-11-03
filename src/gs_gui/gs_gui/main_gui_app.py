@@ -123,7 +123,7 @@ class MainWindow(QMainWindow):
         self.ros_signal.receive_state_list.connect(self.state_handler.receive_state_callback)
         
         # 集群任务进度信号
-        self.ros_signal.cluster_progress_update.connect(self.task_manager.update_progress)
+        self.ros_signal.cluster_progress_update.connect(self._handle_cluster_progress_update)
         
         # 导航状态更新信号
         self.ros_signal.nav_status_update.connect(self.state_handler.update_nav_status)
@@ -139,6 +139,7 @@ class MainWindow(QMainWindow):
         self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)
         self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_manual_command)
         self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task)
+        self.ui.stop_cluster_task_pushButton.clicked.connect(self.stop_cluster_task)
         
         # ============== 离群控制按钮 ==============
         self.ui.departed_arming_pushButton.clicked.connect(self.departed_arming_command)
@@ -272,6 +273,16 @@ class MainWindow(QMainWindow):
         button_text = self.task_manager.toggle_task(self.list_manager.usv_departed_list)
         self.ui.send_cluster_point_pushButton.setText(button_text)
     
+    def stop_cluster_task(self):
+        """停止集群任务并刷新按钮文本"""
+        self.task_manager.stop_task()
+        self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+
+    def _handle_cluster_progress_update(self, progress_info):
+        """处理集群任务进度更新并同步按钮文本"""
+        self.task_manager.update_progress(progress_info)
+        self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+
     # ============== 离群目标点命令 ==============
     def send_departed_point_command(self):
         """发送离群目标点命令"""
@@ -635,6 +646,9 @@ def main(argv=None):
     ros_signal.steering_command.connect(node.set_steering_callback)
     ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
+    ros_signal.cluster_pause_request.connect(node.pause_cluster_task_callback)
+    ros_signal.cluster_resume_request.connect(node.resume_cluster_task_callback)
+    ros_signal.cluster_stop_request.connect(node.stop_cluster_task_callback)
     ros_signal.str_command.connect(node.str_command_callback)
     
     # 连接节点信息信号

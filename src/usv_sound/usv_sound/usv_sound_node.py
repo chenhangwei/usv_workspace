@@ -112,7 +112,7 @@ class UsvSoundNode(Node):
             if self.voltage ==0.0:
                 return          
             # 检查是否为低电压状态
-            if self.voltage < 11.1:
+            if self.voltage < 10.8:
                 if not self.low_voltage:
                     self.get_logger().warn(f'电池电压低: {self.voltage}V')
                 self.low_voltage = True

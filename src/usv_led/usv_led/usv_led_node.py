@@ -14,6 +14,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import time
 import random
 import math
+import json
 
 
 class UsvLedNode(Node):
@@ -46,10 +47,10 @@ class UsvLedNode(Node):
         self.declare_parameter('timer_period_low', 0.5)    # 低频定时器周期
         self.declare_parameter('transition_duration', 3.0)  # 渐变持续时间（秒）
         self.declare_parameter('hold_duration', 10.0)       # 颜色停留时间（秒）
-        self.declare_parameter('low_battery_threshold', 11.1)  # 低电量阈值（伏特）
-        self.declare_parameter('recover_battery_threshold', 11.6)  # 恢复电量阈值（伏特）
+        self.declare_parameter('low_battery_threshold', 10.8)  # 低电量阈值（伏特）
+        self.declare_parameter('recover_battery_threshold', 11.3)  # 恢复电量阈值（伏特）
         self.declare_parameter('breath_step', 6)  # 呼吸灯步进值
-        self.declare_parameter('color_select_transition_duration', 2.0)  # 单个颜色命令的渐变时间
+        self.declare_parameter('color_select_transition_duration', 3.0)  # 单个颜色命令的渐变时间
         
         try:
             self.ser = serial.Serial(port, baud, timeout=1)
@@ -73,6 +74,14 @@ class UsvLedNode(Node):
             self.usv_batterystate_callback, 
             self.qos
         )
+
+        # 向地面站回传当前 LED 模式与颜色，便于传染逻辑实时同步
+        self.led_state_pub = self.create_publisher(
+            String,
+            'led_state',
+            QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
+        )
+        self._last_published_state = None
 
         # 创建定时器
         self.timer_period = 1.0   # 当前定时器周期
@@ -121,6 +130,9 @@ class UsvLedNode(Node):
         # 重新创建定时器
         self.timer.cancel()
         self.timer = self.create_timer(self.current_timer_period, self.timer_callback)
+
+        # 将初始状态通知地面站
+        self._publish_led_state(self.current_color)
 
         self.get_logger().info('USV LED 节点启动完成')
         self.get_logger().info(f'支持的颜色数量: {len(self.color_list)}')
@@ -172,6 +184,31 @@ class UsvLedNode(Node):
             self.get_logger().error(f'构建串口指令时发生错误: {e}')
             return bytes()
 
+    def _publish_led_state(self, color=None):
+        """向地面站发布当前 LED 模式与颜色。"""
+        try:
+            if color is None:
+                color = self.current_color[:]
+
+            if not isinstance(color, (list, tuple)) or len(color) < 3:
+                return
+
+            sanitized_color = [max(0, min(255, int(c))) for c in color[:3]]
+            mode = self.mode or ''
+            state_key = (mode, tuple(sanitized_color))
+            if state_key == self._last_published_state:
+                return
+
+            msg = String()
+            msg.data = json.dumps({
+                'mode': mode,
+                'color': sanitized_color
+            })
+            self.led_state_pub.publish(msg)
+            self._last_published_state = state_key
+        except Exception as exc:
+            self.get_logger().warn(f'发布LED状态失败: {exc}')
+
     def gs_led_callback(self, msg):
         """
         地面站LED命令回调函数
@@ -219,6 +256,7 @@ class UsvLedNode(Node):
                     self.set_timer_period(self.timer_period_high if self._color_select_transition_active else self.timer_period_low)
                     self.last_switch_time = time.time()
                     self.last_sent_rgb = None
+                    self._publish_led_state(self.current_color[:])
             elif msg.data.startswith('color_infect'):
                 # color_infect|r,g,b
                 parts = msg.data.split('|')
@@ -240,9 +278,11 @@ class UsvLedNode(Node):
                     self.target_color = rgb
                     self.in_transition = True
                     self.transition_start_color = self.current_color[:]
-                    self.transition_duration = 2.0  # 传染渐变2秒
+                    # 传染模式与手动切换保持一致的渐变时长
+                    self.transition_duration = self.default_transition_duration
                     self.last_switch_time = time.time()
                     self._color_select_transition_active = False
+                    self._publish_led_state(rgb)
             elif msg.data in allowed_modes:
                 # 其它允许模式
                 if msg.data == 'led_off':
@@ -270,6 +310,7 @@ class UsvLedNode(Node):
                     self._color_select_transition_active = False
                     self._color_select_start_color = self.current_color[:]
                     self._color_select_transition_start = None
+                self._publish_led_state(self.current_color[:])
             else:
                 # 其它无关消息内容，忽略，不影响LED
                 self.get_logger().info(f'忽略无关LED指令: {msg.data}')
@@ -289,6 +330,7 @@ class UsvLedNode(Node):
             self._color_select_start_color = self._infect_backup.get('_color_select_start_color', self.current_color[:])
             self._color_select_transition_start = self._infect_backup.get('_color_select_transition_start', None)
             del self._infect_backup
+        self._publish_led_state(self.current_color[:])
 
     def usv_batterystate_callback(self, msg):
         """
@@ -477,6 +519,8 @@ class UsvLedNode(Node):
                     # self.get_logger().info(f'发送LED命令：{command.hex()}')
                 elif not self.ser or not self.ser.is_open:
                     self.get_logger().warn('串口未打开，无法发送LED命令')
+
+                self._publish_led_state(rgb_to_send)
                     
         except Exception as e:
             self.get_logger().error(f'定时器回调处理时发生错误: {e}')

@@ -28,6 +28,9 @@ class ROSSignal(QObject):
     # 目标点命令信号
     cluster_target_point_command = pyqtSignal(list)     # 集群目标点命令，参数：目标点列表
     departed_target_point_command = pyqtSignal(list)    # 离群目标点命令，参数：目标点列表
+    cluster_pause_request = pyqtSignal()                # 集群暂停请求
+    cluster_resume_request = pyqtSignal()               # 集群恢复请求
+    cluster_stop_request = pyqtSignal()                 # 集群停止请求
 
     # 状态更新信号
     receive_state_list = pyqtSignal(list)  # 接收USV状态列表，参数：USV状态字典列表

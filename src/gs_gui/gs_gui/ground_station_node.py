@@ -4,6 +4,9 @@
 包括状态监控、命令发送、导航控制等功能
 """
 
+import json
+from collections import defaultdict, deque
+from datetime import datetime
 import rclpy 
 import rclpy.action
 from rclpy.node import Node  # 从rclpy.node模块导入Node类，用于创建ROS2节点
@@ -41,6 +44,7 @@ class GroundStationNode(Node):
     NAMESPACE_UPDATE_PERIOD = 2.0 # 命名空间更新周期(秒)，从 5.0 减少到 2.0，加快离线检测
     CLUSTER_TARGET_PUBLISH_PERIOD = 5 # 集群目标发布周期(秒)，增加周期减少CPU占用
     MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
+    PREARM_WARNING_EXPIRY = 15.0  # PreArm 报警保留时长（秒）
     
     def __init__(self, signal):
         """
@@ -59,6 +63,12 @@ class GroundStationNode(Node):
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
 
+        # 预检与状态文本缓存
+        self._vehicle_messages = defaultdict(lambda: deque(maxlen=50))
+        self._prearm_warnings = defaultdict(dict)
+        self._prearm_ready = {}
+        self._sensor_status_cache = {}
+
         # 初始化USV状态和目标管理相关变量
         self.usv_states = {}  # USV状态字典
         self.last_ns_list = []  # 上次命名空间列表
@@ -73,14 +83,13 @@ class GroundStationNode(Node):
         self.publish_thread = threading.Thread(target=self.process_publish_queue, daemon=True)  # 创建发布线程，设置为守护线程
         self.publish_thread.start()  # 启动发布线程
 
-        # 初始化集群控制相关变量
-        self._usv_ack_map = {}  # USV确认映射表
-        self._cluster_start_time = None  # 集群开始时间
         # 将超时/重试等参数化，支持通过参数/launch调整
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
         self.declare_parameter('offline_grace_period', 5.0)  # 从 20.0 减少到 5.0 秒，加快移除速度
+        self.declare_parameter('ack_resend_interval', 2.0)
+        self.declare_parameter('cluster_action_timeout', 300.0)
         # area center 参数（任务坐标系原点在全局 map 中的位置）
         self.declare_parameter('area_center_x', 0.0)
         self.declare_parameter('area_center_y', 0.0)
@@ -99,6 +108,20 @@ class GroundStationNode(Node):
             self.MIN_ACK_RATE_FOR_PROCEED = float(self.get_parameter('min_ack_rate_for_proceed').get_parameter_value().double_value)
         except Exception:
             pass
+        try:
+            self._ack_resend_interval = float(self.get_parameter('ack_resend_interval').get_parameter_value().double_value)
+        except Exception:
+            self._ack_resend_interval = 2.0
+        try:
+            self._cluster_action_timeout = float(self.get_parameter('cluster_action_timeout').get_parameter_value().double_value)
+        except Exception:
+            self._cluster_action_timeout = 300.0
+
+        # 将最新参数同步给集群控制器
+        self.cluster_controller.configure(
+            resend_interval=self._ack_resend_interval,
+            action_timeout=self._cluster_action_timeout,
+        )
 
         # 读取 area_center 参数
         try:
@@ -116,7 +139,6 @@ class GroundStationNode(Node):
             self._ns_offline_grace_period = 5.0  # 从 20.0 减少到 5.0 秒，加快移除速度
         # 离线判定的宽限期（秒），在此时间内即便 ROS 图暂时看不到也不移除
 
-        self._cluster_task_paused = False  # 集群任务是否已暂停
         # 用于通知后台线程退出的事件
         self._stop_event = threading.Event()
 
@@ -128,6 +150,7 @@ class GroundStationNode(Node):
         self._usv_infecting = set()  # 正在传染的USV集合
         # 维护本地 LED 状态 
         self._usv_current_led_state = {} # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
+        self._usv_infection_sources = {}  # 记录被传染USV的源映射
         # LED传染模式开关（默认开启）
         self._led_infection_enabled = True
      
@@ -157,6 +180,24 @@ class GroundStationNode(Node):
         self._incoming_str_commands = queue.Queue(maxsize=200)
         # 在节点线程中周期性处理入队的字符串命令，避免在 GUI 线程执行节点逻辑
         self._str_command_timer = self.create_timer(0.1, self._process_incoming_str_commands)
+
+    def pause_cluster_task_callback(self):
+        """处理来自 GUI 的集群暂停请求。"""
+        self.get_logger().info("接收到集群暂停请求")
+        self.cluster_controller.pause_cluster_task()
+
+    def resume_cluster_task_callback(self):
+        """处理来自 GUI 的集群恢复请求。"""
+        if not self.cluster_controller.is_cluster_task_paused():
+            self.get_logger().warn("集群任务未处于暂停状态，忽略恢复请求")
+            return
+        self.get_logger().info("接收到集群恢复请求")
+        self.cluster_controller.resume_cluster_task()
+
+    def stop_cluster_task_callback(self):
+        """处理来自 GUI 的集群停止请求。"""
+        self.get_logger().info("接收到集群停止请求")
+        self.cluster_controller.stop_cluster_task("GUI 手动停止")
 
     # 在独立线程中异步处理消息发布队列
     def process_publish_queue(self):
@@ -471,11 +512,10 @@ class GroundStationNode(Node):
             if result.success:
                 self.ros_signal.nav_status_update.emit(usv_id, "成功")
                 # 标记为已确认
-                if usv_id in self._usv_ack_map:
-                    self._usv_ack_map[usv_id]['acked'] = True
-                    self._usv_ack_map[usv_id]['ack_time'] = self.get_clock().now().nanoseconds / 1e9
+                self.cluster_controller.mark_usv_goal_result(usv_id, True)
             else:
                 self.ros_signal.nav_status_update.emit(usv_id, "失败")
+                self.cluster_controller.mark_usv_goal_result(usv_id, False)
 
             # 可以在这里发射信号通知GUI更新状态
             # self.ros_signal.navigation_completed.emit(usv_id, result.success, result.error_code)
@@ -638,6 +678,7 @@ class GroundStationNode(Node):
                 # 清空传染状态字典
                 self._usv_led_modes.clear()
                 self._usv_infecting.clear()
+                self._usv_infection_sources.clear()
 
     def _update_local_led_state(self, usv_id, command_str):
         """
@@ -649,21 +690,37 @@ class GroundStationNode(Node):
         cmd_parts = command_str.data.split('|')
         mode = cmd_parts[0].lower()
         
-        state = self._usv_current_led_state.get(usv_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
-        
+        cached = self._usv_current_led_state.get(
+            usv_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
+
+        new_state = {
+            'mode': cached.get('mode', 'color_switching'),
+            'color': list(cached.get('color', [255, 0, 0]))
+        }
+        updated = False
+
         if mode == 'color_select' and len(cmd_parts) > 1:
             try:
-                color_parts = [int(c.strip()) for c in cmd_parts[1].split(',')]
-                if len(color_parts) == 3:
-                    state['mode'] = 'color_select'
-                    state['color'] = color_parts
+                color_parts = [max(0, min(255, int(c.strip()))) for c in cmd_parts[1].split(',')]
             except ValueError:
                 self.get_logger().warn(f"解析 {usv_id} 的颜色命令失败: {command_str.data}")
-        elif mode != 'color_infect': # 传染模式不改变基础模式和颜色
-             state['mode'] = mode
-             # 可以根据模式设置默认颜色，这里保持不变
-        
-        self._usv_current_led_state[usv_id] = state
+                color_parts = None
+
+            if color_parts and len(color_parts) == 3:
+                if new_state['mode'] != 'color_select':
+                    new_state['mode'] = 'color_select'
+                    updated = True
+                if new_state['color'] != color_parts:
+                    new_state['color'] = color_parts
+                    updated = True
+        elif mode != 'color_infect':  # 传染模式不改变基础模式和颜色
+            if new_state['mode'] != mode:
+                new_state['mode'] = mode
+                updated = True
+
+        self._usv_current_led_state[usv_id] = new_state
+        if updated:
+            self.led_infection_handler.propagate_color_update(usv_id)
 
     def str_command_callback(self, msg):
         """
@@ -673,6 +730,286 @@ class GroundStationNode(Node):
             msg: 字符串命令消息
         """
         self.command_processor.str_command_callback(msg)
+
+    def handle_status_text(self, usv_id, msg):
+        """处理飞控 status_text 消息，收集预检提示与车辆消息."""
+        if msg is None:
+            return
+
+        text_raw = getattr(msg, 'text', '') or ''
+        text = text_raw.strip()
+        if not text:
+            return
+        
+        # DEBUG: 记录收到的 statustext 消息
+        self.get_logger().info(f"[StatusText] {usv_id}: {text}")
+
+        try:
+            severity = int(getattr(msg, 'severity', 6))
+        except (TypeError, ValueError):
+            severity = 6
+
+        now_sec = self._now_seconds()
+        entry = {
+            'text': text,
+            'severity': severity,
+            'severity_label': self._severity_to_label(severity),
+            'time': self._format_time(now_sec),
+            'timestamp': now_sec,
+        }
+        self._vehicle_messages[usv_id].appendleft(entry)
+
+        upper_text = text.upper()
+        warnings = self._prearm_warnings[usv_id]
+        if 'PREARM' in upper_text:
+            if severity <= 4 and 'PASS' not in upper_text and 'OK' not in upper_text:
+                warnings[text] = now_sec
+            else:
+                warnings.clear()
+
+        self._cleanup_prearm_warnings(usv_id, now_sec)
+
+        state = self.usv_states.get(usv_id)
+        if state is None:
+            state = {'namespace': usv_id}
+            self.usv_states[usv_id] = state
+
+        self.augment_state_payload(usv_id, state)
+
+        try:
+            self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+        except Exception as exc:
+            self.get_logger().warn(f"推送 {usv_id} 状态文本更新失败: {exc}")
+
+    def augment_state_payload(self, usv_id, state_data=None):
+        """为状态字典附加车辆消息、预检标记与传感器状态."""
+        if state_data is None:
+            state_data = self.usv_states.get(usv_id)
+            if state_data is None:
+                return None
+
+        now_sec = self._now_seconds()
+        self._cleanup_prearm_warnings(usv_id, now_sec)
+
+        messages = [dict(item) for item in self._vehicle_messages.get(usv_id, [])]
+        warnings = list(self._prearm_warnings.get(usv_id, {}).keys())
+        ready = len(warnings) == 0
+
+        self._prearm_ready[usv_id] = ready
+        self._sensor_status_cache[usv_id] = self._build_sensor_status(usv_id, state_data)
+
+        state_data['vehicle_messages'] = messages
+        state_data['prearm_ready'] = ready
+        state_data['prearm_warnings'] = warnings
+        state_data['sensor_status'] = self._sensor_status_cache[usv_id]
+
+        return state_data
+
+    def _build_sensor_status(self, usv_id, state):
+        """根据当前状态评估关键传感器的健康状况."""
+        statuses = []
+
+        fix_type = state.get('gps_fix_type')
+        sat = state.get('gps_satellites_visible')
+        eph = state.get('gps_eph')
+
+        gps_label = self._describe_gps_fix(fix_type)
+        detail_parts = []
+        try:
+            sat_int = int(sat) if sat is not None else None
+        except (TypeError, ValueError):
+            sat_int = None
+        if sat_int is not None:
+            detail_parts.append(f"{sat_int} sats")
+        try:
+            eph_val = float(eph) if eph is not None else None
+        except (TypeError, ValueError):
+            eph_val = None
+        if eph_val is not None and eph_val > 0:
+            detail_parts.append(f"HDOP {eph_val:.1f}")
+
+        if fix_type is None:
+            gps_level = 'warn'
+        else:
+            try:
+                fix_int = int(fix_type)
+            except (TypeError, ValueError):
+                fix_int = -1
+            if fix_int <= 1:
+                gps_level = 'error'
+            elif fix_int == 2:
+                gps_level = 'warn'
+            else:
+                gps_level = 'ok'
+
+        statuses.append({
+            'name': 'GPS Fix',
+            'status': gps_label,
+            'detail': ', '.join(detail_parts),
+            'level': gps_level,
+        })
+
+        if sat_int is not None:
+            if sat_int >= 8:
+                sat_level = 'ok'
+            elif sat_int >= 5:
+                sat_level = 'warn'
+            else:
+                sat_level = 'error'
+            statuses.append({
+                'name': 'Satellites',
+                'status': f'{sat_int}',
+                'detail': '',
+                'level': sat_level,
+            })
+
+        battery_pct = state.get('battery_percentage')
+        battery_voltage = state.get('battery_voltage')
+        try:
+            battery_pct_val = float(battery_pct) if battery_pct is not None else None
+        except (TypeError, ValueError):
+            battery_pct_val = None
+
+        if battery_pct_val is not None:
+            if battery_pct_val >= 30.0:
+                battery_level = 'ok'
+            elif battery_pct_val >= 15.0:
+                battery_level = 'warn'
+            else:
+                battery_level = 'error'
+            detail = f"{battery_pct_val:.0f}%"
+            if battery_voltage is not None:
+                try:
+                    detail += f" @ {float(battery_voltage):.1f}V"
+                except (TypeError, ValueError):
+                    pass
+            statuses.append({
+                'name': 'Battery',
+                'status': 'OK' if battery_level == 'ok' else 'Low',
+                'detail': detail,
+                'level': battery_level,
+            })
+
+        temperature = state.get('temperature')
+        try:
+            temp_val = float(temperature) if temperature is not None else None
+        except (TypeError, ValueError):
+            temp_val = None
+        if temp_val is not None and temp_val > 0:
+            if temp_val >= 75.0:
+                temp_level = 'error'
+            elif temp_val >= 60.0:
+                temp_level = 'warn'
+            else:
+                temp_level = 'ok'
+            statuses.append({
+                'name': 'CPU Temp',
+                'status': f"{temp_val:.1f}°C",
+                'detail': '',
+                'level': temp_level,
+            })
+
+        return statuses
+
+    def _cleanup_prearm_warnings(self, usv_id, now_sec):
+        warnings = self._prearm_warnings.get(usv_id)
+        if not warnings:
+            return
+        for key, ts in list(warnings.items()):
+            if now_sec - ts > self.PREARM_WARNING_EXPIRY:
+                warnings.pop(key, None)
+
+    def _now_seconds(self):
+        try:
+            return self.get_clock().now().nanoseconds / 1e9
+        except Exception:
+            return datetime.now().timestamp()
+
+    def _format_time(self, seconds):
+        try:
+            return datetime.fromtimestamp(seconds).strftime('%H:%M:%S')
+        except Exception:
+            return '--:--:--'
+
+    @staticmethod
+    def _severity_to_label(severity):
+        mapping = {
+            0: 'EMERGENCY',
+            1: 'ALERT',
+            2: 'CRITICAL',
+            3: 'ERROR',
+            4: 'WARNING',
+            5: 'NOTICE',
+            6: 'INFO',
+            7: 'DEBUG',
+        }
+        return mapping.get(severity, f'LEVEL {severity}')
+
+    @staticmethod
+    def _describe_gps_fix(fix_type):
+        mapping = {
+            0: 'No GPS',
+            1: 'No Fix',
+            2: '2D Fix',
+            3: '3D Fix',
+            4: 'DGPS',
+            5: 'RTK Float',
+            6: 'RTK Fixed',
+        }
+        try:
+            fix_int = int(fix_type)
+        except (TypeError, ValueError):
+            fix_int = None
+        if fix_int is None:
+            return 'Unknown'
+        return mapping.get(fix_int, 'Unknown')
+
+    def handle_led_state_feedback(self, usv_id, msg):
+        """处理来自USV的LED状态反馈。"""
+        if msg is None:
+            return
+
+        payload_raw = getattr(msg, 'data', '')
+        if not payload_raw:
+            return
+
+        try:
+            payload = json.loads(payload_raw)
+        except (TypeError, json.JSONDecodeError) as exc:
+            self.get_logger().warn(f"解析 {usv_id} 的LED状态失败: {exc}")
+            return
+
+        state = self._usv_current_led_state.get(
+            usv_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
+        current_mode = state.get('mode', 'color_switching')
+        current_color = list(state.get('color', [255, 0, 0]))
+
+        updated = False
+
+        mode_val = payload.get('mode')
+        if isinstance(mode_val, str) and mode_val:
+            mode_norm = mode_val.lower()
+            if mode_norm != current_mode:
+                current_mode = mode_norm
+                updated = True
+
+        color_val = payload.get('color')
+        if isinstance(color_val, (list, tuple)) and len(color_val) >= 3:
+            try:
+                sanitized = [max(0, min(255, int(c))) for c in color_val[:3]]
+            except (TypeError, ValueError):
+                sanitized = None
+            if sanitized and sanitized != current_color:
+                current_color = sanitized
+                updated = True
+
+        self._usv_current_led_state[usv_id] = {
+            'mode': current_mode,
+            'color': current_color
+        }
+
+        if updated:
+            self.led_infection_handler.propagate_color_update(usv_id)
     
     def update_area_center_callback(self, offset_dict):
         """

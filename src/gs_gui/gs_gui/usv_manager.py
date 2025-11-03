@@ -6,6 +6,7 @@ USV管理模块
 import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from common_interfaces.msg import UsvStatus
+from mavros_msgs.msg import StatusText
 from std_msgs.msg import String
 from common_interfaces.action import NavigateToPoint
 from rclpy.action import ActionClient
@@ -22,7 +23,11 @@ class UsvManager:
         self.sound_pubs = {}
         self.action_pubs = {}
         self.navigate_to_point_clients = {}
+        self.led_state_subs = {}
+        self.status_text_subs = {}
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
+        # MAVROS 的 statustext 使用 BEST_EFFORT QoS
+        self.qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
 
     # 添加USV命名空间
     def add_usv_namespace(self, ns):
@@ -39,9 +44,11 @@ class UsvManager:
         topic_mode = f"{ns}/set_usv_mode"  # 设置USV模式主题
         topic_arming = f"{ns}/set_usv_arming"  # 设置USV武装状态主题
         topic_led = f"{ns}/gs_led_command"  # LED控制主题
+        topic_led_state = f"{ns}/led_state"  # LED状态回传主题
         topic_sound = f"{ns}/gs_sound_command"  # 声音控制主题
         topic_action = f"{ns}/gs_action_command"  # 动作控制主题
         action_server_name = f"{ns}/navigate_to_point"  # 导航动作服务器名称
+        topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本 (MAVROS直接发布到ns下)
 
         # 为USV创建各种订阅者和发布者
         # 创建USV状态订阅者
@@ -56,6 +63,21 @@ class UsvManager:
         # 创建LED控制发布者
         self.led_pubs[usv_id] = self.node.create_publisher(
             String, topic_led, self.qos_a)
+        # 创建LED状态订阅者
+        self.led_state_subs[usv_id] = self.node.create_subscription(
+            String,
+            topic_led_state,
+            lambda msg, id=usv_id: self.node.handle_led_state_feedback(id, msg),
+            self.qos_a
+        )
+        # 创建飞控状态文本订阅者
+        self.status_text_subs[usv_id] = self.node.create_subscription(
+            StatusText,
+            topic_status_text,
+            lambda msg, id=usv_id: self.node.handle_status_text(id, msg),
+            self.qos_best_effort  # 使用 BEST_EFFORT 匹配 MAVROS
+        )
+        self.node.get_logger().info(f"为 {usv_id} 创建 StatusText 订阅: {topic_status_text}")
         # 创建声音控制发布者
         self.sound_pubs[usv_id] = self.node.create_publisher(
             String, topic_sound, self.qos_a)
@@ -93,6 +115,12 @@ class UsvManager:
         if usv_id in self.led_pubs:
             self.node.destroy_publisher(self.led_pubs[usv_id])
             del self.led_pubs[usv_id]
+        if usv_id in self.led_state_subs:
+            self.node.destroy_subscription(self.led_state_subs[usv_id])
+            del self.led_state_subs[usv_id]
+        if usv_id in self.status_text_subs:
+            self.node.destroy_subscription(self.status_text_subs[usv_id])
+            del self.status_text_subs[usv_id]
         # 销毁并删除声音控制发布者
         if usv_id in self.sound_pubs:
             self.node.destroy_publisher(self.sound_pubs[usv_id])
@@ -112,6 +140,17 @@ class UsvManager:
             # 清理状态记录
             if usv_id in getattr(self.node, 'usv_states', {}):
                 del self.node.usv_states[usv_id]
+            # 清理LED状态缓存及传染映射
+            if hasattr(self.node, '_usv_current_led_state'):
+                self.node._usv_current_led_state.pop(usv_id, None)
+            if hasattr(self.node, '_usv_led_modes'):
+                self.node._usv_led_modes.pop(usv_id, None)
+            if hasattr(self.node, '_usv_infection_sources'):
+                for dst, src in list(self.node._usv_infection_sources.items()):
+                    if dst == usv_id or src == usv_id:
+                        self.node._usv_infection_sources.pop(dst, None)
+            if hasattr(self.node, '_usv_infecting'):
+                self.node._usv_infecting.discard(usv_id)
             # 若 GUI 信号可用，发射最新状态列表，触发表格行删除
             if hasattr(self.node, 'ros_signal') and getattr(self.node.ros_signal, 'receive_state_list', None) is not None:
                 self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))
@@ -142,8 +181,10 @@ class UsvManager:
                 'connected': msg.connected,  # 连接状态
                 'armed': msg.armed,  # 武装状态
                 'guided': msg.guided,  # 引导模式状态
+                'system_status': msg.system_status,
                 'battery_voltage': msg.battery_voltage,  # 电池电压
                 'battery_percentage': msg.battery_percentage,  # 电池电量百分比
+                'battery_current': msg.battery_current,
                 'power_supply_status': msg.power_supply_status,  # 电源状态
                 'position': {
                     'x': round(msg.position.x, 2),  # 保留两位小数减少数据量
@@ -159,8 +200,19 @@ class UsvManager:
                 },  # 速度信息
                 'yaw': round(msg.yaw, 2),  # 偏航角
                 'temperature': round(msg.temperature, 1),  # 温度
+                'gps_fix_type': msg.gps_fix_type,
+                'gps_satellites_visible': msg.gps_satellites_visible,
+                'gps_eph': msg.gps_eph,
+                'gps_epv': msg.gps_epv,
             }
             
+            # 补充附加状态信息（预检&传感器状态等）
+            if hasattr(self.node, 'augment_state_payload'):
+                try:
+                    state_data = self.node.augment_state_payload(usv_id, state_data)
+                except Exception as e:
+                    self.node.get_logger().warn(f"为 {usv_id} 附加状态信息时出错: {e}")
+
             # 只有当状态发生变化时才更新和发送信号
             first_time = usv_id not in self.node.usv_states
             if first_time or self.node.usv_states.get(usv_id) != state_data:

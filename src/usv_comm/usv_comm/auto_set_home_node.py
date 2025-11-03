@@ -8,7 +8,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.srv import CommandHome
+from mavros_msgs.srv import CommandLong
 from mavros_msgs.msg import State
 from sensor_msgs.msg import NavSatFix
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
@@ -34,13 +34,23 @@ class AutoSetHomeNode(Node):
 
         # 声明并获取参数
         self.declare_parameter('set_delay_sec', 3.0)
+        self.declare_parameter('use_current_gps', False)
+        self.declare_parameter('home_latitude', 22.5180977)
+        self.declare_parameter('home_longitude', 113.9007239)
+        self.declare_parameter('home_altitude', -4.8)
+        self.declare_parameter('retry_interval', 1.0)
+        self.declare_parameter('max_retries', 30)
         self.set_delay_sec = self.get_parameter('set_delay_sec').get_parameter_value().double_value
+        self.use_current_gps = self.get_parameter('use_current_gps').get_parameter_value().bool_value
+        self.home_latitude = self.get_parameter('home_latitude').get_parameter_value().double_value
+        self.home_longitude = self.get_parameter('home_longitude').get_parameter_value().double_value
+        self.home_altitude = self.get_parameter('home_altitude').get_parameter_value().double_value
+        self.retry_interval = self.get_parameter('retry_interval').get_parameter_value().double_value
+        self.max_retries = int(self.get_parameter('max_retries').get_parameter_value().integer_value)
         self.set_home_sent = False
-        
+
         # 重试相关状态变量
-        self.retry_count = 0
-        self.max_retries = 30
-        self.retry_interval = 1.0  # 秒
+        self.retry_attempt = 0
         self.retry_timer = None
         
         # GPS 和系统状态
@@ -72,11 +82,15 @@ class AutoSetHomeNode(Node):
             qos_best_effort
         )
 
-        # 创建设置Home点的服务客户端
-        self.set_home_cli = self.create_client(CommandHome, 'cmd/set_home')
+        # 创建 MAV_CMD_DO_SET_HOME 服务客户端（通过 COMMAND_LONG 发送）
+        self.set_home_cli = self.create_client(CommandLong, 'cmd/command')
 
+        home_mode = 'current GPS position' if self.use_current_gps else (
+            f'fixed coordinates ({self.home_latitude:.7f}, {self.home_longitude:.7f}, {self.home_altitude:.2f}m)'
+        )
         self.get_logger().info(
-            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, waiting for GPS fix...'
+            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, target origin: {home_mode}. '
+            'Waiting for GPS fix...'
         )
     
     def gps_callback(self, msg):
@@ -132,55 +146,51 @@ class AutoSetHomeNode(Node):
 
     def set_home(self):
         """设置EKF原点的入口函数,启动非阻塞重试定时器"""
-        self.retry_count = 0
+        self.retry_attempt = 0
         self._try_set_home()
     
     def _try_set_home(self):
         """尝试设置EKF原点,使用非阻塞定时器实现重试"""
+        if self.retry_attempt >= self.max_retries:
+            self.get_logger().error(
+                f'❌ Failed to set EKF origin after {self.max_retries} attempts. Giving up.'
+            )
+            return
+
+        self.retry_attempt += 1
+        attempt = self.retry_attempt
+
         # 检查服务是否就绪
         if self.set_home_cli.service_is_ready():
             self.get_logger().info(
-                f'Service /mavros/cmd/set_home is ready (attempt {self.retry_count + 1}/{self.max_retries})'
+                f'Service /mavros/cmd/command is ready (attempt {attempt}/{self.max_retries})'
             )
             self._send_set_home_request()
             return
         
-        # 服务未就绪,记录并准备重试
-        self.retry_count += 1
-        self.get_logger().warn(
-            f'Service /mavros/cmd/set_home not ready, will retry... ({self.retry_count}/{self.max_retries})'
+        self._schedule_retry(
+            f'Service /mavros/cmd/command not ready, will retry (attempt {attempt}/{self.max_retries})'
         )
-        
-        # 检查是否达到最大重试次数
-        if self.retry_count >= self.max_retries:
-            self.get_logger().error(
-                f'❌ Service /mavros/cmd/set_home not available after {self.max_retries} attempts. '
-                'Please check MAVROS connection.'
-            )
-            return
-        
-        # 创建定时器在指定间隔后重试
-        if self.retry_timer is not None:
-            self.retry_timer.cancel()
-        
-        self.retry_timer = self.create_timer(self.retry_interval, self._retry_callback)
     
     def _retry_callback(self):
         """重试定时器回调"""
-        if self.retry_timer is not None:
-            self.retry_timer.cancel()
-            self.retry_timer = None
-        
+        self._clear_retry_timer()
         self._try_set_home()
     
     def _send_set_home_request(self):
         """发送设置Home点的服务请求"""
-        # 创建服务请求
-        req = CommandHome.Request()
-        req.current_gps = True
-        req.latitude = 0.0
-        req.longitude = 0.0
-        req.altitude = 0.0
+        # 创建服务请求 (MAV_CMD_DO_SET_HOME = 179)
+        req = CommandLong.Request()
+        req.broadcast = False
+        req.command = 179
+        req.confirmation = 0
+        req.param1 = 1.0 if self.use_current_gps else 0.0
+        req.param2 = 0.0
+        req.param3 = 0.0
+        req.param4 = 0.0
+        req.param5 = float(self.home_latitude)
+        req.param6 = float(self.home_longitude)
+        req.param7 = float(self.home_altitude)
 
         # 异步调用服务
         future = self.set_home_cli.call_async(req)
@@ -191,11 +201,47 @@ class AutoSetHomeNode(Node):
         try:
             result = future.result()
             if result is not None and getattr(result, 'success', False):
-                self.get_logger().info('✅ EKF origin set successfully!')
+                self._clear_retry_timer()
+                self.get_logger().info('✅ EKF origin set successfully via MAV_CMD_DO_SET_HOME!')
             else:
-                self.get_logger().error('❌ Failed to set EKF origin!')
+                result_code = getattr(result, 'result', None)
+                if self.retry_attempt >= self.max_retries:
+                    self.get_logger().error(
+                        f'❌ Failed to set EKF origin after {self.retry_attempt} attempts '
+                        f'(last result={result_code}).'
+                    )
+                    return
+
+                self._schedule_retry(
+                    f'❌ Failed to set EKF origin (success={getattr(result, "success", None)}, '
+                    f'result={result_code})'
+                )
         except Exception as e:
-            self.get_logger().error(f'Exception occurred while setting EKF origin: {e}')
+            if self.retry_attempt >= self.max_retries:
+                self.get_logger().error(f'Exception occurred while setting EKF origin: {e}')
+                return
+            self._schedule_retry(f'Exception occurred while setting EKF origin: {e}')
+
+    def _schedule_retry(self, reason: str):
+        """安排下一次重试"""
+        if self.retry_attempt >= self.max_retries:
+            self.get_logger().error(
+                f'{reason}. Reached retry limit ({self.max_retries}).'
+            )
+            return
+
+        self._clear_retry_timer()
+        self.get_logger().warn(
+            f'{reason}. Retrying in {self.retry_interval:.1f}s '
+            f'(next attempt {self.retry_attempt + 1}/{self.max_retries}).'
+        )
+        self.retry_timer = self.create_timer(self.retry_interval, self._retry_callback)
+
+    def _clear_retry_timer(self):
+        """清理已存在的重试定时器"""
+        if self.retry_timer is not None:
+            self.retry_timer.cancel()
+            self.retry_timer = None
 
 
 def main(args=None):

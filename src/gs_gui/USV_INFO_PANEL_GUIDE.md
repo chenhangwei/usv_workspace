@@ -264,7 +264,8 @@ def show_usv_detail_info(self):
     # 基本信息
     'namespace': 'usv_01',          # USV ID
     'mode': 'GUIDED',                # 飞行模式
-    'status': 'ACTIVE',              # 系统状态
+    'connected': True,               # 是否在线
+    'system_status': 'ACTIVE',       # 飞控系统状态（可选）
     'armed': True,                   # 是否解锁
     
     # 位置信息
@@ -273,26 +274,38 @@ def show_usv_detail_info(self):
         'y': -5.2,                   # Y 坐标 (m)
         'z': 0.3                     # Z 坐标 (m)
     },
-    'yaw': 45.6,                     # 航向角 (度)
+    'yaw': 0.8,                      # 航向角 (弧度)
     
     # 电池信息
     'battery_percentage': 75.0,      # 电池百分比 (%)
-    'voltage': 12.6,                 # 电压 (V)
-    'current': 2.3,                  # 电流 (A)
+    'battery_voltage': 12.6,         # 电压 (V)
+    'battery_current': 2.3,          # 电流 (A)
+    'temperature': 42.5,             # 机载温度 (°C，可选)
     
     # GPS 信息
-    'gps_satellite_count': 12,       # 卫星数量
-    'gps_accuracy': 0.8,             # GPS 精度 (m)
+    'gps_satellites_visible': 12,    # 卫星数量
+    'gps_eph': 0.8,                  # 水平精度 HDOP (m)
     
     # 速度信息
-    'ground_speed': 1.5,             # 地速 (m/s)
-    'heading': 48.2                  # 航向 (度)
+    'velocity': {
+        'linear': {'x': 1.1, 'y': 1.0}
+    },                               # 线速度向量，用于计算地速
+
+    # 预检与传感器状态
+    'prearm_ready': True,            # 预检是否通过
+    'prearm_warnings': [],           # 预检警告列表
+    'sensor_status': [               # 关键传感器健康度列表
+        {'name': 'GPS Fix', 'status': '3D Fix', 'detail': '12 sats', 'level': 'ok'}
+    ],
+    'vehicle_messages': [            # 最近的飞控消息（Optional）
+        {'severity': 6, 'severity_label': 'INFO', 'text': 'Mission uploaded', 'time': '12:01', 'timestamp': 0.0}
+    ]
 }
 ```
 
 ### 与现有数据的兼容性
 
-如果你的 `UsvStatus` 消息中没有某些字段（如 `current`、`gps_accuracy` 等），面板会自动显示 `--`，不会报错。
+如果 `UsvStatus` 消息中缺少部分字段（如 `battery_current`、`gps_eph`、`sensor_status` 等），面板会自动显示 `--` 或占位提示，不会报错。
 
 ---
 
@@ -347,17 +360,22 @@ def test_usv_info_panel():
     test_state = {
         'namespace': 'usv_01',
         'mode': 'GUIDED',
-        'status': 'ACTIVE',
+        'connected': True,
+        'system_status': 'ACTIVE',
         'armed': True,
         'position': {'x': 10.5, 'y': -5.2, 'z': 0.3},
-        'yaw': 45.6,
+        'yaw': 0.8,
         'battery_percentage': 75.0,
-        'voltage': 12.6,
-        'current': 2.3,
-        'gps_satellite_count': 12,
-        'gps_accuracy': 0.8,
-        'ground_speed': 1.5,
-        'heading': 48.2
+        'battery_voltage': 12.6,
+        'battery_current': 2.3,
+        'temperature': 42.5,
+        'gps_satellites_visible': 12,
+        'gps_eph': 0.8,
+        'velocity': {'linear': {'x': 1.1, 'y': 1.0}},
+        'prearm_ready': True,
+        'prearm_warnings': [],
+        'sensor_status': [],
+        'vehicle_messages': []
     }
     
     panel.update_state(test_state)

@@ -142,15 +142,14 @@ class ClusterTaskManager:
             self.start_task(usv_departed_list)
         # 如果任务正在运行，则切换暂停状态
         elif self.cluster_task_running:
-            self.cluster_task_paused = not self.cluster_task_paused
-            if self.cluster_task_paused:
+            if not self.cluster_task_paused:
+                self.cluster_task_paused = True
                 self.append_info("集群任务已暂停")
-                # 发送暂停信号给ROS节点
-                self.ros_signal.cluster_target_point_command.emit([])
+                self.ros_signal.cluster_pause_request.emit()
             else:
+                self.cluster_task_paused = False
                 self.append_info("集群任务已继续")
-                # 重新发送任务数据以恢复任务
-                self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+                self.ros_signal.cluster_resume_request.emit()
         
         return self.get_button_text()
     
@@ -229,7 +228,7 @@ class ClusterTaskManager:
         
         if reply == QMessageBox.Yes:
             # 发送停止信号给ROS节点
-            self.ros_signal.cluster_target_point_command.emit([])
+            self.ros_signal.cluster_stop_request.emit()
             
             # 重置任务状态
             self.cluster_task_running = False
@@ -281,15 +280,33 @@ class ClusterTaskManager:
         acked_usvs = progress_info.get('acked_usvs', 0)
         ack_rate = progress_info.get('ack_rate', 0)
         elapsed_time = progress_info.get('elapsed_time', 0)
+        state = progress_info.get('state', 'unknown')
+        state_label_map = {
+            'running': '运行中',
+            'paused': '已暂停',
+            'completed': '已完成',
+            'idle': '空闲',
+        }
+        state_label = state_label_map.get(state, '未知')
         
         # 更新标签显示
         progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
                         f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
-                        f"耗时 {elapsed_time:.1f}s")
+                        f"耗时 {elapsed_time:.1f}s, 状态 {state_label}")
         
         self.append_info(progress_text)
         
-        # 如果任务已完成，重置按钮状态
-        if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
+        if state == 'running':
+            self.cluster_task_running = True
+            self.cluster_task_paused = False
+        elif state == 'paused':
+            self.cluster_task_running = True
+            self.cluster_task_paused = True
+        elif state in ('completed', 'idle'):
             self.cluster_task_running = False
             self.cluster_task_paused = False
+        else:
+            # 兼容旧信号：通过 ack_rate 判断
+            if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
+                self.cluster_task_running = False
+                self.cluster_task_paused = False

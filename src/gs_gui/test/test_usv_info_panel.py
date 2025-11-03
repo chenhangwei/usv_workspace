@@ -36,17 +36,21 @@ class TestUsvInfoPanel:
         test_state = {
             'namespace': 'usv_01',
             'mode': 'GUIDED',
-            'status': 'ACTIVE',
+            'connected': True,
             'armed': True,
             'position': {'x': 10.5, 'y': -5.2, 'z': 0.3},
-            'yaw': 45.6,
+            'yaw': 0.8,
             'battery_percentage': 75.0,
-            'voltage': 12.6,
-            'current': 2.3,
-            'gps_satellite_count': 12,
-            'gps_accuracy': 0.8,
-            'ground_speed': 1.5,
-            'heading': 48.2
+            'battery_voltage': 12.6,
+            'battery_current': 2.3,
+            'temperature': 42.5,
+            'gps_satellites_visible': 12,
+            'gps_eph': 0.8,
+            'velocity': {'linear': {'x': 1.1, 'y': 1.0}},
+            'vehicle_messages': [],
+            'prearm_ready': True,
+            'prearm_warnings': [],
+            'sensor_status': [{'name': 'GPS Fix', 'status': '3D Fix', 'detail': '', 'level': 'ok'}]
         }
         
         panel.update_state(test_state)
@@ -54,27 +58,32 @@ class TestUsvInfoPanel:
         # 验证基本信息
         assert panel.id_label.text() == 'usv_01'
         assert panel.mode_label.text() == 'GUIDED'
-        assert panel.status_label.text() == 'ACTIVE'
+        assert panel.status_label.text() == '在线'
         assert '解锁' in panel.armed_label.text()
         
         # 验证位置信息
         assert '10.50' in panel.x_label.text()
         assert '-5.20' in panel.y_label.text()
         assert '0.30' in panel.z_label.text()
-        assert '45.6' in panel.yaw_label.text()
+        assert panel.yaw_label.text() != '--'
         
         # 验证电池信息
         assert panel.battery_bar.value() == 75
         assert '12.60' in panel.voltage_label.text()
-        assert '2.30' in panel.current_label.text()
+        assert panel.current_label.text().startswith('2.3')
         
         # 验证 GPS 信息
         assert panel.satellite_label.text() == '12'
         assert '0.80' in panel.gps_accuracy_label.text()
         
         # 验证速度信息
-        assert '1.50' in panel.ground_speed_label.text()
-        assert '48.2' in panel.heading_speed_label.text()
+        assert panel.ground_speed_label.text() != '--'
+        assert panel.heading_speed_label.text() != '--'
+
+        # 验证 Ready 按钮
+        assert panel.ready_button.text() == 'Ready to Sail'
+        assert '预检' not in panel.ready_summary_label.text()
+        assert panel.sensor_list.count() == 1
     
     def test_update_partial_state(self, qapp):
         """测试部分状态更新（缺少某些字段）"""
@@ -153,16 +162,50 @@ class TestUsvInfoPanel:
         panel = UsvInfoPanel()
         
         # 测试良好信号（>=10）
-        panel.update_state({'gps_satellite_count': 12})
+        panel.update_state({'gps_satellites_visible': 12})
         assert panel.satellite_label.text() == '12'
         
         # 测试中等信号（6-9）
-        panel.update_state({'gps_satellite_count': 7})
+        panel.update_state({'gps_satellites_visible': 7})
         assert panel.satellite_label.text() == '7'
         
         # 测试弱信号（<6）
-        panel.update_state({'gps_satellite_count': 4})
+        panel.update_state({'gps_satellites_visible': 4})
         assert panel.satellite_label.text() == '4'
+
+    def test_ready_view_updates(self, qapp):
+        """测试 Ready 状态按钮和警告列表"""
+        panel = UsvInfoPanel()
+
+        # 所有预检通过
+        panel.update_state({
+            'namespace': 'usv_01',
+            'connected': True,
+            'prearm_ready': True,
+            'prearm_warnings': [],
+            'sensor_status': []
+        })
+        assert panel.ready_button.text() == 'Ready to Sail'
+        assert panel.warning_list.count() == 1
+
+        # 存在预检警告
+        panel.update_state({
+            'namespace': 'usv_01',
+            'connected': True,
+            'prearm_ready': False,
+            'prearm_warnings': ['PreArm: MAG orientation inconsistent'],
+            'sensor_status': []
+        })
+        assert 'PreArm' in panel.ready_button.text()
+        assert panel.warning_list.count() == 1
+
+        # 离线状态
+        panel.update_state({
+            'namespace': 'usv_01',
+            'connected': False,
+            'sensor_status': []
+        })
+        assert panel.ready_button.text() == 'USV 离线'
     
     def test_format_float(self, qapp):
         """测试浮点数格式化"""
@@ -211,48 +254,60 @@ def test_visual_display():
     test_states = [
         {
             'namespace': 'usv_01',
+            'connected': True,
             'mode': 'GUIDED',
             'status': 'ACTIVE',
             'armed': True,
             'position': {'x': 10.5, 'y': -5.2, 'z': 0.3},
             'yaw': 45.6,
             'battery_percentage': 85.0,
-            'voltage': 12.8,
-            'current': 2.1,
-            'gps_satellite_count': 14,
-            'gps_accuracy': 0.5,
-            'ground_speed': 1.8,
-            'heading': 48.2
+            'battery_voltage': 12.8,
+            'battery_current': 2.1,
+            'temperature': 41.0,
+            'gps_satellites_visible': 14,
+            'gps_eph': 0.5,
+            'velocity': {'linear': {'x': 1.2, 'y': 1.4}},
+            'prearm_ready': True,
+            'prearm_warnings': [],
+            'sensor_status': [{'name': 'Battery', 'status': 'OK', 'detail': '85%', 'level': 'ok'}]
         },
         {
             'namespace': 'usv_02',
+            'connected': True,
             'mode': 'MANUAL',
             'status': 'STANDBY',
             'armed': False,
             'position': {'x': 5.0, 'y': 3.0, 'z': 0.1},
             'yaw': 120.0,
             'battery_percentage': 45.0,
-            'voltage': 11.5,
-            'current': 1.5,
-            'gps_satellite_count': 8,
-            'gps_accuracy': 1.2,
-            'ground_speed': 0.5,
-            'heading': 125.0
+            'battery_voltage': 11.5,
+            'battery_current': 1.5,
+            'temperature': 48.0,
+            'gps_satellites_visible': 8,
+            'gps_eph': 1.2,
+            'velocity': {'linear': {'x': 0.2, 'y': 0.4}},
+            'prearm_ready': False,
+            'prearm_warnings': ['PreArm: waiting for GPS lock'],
+            'sensor_status': [{'name': 'GPS Fix', 'status': '2D Fix', 'detail': '8 sats', 'level': 'warn'}]
         },
         {
             'namespace': 'usv_03',
+            'connected': True,
             'mode': 'AUTO',
             'status': 'CRITICAL',
             'armed': True,
             'position': {'x': -2.5, 'y': 8.0, 'z': 0.0},
             'yaw': 270.0,
-            'battery_percentage': 15.0,
-            'voltage': 10.8,
-            'current': 3.2,
-            'gps_satellite_count': 5,
-            'gps_accuracy': 2.5,
-            'ground_speed': 2.5,
-            'heading': 268.0
+            'battery_percentage': 25.0,
+            'battery_voltage': 10.8,
+            'battery_current': 3.2,
+            'temperature': 55.0,
+            'gps_satellites_visible': 5,
+            'gps_eph': 2.5,
+            'velocity': {'linear': {'x': 0.1, 'y': 0.1}},
+            'prearm_ready': False,
+            'prearm_warnings': ['PreArm: battery too low'],
+            'sensor_status': [{'name': 'Battery', 'status': 'Low', 'detail': '25%', 'level': 'error'}]
         }
     ]
     

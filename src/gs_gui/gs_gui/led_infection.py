@@ -42,12 +42,19 @@ class LedInfectionHandler:
                         id_a, id_b)
                     # 添加到传染对集合
                     infect_pairs.add((src_id, dst_id))
+                    self.node._usv_infection_sources[dst_id] = src_id
+                    self.node._usv_infecting.add(dst_id)
 
                     # 记录目标USV的原始LED模式（仅在首次传染时记录）
                     self._record_original_led_mode(dst_id)
 
                     # 发送传染指令（实时跟随传染源的颜色）
                     self._send_infection_command(dst_id, src_color)
+
+        # 对每个传染源立即同步一次颜色，避免等待下一轮状态上报
+        if infect_pairs:
+            for src_id in {pair[0] for pair in infect_pairs}:
+                self.propagate_color_update(src_id)
 
         # 恢复离开传染范围的USV
         self._restore_led_modes(infect_pairs)
@@ -81,19 +88,22 @@ class LedInfectionHandler:
         确定两个USV之间的LED传染源和目标。
         传染源基于 USV ID 的字符串排序决定（ID靠前为源）。
         """
-        # 从本地状态字典中获取 LED 状态 
-        state_a = self.node._usv_current_led_state.get(id_a, {'mode': 'color_switching', 'color': [255, 0, 0]})
-        state_b = self.node._usv_current_led_state.get(id_b, {'mode': 'color_switching', 'color': [255, 0, 0]})
-        
+        # 从本地状态字典中获取 LED 状态
+        state_a = self.node._usv_current_led_state.get(
+            id_a, {'mode': 'color_switching', 'color': [255, 0, 0]})
+        state_b = self.node._usv_current_led_state.get(
+            id_b, {'mode': 'color_switching', 'color': [255, 0, 0]})
+
         # 以编号字符串排序，靠前为主
         if id_a < id_b:
             src_id, dst_id = id_a, id_b
-            src_color = state_a['color'] # 使用本地状态的颜色
-            src_mode = state_a['mode'] # 使用本地状态的模式
+            src_color = list(state_a.get('color', [255, 0, 0]))
+            src_mode = state_a.get('mode', 'color_switching')
         else:
             src_id, dst_id = id_b, id_a
-            src_color = state_b['color'] # 使用本地状态的颜色
-            src_mode = state_b['mode'] # 使用本地状态的模式
+            src_color = list(state_b.get('color', [255, 0, 0]))
+            src_mode = state_b.get('mode', 'color_switching')
+
         # 返回传染源信息
         return src_id, dst_id, src_color, src_mode
 
@@ -104,18 +114,24 @@ class LedInfectionHandler:
         # 从本地状态字典中获取原始 LED 状态 ---
         if dst_id not in self.node._usv_led_modes:
             # 始终使用本地维护的状态作为原始状态
-            original_state = self.node._usv_current_led_state.get(dst_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
-            dst_led_mode = original_state['mode']
-            dst_led_color = original_state['color']
-            
+            original_state = self.node._usv_current_led_state.get(
+                dst_id, {'mode': 'color_switching', 'color': [255, 0, 0]})
+            dst_led_mode = original_state.get('mode', 'color_switching')
+            dst_led_color = list(original_state.get('color', [255, 0, 0]))
+
             self.node._usv_led_modes[dst_id] = (dst_led_mode, dst_led_color)
 
     def _send_infection_command(self, dst_id, src_color):
         """
         发送LED传染命令
         """
+        if not isinstance(src_color, (list, tuple)) or len(src_color) < 3:
+            return
+
+        sanitized = [max(0, min(255, int(c))) for c in src_color[:3]]
+
         # 构造传染命令
-        infect_cmd = f"color_infect|{src_color[0]},{src_color[1]},{src_color[2]}"
+        infect_cmd = f"color_infect|{sanitized[0]},{sanitized[1]},{sanitized[2]}"
         # 检查目标USV是否存在对应的LED发布者
         if dst_id in self.node.usv_manager.led_pubs:
             # 创建消息
@@ -150,3 +166,23 @@ class LedInfectionHandler:
                     self.node.publish_queue.put((self.node.usv_manager.led_pubs[dst_id], msg))
                 # 删除记录的LED模式
                 del self.node._usv_led_modes[dst_id]
+                self.node._usv_infection_sources.pop(dst_id, None)
+                self.node._usv_infecting.discard(dst_id)
+
+    def propagate_color_update(self, src_id):
+        """当传染源颜色变化时，同步更新所有被传染的USV。"""
+        state = self.node._usv_current_led_state.get(src_id)
+        if not state:
+            return
+
+        color = state.get('color')
+        if not isinstance(color, (list, tuple)) or len(color) < 3:
+            return
+
+        sanitized = [max(0, min(255, int(c))) for c in color[:3]]
+
+        for dst_id, mapped_src in list(self.node._usv_infection_sources.items()):
+            if mapped_src != src_id:
+                continue
+            self._record_original_led_mode(dst_id)
+            self._send_infection_command(dst_id, sanitized)

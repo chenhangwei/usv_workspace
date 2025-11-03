@@ -275,14 +275,14 @@ ros2 launch gs_bringup gs_launch.py
 - armed
 
 # 可选字段（新增，建议添加）
-- status
-- battery_percentage
-- voltage
-- current
-- gps_satellite_count
-- gps_accuracy
-- ground_speed
-- heading
+- connected / system_status
+- battery_percentage / battery_voltage / battery_current
+- temperature
+- gps_satellites_visible / gps_eph
+- velocity.linear.x / velocity.linear.y
+- prearm_ready / prearm_warnings
+- sensor_status
+- vehicle_messages
 ```
 
 如果某些字段不可用，面板会显示 `--`，不会报错。

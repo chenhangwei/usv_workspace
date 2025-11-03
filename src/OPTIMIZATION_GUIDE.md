@@ -586,8 +586,8 @@ class TestClusterController:
         # 模拟超时场景
         controller._handle_usv_timeout('usv_01', mock_target)
         
-        # 验证重试逻辑
-        assert mock_node._usv_ack_map['usv_01']['retry'] == 1
+    # 验证重试逻辑
+    assert controller._ack_states['usv_01'].retry == 1
     
     def test_ack_rate_threshold(self):
         """测试确认率阈值逻辑"""

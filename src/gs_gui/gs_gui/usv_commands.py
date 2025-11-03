@@ -33,7 +33,7 @@ class USVCommandHandler:
         ]
         self._rainbow_index = 0
         self._rainbow_timer = QTimer()
-        self._rainbow_timer.setInterval(5000)  # 5 秒间隔
+        self._rainbow_timer.setInterval(8000)  # 8 秒间隔
         self._rainbow_timer.setSingleShot(False)
         self._rainbow_timer.timeout.connect(self._send_next_rainbow_color)
     

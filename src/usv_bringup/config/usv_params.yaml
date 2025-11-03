@@ -33,12 +33,18 @@ usv_status_node:
     
     # 电池电压范围配置（基于实际电池特性）
     battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
-    battery_voltage_empty: 11.1             # 空电电压（V）- 电量显示0%，需要充电
+    battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
 
 auto_set_home_node:
   ros__parameters:
     # Home点设置延迟
     set_delay_sec: 3.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
+    use_current_gps: false                  # false 表示使用固定经纬度
+    home_latitude: 22.5180977               # 基站纬度（北纬）
+    home_longitude: 113.9007239             # 基站经度（东经）
+    home_altitude: -4.8                     # 基站高度（米，可根据实际高度微调）
+    retry_interval: 1.0                     # 重试发送命令的时间间隔（秒）
+    max_retries: 30                         # 最大重试次数
 
 # =============================================================================
 # 控制模块参数
@@ -96,14 +102,14 @@ usv_led_node:
     timer_period_low: 0.5                   # 低频定时器周期（秒）
     transition_duration: 3.0                # 颜色渐变持续时间（秒）
     hold_duration: 10.0                     # 颜色停留时间（秒）
-    low_battery_threshold: 11.1             # 低电量阈值（伏特）
-    recover_battery_threshold: 11.6         # 恢复电量阈值（伏特）
+    low_battery_threshold: 10.8            # 低电量阈值（伏特）
+    recover_battery_threshold: 11.3         # 恢复电量阈值（伏特）
     breath_step: 6                          # 呼吸灯步进值
 
 usv_sound_node:
   ros__parameters:
     # 声音播放配置
-    low_voltage_threshold: 11.1             # 低电压阈值（伏特）
+    low_voltage_threshold: 10.8           # 低电压阈值（伏特）
     sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']  # 常规声音类型列表
     moon_type: 'moon101'                    # 低电压声音类型
     min_play_interval: 2                    # 最小播放间隔（秒）
