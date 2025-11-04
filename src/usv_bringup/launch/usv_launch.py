@@ -39,7 +39,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_01',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -66,14 +66,14 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14560@192.168.68.53:14550',
+        default_value='',#udp://:14580@192.168.68.53:14550
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='1',
+        default_value='3',
         description='MAVROS目标系统ID'
     )
     
@@ -293,6 +293,7 @@ def generate_launch_description():
                     'setpoint_raw',    # 原始设定点（控制必需）
                     'global_position', # GPS 全局位置
                     'gps_status',      # GPS 状态和卫星数
+                    'param',           # 参数管理（地面站参数配置功能需要）
                 ],
                 
                 # 禁用参数同步，避免启动时读取 900+ 个参数造成超时
@@ -302,8 +303,17 @@ def generate_launch_description():
                 'vision_pose.enable': False,
                 
                 # 连接优化（ArduPilot 4.7 原生支持）
-                'conn.timeout': 5.0,
+                'conn.timeout': 10.0,  # 增加连接超时到 10 秒（原 5.0）
                 'conn.heartbeat_mav_type': 'MAV_TYPE_SURFACE_BOAT',
+                
+                # 命令超时配置
+                'cmd.command_timeout': 5.0,  # 命令确认超时（秒）
+                'cmd.use_comp_id_system_control': False,  # 禁用组件 ID 系统控制
+                
+                # 系统插件配置
+                'sys.min_version': [1, 0, 0],  # 最低 MAVLink 版本要求
+                'sys.conn_timeout_ms': 10000,  # 连接超时（毫秒）
+                'sys.rate_limit': 5.0,  # 版本请求速率限制（Hz）
                 
                 # MAVLink 2.0 优化（ArduPilot 4.7 完全支持）
                 'conn.use_mavlink2': True,  # 强制使用 MAVLink 2.0

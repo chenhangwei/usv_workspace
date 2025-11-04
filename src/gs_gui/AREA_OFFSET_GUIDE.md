@@ -11,9 +11,9 @@
 ```
 XML任务文件坐标 (Area相对坐标)
            ↓  [+area_center]
-    全局地图坐标 (Map全局坐标)
-           ↓  [-usv_boot_pose + 旋转]
-  USV本地坐标 (以USV启动点为原点)
+    全局地图坐标 (Map全局坐标，以A0基站为原点)
+           ↓  (无需转换，全局坐标=USV本地坐标)
+  USV本地坐标 (也以A0基站为原点，通过set_home设置)
 ```
 
 ### 1. Area坐标系
@@ -27,9 +27,9 @@ XML任务文件坐标 (Area相对坐标)
 - **用途**: 统一各USV的参考坐标系
 
 ### 3. USV本地坐标系
-- **定义**: 每艘USV独立的本地坐标系
-- **特点**: 以USV上电位置为原点
-- **用途**: 飞控实际执行的坐标系
+- **定义**: 每艘USV的本地坐标系
+- **特点**: **也以定位基站A0为原点**（通过set_home设置）
+- **用途**: 飞控实际执行的坐标系，与全局坐标系完全相同
 
 ## 使用方法
 
@@ -97,14 +97,12 @@ global_z = area_center_z + area_z
 
 **Global → USV Local:**
 ```python
-dx = global_x - boot_x
-dy = global_y - boot_y
-local_x = cos(-θ) * dx - sin(-θ) * dy
-local_y = sin(-θ) * dx + cos(-θ) * dy
-local_z = global_z - boot_z
+# 全局坐标系 = USV本地坐标系（都以A0为原点）
+# 无需转换，直接返回
+local_x = global_x
+local_y = global_y
+local_z = global_z
 ```
-
-其中 `(boot_x, boot_y, boot_z, θ)` 是USV的上电位姿。
 
 ## 注意事项
 
@@ -115,12 +113,9 @@ local_z = global_z - boot_z
    - 影响后续发送的所有导航目标
    - 已发送的目标点不受影响
 
-3. **Boot Pose标记**:
-   - 建议在任务开始前标记所有USV的Boot Pose
-   - 使用菜单 `Boot Pose` → `批量标记集群USV Boot Pose`
-
-4. **坐标系一致性**:
-   - 确保Area Center、任务文件和全局地图使用相同的坐标系定义
+3. **坐标系一致性**:
+   - 确保所有USV通过set_home设置相同的Home点（A0基站坐标）
+   - Area Center、任务文件和全局地图使用相同的坐标系定义
    - 建议使用GPS坐标或本地ENU坐标系
 
 5. **调试建议**:
@@ -130,11 +125,11 @@ local_z = global_z - boot_z
 ## 故障排查
 
 ### 问题1: USV导航到错误位置
-- **原因**: Area Center设置不正确
+- **原因**: Area Center设置不正确或Home点未正确设置
 - **解决**: 
   1. 检查全局地图坐标系定义
   2. 验证Area Center坐标值
-  3. 确认USV Boot Pose已正确标记
+  3. 确认所有USV的Home点都设置为A0基站坐标
 
 ### 问题2: 偏移量设置不生效
 - **原因**: 信号未正确连接
@@ -144,10 +139,10 @@ local_z = global_z - boot_z
   3. 重启地面站GUI
 
 ### 问题3: 不同USV导航结果不一致
-- **原因**: 各USV的Boot Pose不一致
+- **原因**: 各USV的Home点设置不一致
 - **解决**: 
-  1. 重新标记所有USV的Boot Pose
-  2. 确保所有USV在同一全局坐标系下
+  1. 确认所有USV的usv_params.yaml中Home点坐标完全相同
+  2. 检查auto_set_home_node日志，确认Home点设置成功
 
 ## API参考
 

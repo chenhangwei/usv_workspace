@@ -130,6 +130,14 @@ class MainWindow(QMainWindow):
         
         # 导航反馈信号
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
+        
+        # 飞控重启按钮连接（在 USV 详细面板中）
+        if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
+            self.usv_info_panel.reboot_button.clicked.connect(self.on_reboot_autopilot_clicked)
+        
+        # 参数配置按钮连接（在 USV 详细面板中）
+        if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'param_button'):
+            self.usv_info_panel.param_button.clicked.connect(self.on_param_config_clicked)
     
     def _connect_ui_signals(self):
         """连接UI按钮信号到处理函数"""
@@ -487,6 +495,140 @@ class MainWindow(QMainWindow):
                 self.ui_utils.append_info(f"处理行选择时出错: {exc}")
             except Exception:
                 pass
+    
+    def on_reboot_autopilot_clicked(self):
+        """
+        飞控重启按钮点击处理
+        
+        从当前选中的 USV 列表中获取 USV，发送重启命令
+        """
+        try:
+            # 获取当前选中的 USV（集群 + 离群）
+            current_selection = self.list_manager.usv_cluster_list + self.list_manager.usv_departed_list
+            if not current_selection:
+                QMessageBox.warning(self, "无选中 USV", "请先从列表中选择一个 USV")
+                return
+            
+            # 获取第一个选中的 USV（详细页通常显示第一个选中项）
+            selected_usv = current_selection[0] if current_selection else None
+            if not selected_usv:
+                return
+            
+            usv_id = selected_usv.get('namespace', 'unknown')
+            
+            # 确认对话框
+            reply = QMessageBox.question(
+                self,
+                "确认重启飞控",
+                f"确定要重启 {usv_id} 的飞控吗？\n\n"
+                f"⚠️ 飞控将重启并需要 10-20 秒恢复连接。\n"
+                f"⚠️ 重启期间将失去控制，请确保 USV 处于安全状态。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                # 发送重启信号
+                self.ros_signal.reboot_autopilot.emit(usv_id)
+                self.ui_utils.append_info(f"✅ 已向 {usv_id} 发送飞控重启命令")
+                
+                # 禁用按钮 20 秒（防止重复点击）
+                if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
+                    self.usv_info_panel.reboot_button.setEnabled(False)
+                    self.usv_info_panel.reboot_button.setText("⏳ 重启中…")
+                    QTimer.singleShot(20000, self._enable_reboot_button)
+        
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"发送重启命令失败: {e}")
+            self.ui_utils.append_info(f"❌ 发送重启命令失败: {e}")
+    
+    def on_param_config_clicked(self):
+        """
+        参数配置按钮点击处理
+        
+        从当前选中的 USV 打开参数配置窗口
+        """
+        try:
+            # 获取当前选中的 USV（集群 + 离群）
+            current_selection = self.list_manager.usv_cluster_list + self.list_manager.usv_departed_list
+            if not current_selection:
+                QMessageBox.warning(self, "无选中 USV", "请先从列表中选择一个 USV")
+                return
+            
+            # 获取第一个选中的 USV
+            selected_usv = current_selection[0] if current_selection else None
+            if not selected_usv:
+                return
+            
+            usv_namespace = selected_usv.get('namespace', 'unknown')
+            
+            # 检查是否已有参数窗口打开
+            if hasattr(self, '_param_windows') and usv_namespace in self._param_windows:
+                # 已有窗口，激活显示
+                window = self._param_windows[usv_namespace]
+                window.activateWindow()
+                window.raise_()
+                return
+            
+            # 创建参数管理器
+            from .param_manager import ParamManagerAsync
+            from .param_window import ParamWindow
+            
+            # 获取 ROS 节点（从父窗口传递）
+            if not hasattr(self, 'ros_node'):
+                QMessageBox.critical(
+                    self, 
+                    "错误", 
+                    "无法访问 ROS 节点，参数功能不可用"
+                )
+                return
+            
+            # 创建参数管理器
+            param_manager = ParamManagerAsync(self.ros_node, usv_namespace)
+            
+            # 创建参数窗口
+            param_window = ParamWindow(usv_namespace, param_manager, self)
+            
+            # 缓存窗口引用
+            if not hasattr(self, '_param_windows'):
+                self._param_windows = {}
+            self._param_windows[usv_namespace] = param_window
+            
+            # 窗口关闭时清理引用
+            def on_window_closed():
+                if hasattr(self, '_param_windows') and usv_namespace in self._param_windows:
+                    del self._param_windows[usv_namespace]
+            
+            param_window.finished.connect(on_window_closed)
+            
+            # 显示窗口
+            param_window.show()
+            self.ui_utils.append_info(f"✅ 已打开 {usv_namespace} 的参数配置窗口")
+            
+        except ImportError as e:
+            QMessageBox.critical(
+                self, 
+                "模块加载失败", 
+                f"参数管理模块加载失败:\n{e}\n\n"
+                f"请检查是否已安装相关依赖。"
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"打开参数窗口失败: {e}")
+            self.ui_utils.append_info(f"❌ 打开参数窗口失败: {e}")
+                    
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"发送重启命令失败: {e}")
+            self.ui_utils.append_info(f"❌ 发送重启命令失败: {e}")
+    
+    def _enable_reboot_button(self):
+        """重新启用重启按钮"""
+        try:
+            if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
+                self.usv_info_panel.reboot_button.setEnabled(True)
+                self.usv_info_panel.reboot_button.setText("🔄 重启飞控")
+                self.ui_utils.append_info("ℹ️ 重启按钮已恢复，飞控应已完成重启")
+        except Exception as e:
+            print(f"恢复重启按钮时出错: {e}")
 
     def closeEvent(self, event):
         """
@@ -596,10 +738,13 @@ def main(argv=None):
     rclpy.init(args=None)
     node = GroundStationNode(ros_signal)
     
+    # 将 ROS 节点传递给主窗口（用于参数管理功能）
+    main_window.ros_node = node
+    
     # 加载参数
     try:
         default_params_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), '..', '..', 'usv_bringup', 'config', 'gs_params.yaml'
+            os.path.dirname(__file__), '..', '..', 'gs_bringup', 'config', 'gs_params.yaml'
         ))
         if os.path.isfile(default_params_path):
             with open(default_params_path, 'r') as f:
@@ -650,6 +795,9 @@ def main(argv=None):
     ros_signal.cluster_resume_request.connect(node.resume_cluster_task_callback)
     ros_signal.cluster_stop_request.connect(node.stop_cluster_task_callback)
     ros_signal.str_command.connect(node.str_command_callback)
+    
+    # 连接飞控重启信号
+    ros_signal.reboot_autopilot.connect(node.reboot_autopilot_callback)
     
     # 连接节点信息信号
     try:

@@ -50,5 +50,8 @@ class ROSSignal(QObject):
     
     # LED传染模式控制信号
     led_infection_mode_changed = pyqtSignal(bool)  # LED传染模式开关，参数：True开启/False关闭
+    
+    # 飞控重启命令信号
+    reboot_autopilot = pyqtSignal(str)  # 飞控重启命令，参数：USV命名空间
 
 

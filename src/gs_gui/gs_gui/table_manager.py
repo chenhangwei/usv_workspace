@@ -237,7 +237,11 @@ class TableManager:
             vel_text = "(Unknown, Unknown, Unknown)"
 
         try:
-            yaw_text = f"{float(state.get('yaw', 0.0)):.2f}"
+            # 将偏航角从弧度转换为度数显示
+            import math
+            yaw_rad = float(state.get('yaw', 0.0))
+            yaw_deg = math.degrees(yaw_rad)
+            yaw_text = f"{yaw_deg:.1f}°"
         except Exception:
             yaw_text = "Unknown"
 

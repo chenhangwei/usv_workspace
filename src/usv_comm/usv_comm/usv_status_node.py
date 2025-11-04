@@ -1,7 +1,7 @@
 from math import sqrt, degrees, atan2
 import rclpy
 from rclpy.node import Node
-from mavros_msgs.msg import State, PositionTarget, WaypointReached, Altitude, ExtendedState
+from mavros_msgs.msg import State, PositionTarget, WaypointReached, Altitude, ExtendedState, GPSRAW
 from sensor_msgs.msg import BatteryState, NavSatFix
 from std_msgs.msg import String, Bool, Float32, Int32, Float64
 from common_interfaces.msg import UsvStatus
@@ -116,8 +116,10 @@ class UsvStatusNode(Node):
         self.usv_velocity = TwistStamped()
         self.usv_pose = PoseStamped()
         self.usv_gps = NavSatFix()
+        self.usv_gps_raw = GPSRAW()  # 添加 GPS RAW 数据
         self.usv_altitude = Altitude()
         self.usv_extended_state = ExtendedState()
+        self.usv_compass_hdg = 0.0  # 罗盘航向（度数）
         
         # 数据时效性跟踪（记录最后接收时间）
         self.last_state_time = 0.0
@@ -125,7 +127,9 @@ class UsvStatusNode(Node):
         self.last_velocity_time = 0.0
         self.last_pose_time = 0.0
         self.last_gps_time = 0.0
+        self.last_gps_raw_time = 0.0  # 添加 GPS RAW 时间戳
         self.last_altitude_time = 0.0
+        self.last_compass_time = 0.0  # 罗盘航向时间戳
         
         # 消息计数器
         self.message_count = 0
@@ -169,6 +173,7 @@ class UsvStatusNode(Node):
         # GPS 相关订阅（需要 MAVROS global_position 插件）
         # 如果 launch 文件中未加载该插件，这些订阅会失败但不影响节点运行
         self.has_gps = False
+        self.has_gps_raw = False
         self.has_altitude = False
         
         try:
@@ -180,6 +185,16 @@ class UsvStatusNode(Node):
         except Exception as e:
             self.get_logger().info('GPS topic 不可用（需要 MAVROS global_position 插件）')
         
+        # 订阅 GPS RAW 消息（包含卫星数）
+        try:
+            self.gps_raw_sub = self.create_subscription(
+                GPSRAW, 'gpsstatus/gps1/raw',
+                self.gps_raw_callback, qos_best_effort)
+            self.has_gps_raw = True
+            self.get_logger().info('GPS RAW topic 订阅成功（用于获取卫星数）')
+        except Exception as e:
+            self.get_logger().info(f'GPS RAW topic 不可用: {e}')
+        
         try:
             self.altitude_sub = self.create_subscription(
                 Altitude, 'altitude',
@@ -188,6 +203,17 @@ class UsvStatusNode(Node):
             self.get_logger().info('Altitude topic 订阅成功')
         except Exception as e:
             self.get_logger().info('Altitude topic 不可用（已包含在 global_position 中）')
+        
+        # 订阅罗盘航向（来自飞控的磁力计）
+        self.has_compass = False
+        try:
+            self.compass_sub = self.create_subscription(
+                Float64, 'global_position/compass_hdg',
+                self.compass_callback, qos_best_effort)
+            self.has_compass = True
+            self.get_logger().info('罗盘航向 topic 订阅成功')
+        except Exception as e:
+            self.get_logger().info(f'罗盘航向 topic 不可用: {e}')
 
         # 定时器，定期发布状态信息
         timer_period = 1.0 / publish_rate
@@ -238,11 +264,23 @@ class UsvStatusNode(Node):
             self.usv_gps = msg
             self.last_gps_time = time.time()
     
+    def gps_raw_callback(self, msg):
+        """GPS RAW 回调函数（包含卫星数）"""
+        if isinstance(msg, GPSRAW):
+            self.usv_gps_raw = msg
+            self.last_gps_raw_time = time.time()
+    
     def altitude_callback(self, msg):
         """高度回调函数"""
         if isinstance(msg, Altitude):
             self.usv_altitude = msg
             self.last_altitude_time = time.time()
+    
+    def compass_callback(self, msg):
+        """罗盘航向回调函数"""
+        if isinstance(msg, Float64):
+            self.usv_compass_hdg = msg.data
+            self.last_compass_time = time.time()
     
     def extended_state_callback(self, msg):
         """扩展状态回调函数"""
@@ -296,17 +334,21 @@ class UsvStatusNode(Node):
             # ==================== 电池信息 ====================
             msg.battery_voltage = max(0.0, getattr(self.usv_battery, 'voltage', 0.0))
             
-            # 基于电压计算电量百分比（使用配置的电压范围）
+            # 直接使用飞控计算的电量百分比
+            fcu_percentage = getattr(self.usv_battery, 'percentage', -1.0)
             voltage = msg.battery_voltage
-            if voltage >= self.battery_voltage_full:
-                battery_pct = 100.0
-            elif voltage <= self.battery_voltage_empty:
-                battery_pct = 0.0
+            
+            # 检查飞控百分比是否有效（0-1.0 之间为有效值）
+            if 0.0 <= fcu_percentage <= 1.0:
+                # 使用飞控计算的百分比（已考虑电流积分和电池特性）
+                battery_pct = fcu_percentage * 100.0
             else:
-                # 线性插值计算电量百分比
-                voltage_range = self.battery_voltage_full - self.battery_voltage_empty
-                voltage_above_empty = voltage - self.battery_voltage_empty
-                battery_pct = (voltage_above_empty / voltage_range) * 100.0
+                # 如果飞控未配置 BATT_CAPACITY，百分比将为 0 或无效值
+                battery_pct = 0.0
+                if self.battery_log_counter == 0:  # 只在第一次警告
+                    self.get_logger().warn(
+                        '⚠️ 飞控电量百分比无效，请在 QGroundControl 中配置 BATT_CAPACITY 参数！'
+                    )
             
             msg.battery_percentage = max(0.0, min(100.0, battery_pct))
             
@@ -315,8 +357,7 @@ class UsvStatusNode(Node):
             if self.battery_log_counter >= 10:
                 self.battery_log_counter = 0
                 self.get_logger().debug(
-                    f"电池: {voltage:.2f}V → {msg.battery_percentage:.1f}% "
-                    f"(范围: {self.battery_voltage_empty}V-{self.battery_voltage_full}V)"
+                    f"电池: {voltage:.2f}V, {msg.battery_percentage:.1f}% (飞控百分比: {fcu_percentage:.3f})"
                 )
             
             msg.battery_current = getattr(self.usv_battery, 'current', 0.0)
@@ -336,29 +377,70 @@ class UsvStatusNode(Node):
                 msg.position = Point()
             
             # 完整的欧拉角
-            try:
-                quaternion = (
-                    self.usv_pose.pose.orientation.x,
-                    self.usv_pose.pose.orientation.y,
-                    self.usv_pose.pose.orientation.z,
-                    self.usv_pose.pose.orientation.w
-                )
-                roll, pitch, yaw = euler_from_quaternion(quaternion)
-                msg.roll = float(roll)
-                msg.pitch = float(pitch)
-                msg.yaw = float(yaw)
+            # 优先使用罗盘航向，如果不可用则尝试从四元数计算
+            compass_available = self.has_compass and (time.time() - self.last_compass_time) < self.data_timeout
+            
+            if compass_available:
+                # 使用罗盘航向（最可靠的来源）
+                compass_deg = self.usv_compass_hdg
+                # 罗盘航向转换为 yaw（弧度，ENU坐标系）
+                # 罗盘: 0°=北, 90°=东, 180°=南, 270°=西
+                # ENU: 0=东(+X), 90°=北(+Y), 180°=西, 270°=南
+                # 转换: yaw_enu = 90 - compass_deg
+                import math
+                yaw_deg = 90.0 - compass_deg
+                msg.yaw = math.radians(yaw_deg)
                 
                 # 规范化yaw到[-π, π]
-                import math
                 while msg.yaw > math.pi:
                     msg.yaw -= 2 * math.pi
                 while msg.yaw < -math.pi:
                     msg.yaw += 2 * math.pi
+                
+                # roll 和 pitch 从四元数获取（如果可用）
+                try:
+                    quaternion = (
+                        self.usv_pose.pose.orientation.x,
+                        self.usv_pose.pose.orientation.y,
+                        self.usv_pose.pose.orientation.z,
+                        self.usv_pose.pose.orientation.w
+                    )
+                    # 检查四元数是否有效（不是单位四元数）
+                    if abs(quaternion[0]) > 0.01 or abs(quaternion[1]) > 0.01:
+                        roll, pitch, _ = euler_from_quaternion(quaternion)
+                        msg.roll = float(roll)
+                        msg.pitch = float(pitch)
+                    else:
+                        msg.roll = 0.0
+                        msg.pitch = 0.0
+                except Exception:
+                    msg.roll = 0.0
+                    msg.pitch = 0.0
+            else:
+                # 回退：尝试从四元数计算完整欧拉角
+                try:
+                    quaternion = (
+                        self.usv_pose.pose.orientation.x,
+                        self.usv_pose.pose.orientation.y,
+                        self.usv_pose.pose.orientation.z,
+                        self.usv_pose.pose.orientation.w
+                    )
+                    roll, pitch, yaw = euler_from_quaternion(quaternion)
+                    msg.roll = float(roll)
+                    msg.pitch = float(pitch)
+                    msg.yaw = float(yaw)
                     
-            except Exception as e:
-                msg.roll = 0.0
-                msg.pitch = 0.0
-                msg.yaw = 0.0
+                    # 规范化yaw到[-π, π]
+                    import math
+                    while msg.yaw > math.pi:
+                        msg.yaw -= 2 * math.pi
+                    while msg.yaw < -math.pi:
+                        msg.yaw += 2 * math.pi
+                        
+                except Exception as e:
+                    msg.roll = 0.0
+                    msg.pitch = 0.0
+                    msg.yaw = 0.0
             
             # 高度信息
             try:
@@ -379,14 +461,20 @@ class UsvStatusNode(Node):
                 msg.ground_speed = sqrt(vx*vx + vy*vy)
                 msg.climb_rate = vz
                 
-                # 计算航向（基于速度方向）
-                if msg.ground_speed > 0.1:  # 避免低速时航向跳变
+                # 航向计算：优先使用罗盘，其次速度方向，最后使用yaw
+                compass_available = self.has_compass and (time.time() - self.last_compass_time) < self.data_timeout
+                
+                if compass_available:
+                    # 优先：直接使用罗盘航向（最可靠）
+                    msg.heading = self.usv_compass_hdg
+                elif msg.ground_speed > 0.1:
+                    # 次选：高速时使用速度方向计算航向
                     heading_rad = atan2(vy, vx)
                     msg.heading = degrees(heading_rad)
                     if msg.heading < 0:
                         msg.heading += 360.0
                 else:
-                    # 低速时使用偏航角作为航向
+                    # 最后：低速时使用偏航角作为航向
                     msg.heading = degrees(msg.yaw)
                     if msg.heading < 0:
                         msg.heading += 360.0
@@ -409,23 +497,44 @@ class UsvStatusNode(Node):
                 else:
                     msg.gps_fix_type = 0
                 
-                # 从position_covariance获取精度
-                cov = getattr(self.usv_gps, 'position_covariance', [])
-                if len(cov) >= 9:
-                    # HDOP ≈ sqrt(cov[0] + cov[4]) 
-                    msg.gps_eph = float(sqrt(cov[0] + cov[4]) if (cov[0] + cov[4]) > 0 else 99.0)
-                    msg.gps_epv = float(sqrt(cov[8]) if cov[8] > 0 else 99.0)
+                # 从 GPS RAW 获取 HDOP/VDOP（优先）和卫星数
+                if self.has_gps_raw and (time.time() - self.last_gps_raw_time) < self.data_timeout:
+                    # GPS RAW 的 eph/epv 是 uint16，单位通常是 cm (即 0.01)
+                    # 如果值为 UINT16_MAX (65535)，表示未知
+                    raw_eph = self.usv_gps_raw.eph
+                    raw_epv = self.usv_gps_raw.epv
+                    
+                    if raw_eph < 65535:
+                        msg.gps_eph = float(raw_eph) / 100.0  # 转换为米
+                    else:
+                        msg.gps_eph = 99.0  # 未知值
+                    
+                    if raw_epv < 65535:
+                        msg.gps_epv = float(raw_epv) / 100.0  # 转换为米
+                    else:
+                        msg.gps_epv = 99.0  # 未知值
+                    
+                    # 卫星数
+                    msg.gps_satellites_visible = int(self.usv_gps_raw.satellites_visible)
                 else:
-                    msg.gps_eph = 99.0
-                    msg.gps_epv = 99.0
-                
-                # 从NavSatFix没有直接的卫星数，需要从其他topic获取
-                # 这里暂时设为0，后续可订阅 mavros/gpsstatus/gps1/raw
-                msg.gps_satellites_visible = 0
+                    # 如果没有 GPS RAW，尝试从 NavSatFix 的 position_covariance 计算
+                    cov = getattr(self.usv_gps, 'position_covariance', [])
+                    if len(cov) >= 9 and (cov[0] + cov[4]) > 0:
+                        # HDOP ≈ sqrt(cov[0] + cov[4])
+                        msg.gps_eph = float(sqrt(cov[0] + cov[4]))
+                        msg.gps_epv = float(sqrt(cov[8]) if cov[8] > 0 else 99.0)
+                    else:
+                        msg.gps_eph = 99.0
+                        msg.gps_epv = 99.0
+                    
+                    msg.gps_satellites_visible = 0
                 
             except Exception as e:
                 self.get_logger().error(f'GPS信息处理错误: {e}', throttle_duration_sec=10.0)
                 msg.gps_fix_type = 0
+                msg.gps_satellites_visible = 0
+                msg.gps_eph = 99.0
+                msg.gps_epv = 99.0
                 msg.gps_satellites_visible = 0
                 msg.gps_eph = 99.0
                 msg.gps_epv = 99.0

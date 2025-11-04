@@ -28,14 +28,33 @@ class StyleManager:
         self._resource_dir = self._find_resource_dir()
     
     def _find_resource_dir(self) -> str:
-        """查找资源目录路径"""
+        """查找资源目录路径（优先从源码目录查找）"""
+        # 优先尝试开发模式：从源代码目录查找
+        current_file = os.path.abspath(__file__)
+        dev_resource_dir = os.path.normpath(os.path.join(os.path.dirname(current_file), '..', 'resource'))
+        
+        if os.path.exists(dev_resource_dir):
+            return dev_resource_dir
+        
+        # 降级到安装模式（使用 share 目录）
+        try:
+            from ament_index_python.packages import get_package_share_directory
+            share_dir = get_package_share_directory('gs_gui')
+            install_resource_dir = os.path.join(share_dir, 'resource')
+            if os.path.exists(install_resource_dir):
+                return install_resource_dir
+        except Exception:
+            pass
+        
+        # 最后尝试 pkg_resources（旧方法，兼容性）
         try:
             import pkg_resources
             return pkg_resources.resource_filename('gs_gui', 'resource')
         except Exception:
-            # 开发模式：从源代码目录查找
-            current_file = os.path.abspath(__file__)
-            return os.path.join(os.path.dirname(current_file), '..', 'resource')
+            pass
+        
+        # 返回开发模式路径作为后备（即使不存在）
+        return dev_resource_dir
     
     def load_theme(self, theme_name: str = 'modern_dark') -> bool:
         """

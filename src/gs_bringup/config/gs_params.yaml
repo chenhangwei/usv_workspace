@@ -15,7 +15,21 @@ main_gui_app:
     distance_mode: '2d'           # '2d' or '3d' distance computation mode
 
     # area center: the mission coordinate frame origin in the global 'map' frame
-    # Set these to the global coordinates (map) of the area center (e.g., stadium center or lake center)
+    # 任务坐标系原点在全局坐标系中的位置
+    # 
+    # 坐标系说明：
+    # - 全局坐标系 (Map/Global): 以定位基站A0为原点的坐标系
+    # - 任务坐标系 (Area): XML任务文件中使用的相对坐标系
+    # 
+    # 使用方法：
+    # 1. 确定定位基站A0在GPS中的位置（通过auto_set_home_node设置为Home点）
+    # 2. 确定任务区域中心相对A0的位置偏移
+    # 3. 设置以下参数为该偏移量
+    # 
+    # 例如：如果任务区域中心在A0基站东50m、北30m处：
+    #   area_center_x: 50.0   (东向偏移，米)
+    #   area_center_y: 30.0   (北向偏移，米)
+    #   area_center_z: 0.0    (高度偏移，米)
     area_center_x: 0.0
     area_center_y: 0.0
     area_center_z: 0.0

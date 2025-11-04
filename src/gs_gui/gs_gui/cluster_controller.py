@@ -407,26 +407,70 @@ class ClusterController:
             gx = ax + float(p_area.get('x', 0.0))
             gy = ay + float(p_area.get('y', 0.0))
             gz = az + float(p_area.get('z', 0.0))
-            return {'x': gx, 'y': gy, 'z': gz}
-        except Exception:
+            
+            result = {'x': gx, 'y': gy, 'z': gz}
+            
+            # 调试日志（可通过参数控制）
+            if self.node.get_parameter('debug_coordinates').value if self.node.has_parameter('debug_coordinates') else False:
+                self.node.get_logger().debug(
+                    f"坐标转换 Area→Global: {p_area} + center{{'x':{ax},'y':{ay},'z':{az}}} = {result}"
+                )
+            
+            return result
+        except Exception as e:
+            self.node.get_logger().error(f"Area→Global 转换失败: {e}, 使用原始坐标")
             return {'x': float(p_area.get('x', 0.0)), 'y': float(p_area.get('y', 0.0)), 'z': float(p_area.get('z', 0.0))}
 
     def _global_to_usv_local(self, usv_id, p_global):
         """
-        将全局坐标转换为指定usv的本地坐标。
-        直接使用USV上电时的位置作为本地坐标系原点（usv_boot_pose）。
-        注意：系统假设USV飞控在上电时将当前位置设为本地坐标原点(0,0,0)
+        全局坐标 → USV本地坐标（实际上是同一个坐标系）
+        
+        坐标系说明:
+        - 全局坐标系 (Map/Global): 以定位基站A0为原点
+        - USV本地坐标系 (Local): **也是以定位基站A0为原点**（通过set_home设置）
+        - 两者是**同一个坐标系**，因此不需要转换！
+        
+        设计优势:
+        - 所有USV共享同一个坐标系（A0为原点），便于集群协作
+        - 导航目标点直接使用全局坐标（相对A0的偏移），飞控会正确处理
+        - 无需复杂的坐标变换，简化系统架构
+        
+        Args:
+            usv_id: USV标识符
+            p_global: 全局坐标 {'x', 'y', 'z'}（相对A0基站）
+        
+        Returns:
+            USV本地坐标 {'x', 'y', 'z'}（与全局坐标相同，因为都是相对A0）
         """
-        boot = self.node.usv_boot_pose.get(usv_id)
-        if boot is None:
-            # 未知启动点，直接返回全局坐标
-            return p_global
-        # 执行平移变换（不含旋转）
-        return {
-            'x': p_global.get('x', 0.0) - boot.get('x', 0.0),
-            'y': p_global.get('y', 0.0) - boot.get('y', 0.0),
-            'z': p_global.get('z', 0.0) - boot.get('z', 0.0)
+        import math
+        
+        # 全局坐标系 = USV本地坐标系（都以A0为原点），直接返回
+        result = {
+            'x': p_global.get('x', 0.0),
+            'y': p_global.get('y', 0.0),
+            'z': p_global.get('z', 0.0)
         }
+        
+        # 调试日志
+        if self.node.get_parameter('debug_coordinates').value if self.node.has_parameter('debug_coordinates') else False:
+            distance = math.sqrt(result['x']**2 + result['y']**2 + result['z']**2)
+            
+            self.node.get_logger().debug(
+                f"📍 Global→Local({usv_id}) [无需转换，都以A0为原点]:\n"
+                f"   输入坐标: ({p_global.get('x', 0):.2f}, {p_global.get('y', 0):.2f}, {p_global.get('z', 0):.2f})\n"
+                f"   输出坐标: ({result['x']:.2f}, {result['y']:.2f}, {result['z']:.2f})\n"
+                f"   距A0距离: {distance:.2f}m"
+            )
+        
+        # 验证结果合理性（相对A0基站的距离）
+        MAX_REASONABLE_DISTANCE = 1000.0  # 1km
+        distance = math.sqrt(result['x']**2 + result['y']**2 + result['z']**2)
+        if distance > MAX_REASONABLE_DISTANCE:
+            self.node.get_logger().warning(
+                f"⚠️ {usv_id} 目标点距A0基站距离异常: {distance:.2f}m > {MAX_REASONABLE_DISTANCE}m"
+            )
+        
+        return result
 
     def _proceed_to_next_step(self):
         """

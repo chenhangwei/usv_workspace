@@ -35,9 +35,14 @@ class AutoSetHomeNode(Node):
         # 声明并获取参数
         self.declare_parameter('set_delay_sec', 3.0)
         self.declare_parameter('use_current_gps', False)
-        self.declare_parameter('home_latitude', 22.5180977)
-        self.declare_parameter('home_longitude', 113.9007239)
-        self.declare_parameter('home_altitude', -4.8)
+        
+        # ⚠️ 重要：以下坐标应该是定位基站A0的GPS原点坐标，不是USV上电位置！
+        # 这个Home点将作为所有USV共享的全局坐标系原点
+        # 所有USV应该使用相同的Home点坐标（定位基站A0的位置）
+        self.declare_parameter('home_latitude', 22.5180977)   # A0基站纬度
+        self.declare_parameter('home_longitude', 113.9007239)  # A0基站经度
+        self.declare_parameter('home_altitude', -4.8)          # A0基站海拔高度（米）
+        
         self.declare_parameter('retry_interval', 1.0)
         self.declare_parameter('max_retries', 30)
         self.set_delay_sec = self.get_parameter('set_delay_sec').get_parameter_value().double_value
@@ -85,12 +90,22 @@ class AutoSetHomeNode(Node):
         # 创建 MAV_CMD_DO_SET_HOME 服务客户端（通过 COMMAND_LONG 发送）
         self.set_home_cli = self.create_client(CommandLong, 'cmd/command')
 
-        home_mode = 'current GPS position' if self.use_current_gps else (
-            f'fixed coordinates ({self.home_latitude:.7f}, {self.home_longitude:.7f}, {self.home_altitude:.2f}m)'
-        )
+        # 日志输出Home点设置模式
+        if self.use_current_gps:
+            home_mode = 'current GPS position (当前GPS位置)'
+            self.get_logger().warning(
+                '⚠️ 使用当前GPS位置作为Home点！'
+                '如果你的系统使用定位基站A0，请将 use_current_gps 设为 false'
+            )
+        else:
+            home_mode = (
+                f'fixed coordinates (定位基站A0): '
+                f'({self.home_latitude:.7f}, {self.home_longitude:.7f}, {self.home_altitude:.2f}m)'
+            )
+        
         self.get_logger().info(
-            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, target origin: {home_mode}. '
-            'Waiting for GPS fix...'
+            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, '
+            f'target origin: {home_mode}. Waiting for GPS fix...'
         )
     
     def gps_callback(self, msg):

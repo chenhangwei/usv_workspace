@@ -198,7 +198,8 @@ class UsvManager:
                         'z': round(msg.velocity.linear.z, 2)
                     }
                 },  # 速度信息
-                'yaw': round(msg.yaw, 2),  # 偏航角
+                'yaw': round(msg.yaw, 2),  # 偏航角（弧度）
+                'heading': round(msg.heading, 1),  # 航向角（度数，0-360）
                 'temperature': round(msg.temperature, 1),  # 温度
                 'gps_fix_type': msg.gps_fix_type,
                 'gps_satellites_visible': msg.gps_satellites_visible,

@@ -144,6 +144,7 @@ class GroundStationNode(Node):
 
         #Action 任务跟踪
         self._usv_active_goals = {} # 跟踪每个 USV 当前活动的 Action 句柄
+        self._send_locks = {}  # 每个 USV 的发送锁，防止并发冲突
 
         # 初始化传染机制相关变量
         self._usv_led_modes = {}  # USV LED模式字典
@@ -390,64 +391,95 @@ class GroundStationNode(Node):
         Returns:
             bool: 发送是否成功
         """
-        # 检查USV是否存在
-        if usv_id not in self.usv_manager.navigate_to_point_clients:
-            self.get_logger().error(f"未找到USV {usv_id} 的导航客户端")
-            # 更新导航状态为失败
-            self.ros_signal.nav_status_update.emit(usv_id, "失败")
+        # 获取或创建该 USV 的发送锁
+        if usv_id not in self._send_locks:
+            self._send_locks[usv_id] = threading.Lock()
+        
+        lock = self._send_locks[usv_id]
+        
+        # 尝试获取锁（非阻塞）
+        if not lock.acquire(blocking=False):
+            self.get_logger().warning(f"USV {usv_id} 正在发送导航目标，忽略本次请求")
             return False
+        
+        try:
+            # 验证目标点是否在安全范围内
+            try:
+                self._validate_target_position(x, y, z)
+            except ValueError as e:
+                self.get_logger().error(f"USV {usv_id} 目标点验证失败: {e}")
+                self.ros_signal.nav_status_update.emit(usv_id, "失败")
+                return False
+            
+            # 检查USV是否存在
+            if usv_id not in self.usv_manager.navigate_to_point_clients:
+                self.get_logger().error(f"未找到USV {usv_id} 的导航客户端")
+                # 更新导航状态为失败
+                self.ros_signal.nav_status_update.emit(usv_id, "失败")
+                return False
 
-        # 检查Action服务器是否可用
-        action_client = self.usv_manager.navigate_to_point_clients[usv_id]
-        if not action_client.wait_for_server(timeout_sec=1.0):
-            self.get_logger().error(f"USV {usv_id} 的导航Action服务器未响应")
-            # 更新导航状态为失败
-            self.ros_signal.nav_status_update.emit(usv_id, "失败")
-            return False
+            # 检查Action服务器是否可用（增加超时时间以适应网络延迟）
+            action_client = self.usv_manager.navigate_to_point_clients[usv_id]
+            if not action_client.wait_for_server(timeout_sec=3.0):
+                self.get_logger().error(f"USV {usv_id} 的导航Action服务器未响应（超时3秒）")
+                # 更新导航状态为失败
+                self.ros_signal.nav_status_update.emit(usv_id, "失败")
+                return False
 
-        # 构造目标消息
-        goal_msg = NavigateToPoint.Goal()
-        goal_msg.goal = PoseStamped()
-        # 设置时间戳为当前时间
-        goal_msg.goal.header.stamp = self.get_clock().now().to_msg()
-        # 设置坐标系为map
-        goal_msg.goal.header.frame_id = 'map'
-        # 设置目标点位置
-        goal_msg.goal.pose.position.x = float(x)
-        goal_msg.goal.pose.position.y = float(y)
-        goal_msg.goal.pose.position.z = float(z)  # 添加z坐标
+            # 构造目标消息
+            goal_msg = NavigateToPoint.Goal()
+            goal_msg.goal = PoseStamped()
+            # 设置时间戳为当前时间
+            goal_msg.goal.header.stamp = self.get_clock().now().to_msg()
+            # 设置坐标系为map
+            goal_msg.goal.header.frame_id = 'map'
+            # 设置目标点位置
+            goal_msg.goal.pose.position.x = float(x)
+            goal_msg.goal.pose.position.y = float(y)
+            goal_msg.goal.pose.position.z = float(z)  # 添加z坐标
 
-        # 使用四元数表示偏航角
-        from tf_transformations import quaternion_from_euler
-        # 计算四元数
-        quat = quaternion_from_euler(0, 0, float(yaw))
-        # 设置四元数
-        goal_msg.goal.pose.orientation.x = quat[0]
-        goal_msg.goal.pose.orientation.y = quat[1]
-        goal_msg.goal.pose.orientation.z = quat[2]
-        goal_msg.goal.pose.orientation.w = quat[3]
+            # 使用四元数表示偏航角
+            from tf_transformations import quaternion_from_euler
+            # 计算四元数
+            quat = quaternion_from_euler(0, 0, float(yaw))
+            # 设置四元数
+            goal_msg.goal.pose.orientation.x = quat[0]
+            goal_msg.goal.pose.orientation.y = quat[1]
+            goal_msg.goal.pose.orientation.z = quat[2]
+            goal_msg.goal.pose.orientation.w = quat[3]
 
-        # 设置超时时间
-        goal_msg.timeout = float(timeout)
+            # 设置超时时间
+            goal_msg.timeout = float(timeout)
 
-        # 更新导航状态为执行中
-        self.ros_signal.nav_status_update.emit(usv_id, "执行中")
+            # 更新导航状态为执行中
+            self.ros_signal.nav_status_update.emit(usv_id, "执行中")
 
-        # 取消旧任务
-        self._cancel_active_goal(usv_id) # 取消旧任务
+            # 取消旧任务并等待取消完成（避免竞态条件）
+            cancel_future = self._cancel_active_goal(usv_id)
+            if cancel_future is not None:
+                # 等待取消完成，最多1秒
+                try:
+                    rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=1.0)
+                    self.get_logger().info(f"USV {usv_id} 旧任务已取消")
+                except Exception as e:
+                    self.get_logger().warning(f"等待 USV {usv_id} 取消完成时超时: {e}")
 
-        # 异步发送目标
-        send_goal_future = action_client.send_goal_async(
-            goal_msg,
-            feedback_callback=lambda feedback_msg, uid=usv_id: self.nav_feedback_callback(feedback_msg, uid))
+            # 异步发送目标
+            send_goal_future = action_client.send_goal_async(
+                goal_msg,
+                feedback_callback=lambda feedback_msg, uid=usv_id: self.nav_feedback_callback(feedback_msg, uid))
 
-        # 添加结果回调
-        send_goal_future.add_done_callback(
-            lambda future, uid=usv_id: self.nav_goal_response_callback(future, uid))
+            # 添加结果回调
+            send_goal_future.add_done_callback(
+                lambda future, uid=usv_id: self.nav_goal_response_callback(future, uid))
 
-        # 记录日志信息
-        self.get_logger().info(f"向USV {usv_id} 发送导航目标点: ({x}, {y}, {z}), 偏航: {yaw}, 超时: {timeout}")
-        return True
+            # 记录日志信息
+            self.get_logger().info(f"向USV {usv_id} 发送导航目标点: ({x}, {y}, {z}), 偏航: {yaw}, 超时: {timeout}")
+            return True
+            
+        finally:
+            # 释放锁
+            lock.release()
 
     # 导航目标响应回调
     def nav_goal_response_callback(self, future, usv_id):
@@ -532,22 +564,70 @@ class GroundStationNode(Node):
             # 更新导航状态为失败
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
 
+    def _validate_target_position(self, x, y, z):
+        """
+        验证目标点是否在安全范围内
+        
+        Args:
+            x (float): 目标点X坐标
+            y (float): 目标点Y坐标
+            z (float): 目标点Z坐标
+            
+        Raises:
+            ValueError: 如果目标点超出安全范围
+        """
+        import math
+        
+        # 定义安全范围参数（可根据实际需求调整）
+        MAX_DISTANCE = 500.0  # 最大水平距离 500m
+        MAX_ALTITUDE = 10.0   # 最大高度 10m（USV 通常在水面）
+        
+        # 计算2D距离
+        distance_2d = math.sqrt(x**2 + y**2)
+        
+        # 检查水平距离
+        if distance_2d > MAX_DISTANCE:
+            raise ValueError(
+                f"目标点距离过远: {distance_2d:.2f}m > {MAX_DISTANCE}m"
+            )
+        
+        # 检查高度（通常 USV 不应该有太大的Z坐标）
+        if abs(z) > MAX_ALTITUDE:
+            raise ValueError(
+                f"目标点高度异常: {abs(z):.2f}m > {MAX_ALTITUDE}m"
+            )
+
     def _cancel_active_goal(self, usv_id):
         """
         取消指定 USV 当前活动的 Action 任务
+        
+        Args:
+            usv_id (str): USV标识符
+            
+        Returns:
+            Future or None: 取消操作的Future对象，如果没有活动任务则返回None
         """
         if usv_id in self._usv_active_goals:
             goal_handle = self._usv_active_goals[usv_id]
-            # 检查句柄是否仍然有效
-            if goal_handle.status in [rclpy.action.client.GoalStatus.STATUS_EXECUTING, rclpy.action.client.GoalStatus.STATUS_ACCEPTED]:
-                self.get_logger().warn(f"正在取消 USV {usv_id} 的上一个导航任务...")
+            
+            # 扩展状态检查，包含正在取消的状态
+            valid_statuses = [
+                rclpy.action.client.GoalStatus.STATUS_ACCEPTED,
+                rclpy.action.client.GoalStatus.STATUS_EXECUTING,
+                rclpy.action.client.GoalStatus.STATUS_CANCELING
+            ]
+            
+            if goal_handle.status in valid_statuses:
+                self.get_logger().warn(f"正在取消 USV {usv_id} 的上一个导航任务（状态: {goal_handle.status}）...")
                 cancel_future = goal_handle.cancel_goal_async()
-                
-                # 可选：等待取消结果以确保取消请求已发送，但这里不做阻塞处理
-                # cancel_future.add_done_callback(...)
-                
-            # 无论是否取消成功，都从跟踪字典中删除
-            del self._usv_active_goals[usv_id]
+                # 从跟踪字典中删除
+                del self._usv_active_goals[usv_id]
+                return cancel_future  # 返回Future以便调用方等待
+            else:
+                # 状态不需要取消，直接删除
+                del self._usv_active_goals[usv_id]
+        
+        return None
 
     # 导航反馈回调
     def nav_feedback_callback(self, feedback_msg, usv_id):
@@ -730,6 +810,89 @@ class GroundStationNode(Node):
             msg: 字符串命令消息
         """
         self.command_processor.str_command_callback(msg)
+    
+    def reboot_autopilot_callback(self, usv_namespace):
+        """
+        飞控重启回调
+        
+        发送 MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 命令重启飞控
+        
+        Args:
+            usv_namespace: USV 命名空间（如 'usv_01'）
+        """
+        try:
+            # 导入 MAVROS 命令服务
+            from mavros_msgs.srv import CommandLong
+            
+            # 创建服务客户端（MAVROS 命令服务在节点命名空间下，不需要 mavros 子命名空间）
+            service_name = f'/{usv_namespace}/cmd/command'
+            client = self.create_client(CommandLong, service_name)
+            
+            # 等待服务可用
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().error(f'❌ 服务不可用: {service_name}')
+                try:
+                    self.ros_signal.node_info.emit(f'❌ {usv_namespace} 飞控重启失败：服务不可用')
+                except Exception:
+                    pass
+                return
+            
+            # 构建重启命令
+            request = CommandLong.Request()
+            request.broadcast = False
+            request.command = 246  # MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+            request.confirmation = 0
+            request.param1 = 1.0   # 重启飞控 (1=reboot autopilot)
+            request.param2 = 0.0   # 不重启机载计算机
+            request.param3 = 0.0
+            request.param4 = 0.0
+            request.param5 = 0.0
+            request.param6 = 0.0
+            request.param7 = 0.0
+            
+            # 异步发送命令
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda f: self._handle_reboot_response(f, usv_namespace)
+            )
+            
+            self.get_logger().info(f'✅ 已向 {usv_namespace} 发送飞控重启命令 (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN)')
+            try:
+                self.ros_signal.node_info.emit(f'✅ 已向 {usv_namespace} 发送飞控重启命令')
+            except Exception:
+                pass
+            
+        except Exception as e:
+            self.get_logger().error(f'❌ 发送重启命令失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'❌ 发送重启命令失败: {e}')
+            except Exception:
+                pass
+    
+    def _handle_reboot_response(self, future, usv_namespace):
+        """处理重启命令响应"""
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f'✅ {usv_namespace} 飞控重启命令已确认')
+                try:
+                    self.ros_signal.node_info.emit(f'✅ {usv_namespace} 飞控重启命令已确认，请等待 10-20 秒')
+                except Exception:
+                    pass
+            else:
+                self.get_logger().warn(
+                    f'⚠️ {usv_namespace} 飞控重启命令失败: result={response.result}'
+                )
+                try:
+                    self.ros_signal.node_info.emit(f'⚠️ {usv_namespace} 飞控重启命令失败')
+                except Exception:
+                    pass
+        except Exception as e:
+            self.get_logger().error(f'❌ 重启命令响应处理失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'❌ 重启命令响应处理失败: {e}')
+            except Exception:
+                pass
 
     def handle_status_text(self, usv_id, msg):
         """处理飞控 status_text 消息，收集预检提示与车辆消息."""
@@ -890,9 +1053,11 @@ class GroundStationNode(Node):
                 'level': battery_level,
             })
 
+        # 温度检查（从毫摄氏度转换为摄氏度）
         temperature = state.get('temperature')
         try:
-            temp_val = float(temperature) if temperature is not None else None
+            temp_raw = float(temperature) if temperature is not None else None
+            temp_val = temp_raw / 1000.0 if temp_raw is not None else None  # 毫度 → 度
         except (TypeError, ValueError):
             temp_val = None
         if temp_val is not None and temp_val > 0:

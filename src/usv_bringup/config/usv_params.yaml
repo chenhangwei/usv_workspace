@@ -39,10 +39,18 @@ auto_set_home_node:
   ros__parameters:
     # Home点设置延迟
     set_delay_sec: 3.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
-    use_current_gps: false                  # false 表示使用固定经纬度
+    
+    # ⚠️ 重要说明：
+    # use_current_gps: false 表示使用固定的A0基站坐标作为Home点
+    # 所有USV共享同一个Home点（A0基站），这样所有USV的本地坐标系都统一以A0为原点
+    # 这是多USV系统的关键设计：全局坐标系 = USV本地坐标系 = 以A0为原点
+    use_current_gps: false                  # false=使用A0基站坐标，true=使用USV当前位置（不推荐）
+    
+    # A0定位基站的GPS坐标（所有USV共享的坐标系原点）
     home_latitude: 22.5180977               # 基站纬度（北纬）
     home_longitude: 113.9007239             # 基站经度（东经）
-    home_altitude: -4.8                     # 基站高度（米，可根据实际高度微调）
+    home_altitude: -4.8                     # 基站高度（米，相对海平面）
+    
     retry_interval: 1.0                     # 重试发送命令的时间间隔（秒）
     max_retries: 30                         # 最大重试次数
 
@@ -102,16 +110,20 @@ usv_led_node:
     timer_period_low: 0.5                   # 低频定时器周期（秒）
     transition_duration: 3.0                # 颜色渐变持续时间（秒）
     hold_duration: 10.0                     # 颜色停留时间（秒）
-    low_battery_threshold: 10.8            # 低电量阈值（伏特）
-    recover_battery_threshold: 11.3         # 恢复电量阈值（伏特）
+    
+    # ⚠️ 电池低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
+    low_battery_percentage: 10.0            # 低电量百分比阈值（%）- 低于此值进入红色呼吸灯
+    recover_battery_percentage: 15.0        # 恢复电量百分比阈值（%）- 高于此值退出红色呼吸灯
     breath_step: 6                          # 呼吸灯步进值
 
 usv_sound_node:
   ros__parameters:
     # 声音播放配置
-    low_voltage_threshold: 10.8           # 低电压阈值（伏特）
+    # ⚠️ 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
+    low_battery_percentage: 10.0            # 低电量百分比阈值（%）
+    
     sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']  # 常规声音类型列表
-    moon_type: 'moon101'                    # 低电压声音类型
+    moon_type: 'moon101'                    # 低电量声音类型
     min_play_interval: 2                    # 最小播放间隔（秒）
     max_play_interval: 10                   # 最大播放间隔（秒）
     min_play_count: 1                       # 最小播放次数

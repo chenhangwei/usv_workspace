@@ -8,6 +8,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QListWidget, QListWidgetItem, QAbstractItemView)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
+from .compass_widget import CompassWidget
 
 # 兼容性定义
 try:
@@ -97,10 +98,6 @@ class UsvInfoPanel(QWidget):
         # ==================== 基本信息组 ====================
         basic_group = self._create_basic_info_group()
         content_layout.addWidget(basic_group)
-        
-        # ==================== Ready 状态组 ====================
-        readiness_group = self._create_readiness_group()
-        content_layout.addWidget(readiness_group)
 
         # ==================== 位置信息组 ====================
         position_group = self._create_position_info_group()
@@ -117,6 +114,10 @@ class UsvInfoPanel(QWidget):
         # ==================== 速度信息组 ====================
         velocity_group = self._create_velocity_info_group()
         content_layout.addWidget(velocity_group)
+        
+        # ==================== Ready 状态组 ====================
+        readiness_group = self._create_readiness_group()
+        content_layout.addWidget(readiness_group)
 
         # ==================== 飞控消息组 ====================
         messages_group = self._create_vehicle_message_group()
@@ -266,6 +267,24 @@ class UsvInfoPanel(QWidget):
         self.ready_button.setMinimumHeight(44)
         self._apply_button_style(self.ready_button, "#95a5a6")
         layout.addWidget(self.ready_button)
+        
+        # 飞控重启按钮
+        self.reboot_button = QPushButton("🔄 重启飞控")
+        self.reboot_button.setEnabled(True)
+        self.reboot_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.reboot_button.setMinimumHeight(40)
+        self._apply_button_style(self.reboot_button, "#e67e22")  # 橙色
+        self.reboot_button.setToolTip("向飞控发送重启命令（需10-20秒重启）")
+        layout.addWidget(self.reboot_button)
+        
+        # 参数配置按钮
+        self.param_button = QPushButton("⚙️ 飞控参数配置")
+        self.param_button.setEnabled(True)
+        self.param_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.param_button.setMinimumHeight(40)
+        self._apply_button_style(self.param_button, "#9b59b6")  # 紫色
+        self.param_button.setToolTip("打开飞控参数配置窗口（读取/修改参数）")
+        layout.addWidget(self.param_button)
 
         # Ready 摘要信息
         self.ready_summary_label = QLabel("未接收到预检数据")
@@ -416,28 +435,43 @@ class UsvInfoPanel(QWidget):
         return group
     
     def _create_velocity_info_group(self):
-        """创建速度信息组"""
-        group = QGroupBox("💨 速度信息")
+        """创建速度信息组（带罗盘显示）"""
+        group = QGroupBox("💨 速度 & 航向")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#e74c3c"))
         
-        layout = QGridLayout()
-        layout.setSpacing(5)
-        layout.setContentsMargins(10, 12, 10, 10)
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.setContentsMargins(10, 12, 10, 10)
+        
+        # 上半部分：文字信息
+        info_layout = QGridLayout()
+        info_layout.setSpacing(5)
         
         # 地速
         self.ground_speed_label = self._create_value_label("--")
-        layout.addWidget(self._create_key_label("地速:"), 0, 0)
-        layout.addWidget(self.ground_speed_label, 0, 1)
-        layout.addWidget(QLabel("m/s"), 0, 2)
+        info_layout.addWidget(self._create_key_label("地速:"), 0, 0)
+        info_layout.addWidget(self.ground_speed_label, 0, 1)
+        info_layout.addWidget(QLabel("m/s"), 0, 2)
         
-        # 航向速度
+        # 航向数字
         self.heading_speed_label = self._create_value_label("--")
-        layout.addWidget(self._create_key_label("航向:"), 1, 0)
-        layout.addWidget(self.heading_speed_label, 1, 1)
-        layout.addWidget(QLabel("°"), 1, 2)
+        info_layout.addWidget(self._create_key_label("航向:"), 1, 0)
+        info_layout.addWidget(self.heading_speed_label, 1, 1)
+        info_layout.addWidget(QLabel("°"), 1, 2)
         
-        layout.setColumnStretch(1, 1)
-        group.setLayout(layout)
+        info_layout.setColumnStretch(1, 1)
+        main_layout.addLayout(info_layout)
+        
+        # 下半部分：罗盘图形显示
+        compass_container = QHBoxLayout()
+        compass_container.addStretch()
+        self.compass_widget = CompassWidget()
+        self.compass_widget.setFixedSize(140, 140)  # 固定尺寸，避免拉伸
+        compass_container.addWidget(self.compass_widget)
+        compass_container.addStretch()
+        main_layout.addLayout(compass_container)
+        
+        group.setLayout(main_layout)
         return group
 
     def _create_vehicle_message_group(self):
@@ -612,13 +646,23 @@ class UsvInfoPanel(QWidget):
             self._update_armed_style(armed)
             
             # 更新位置信息
+            # 更新位置信息
             pos = state.get('position', {}) or {}
-            self.x_label.setText(self._format_float(pos.get('x')))
-            self.y_label.setText(self._format_float(pos.get('y')))
-            self.z_label.setText(self._format_float(pos.get('z')))
+            self.x_label.setText(self._format_float(pos.get('x'), precision=2))
+            self.y_label.setText(self._format_float(pos.get('y'), precision=2))
+            self.z_label.setText(self._format_float(pos.get('z'), precision=2))
             
-            yaw = state.get('yaw')
-            self.yaw_label.setText(self._format_float(yaw, precision=1))
+            # Yaw 角度（从弧度转换为度数显示）
+            yaw_rad = state.get('yaw')
+            if yaw_rad is not None:
+                try:
+                    import math
+                    yaw_deg = math.degrees(float(yaw_rad))
+                    self.yaw_label.setText(self._format_float(yaw_deg, precision=1))
+                except (ValueError, TypeError):
+                    self.yaw_label.setText("--")
+            else:
+                self.yaw_label.setText("--")
             
             # 更新电池信息
             battery_pct = state.get('battery_percentage', 0)
@@ -636,9 +680,10 @@ class UsvInfoPanel(QWidget):
             current = state.get('battery_current', None)
             self.current_label.setText(self._format_float(current, precision=1))
             
-            # 温度信息
+            # 温度信息（从毫摄氏度转换为摄氏度）
             try:
-                temp_celsius = float(state.get('temperature'))
+                temp_raw = float(state.get('temperature'))
+                temp_celsius = temp_raw / 1000.0  # 转换：毫度 → 度
             except (ValueError, TypeError):
                 temp_celsius = None
             if temp_celsius is not None:
@@ -674,14 +719,15 @@ class UsvInfoPanel(QWidget):
             except (ValueError, TypeError):
                 self.ground_speed_label.setText("--")
             
-            # 航向（从 yaw 获取，转换为度）
+            # 航向（直接从 heading 字段获取，单位为度）
             try:
-                import math
-                yaw_rad = float(state.get('yaw', 0.0))
-                heading_deg = math.degrees(yaw_rad)
+                heading_deg = float(state.get('heading', 0.0))
                 self.heading_speed_label.setText(self._format_float(heading_deg, precision=1))
+                # 更新罗盘显示
+                self.compass_widget.set_heading(heading_deg)
             except (ValueError, TypeError):
                 self.heading_speed_label.setText("--")
+                self.compass_widget.set_heading(0.0)
             
         except Exception as e:
             print(f"更新 USV 信息面板失败: {e}")
@@ -708,6 +754,7 @@ class UsvInfoPanel(QWidget):
         
         self.ground_speed_label.setText("--")
         self.heading_speed_label.setText("--")
+        self.compass_widget.set_heading(0.0)  # 重置罗盘显示
         
         # 重置温度状态标志
         self._is_high_temperature = False

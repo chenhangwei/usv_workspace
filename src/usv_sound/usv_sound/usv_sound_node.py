@@ -59,6 +59,16 @@ class UsvSoundNode(Node):
         
         self.get_logger().info('声音播放节点已启动')
         
+        # 声明参数
+        # ⚠️ 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
+        self.declare_parameter('low_battery_percentage', 10.0)        # 低电量阈值（百分比）
+        self.declare_parameter('sound_types', ['gaga101', 'gaga102', 'gaga103', 'gaga104'])
+        self.declare_parameter('moon_type', 'moon101')
+        self.declare_parameter('min_play_interval', 2)
+        self.declare_parameter('max_play_interval', 10)
+        self.declare_parameter('min_play_count', 1)
+        self.declare_parameter('max_play_count', 3)
+        
         # 初始化音频相关变量
         try:
             self.audio = pyaudio.PyAudio()
@@ -69,9 +79,12 @@ class UsvSoundNode(Node):
         self.loop_thread = None
         self.loop_stop_event = threading.Event()
         self.low_voltage = False
-        self.sound_types = ['gaga101', 'gaga102', 'gaga103', 'gaga104']
-        self.moon_type = 'moon101'
+        
+        # 从参数读取配置
+        self.sound_types = self.get_parameter('sound_types').get_parameter_value().string_array_value
+        self.moon_type = self.get_parameter('moon_type').get_parameter_value().string_value
         self.voltage = 12.0
+        self.battery_percentage = 100.0
 
     def gs_sound_callback(self, msg):
         """
@@ -98,7 +111,7 @@ class UsvSoundNode(Node):
 
     def voltage_callback(self, msg):
         """
-        电池电压回调函数
+        电池状态回调函数 - 基于飞控百分比判断低电量
         
         Args:
             msg (BatteryState): 包含电池状态信息的消息
@@ -108,18 +121,38 @@ class UsvSoundNode(Node):
                 self.get_logger().warn('收到无效的电池状态消息类型')
                 return
                 
+            # 获取飞控百分比（0.0-1.0）
             self.voltage = msg.voltage if hasattr(msg, 'voltage') else 12.0
-            if self.voltage ==0.0:
-                return          
-            # 检查是否为低电压状态
-            if self.voltage < 10.8:
+            percentage = getattr(msg, 'percentage', -1.0)
+            
+            if self.voltage == 0.0:
+                return
+            
+            # 检查百分比是否有效
+            if not (0.0 <= percentage <= 1.0):
+                # 飞控未配置 BATT_CAPACITY，无法判断低电量
+                return
+            
+            # 转换为百分比（0-100）
+            self.battery_percentage = percentage * 100.0
+            
+            # 获取低电量阈值
+            low_threshold = self.get_parameter('low_battery_percentage').get_parameter_value().double_value
+            
+            # 检查是否为低电量状态（带状态变化日志）
+            if self.battery_percentage < low_threshold:
                 if not self.low_voltage:
-                    self.get_logger().warn(f'电池电压低: {self.voltage}V')
+                    self.get_logger().warn(
+                        f'⚠️ 电池电量低: {self.battery_percentage:.1f}%，切换到低电量声音'
+                    )
                 self.low_voltage = True
             else:
                 if self.low_voltage:
-                    self.get_logger().info(f'电池电压恢复正常: {self.voltage}V')
+                    self.get_logger().info(
+                        f'✅ 电池电量恢复正常: {self.battery_percentage:.1f}%'
+                    )
                 self.low_voltage = False
+                
         except Exception as e:
             self.get_logger().error(f'处理电池状态时发生错误: {e}')
 

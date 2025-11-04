@@ -47,8 +47,12 @@ class UsvLedNode(Node):
         self.declare_parameter('timer_period_low', 0.5)    # 低频定时器周期
         self.declare_parameter('transition_duration', 3.0)  # 渐变持续时间（秒）
         self.declare_parameter('hold_duration', 10.0)       # 颜色停留时间（秒）
-        self.declare_parameter('low_battery_threshold', 10.8)  # 低电量阈值（伏特）
-        self.declare_parameter('recover_battery_threshold', 11.3)  # 恢复电量阈值（伏特）
+        
+        # ⚠️ 电池低电量阈值配置 - 基于飞控百分比
+        # 需要在 QGroundControl 中配置 BATT_CAPACITY 参数
+        self.declare_parameter('low_battery_percentage', 10.0)     # 低电量阈值（百分比）
+        self.declare_parameter('recover_battery_percentage', 15.0) # 恢复电量阈值（百分比）
+        
         self.declare_parameter('breath_step', 6)  # 呼吸灯步进值
         self.declare_parameter('color_select_transition_duration', 3.0)  # 单个颜色命令的渐变时间
         
@@ -334,7 +338,7 @@ class UsvLedNode(Node):
 
     def usv_batterystate_callback(self, msg):
         """
-        电池状态回调函数
+        电池状态回调函数 - 基于飞控百分比判断低电量
         
         Args:
             msg (BatteryState): 包含电池状态信息的消息
@@ -342,29 +346,44 @@ class UsvLedNode(Node):
         try:
             if isinstance(msg, BatteryState):
                 self.usv_state = msg
-                voltage = getattr(self.usv_state, 'voltage', None)
-                # self.get_logger().info(f"收到电池电压: {voltage}")
-                low_threshold = self.get_parameter('low_battery_threshold').get_parameter_value().double_value
-                recover_threshold = self.get_parameter('recover_battery_threshold').get_parameter_value().double_value
                 
-                # 过滤无效电压
-                if voltage is None or voltage <= 0 or (isinstance(voltage, float) and math.isnan(voltage)):
-                    # self.get_logger().warn("收到无效电池电压，忽略本次数据")
+                # 获取飞控百分比（0.0-1.0）
+                percentage = getattr(self.usv_state, 'percentage', -1.0)
+                
+                # 检查百分比是否有效
+                if not (0.0 <= percentage <= 1.0):
+                    # 飞控未配置 BATT_CAPACITY，无法判断低电量
                     return
-                    
-                if voltage < low_threshold:
+                
+                # 转换为百分比（0-100）
+                battery_percentage = percentage * 100.0
+                
+                # 获取阈值参数
+                low_threshold = self.get_parameter('low_battery_percentage').get_parameter_value().double_value
+                recover_threshold = self.get_parameter('recover_battery_percentage').get_parameter_value().double_value
+                
+                # 低电量判断（带滞后）
+                if battery_percentage < low_threshold:
                     if not self.is_low_battery_level:
                         self.last_mode_before_low_battery = self.mode
                         self.mode = 'low_battery_breath'
-                        self.get_logger().warn(f'USV 电池电压低于 {low_threshold}V，进入低电量呼吸灯状态')
+                        self.get_logger().warn(
+                            f'⚠️ USV 电池电量低于 {low_threshold}% '
+                            f'(当前: {battery_percentage:.1f}%)，进入低电量红色呼吸灯模式'
+                        )
                     self._color_select_transition_active = False
                     self.is_low_battery_level = True
-                elif voltage > recover_threshold:
+                    
+                elif battery_percentage > recover_threshold:
                     if self.is_low_battery_level:
                         # 恢复原有模式
                         self.mode = self.last_mode_before_low_battery or 'color_switching'
-                        self.get_logger().info(f'USV 电池电压恢复，退出低电量呼吸灯')
+                        self.get_logger().info(
+                            f'✅ USV 电池电量恢复至 {recover_threshold}% 以上 '
+                            f'(当前: {battery_percentage:.1f}%)，退出低电量模式'
+                        )
                     self.is_low_battery_level = False
+                    
         except Exception as e:
             self.get_logger().error(f'处理电池状态时发生错误: {e}')
 
@@ -419,14 +438,30 @@ class UsvLedNode(Node):
             # 低电压呼吸灯，强制高频
             elif self.mode == 'low_battery_breath':
                 self.set_timer_period(self.timer_period_high)
-                voltage = self.usv_state.voltage if hasattr(self.usv_state, 'voltage') else 12.0
-                low_threshold = self.get_parameter('low_battery_threshold').get_parameter_value().double_value
-                if voltage < low_threshold:
-                    voltage = 10.6
+                
+                # 获取当前电池百分比状态
+                percentage = getattr(self.usv_state, 'percentage', -1.0)
+                low_threshold = self.get_parameter('low_battery_percentage').get_parameter_value().double_value
+                
+                # 判断是否仍处于低电量状态（纯百分比判断）
+                still_low_battery = False
+                battery_percentage = 0.0
+                
+                if 0.0 <= percentage <= 1.0:
+                    battery_percentage = percentage * 100.0
+                    still_low_battery = (battery_percentage < low_threshold)
+                
+                # 呼吸灯效果
                 base_interval = 0.1
                 min_interval = 0.03
-                delta_v = max(0, (low_threshold - voltage))
-                interval = max(min_interval, base_interval - int(delta_v * 10) * 0.015)
+                
+                if still_low_battery:
+                    # 根据电量百分比调整呼吸频率（电量越低，呼吸越快）
+                    delta_percentage = max(0.0, (low_threshold - battery_percentage))
+                    interval = max(min_interval, base_interval - int(delta_percentage) * 0.015)
+                else:
+                    interval = base_interval
+                    
                 if now - self.last_breath_time >= interval:
                     r = self.breath_values[self.breath_index % len(self.breath_values)]
                     g = 0

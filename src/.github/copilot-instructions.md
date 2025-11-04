@@ -17,7 +17,7 @@
 
 **三层坐标变换：**
 ```python
-# 任务坐标 (Area) → 全局坐标 (Map) → USV本地坐标 (USV Local)
+# 任务坐标 (Area) → 全局坐标 (Map) → USV本地坐标 (与全局坐标相同)
 def _area_to_global(pos):
     # area_center 在 gs_params.yaml 中配置
     return {
@@ -27,12 +27,14 @@ def _area_to_global(pos):
     }
 
 def _global_to_usv_local(usv_id, pos_global):
-    # 使用 usv_boot_pose (USV上电时位置) 进行变换
-    boot = self.usv_boot_pose.get(usv_id)
-    # 执行旋转和平移变换（详见 cluster_controller.py）
+    # 全局坐标系 = USV本地坐标系（都以A0基站为原点）
+    # 无需转换，直接返回
+    return pos_global
 ```
 
-**Why**: XML 任务文件使用相对坐标，需要转换到全局 map 坐标系，再转到每艘 USV 的本地坐标系发送给飞控。
+**Why**: - XML 任务文件使用相对坐标，需要转换到全局 map 坐标系
+- 全局坐标系 = USV本地坐标系（都以定位基站A0为原点，通过set_home设置）
+- 无需复杂的坐标变换，所有USV共享同一坐标系
 
 ### 2. 导航系统（Navigation via ROS 2 Actions）
 

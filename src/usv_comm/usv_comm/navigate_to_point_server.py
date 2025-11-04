@@ -88,6 +88,53 @@ class NavigateToPointServer(Node):
         """
         self.current_pose = msg
 
+    def _calculate_heading_error(self, target_pose, current_pose):
+        """
+        计算航向误差（度）
+        
+        Args:
+            target_pose (PoseStamped): 目标姿态
+            current_pose (PoseStamped): 当前姿态
+            
+        Returns:
+            float: 航向误差（度），范围 -180 ~ 180
+        """
+        from tf_transformations import euler_from_quaternion
+        
+        # 计算目标航向（yaw角）
+        target_orientation = target_pose.pose.orientation
+        target_euler = euler_from_quaternion([
+            target_orientation.x,
+            target_orientation.y,
+            target_orientation.z,
+            target_orientation.w
+        ])
+        target_yaw = target_euler[2]  # yaw 是第三个元素
+        
+        # 计算当前航向
+        current_orientation = current_pose.pose.orientation
+        current_euler = euler_from_quaternion([
+            current_orientation.x,
+            current_orientation.y,
+            current_orientation.z,
+            current_orientation.w
+        ])
+        current_yaw = current_euler[2]
+        
+        # 计算误差（弧度）
+        error_rad = target_yaw - current_yaw
+        
+        # 归一化到 -π ~ π
+        while error_rad > math.pi:
+            error_rad -= 2 * math.pi
+        while error_rad < -math.pi:
+            error_rad += 2 * math.pi
+        
+        # 转换为度
+        error_deg = math.degrees(error_rad)
+        
+        return error_deg
+
     async def execute_callback(self, goal_handle):
         """
         Action执行回调函数
@@ -148,8 +195,8 @@ class NavigateToPointServer(Node):
                 dz = target_pose.pose.position.z - self.current_pose.pose.position.z
                 distance_to_goal = math.sqrt(dx*dx + dy*dy + dz*dz)
                 
-                # 简化的航向误差计算（实际应用中可能需要更复杂的计算）
-                heading_error = 0.0
+                # 计算真实的航向误差
+                heading_error = self._calculate_heading_error(target_pose, self.current_pose)
                 
                 # 发布反馈信息
                 current_time = time.time()

@@ -58,10 +58,29 @@
 - **`gs_gui/UI_MODERNIZATION_GUIDE.md`** - UI 现代化设计指南
 - **`gs_gui/UI_RESPONSIVE_DESIGN.md`** - 响应式设计文档
 - **`gs_gui/UI_SCROLL_IMPLEMENTATION.md`** - 滚动条实现
+- **`gs_gui/REBOOT_BUTTON_FIX.md`** ⭐ - 飞控重启按钮修复（服务名称错误）
 - **`usv_comm/BATTERY_PERCENTAGE_FIX.md`** - 电池百分比修复
 
+#### 参数管理功能
+- **`gs_gui/PARAM_MANAGER_DESIGN.md`** - 参数管理器架构设计
+- **`gs_gui/PARAM_MANAGER_GUIDE.md`** - 参数管理使用指南
+- **`gs_gui/PARAM_MANAGER_SUMMARY.md`** - 参数管理实现总结
+- **`gs_gui/PARAM_QUICK_REF.md`** - 参数管理快速参考
+- **`gs_gui/PARAM_BUTTON_FIX.md`** - 参数按钮修复文档
+- **`gs_gui/PARAM_LOADING_ISSUE.md`** ⭐ - 参数加载问题详细说明（含 Phase 2 完成状态）
+- **`gs_gui/PARAM_PHASE2_SUMMARY.md`** ⭐ - Phase 2 实现总结（异步加载）
+- **`gs_gui/PARAM_PHASE3_SUMMARY.md`** ⭐ - Phase 3 实现总结（参数缓存）
+- **`gs_gui/PARAM_USAGE_GUIDE.md`** ⭐ - 参数管理快速使用指南
+- **`gs_gui/PARAM_UI_IMPROVEMENT.md`** ⭐ - 参数窗口界面显示优化（字体、间距、对比度）
+- **`gs_gui/PARAM_SERVICE_TROUBLESHOOTING.md`** ⭐⭐ - 参数服务故障排查指南（含实际诊断案例）
+
+#### MAVROS 通信和配置
+- **`usv_bringup/MAVROS_STARTUP_OPTIMIZATION.md`** - MAVROS 启动优化（97s→12s）
+- **`usv_bringup/BAUDRATE_CONFIGURATION_GUIDE.md`** ⭐⭐ - 波特率配置指南（含实测案例和推荐值）
+- **`MAVLINK_COMMAND_TIMEOUT_GUIDE.md`** - MAVLink 命令超时问题指南
+
 #### 问题分析
-- **`USV_STARTUP_DIFFERENCES_ANALYSIS.md`** - USV 启动差异分析（本次会话创建）
+- **`USV_STARTUP_DIFFERENCES_ANALYSIS.md`** - USV 启动差异分析
 - **`gs_gui/TEMPERATURE_HYSTERESIS_UPDATE.md`** - 温度滞后更新
 
 ### 🟢 快速参考文档（可合并或删除）
