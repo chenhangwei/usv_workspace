@@ -1013,12 +1013,10 @@ class GroundStationNode(Node):
         })
 
         if sat_int is not None:
-            if sat_int >= 8:
-                sat_level = 'ok'
-            elif sat_int >= 5:
-                sat_level = 'warn'
+            if sat_int >= 4:
+                sat_level = 'ok'      # 4颗及以上可定位，显示绿色
             else:
-                sat_level = 'error'
+                sat_level = 'error'   # 少于4颗无法定位，显示红色
             statuses.append({
                 'name': 'Satellites',
                 'status': f'{sat_int}',

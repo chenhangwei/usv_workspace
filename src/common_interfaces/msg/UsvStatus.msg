@@ -18,6 +18,7 @@ float32 battery_current          # 电池电流（单位：安培，放电为正
 float32 battery_remaining        # 剩余电量（单位：安时 Ah）
 uint8 power_supply_status        # 电源状态（0=未知, 1=充电, 2=放电, 3=未充电, 4=充满）
 int32 battery_cell_count         # 电池串联节数
+bool low_voltage_mode            # 低电压模式（电压低于 10.5V 时为 true）
 
 # ==================== 位置和姿态 ====================
 geometry_msgs/Point position     # 当前位置（x, y, z）在 local frame

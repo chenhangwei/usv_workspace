@@ -186,6 +186,7 @@ class UsvManager:
                 'battery_percentage': msg.battery_percentage,  # 电池电量百分比
                 'battery_current': msg.battery_current,
                 'power_supply_status': msg.power_supply_status,  # 电源状态
+                'low_voltage_mode': msg.low_voltage_mode,  # 低电压模式
                 'position': {
                     'x': round(msg.position.x, 2),  # 保留两位小数减少数据量
                     'y': round(msg.position.y, 2),

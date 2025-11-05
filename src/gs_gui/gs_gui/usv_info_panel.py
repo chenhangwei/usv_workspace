@@ -993,12 +993,13 @@ class UsvInfoPanel(QWidget):
         """根据卫星数量更新样式"""
         try:
             count = int(satellite_count)
-            if count >= 10:
-                color = "#27ae60"  # 绿色
-            elif count >= 6:
-                color = "#f39c12"  # 橙色
+            print(f"[DEBUG] 卫星数量: {count}")  # 调试输出
+            if count >= 4:
+                color = "#27ae60"  # 绿色 - 正常（4颗及以上可定位）
+                print(f"[DEBUG] 使用绿色")
             else:
-                color = "#e74c3c"  # 红色
+                color = "#e74c3c"  # 红色 - 信号弱（少于4颗无法定位）
+                print(f"[DEBUG] 使用红色")
             
             self.satellite_label.setStyleSheet(f"""
                 QLabel {{
@@ -1010,7 +1011,8 @@ class UsvInfoPanel(QWidget):
                     font-size: 13px;
                 }}
             """)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            print(f"[DEBUG] 异常: {e}, satellite_count={satellite_count}")  # 调试输出
             self.satellite_label.setStyleSheet("""
                 QLabel {
                     color: #34495e;

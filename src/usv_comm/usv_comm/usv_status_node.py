@@ -10,6 +10,7 @@ from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import psutil
 import time
+from collections import deque
 
 
 class UsvStatusNode(Node):
@@ -50,7 +51,8 @@ class UsvStatusNode(Node):
         
         # 电池电压范围参数
         self.declare_parameter('battery_voltage_full', 12.6)   # 满电电压（V）
-        self.declare_parameter('battery_voltage_empty', 10.8)  # 空电电压（V）
+        self.declare_parameter('battery_voltage_empty', 10.5)  # 空电电压（V）
+        self.declare_parameter('battery_avg_window', 10.0)     # 电压平均窗口（秒）
         
         # 根据节点命名空间推断 usv_id
         ns_guess = self.get_namespace().lstrip('/') if self.get_namespace() else 'usv_01'
@@ -86,7 +88,11 @@ class UsvStatusNode(Node):
         try:
             self.battery_voltage_empty = float(self.get_parameter('battery_voltage_empty').get_parameter_value().double_value)
         except Exception:
-            self.battery_voltage_empty = 11.1
+            self.battery_voltage_empty = 10.5
+        try:
+            self.battery_avg_window = float(self.get_parameter('battery_avg_window').get_parameter_value().double_value)
+        except Exception:
+            self.battery_avg_window = 10.0
 
         # 读取 usv_id 参数
         try:
@@ -106,7 +112,8 @@ class UsvStatusNode(Node):
         # 记录电池电压配置
         self.get_logger().info(
             f"电池电压范围配置: 满电={self.battery_voltage_full}V (100%), "
-            f"空电={self.battery_voltage_empty}V (0%)"
+            f"空电={self.battery_voltage_empty}V (0%), "
+            f"平均窗口={self.battery_avg_window}秒"
         )
 
         # 初始化状态变量
@@ -120,6 +127,12 @@ class UsvStatusNode(Node):
         self.usv_altitude = Altitude()
         self.usv_extended_state = ExtendedState()
         self.usv_compass_hdg = 0.0  # 罗盘航向（度数）
+        
+        # 电压历史缓存（用于计算平均电压）
+        # 存储格式：(timestamp, voltage)
+        self.voltage_history = deque()
+        self.low_voltage_mode = False  # 低电压模式标志
+        self.low_voltage_triggered = False  # 是否已触发低电压警告
         
         # 数据时效性跟踪（记录最后接收时间）
         self.last_state_time = 0.0
@@ -245,6 +258,14 @@ class UsvStatusNode(Node):
                 return
             self.usv_battery = msg
             self.last_battery_time = time.time()
+            
+            # 记录电压历史（用于计算平均值）
+            current_time = time.time()
+            self.voltage_history.append((current_time, msg.voltage))
+            
+            # 清理超过时间窗口的旧数据
+            while self.voltage_history and (current_time - self.voltage_history[0][0]) > self.battery_avg_window:
+                self.voltage_history.popleft()
 
     def usv_velocity_callback(self, msg):
         """速度回调函数"""
@@ -286,6 +307,48 @@ class UsvStatusNode(Node):
         """扩展状态回调函数"""
         if isinstance(msg, ExtendedState):
             self.usv_extended_state = msg
+    
+    def get_average_voltage(self):
+        """
+        计算电压历史的平均值
+        
+        Returns:
+            float: 平均电压，如果没有历史数据则返回当前电压
+        """
+        if not self.voltage_history:
+            # 没有历史数据，返回当前电压
+            return getattr(self.usv_battery, 'voltage', 0.0)
+        
+        # 计算平均值
+        total_voltage = sum(voltage for _, voltage in self.voltage_history)
+        avg_voltage = total_voltage / len(self.voltage_history)
+        return avg_voltage
+    
+    def calculate_battery_percentage(self, voltage):
+        """
+        根据电压计算电量百分比
+        
+        公式：percentage = (12.6 - voltage) / (12.6 - 10.5) * 100
+        注意：这个公式是反向的，电压越低，百分比越高是错误的
+        正确公式应该是：percentage = (voltage - 10.5) / (12.6 - 10.5) * 100
+        
+        Args:
+            voltage: 当前电压（V）
+            
+        Returns:
+            float: 电量百分比 (0-100)
+        """
+        v_full = self.battery_voltage_full   # 12.6V
+        v_empty = self.battery_voltage_empty  # 10.5V
+        
+        if voltage <= v_empty:
+            return 0.0
+        elif voltage >= v_full:
+            return 100.0
+        else:
+            # 正确公式：电压越高，百分比越高
+            percentage = (voltage - v_empty) / (v_full - v_empty) * 100.0
+            return max(0.0, min(100.0, percentage))
 
     def state_timer_callback(self):
         """定时器回调函数，定期发布状态信息"""
@@ -332,37 +395,55 @@ class UsvStatusNode(Node):
             msg.system_status = system_status_map.get(system_status_id, 'UNKNOWN')
 
             # ==================== 电池信息 ====================
-            msg.battery_voltage = max(0.0, getattr(self.usv_battery, 'voltage', 0.0))
+            # 获取当前电压
+            current_voltage = max(0.0, getattr(self.usv_battery, 'voltage', 0.0))
+            msg.battery_voltage = current_voltage
             
-            # 直接使用飞控计算的电量百分比
-            fcu_percentage = getattr(self.usv_battery, 'percentage', -1.0)
-            voltage = msg.battery_voltage
+            # 计算 10 秒平均电压
+            avg_voltage = self.get_average_voltage()
             
-            # 检查飞控百分比是否有效（0-1.0 之间为有效值）
-            if 0.0 <= fcu_percentage <= 1.0:
-                # 使用飞控计算的百分比（已考虑电流积分和电池特性）
-                battery_pct = fcu_percentage * 100.0
-            else:
-                # 如果飞控未配置 BATT_CAPACITY，百分比将为 0 或无效值
-                battery_pct = 0.0
-                if self.battery_log_counter == 0:  # 只在第一次警告
-                    self.get_logger().warn(
-                        '⚠️ 飞控电量百分比无效，请在 QGroundControl 中配置 BATT_CAPACITY 参数！'
+            # 使用平均电压计算电量百分比
+            # 公式：percentage = (voltage - 10.5) / (12.6 - 10.5) * 100
+            battery_pct = self.calculate_battery_percentage(avg_voltage)
+            msg.battery_percentage = battery_pct
+            
+            # 检查是否进入低电压模式（百分比 < 0 表示电压低于 10.5V）
+            if avg_voltage < self.battery_voltage_empty:
+                if not self.low_voltage_mode:
+                    # 刚进入低电压模式
+                    self.low_voltage_mode = True
+                    self.get_logger().error(
+                        f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                        f'当前电压: {current_voltage:.2f}V, '
+                        f'平均电压(10s): {avg_voltage:.2f}V, '
+                        f'临界电压: {self.battery_voltage_empty}V\n'
+                        f'请立即返航或靠岸！'
                     )
-            
-            msg.battery_percentage = max(0.0, min(100.0, battery_pct))
+            else:
+                if self.low_voltage_mode:
+                    # 退出低电压模式
+                    self.low_voltage_mode = False
+                    self.get_logger().info(
+                        f'✅ 退出低电压模式 - 平均电压: {avg_voltage:.2f}V'
+                    )
             
             # 定期记录电量计算日志（每10条消息记录一次，避免刷屏）
             self.battery_log_counter += 1
             if self.battery_log_counter >= 10:
                 self.battery_log_counter = 0
+                voltage_samples = len(self.voltage_history)
                 self.get_logger().debug(
-                    f"电池: {voltage:.2f}V, {msg.battery_percentage:.1f}% (飞控百分比: {fcu_percentage:.3f})"
+                    f"电池: 当前={current_voltage:.2f}V, "
+                    f"平均(10s)={avg_voltage:.2f}V, "
+                    f"百分比={battery_pct:.1f}%, "
+                    f"样本数={voltage_samples}, "
+                    f"低电压模式={'是' if self.low_voltage_mode else '否'}"
                 )
             
             msg.battery_current = getattr(self.usv_battery, 'current', 0.0)
             msg.battery_remaining = getattr(self.usv_battery, 'charge', 0.0)
             msg.power_supply_status = getattr(self.usv_battery, 'power_supply_status', 0)
+            msg.low_voltage_mode = self.low_voltage_mode  # 设置低电压模式标志
             
             # 计算电池节数（假设单节电压3.7V）
             if msg.battery_voltage > 1.0:
@@ -489,13 +570,29 @@ class UsvStatusNode(Node):
 
             # ==================== GPS 信息 ====================
             try:
-                gps_status = getattr(self.usv_gps, 'status', None)
-                if gps_status:
-                    # GPS fix type: MAVROS可能返回负数（如-1表示NO_FIX），需要转为uint8兼容值
-                    fix_type_raw = getattr(gps_status, 'status', 0)
-                    msg.gps_fix_type = max(0, min(255, fix_type_raw))  # 限制在uint8范围[0,255]
+                # 优先使用 GPS RAW 的 fix_type（更准确，包含 3D Fix 等详细状态）
+                # GPS RAW fix_type 定义：
+                # 0: NO_FIX, 1: NO_FIX, 2: 2D_FIX, 3: 3D_FIX, 
+                # 4: DGPS, 5: RTK_FLOAT, 6: RTK_FIXED
+                if self.has_gps_raw and (time.time() - self.last_gps_raw_time) < self.data_timeout:
+                    msg.gps_fix_type = int(self.usv_gps_raw.fix_type)
                 else:
-                    msg.gps_fix_type = 0
+                    # 降级使用 NavSatFix 的 status.status（值域不同，需要映射）
+                    # NavSatFix status: -1=NO_FIX, 0=FIX, 1=SBAS_FIX, 2=GBAS_FIX
+                    # 映射到 GPS RAW 格式：-1→0, 0→3, 1→4, 2→6
+                    gps_status = getattr(self.usv_gps, 'status', None)
+                    if gps_status:
+                        nav_status = getattr(gps_status, 'status', -1)
+                        if nav_status < 0:
+                            msg.gps_fix_type = 0  # NO_FIX
+                        elif nav_status == 0:
+                            msg.gps_fix_type = 3  # 假定为 3D_FIX
+                        elif nav_status == 1:
+                            msg.gps_fix_type = 4  # SBAS → DGPS
+                        else:
+                            msg.gps_fix_type = 6  # GBAS → RTK_FIXED
+                    else:
+                        msg.gps_fix_type = 0
                 
                 # 从 GPS RAW 获取 HDOP/VDOP（优先）和卫星数
                 if self.has_gps_raw and (time.time() - self.last_gps_raw_time) < self.data_timeout:

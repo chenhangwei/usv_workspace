@@ -211,12 +211,18 @@ class TableManager:
         try:
             bp = state.get('battery_percentage', 0)
             bp_text = f"{float(bp):.1f}%"
+            # 如果处于低电压模式，添加警告标志
+            if state.get('low_voltage_mode', False):
+                bp_text = f"⚠️ {bp_text}"
         except Exception:
             bp_text = "Unknown"
 
         voltage = state.get('battery_voltage', 'Unknown')
         try:
             voltage_text = f"{float(voltage):.1f}"
+            # 如果处于低电压模式，添加警告标志
+            if state.get('low_voltage_mode', False):
+                voltage_text = f"⚠️ {voltage_text}"
         except Exception:
             voltage_text = str(voltage) if voltage is not None else "Unknown"
 

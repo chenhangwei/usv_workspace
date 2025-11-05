@@ -9,6 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String
 from sensor_msgs.msg import BatteryState
+from common_interfaces.msg import UsvStatus
 import pyaudio
 import wave
 import os
@@ -57,6 +58,14 @@ class UsvSoundNode(Node):
             qos_best_effort
         )
         
+        # 订阅 USV 状态（用于获取低电压模式标志）
+        self.usv_status_sub = self.create_subscription(
+            UsvStatus,
+            'usv_status',
+            self.usv_status_callback,
+            qos_best_effort
+        )
+        
         self.get_logger().info('声音播放节点已启动')
         
         # 声明参数
@@ -86,6 +95,42 @@ class UsvSoundNode(Node):
         self.voltage = 12.0
         self.battery_percentage = 100.0
 
+    def usv_status_callback(self, msg):
+        """
+        USV 状态回调函数 - 检测低电压模式
+        
+        Args:
+            msg (UsvStatus): 包含 USV 完整状态信息的消息
+        """
+        try:
+            if not isinstance(msg, UsvStatus):
+                self.get_logger().warn('收到无效的 USV 状态消息类型')
+                return
+            
+            # 获取低电压模式标志
+            low_voltage_mode = getattr(msg, 'low_voltage_mode', False)
+            
+            # 检查是否为低电压状态（带状态变化日志）
+            if low_voltage_mode:
+                if not self.low_voltage:
+                    self.get_logger().error(
+                        f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                        f'电压: {msg.battery_voltage:.2f}V < 10.5V\n'
+                        f'切换到低电量告警声音'
+                    )
+                self.low_voltage = True
+            else:
+                if self.low_voltage:
+                    self.get_logger().info(
+                        f'✅ 退出低电压模式\n'
+                        f'电压: {msg.battery_voltage:.2f}V >= 10.5V\n'
+                        f'恢复正常声音'
+                    )
+                self.low_voltage = False
+                
+        except Exception as e:
+            self.get_logger().error(f'处理 USV 状态时发生错误: {e}')
+    
     def gs_sound_callback(self, msg):
         """
         地面站声音命令回调函数

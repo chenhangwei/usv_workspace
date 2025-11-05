@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from sensor_msgs.msg import BatteryState
+from common_interfaces.msg import UsvStatus
 import serial
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import time
@@ -76,6 +77,14 @@ class UsvLedNode(Node):
             BatteryState, 
             'battery', 
             self.usv_batterystate_callback, 
+            self.qos
+        )
+        
+        # 订阅 USV 状态（用于获取低电压模式标志）
+        self.usv_status_sub = self.create_subscription(
+            UsvStatus,
+            'usv_status',
+            self.usv_status_callback,
             self.qos
         )
 
@@ -336,6 +345,43 @@ class UsvLedNode(Node):
             del self._infect_backup
         self._publish_led_state(self.current_color[:])
 
+    def usv_status_callback(self, msg):
+        """
+        USV 状态回调函数 - 检测低电压模式
+        
+        Args:
+            msg (UsvStatus): 包含 USV 完整状态信息的消息
+        """
+        try:
+            if isinstance(msg, UsvStatus):
+                # 检查低电压模式标志
+                low_voltage_mode = getattr(msg, 'low_voltage_mode', False)
+                
+                if low_voltage_mode:
+                    if not self.is_low_battery_level:
+                        self.last_mode_before_low_battery = self.mode
+                        self.mode = 'low_battery_breath'
+                        self.get_logger().error(
+                            f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                            f'电压: {msg.battery_voltage:.2f}V < 10.5V\n'
+                            f'进入低电量红色呼吸灯模式'
+                        )
+                    self._color_select_transition_active = False
+                    self.is_low_battery_level = True
+                else:
+                    if self.is_low_battery_level:
+                        # 恢复原有模式
+                        self.mode = self.last_mode_before_low_battery or 'color_switching'
+                        self.get_logger().info(
+                            f'✅ 退出低电压模式\n'
+                            f'电压: {msg.battery_voltage:.2f}V >= 10.5V\n'
+                            f'恢复正常LED模式'
+                        )
+                    self.is_low_battery_level = False
+                    
+        except Exception as e:
+            self.get_logger().error(f'处理 USV 状态时发生错误: {e}')
+    
     def usv_batterystate_callback(self, msg):
         """
         电池状态回调函数 - 基于飞控百分比判断低电量

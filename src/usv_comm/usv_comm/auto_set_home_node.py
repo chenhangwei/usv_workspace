@@ -62,6 +62,12 @@ class AutoSetHomeNode(Node):
         self.gps_fix_type = 0  # 0=无定位, 2=2D, 3=3D
         self.system_connected = False
         self.first_pose_received = False
+        
+        # 检查定时器（用于周期性检查 GPS 状态）
+        self.check_timer = None
+        
+        # 延迟设置 Home 点的定时器
+        self.delay_timer = None
 
         # 订阅本地位置信息
         self.pose_sub = self.create_subscription(
@@ -111,8 +117,12 @@ class AutoSetHomeNode(Node):
     def gps_callback(self, msg):
         """GPS 状态回调"""
         self.gps_fix_type = msg.status.status
-        # status: -1=无服务, 0=无定位, 1=GPS定位, 2=DGPS定位
-        # 我们需要至少 GPS 定位 (status >= 0)
+        # NavSatFix status.status 定义:
+        # -1 = STATUS_NO_FIX (无定位)
+        #  0 = STATUS_FIX (有定位，未经差分校正) ✅
+        #  1 = STATUS_SBAS_FIX (SBAS 差分定位)
+        #  2 = STATUS_GBAS_FIX (GBAS 差分定位)
+        # 我们需要至少有定位 (status >= 0)
     
     def state_callback(self, msg):
         """MAVROS 状态回调"""
@@ -130,8 +140,8 @@ class AutoSetHomeNode(Node):
         if not self.first_pose_received:
             self.first_pose_received = True
             self.get_logger().info('Received first local_position, waiting for GPS fix...')
-            # 启动定期检查定时器
-            self.create_timer(1.0, self.check_and_set_home)
+            # 启动定期检查定时器（保存引用以便后续停止）
+            self.check_timer = self.create_timer(1.0, self.check_and_set_home)
     
     def check_and_set_home(self):
         """检查 GPS 和系统状态，满足条件后设置 Home 点"""
@@ -144,21 +154,41 @@ class AutoSetHomeNode(Node):
             return
         
         # 检查 GPS 定位状态
-        # NavSatFix.status.status: -1=无服务, 0=无定位, 1=GPS定位, 2=DGPS
-        # ArduPilot 要求至少有 GPS 定位（>= 1）才能设置 EKF 原点
-        if self.gps_fix_type < 1:
+        # NavSatFix status.status: -1=无定位, 0=有定位, 1=SBAS, 2=GBAS
+        # 需要至少有定位 (status >= 0)
+        if self.gps_fix_type < 0:
             self.get_logger().info(
-                f'⏳ Waiting for GPS fix (current type: {self.gps_fix_type}, need >= 1)...'
+                f'⏳ Waiting for GPS fix (current status: {self.gps_fix_type}, need >= 0)...'
             )
             return
         
         # 所有条件满足，设置 Home 点
+        # 注意：这里的 gps_fix_type 是 NavSatFix.status.status (0=有定位，非 GPS_RAW 的 fix_type)
+        status_desc = {-1: 'NO_FIX', 0: 'FIX', 1: 'SBAS_FIX', 2: 'GBAS_FIX'}.get(
+            self.gps_fix_type, 'UNKNOWN')
         self.get_logger().info(
-            f'✅ GPS fix obtained (type: {self.gps_fix_type}), system connected. '
+            f'✅ GPS positioning ready ({status_desc}), system connected. '
             f'Setting Home point in {self.set_delay_sec:.1f}s...'
         )
         self.set_home_sent = True
-        self.create_timer(self.set_delay_sec, self.set_home)
+        
+        # 停止检查定时器，避免重复调用
+        if self.check_timer is not None:
+            self.check_timer.cancel()
+            self.check_timer = None
+        
+        # 延迟后设置 Home 点（创建单次定时器）
+        self.delay_timer = self.create_timer(self.set_delay_sec, self._set_home_delayed)
+    
+    def _set_home_delayed(self):
+        """延迟设置 Home 点的回调（单次触发）"""
+        # 取消定时器，确保只触发一次
+        if self.delay_timer is not None:
+            self.delay_timer.cancel()
+            self.delay_timer = None
+        
+        # 调用实际的设置函数
+        self.set_home()
 
     def set_home(self):
         """设置EKF原点的入口函数,启动非阻塞重试定时器"""
@@ -167,25 +197,27 @@ class AutoSetHomeNode(Node):
     
     def _try_set_home(self):
         """尝试设置EKF原点,使用非阻塞定时器实现重试"""
-        if self.retry_attempt >= self.max_retries:
+        # 注意：retry_attempt 在这里递增，不要在其他地方重复递增！
+        self.retry_attempt += 1
+        
+        if self.retry_attempt > self.max_retries:
             self.get_logger().error(
                 f'❌ Failed to set EKF origin after {self.max_retries} attempts. Giving up.'
             )
             return
 
-        self.retry_attempt += 1
         attempt = self.retry_attempt
 
         # 检查服务是否就绪
         if self.set_home_cli.service_is_ready():
             self.get_logger().info(
-                f'Service /mavros/cmd/command is ready (attempt {attempt}/{self.max_retries})'
+                f'Service cmd/command is ready (attempt {attempt}/{self.max_retries})'
             )
             self._send_set_home_request()
             return
         
         self._schedule_retry(
-            f'Service /mavros/cmd/command not ready, will retry (attempt {attempt}/{self.max_retries})'
+            f'Service cmd/command not ready (attempt {attempt}/{self.max_retries})'
         )
     
     def _retry_callback(self):
@@ -221,6 +253,7 @@ class AutoSetHomeNode(Node):
                 self.get_logger().info('✅ EKF origin set successfully via MAV_CMD_DO_SET_HOME!')
             else:
                 result_code = getattr(result, 'result', None)
+                # 注意：这里不需要 retry_attempt +1，因为 _try_set_home 中已经递增过了
                 if self.retry_attempt >= self.max_retries:
                     self.get_logger().error(
                         f'❌ Failed to set EKF origin after {self.retry_attempt} attempts '
@@ -240,6 +273,7 @@ class AutoSetHomeNode(Node):
 
     def _schedule_retry(self, reason: str):
         """安排下一次重试"""
+        # 注意：这里不增加 retry_attempt，由 _try_set_home 统一管理
         if self.retry_attempt >= self.max_retries:
             self.get_logger().error(
                 f'{reason}. Reached retry limit ({self.max_retries}).'
@@ -249,7 +283,7 @@ class AutoSetHomeNode(Node):
         self._clear_retry_timer()
         self.get_logger().warn(
             f'{reason}. Retrying in {self.retry_interval:.1f}s '
-            f'(next attempt {self.retry_attempt + 1}/{self.max_retries}).'
+            f'(current attempt was {self.retry_attempt}/{self.max_retries}).'
         )
         self.retry_timer = self.create_timer(self.retry_interval, self._retry_callback)
 
