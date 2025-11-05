@@ -268,25 +268,9 @@ class UsvInfoPanel(QWidget):
         self._apply_button_style(self.ready_button, "#95a5a6")
         layout.addWidget(self.ready_button)
         
-        # 飞控重启按钮
-        self.reboot_button = QPushButton("🔄 重启飞控")
-        self.reboot_button.setEnabled(True)
-        self.reboot_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.reboot_button.setMinimumHeight(40)
-        self._apply_button_style(self.reboot_button, "#e67e22")  # 橙色
-        self.reboot_button.setToolTip("向飞控发送重启命令（需10-20秒重启）")
-        layout.addWidget(self.reboot_button)
-        
-        # 参数配置按钮
-        self.param_button = QPushButton("⚙️ 飞控参数配置")
-        self.param_button.setEnabled(True)
-        self.param_button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.param_button.setMinimumHeight(40)
-        self._apply_button_style(self.param_button, "#9b59b6")  # 紫色
-        self.param_button.setToolTip("打开飞控参数配置窗口（读取/修改参数）")
-        layout.addWidget(self.param_button)
+        # 飞控重启功能已移至参数配置窗口菜单：工具 → 🔄 重启飞控
 
-        # Ready 摘要信息
+        # Ready 摘要信息（参数配置功能已移至菜单栏：工具 → 飞控参数配置）
         self.ready_summary_label = QLabel("未接收到预检数据")
         self.ready_summary_label.setWordWrap(True)
         try:

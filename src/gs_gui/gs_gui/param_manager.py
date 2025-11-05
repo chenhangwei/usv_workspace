@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
+from .param_metadata import get_param_metadata, load_all_metadata
 
 
 class ParamType(Enum):
@@ -125,6 +126,10 @@ class ParamManager:
         # 创建缓存目录
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         
+        # 加载参数元数据
+        load_all_metadata()
+        self.logger.info("参数元数据已加载")
+        
         # 创建服务客户端
         self._create_service_clients()
         
@@ -218,12 +223,20 @@ class ParamManager:
             param_type = ParamType.REAL
             param_value = msg.value.real
         
-        # 创建 ParamInfo 对象
+        # 尝试获取参数元数据
+        metadata = get_param_metadata(param_name)
+        
+        # 创建 ParamInfo 对象（合并元数据）
         param_info = ParamInfo(
             name=param_name,
             value=param_value,
             original_value=param_value,
-            param_type=param_type
+            param_type=param_type,
+            description=metadata.description if metadata else "",
+            unit=metadata.unit if metadata else "",
+            min_value=metadata.min_value if metadata else None,
+            max_value=metadata.max_value if metadata else None,
+            increment=metadata.increment if metadata else None
         )
         
         # 存入缓存

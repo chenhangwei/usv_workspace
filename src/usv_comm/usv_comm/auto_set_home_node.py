@@ -145,9 +145,10 @@ class AutoSetHomeNode(Node):
         
         # 检查 GPS 定位状态
         # NavSatFix.status.status: -1=无服务, 0=无定位, 1=GPS定位, 2=DGPS
-        if self.gps_fix_type < 0:
+        # ArduPilot 要求至少有 GPS 定位（>= 1）才能设置 EKF 原点
+        if self.gps_fix_type < 1:
             self.get_logger().info(
-                f'Waiting for GPS fix (current: {self.gps_fix_type}, need >= 0)...'
+                f'⏳ Waiting for GPS fix (current type: {self.gps_fix_type}, need >= 1)...'
             )
             return
         

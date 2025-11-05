@@ -62,8 +62,8 @@
 - **`usv_comm/BATTERY_PERCENTAGE_FIX.md`** - 电池百分比修复
 
 #### 参数管理功能
-- **`gs_gui/PARAM_MANAGER_DESIGN.md`** - 参数管理器架构设计
-- **`gs_gui/PARAM_MANAGER_GUIDE.md`** - 参数管理使用指南
+- **`gs_gui/PARAM_MANAGER_DESIGN.md`** - 参数管理器架构设计（MAVROS 模式）
+- **`gs_gui/PARAM_MANAGER_GUIDE.md`** - 参数管理使用指南（MAVROS 模式）
 - **`gs_gui/PARAM_MANAGER_SUMMARY.md`** - 参数管理实现总结
 - **`gs_gui/PARAM_QUICK_REF.md`** - 参数管理快速参考
 - **`gs_gui/PARAM_BUTTON_FIX.md`** - 参数按钮修复文档
@@ -73,6 +73,7 @@
 - **`gs_gui/PARAM_USAGE_GUIDE.md`** ⭐ - 参数管理快速使用指南
 - **`gs_gui/PARAM_UI_IMPROVEMENT.md`** ⭐ - 参数窗口界面显示优化（字体、间距、对比度）
 - **`gs_gui/PARAM_SERVICE_TROUBLESHOOTING.md`** ⭐⭐ - 参数服务故障排查指南（含实际诊断案例）
+- **`gs_gui/PARAM_SERIAL_MODE_GUIDE.md`** ⭐⭐⭐ - 串口直连参数模式完整指南（pymavlink 模式，推荐）
 
 #### MAVROS 通信和配置
 - **`usv_bringup/MAVROS_STARTUP_OPTIMIZATION.md`** - MAVROS 启动优化（97s→12s）

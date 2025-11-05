@@ -130,14 +130,6 @@ class MainWindow(QMainWindow):
         
         # 导航反馈信号
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
-        
-        # 飞控重启按钮连接（在 USV 详细面板中）
-        if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
-            self.usv_info_panel.reboot_button.clicked.connect(self.on_reboot_autopilot_clicked)
-        
-        # 参数配置按钮连接（在 USV 详细面板中）
-        if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'param_button'):
-            self.usv_info_panel.param_button.clicked.connect(self.on_param_config_clicked)
     
     def _connect_ui_signals(self):
         """连接UI按钮信号到处理函数"""
@@ -195,9 +187,10 @@ class MainWindow(QMainWindow):
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
+        self.action_param_config.triggered.connect(self.open_param_config_window)
 
     def _init_custom_menu(self):
-        """在菜单栏中增加坐标偏移设置入口和LED传染模式开关"""
+        """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
         # 坐标系设置菜单
         coord_menu = self.ui.menubar.addMenu("坐标系设置")
         self.action_set_area_offset = QAction("设置任务坐标系偏移量", self)
@@ -209,6 +202,13 @@ class MainWindow(QMainWindow):
         self.action_led_infection_mode.setCheckable(True)
         self.action_led_infection_mode.setChecked(True)  # 默认打开
         led_menu.addAction(self.action_led_infection_mode)
+        
+        # 工具菜单
+        tools_menu = self.ui.menubar.addMenu("工具(&T)")
+        self.action_param_config = QAction("🔧 飞控参数配置...", self)
+        self.action_param_config.setShortcut("Ctrl+P")
+        self.action_param_config.setToolTip("通过串口直连配置飞控参数")
+        tools_menu.addAction(self.action_param_config)
     
     def _init_usv_info_panel(self):
         """初始化 USV 信息面板，替换原有的 groupBox_3"""
@@ -496,139 +496,49 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
     
-    def on_reboot_autopilot_clicked(self):
+    def open_param_config_window(self):
         """
-        飞控重启按钮点击处理
+        打开参数配置窗口（串口直连模式）
         
-        从当前选中的 USV 列表中获取 USV，发送重启命令
+        通过 USB 串口直接与飞控通信，不依赖 MAVROS。
         """
         try:
-            # 获取当前选中的 USV（集群 + 离群）
-            current_selection = self.list_manager.usv_cluster_list + self.list_manager.usv_departed_list
-            if not current_selection:
-                QMessageBox.warning(self, "无选中 USV", "请先从列表中选择一个 USV")
+            from .param_window_serial import ParamWindowSerial
+            
+            # 检查是否已有串口参数窗口打开（并且窗口仍然有效）
+            if (hasattr(self, '_param_window_serial') and 
+                self._param_window_serial is not None and 
+                not self._param_window_serial.isHidden()):
+                # 窗口存在且未被关闭，激活它
+                self._param_window_serial.activateWindow()
+                self._param_window_serial.raise_()
                 return
             
-            # 获取第一个选中的 USV（详细页通常显示第一个选中项）
-            selected_usv = current_selection[0] if current_selection else None
-            if not selected_usv:
-                return
+            # 创建新窗口
+            self._param_window_serial = ParamWindowSerial(self)
             
-            usv_id = selected_usv.get('namespace', 'unknown')
-            
-            # 确认对话框
-            reply = QMessageBox.question(
-                self,
-                "确认重启飞控",
-                f"确定要重启 {usv_id} 的飞控吗？\n\n"
-                f"⚠️ 飞控将重启并需要 10-20 秒恢复连接。\n"
-                f"⚠️ 重启期间将失去控制，请确保 USV 处于安全状态。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-            )
-            
-            if reply == QMessageBox.StandardButton.Yes:
-                # 发送重启信号
-                self.ros_signal.reboot_autopilot.emit(usv_id)
-                self.ui_utils.append_info(f"✅ 已向 {usv_id} 发送飞控重启命令")
-                
-                # 禁用按钮 20 秒（防止重复点击）
-                if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
-                    self.usv_info_panel.reboot_button.setEnabled(False)
-                    self.usv_info_panel.reboot_button.setText("⏳ 重启中…")
-                    QTimer.singleShot(20000, self._enable_reboot_button)
-        
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"发送重启命令失败: {e}")
-            self.ui_utils.append_info(f"❌ 发送重启命令失败: {e}")
-    
-    def on_param_config_clicked(self):
-        """
-        参数配置按钮点击处理
-        
-        从当前选中的 USV 打开参数配置窗口
-        """
-        try:
-            # 获取当前选中的 USV（集群 + 离群）
-            current_selection = self.list_manager.usv_cluster_list + self.list_manager.usv_departed_list
-            if not current_selection:
-                QMessageBox.warning(self, "无选中 USV", "请先从列表中选择一个 USV")
-                return
-            
-            # 获取第一个选中的 USV
-            selected_usv = current_selection[0] if current_selection else None
-            if not selected_usv:
-                return
-            
-            usv_namespace = selected_usv.get('namespace', 'unknown')
-            
-            # 检查是否已有参数窗口打开
-            if hasattr(self, '_param_windows') and usv_namespace in self._param_windows:
-                # 已有窗口，激活显示
-                window = self._param_windows[usv_namespace]
-                window.activateWindow()
-                window.raise_()
-                return
-            
-            # 创建参数管理器
-            from .param_manager import ParamManagerAsync
-            from .param_window import ParamWindow
-            
-            # 获取 ROS 节点（从父窗口传递）
-            if not hasattr(self, 'ros_node'):
-                QMessageBox.critical(
-                    self, 
-                    "错误", 
-                    "无法访问 ROS 节点，参数功能不可用"
-                )
-                return
-            
-            # 创建参数管理器
-            param_manager = ParamManagerAsync(self.ros_node, usv_namespace)
-            
-            # 创建参数窗口
-            param_window = ParamWindow(usv_namespace, param_manager, self)
-            
-            # 缓存窗口引用
-            if not hasattr(self, '_param_windows'):
-                self._param_windows = {}
-            self._param_windows[usv_namespace] = param_window
-            
-            # 窗口关闭时清理引用
+            # 窗口关闭时清理引用（QMainWindow 使用 destroyed 信号）
             def on_window_closed():
-                if hasattr(self, '_param_windows') and usv_namespace in self._param_windows:
-                    del self._param_windows[usv_namespace]
+                self._param_window_serial = None
             
-            param_window.finished.connect(on_window_closed)
+            self._param_window_serial.destroyed.connect(on_window_closed)
             
             # 显示窗口
-            param_window.show()
-            self.ui_utils.append_info(f"✅ 已打开 {usv_namespace} 的参数配置窗口")
+            self._param_window_serial.show()
+            self.ui_utils.append_info("✅ 已打开串口参数配置窗口")
             
         except ImportError as e:
+            from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(
-                self, 
-                "模块加载失败", 
-                f"参数管理模块加载失败:\n{e}\n\n"
-                f"请检查是否已安装相关依赖。"
+                self, "缺少依赖",
+                f"串口参数模块加载失败:\n{e}\n\n"
+                f"请安装 pymavlink 和 pyserial：\n"
+                f"pip3 install pymavlink pyserial --break-system-packages"
             )
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开参数窗口失败: {e}")
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "错误", f"打开串口参数窗口失败: {e}")
             self.ui_utils.append_info(f"❌ 打开参数窗口失败: {e}")
-                    
-        except Exception as e:
-            QMessageBox.critical(self, "错误", f"发送重启命令失败: {e}")
-            self.ui_utils.append_info(f"❌ 发送重启命令失败: {e}")
-    
-    def _enable_reboot_button(self):
-        """重新启用重启按钮"""
-        try:
-            if hasattr(self, 'usv_info_panel') and hasattr(self.usv_info_panel, 'reboot_button'):
-                self.usv_info_panel.reboot_button.setEnabled(True)
-                self.usv_info_panel.reboot_button.setText("🔄 重启飞控")
-                self.ui_utils.append_info("ℹ️ 重启按钮已恢复，飞控应已完成重启")
-        except Exception as e:
-            print(f"恢复重启按钮时出错: {e}")
 
     def closeEvent(self, event):
         """

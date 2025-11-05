@@ -39,7 +39,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_03',
+        default_value='usv_01',
         description='无人船节点的命名空间'
     )
     
@@ -59,21 +59,21 @@ def generate_launch_description():
     # 飞控串口参数
     fcu_url_arg = DeclareLaunchArgument(
         'fcu_url',
-        default_value='serial:///dev/ttyACM0:921600',
+        default_value='serial:///dev/ttyACM0:115200',
         description='飞控通信串口和波特率'
     )
     
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='',#udp://:14580@192.168.68.53:14550
+        default_value='udp://:14580@192.168.68.53:14550',#
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='3',
+        default_value='1',
         description='MAVROS目标系统ID'
     )
     
@@ -283,8 +283,10 @@ def generate_launch_description():
                 'target_component_id': tgt_component,
                 
                 # ==================== 性能优化：只加载必需的插件 ====================
-                # 插件白名单配置，大幅减少启动时间（从97秒降至5秒）
+                # 插件白名单配置，大幅减少启动时间（从97秒降至10-15秒）
                 # 只加载 USV 控制必需的插件，避免加载 60+ 个不需要的插件
+                # 注意：移除 'param' 插件，避免启动时同步 900+ 参数造成超时
+                #       地面站参数配置功能通过直接 MAVLink 消息实现，不需要此插件
                 'plugin_allowlist': [
                     'sys_status',      # 系统状态（必需）
                     'sys_time',        # 时间同步（必需）
@@ -293,11 +295,8 @@ def generate_launch_description():
                     'setpoint_raw',    # 原始设定点（控制必需）
                     'global_position', # GPS 全局位置
                     'gps_status',      # GPS 状态和卫星数
-                    'param',           # 参数管理（地面站参数配置功能需要）
+                    'battery',         # 电池状态（电量监控必需）
                 ],
-                
-                # 禁用参数同步，避免启动时读取 900+ 个参数造成超时
-                'param.use_mission_item_int': False,
                 
                 # 禁用视觉定位
                 'vision_pose.enable': False,
