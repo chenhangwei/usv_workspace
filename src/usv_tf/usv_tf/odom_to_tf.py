@@ -14,12 +14,17 @@ class OdomToTF(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT # 可靠性策略
         )
         self.tf_broadcaster=TransformBroadcaster(self)
+        
+        # 声明命名空间参数（用于 TF frame 命名）
         self.declare_parameter('namespace', 'usv_01')
         ns = self.get_parameter('namespace').get_parameter_value().string_value
         self.base_link_frame = f'base_link_{ns}'
+        
+        # [OK] 使用相对路径订阅（节点已在命名空间中启动）
+        # 相对路径会自动添加节点的命名空间前缀
         self.subscription_=self.create_subscription(
             Odometry,
-            f'/{ns}/global_position/local',
+            'global_position/local',  # 相对路径（推荐）
             self.odom_callback,
             qos
         )

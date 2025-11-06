@@ -267,7 +267,7 @@ class ParamItemDelegate(QStyledItemDelegate):
         # 重启提示
         if meta and meta.reboot_required:
             lines.append("")
-            lines.append("⚠️ <b>修改此参数需要重启飞控</b>")
+            lines.append("[!] <b>修改此参数需要重启飞控</b>")
         
         # 只读提示
         if meta and meta.read_only:

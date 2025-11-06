@@ -1,0 +1,77 @@
+# USV Fleet Configuration for Distributed Launch
+# 该文件定义了 USV 集群的机器配置，用于地面站远程启动
+# 
+# 使用说明：
+# 1. 配置每艘 USV 的网络信息（IP、用户名、工作空间路径）
+# 2. 在地面站启动时，会通过 SSH 自动启动各 USV 节点
+# 3. 确保已配置免密 SSH 登录：ssh-copy-id usv@<usv_ip>
+
+# ==================== USV 机器配置 ====================
+# 每个 USV 需要配置以下信息：
+# - enabled: 是否启用该 USV（true/false）
+# - hostname: 机载计算机的 IP 地址或主机名
+# - username: SSH 登录用户名
+# - workspace: 机载计算机上的 ROS 2 工作空间路径
+# - namespace: ROS 2 命名空间（格式：usv_XX）
+# - fcu_url: 飞控串口配置（格式：serial://<device>:<baudrate>）
+# - system_id: MAVLink 系统 ID（与 namespace 后缀对应）
+# - gcs_url: 地面站通信地址（可选，用于 MAVLink 转发）
+
+usv_fleet:
+  # ==================== USV 01 ====================
+  usv_01:
+    enabled: true                                    # 是否启用
+    hostname: "192.168.68.55"                       # USV 01 机载计算机 IP
+    username: "chenhangwei"                                  # SSH 用户名
+    workspace: "/home/chenhangwei/usv_workspace"             # 机载工作空间路径
+    namespace: "usv_01"                              # ROS 2 命名空间
+    fcu_url: "serial:///dev/ttyACM0:921600"          # 飞控串口
+    system_id: 1                                     # MAVLink 系统 ID
+    gcs_url: "udp://:14560@192.168.68.53:14550"      # 地面站通信地址（可选）
+    
+  # ==================== USV 02 ====================
+  usv_02:
+    enabled: true
+    hostname: "192.168.68.54"
+    username: "chenhangwei"
+    workspace: "/home/chenhangwei/usv_workspace"
+    namespace: "usv_02"
+    fcu_url: "serial:///dev/ttyACM0:921600"
+    system_id: 2
+    gcs_url: "udp://:14570@192.168.68.53:14550"
+    
+  # ==================== USV 03 ====================
+  usv_03:
+    enabled: true
+    hostname: "192.168.68.52"
+    username: "chenhangwei"
+    workspace: "/home/chenhangwei/usv_workspace"
+    namespace: "usv_03"
+    fcu_url: "serial:///dev/ttyACM0:921600"
+    system_id: 3
+    gcs_url: "udp://:14580@192.168.68.53:14550"
+
+# ==================== 启动选项 ====================
+launch_options:
+  # 是否使用本地模拟（不通过 SSH 启动，用于单机测试）
+  use_local_simulation: false
+  
+  # SSH 连接超时（秒）
+  ssh_timeout: 10.0
+  
+  # 启动间隔（秒，避免同时启动导致网络拥塞）
+  launch_delay: 2.0
+  
+  # 是否显示远程节点的输出（true=转发到地面站终端）
+  show_remote_output: true
+  
+  # 失败重试次数
+  max_retries: 2
+
+# ==================== 网络配置 ====================
+network:
+  # ROS_DOMAIN_ID（确保与地面站一致）
+  ros_domain_id: 0
+  
+  # ROS 2 DDS 发现超时（秒）
+  discovery_timeout: 30.0

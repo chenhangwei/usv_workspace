@@ -1,6 +1,6 @@
 """
 Ground Station主窗口应用
-重构后的版本，使用模块化设计
+重构后的版本,使用模块化设计
 """
 from http.client import UNAVAILABLE_FOR_LEGAL_REASONS
 import sys
@@ -8,6 +8,7 @@ import threading
 import os
 import yaml
 import logging
+import subprocess
 from logging.handlers import RotatingFileHandler
 
 import rclpy
@@ -28,6 +29,7 @@ from gs_gui.ui_utils import UIUtils
 from gs_gui.area_offset_dialog import AreaOffsetDialog
 from gs_gui.usv_info_panel import UsvInfoPanel
 from gs_gui.style_manager import StyleManager
+from gs_gui.usv_fleet_launcher import UsvFleetLauncher
 
 
 class MainWindow(QMainWindow):
@@ -185,12 +187,20 @@ class MainWindow(QMainWindow):
             lambda index: self._handle_table_clicked(index, is_cluster=False)
         )
         self.ui.action3D.triggered.connect(self.show_usv_plot_window)
+        self.action_launch_usv_fleet.triggered.connect(self.launch_usv_fleet)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
         self.action_param_config.triggered.connect(self.open_param_config_window)
 
     def _init_custom_menu(self):
         """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
+        # USV控制菜单
+        usv_menu = self.ui.menubar.addMenu("USV控制(&U)")
+        self.action_launch_usv_fleet = QAction("🚀 启动 USV 集群", self)
+        self.action_launch_usv_fleet.setShortcut("Ctrl+L")
+        self.action_launch_usv_fleet.setToolTip("通过分布式 launch 启动所有 USV 节点")
+        usv_menu.addAction(self.action_launch_usv_fleet)
+        
         # 坐标系设置菜单
         coord_menu = self.ui.menubar.addMenu("坐标系设置")
         self.action_set_area_offset = QAction("设置任务坐标系偏移量", self)
@@ -205,7 +215,7 @@ class MainWindow(QMainWindow):
         
         # 工具菜单
         tools_menu = self.ui.menubar.addMenu("工具(&T)")
-        self.action_param_config = QAction("🔧 飞控参数配置...", self)
+        self.action_param_config = QAction("[+] 飞控参数配置...", self)
         self.action_param_config.setShortcut("Ctrl+P")
         self.action_param_config.setToolTip("通过串口直连配置飞控参数")
         tools_menu.addAction(self.action_param_config)
@@ -351,6 +361,36 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "操作成功", f"设备 {usv_info['namespace']} 已添加到离群列表")
         else:
             self.ui_utils.append_info("请先选择一行")
+    
+    # ============== USV 集群启动 ==============
+    def launch_usv_fleet(self):
+        """启动 USV 集群启动器对话框"""
+        try:
+            # 查找工作空间路径
+            current_file = os.path.abspath(__file__)
+            search_path = current_file
+            workspace_path = None
+            
+            for _ in range(10):
+                search_path = os.path.dirname(search_path)
+                if os.path.basename(search_path) == 'install':
+                    workspace_path = os.path.dirname(search_path)
+                    break
+            
+            if workspace_path is None:
+                workspace_path = os.path.expanduser('~/usv_workspace')
+            
+            # 打开 USV 集群启动器对话框
+            launcher = UsvFleetLauncher(self, workspace_path)
+            launcher.exec_()
+            
+        except Exception as e:
+            self.ui_utils.append_info(f"❌ 打开 USV 集群启动器失败: {e}")
+            QMessageBox.critical(
+                self,
+                "错误",
+                f"打开 USV 集群启动器时发生错误:\n{e}"
+            )
     
     # ============== 坐标系设置命令 ==============
     def set_area_offset_command(self):
@@ -644,9 +684,13 @@ def main(argv=None):
     except Exception:
         print('无法设置持久化日志')
     
-    # 初始化ROS节点
+    # 初始化ROS节点（传入 append_info 和 append_warning 回调以输出到 GUI）
     rclpy.init(args=None)
-    node = GroundStationNode(ros_signal)
+    node = GroundStationNode(
+        ros_signal, 
+        append_info=main_window.ui_utils.append_info,
+        append_warning=main_window.ui_utils.append_warning
+    )
     
     # 将 ROS 节点传递给主窗口（用于参数管理功能）
     main_window.ros_node = node
@@ -684,13 +728,11 @@ def main(argv=None):
                             param_list.append(Parameter(k, value=val))
                 if param_list:
                     node.set_parameters(param_list)
-                    print(f"已加载参数: {[p.name for p in param_list]}")
             except Exception as e:
-                print(f"设置参数时出错: {e}")
-        else:
-            print(f"gs_params.yaml not found at {default_params_path}, skipping GUI param load")
+                node.get_logger().error(f"设置参数时出错: {e}")
+        # gs_params.yaml 文件不存在时不输出任何信息
     except Exception as e:
-        print(f"加载 gs_params.yaml 时出错: {e}")
+        node.get_logger().error(f"加载 gs_params.yaml 时出错: {e}")
     
     # 连接ROS信号到节点
     ros_signal.manual_command.connect(node.set_manual_callback)

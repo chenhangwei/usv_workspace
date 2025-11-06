@@ -68,7 +68,10 @@ class ParamWindow(QDialog):
         
         # 尝试从缓存加载参数
         QTimer.singleShot(500, self._try_load_from_cache)
-    
+        
+        # 窗口居中显示
+        self._center_on_screen()
+
     def _setup_ui(self):
         """设置 UI 布局"""
         main_layout = QVBoxLayout(self)
@@ -82,7 +85,7 @@ class ParamWindow(QDialog):
         toolbar_layout.setContentsMargins(10, 10, 10, 5)  # 为工具栏添加内边距
         
         # 搜索框
-        search_label = QLabel("🔍 搜索:")
+        search_label = QLabel("🚀 搜索:")
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("输入参数名称...")
         self.search_box.textChanged.connect(self._on_search_changed)
@@ -133,7 +136,7 @@ class ParamWindow(QDialog):
         toolbar_layout.addWidget(self.export_button)
         
         # 对比按钮
-        self.compare_button = QPushButton("🔍 对比")
+        self.compare_button = QPushButton("🚀 对比")
         self.compare_button.clicked.connect(self._show_compare_dialog)
         self.compare_button.setToolTip("对比当前值与默认值，或与其他 USV/文件对比")
         toolbar_layout.addWidget(self.compare_button)
@@ -848,7 +851,7 @@ class ParamWindow(QDialog):
             if abs(param.value - meta.default_value) > 1e-9:
                 lines.append(f"<font color='orange'>⚠️ 已偏离默认值</font>")
         if param.is_modified:
-            lines.append(f"<font color='#e74c3c'><b>📝 已修改（未保存）</b></font>")
+            lines.append(f"<font color='#e74c3c'><b>📋 已修改（未保存）</b></font>")
         lines.append("")
         
         # 范围
@@ -994,7 +997,7 @@ class ParamWindow(QDialog):
                     if len(result.messages) > 5:
                         msg_lines.append(f"  ... 共 {len(result.messages)} 条消息")
                 
-                msg_lines.append(f"\n💡 请点击\"保存\"按钮将修改写入飞控")
+                msg_lines.append(f"\n[*] 请点击\"保存\"按钮将修改写入飞控")
                 
                 QMessageBox.information(self, "导入完成", "\n".join(msg_lines))
                 
@@ -1109,7 +1112,7 @@ class ParamWindow(QDialog):
         
         # 构建消息
         msg_lines = [
-            "📊 参数对比结果（当前值 vs 默认值）\n",
+            "📋 参数对比结果（当前值 vs 默认值）\n",
             f"总参数：{stats['total']}",
             f"相同：{stats['same']} ✅",
             f"不同：{stats['different']} ⚠️",
@@ -1131,3 +1134,14 @@ class ParamWindow(QDialog):
         QMessageBox.information(self, "参数对比", "\n".join(msg_lines))
 
 
+
+
+    def _center_on_screen(self):
+        """将窗口居中显示在屏幕上"""
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.desktop().screenGeometry()
+        size = self.geometry()
+        self.move(
+            (screen.width() - size.width()) // 2,
+            (screen.height() - size.height()) // 2
+        )

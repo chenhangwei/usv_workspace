@@ -467,7 +467,7 @@ class ClusterController:
         distance = math.sqrt(result['x']**2 + result['y']**2 + result['z']**2)
         if distance > MAX_REASONABLE_DISTANCE:
             self.node.get_logger().warning(
-                f"⚠️ {usv_id} 目标点距A0基站距离异常: {distance:.2f}m > {MAX_REASONABLE_DISTANCE}m"
+                f"[!] {usv_id} 目标点距A0基站距离异常: {distance:.2f}m > {MAX_REASONABLE_DISTANCE}m"
             )
         
         return result

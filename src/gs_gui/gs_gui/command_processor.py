@@ -185,8 +185,11 @@ class CommandProcessor:
                 except queue.Empty:
                     break
 
-                # 记录日志（在节点线程中）
+                # 输出到 GUI info 窗口和 ROS logger
+                if hasattr(self.node, 'append_info'):
+                    self.node.append_info(f"📤 处理命令: {msg}")
                 self.node.get_logger().info(f"处理入队命令: {msg}")
+                
                 # 类型检查
                 if not isinstance(msg, str):
                     self.node.get_logger().warn("命令不是字符串，跳过")

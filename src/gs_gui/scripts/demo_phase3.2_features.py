@@ -91,13 +91,13 @@ def demo_param_export():
             firmware_version="ArduPilot 4.5.0"
         )
         
-        print(f"✅ 导出状态: {'成功' if success else '失败'}")
+        print(f"[OK] 导出状态: {'成功' if success else '失败'}")
         print(f"📄 文件路径: {temp_file}")
-        print(f"📊 参数数量: {len(params)}")
+        print(f"▪ 参数数量: {len(params)}")
         print()
         
         # 显示文件内容
-        print("📝 文件内容预览：")
+        print("▪ 文件内容预览：")
         print("-" * 70)
         with open(temp_file, 'r') as f:
             content = f.read()
@@ -135,18 +135,18 @@ def demo_json_export():
         firmware_version="ArduPilot 4.5.0"
     )
     
-    print(f"✅ 导出状态: {'成功' if success else '失败'}")
+    print(f"[OK] 导出状态: {'成功' if success else '失败'}")
     print(f"📄 文件路径: {temp_file1}")
     
     # 显示部分内容
     with open(temp_file1, 'r') as f:
         import json
         data = json.load(f)
-        print(f"📊 参数数量: {data['header']['total_params']}")
-        print(f"📝 文件头:")
+        print(f"▪ 参数数量: {data['header']['total_params']}")
+        print(f"▪ 文件头:")
         for key, value in data['header'].items():
             print(f"   • {key}: {value}")
-        print(f"\n📝 第一个参数 (GPS_TYPE):")
+        print(f"\n▪ 第一个参数 (GPS_TYPE):")
         gps_param = data['parameters'].get('GPS_TYPE', {})
         for key, value in list(gps_param.items())[:5]:
             print(f"   • {key}: {value}")
@@ -170,7 +170,7 @@ def demo_json_export():
             firmware_version="ArduPilot 4.5.0"
         )
         
-        print(f"✅ 导出状态: {'成功' if success else '失败'}")
+        print(f"[OK] 导出状态: {'成功' if success else '失败'}")
         print(f"📄 文件路径: {temp_file2}")
         
         # 显示文件大小对比
@@ -268,7 +268,7 @@ def demo_param_import():
         
         # 导入到原始参数
         print(f"📥 从文件导入: {temp_file}")
-        print(f"📊 原始参数值:")
+        print(f"▪ 原始参数值:")
         print(f"   • GPS_TYPE: {original_params['GPS_TYPE'].value}")
         print(f"   • BATT_CAPACITY: {original_params['BATT_CAPACITY'].value}")
         print()
@@ -279,8 +279,8 @@ def demo_param_import():
             validate=True
         )
         
-        print(f"✅ 导入状态: {'成功' if result.success else '失败'}")
-        print(f"📊 导入结果:")
+        print(f"[OK] 导入状态: {'成功' if result.success else '失败'}")
+        print(f"▪ 导入结果:")
         print(f"   • 导入参数: {result.imported_count}")
         print(f"   • 跳过参数: {result.skipped_count}")
         print(f"   • 错误参数: {result.error_count}")
@@ -288,12 +288,12 @@ def demo_param_import():
         print()
         
         if result.conflicts:
-            print(f"⚠️ 冲突详情:")
+            print(f"[!] 冲突详情:")
             for param_name, file_value, current_value in result.conflicts:
                 print(f"   • {param_name}: {current_value} → {file_value}")
             print()
         
-        print(f"📊 导入后参数值:")
+        print(f"▪ 导入后参数值:")
         print(f"   • GPS_TYPE: {original_params['GPS_TYPE'].value}")
         print(f"   • BATT_CAPACITY: {original_params['BATT_CAPACITY'].value}")
         
@@ -332,15 +332,15 @@ def demo_import_validation():
             validate=True
         )
         
-        print(f"✅ 导入状态: {'成功' if result.success else '失败'}")
-        print(f"📊 导入结果:")
+        print(f"[OK] 导入状态: {'成功' if result.success else '失败'}")
+        print(f"▪ 导入结果:")
         print(f"   • 导入参数: {result.imported_count}")
         print(f"   • 跳过参数: {result.skipped_count}")
         print(f"   • 错误参数: {result.error_count}")
         print()
         
         if result.messages:
-            print(f"📝 详细消息:")
+            print(f"▪ 详细消息:")
             for msg in result.messages:
                 print(f"   • {msg}")
         
@@ -377,7 +377,7 @@ def demo_json_import():
         )
         
         print(f"📥 从 JSON 文件导入: {temp_file}")
-        print(f"📊 原始参数值:")
+        print(f"▪ 原始参数值:")
         print(f"   • ARMING_VOLT_MIN: {original_params['ARMING_VOLT_MIN'].value}")
         print(f"   • ARMING_CHECK: {original_params['ARMING_CHECK'].value}")
         print()
@@ -388,13 +388,13 @@ def demo_json_import():
             validate=True
         )
         
-        print(f"✅ 导入状态: {'成功' if result.success else '失败'}")
-        print(f"📊 导入结果:")
+        print(f"[OK] 导入状态: {'成功' if result.success else '失败'}")
+        print(f"▪ 导入结果:")
         print(f"   • 导入参数: {result.imported_count}")
         print(f"   • 冲突参数: {len(result.conflicts)}")
         print()
         
-        print(f"📊 导入后参数值:")
+        print(f"▪ 导入后参数值:")
         print(f"   • ARMING_VOLT_MIN: {original_params['ARMING_VOLT_MIN'].value}")
         print(f"   • ARMING_CHECK: {original_params['ARMING_CHECK'].value}")
         
@@ -421,15 +421,15 @@ def main():
     demo_json_import()
     
     print("=" * 70)
-    print("✅ 所有演示完成！")
+    print("[OK] 所有演示完成！")
     print("=" * 70)
-    print("\n💡 功能特性：")
-    print("   1. ✅ .param 格式：兼容 QGroundControl")
-    print("   2. ✅ JSON 格式：支持完整元数据")
-    print("   3. ✅ 文件信息：自动识别格式和版本")
-    print("   4. ✅ 导入验证：参数范围和类型检查")
-    print("   5. ✅ 冲突检测：显示值变化")
-    print("   6. ✅ 错误处理：跳过无效参数，报告详细信息")
+    print("\n[*] 功能特性：")
+    print("   1. [OK] .param 格式：兼容 QGroundControl")
+    print("   2. [OK] JSON 格式：支持完整元数据")
+    print("   3. [OK] 文件信息：自动识别格式和版本")
+    print("   4. [OK] 导入验证：参数范围和类型检查")
+    print("   5. [OK] 冲突检测：显示值变化")
+    print("   6. [OK] 错误处理：跳过无效参数，报告详细信息")
     print()
 
 

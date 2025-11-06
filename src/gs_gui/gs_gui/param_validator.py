@@ -198,7 +198,7 @@ class ParamValidator:
         
         # 重启提示
         if metadata and metadata.reboot_required:
-            messages.append("⚠️ 此参数需要重启飞控后生效")
+            messages.append("[!] 此参数需要重启飞控后生效")
         
         # 特定参数警告
         if param.name == 'ARMING_CHECK' and new_value == 0:
@@ -208,9 +208,9 @@ class ParamValidator:
             messages.append("🚨 警告：修改机架类型会影响控制逻辑，错误设置会导致失控！")
         
         elif param.name == 'SYSID_THISMAV':
-            messages.append("⚠️ 注意：修改 MAVLink ID 后需要重新配置地面站连接。")
+            messages.append("[!] 注意：修改 MAVLink ID 后需要重新配置地面站连接。")
         
         elif param.name.startswith('ARMING_VOLT'):
-            messages.append("💡 提示：确保电压阈值与电池规格匹配。")
+            messages.append("[*] 提示：确保电压阈值与电池规格匹配。")
         
         return "\n".join(messages) if messages else None

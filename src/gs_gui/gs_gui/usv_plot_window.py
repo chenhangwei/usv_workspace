@@ -250,6 +250,9 @@ class UsvPlotWindow(QDialog):
         self.canvas.mpl_connect('button_press_event', self.on_click)
 
         self.update_plot()
+        
+        # 窗口居中显示
+        self._center_on_screen()
 
     def update_refresh_timer(self):
         """更新定时器间隔"""
@@ -484,3 +487,14 @@ class UsvPlotWindow(QDialog):
                 """)
                 
                 msg_box.exec_()
+
+
+    def _center_on_screen(self):
+        """将窗口居中显示在屏幕上"""
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.desktop().screenGeometry()
+        size = self.geometry()
+        self.move(
+            (screen.width() - size.width()) // 2,
+            (screen.height() - size.height()) // 2
+        )

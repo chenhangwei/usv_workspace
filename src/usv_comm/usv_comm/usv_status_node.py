@@ -413,7 +413,7 @@ class UsvStatusNode(Node):
                     # 刚进入低电压模式
                     self.low_voltage_mode = True
                     self.get_logger().error(
-                        f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
                         f'当前电压: {current_voltage:.2f}V, '
                         f'平均电压(10s): {avg_voltage:.2f}V, '
                         f'临界电压: {self.battery_voltage_empty}V\n'
@@ -424,7 +424,7 @@ class UsvStatusNode(Node):
                     # 退出低电压模式
                     self.low_voltage_mode = False
                     self.get_logger().info(
-                        f'✅ 退出低电压模式 - 平均电压: {avg_voltage:.2f}V'
+                        f'[OK] 退出低电压模式 - 平均电压: {avg_voltage:.2f}V'
                     )
             
             # 定期记录电量计算日志（每10条消息记录一次，避免刷屏）

@@ -16,10 +16,15 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', 
-            ['launch/gs_launch.py']),
-             ('share/' + package_name + '/config', 
-            ['config/gs_params.yaml']),
+        ('share/' + package_name + '/launch', [
+            'launch/gs_launch.py',
+            'launch/gs_distributed_launch.py',  # ROS 2 分布式启动
+            'launch/gs_local_multi_usv.py',     # 本地多 USV 测试
+        ]),
+        ('share/' + package_name + '/config', [
+            'config/gs_params.yaml',
+            'config/usv_fleet.yaml',            # USV 集群配置
+        ]),
     ],
     install_requires=[
         'setuptools',

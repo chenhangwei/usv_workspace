@@ -117,11 +117,11 @@ class UsvCommandNode(Node):
         try:
             response = future.result()
             if response and response.mode_sent:
-                self.get_logger().info(f'✅ 成功切换到模式: {mode}')
+                self.get_logger().info(f'[OK] 成功切换到模式: {mode}')
             else:
-                self.get_logger().warn(f'⚠️ 切换模式 {mode} 失败')
+                self.get_logger().warn(f'[!] 切换模式 {mode} 失败')
         except Exception as e:
-            self.get_logger().error(f'❌ 切换模式 {mode} 时发生异常: {e}')
+            self.get_logger().error(f'[X] 切换模式 {mode} 时发生异常: {e}')
 
     def set_arming_callback(self, msg):
         """
@@ -169,11 +169,11 @@ class UsvCommandNode(Node):
             response = future.result()
             state = 'armed' if command == 'ARMING' else 'disarmed'
             if response and response.success:
-                self.get_logger().info(f'✅ Vehicle {state} successfully')
+                self.get_logger().info(f'[OK] Vehicle {state} successfully')
             else:
-                self.get_logger().warn(f'⚠️ 设置 {state} 失败')
+                self.get_logger().warn(f'[!] 设置 {state} 失败')
         except Exception as e:
-            self.get_logger().error(f'❌ 设置 {state} 时发生异常: {e}')
+            self.get_logger().error(f'[X] 设置 {state} 时发生异常: {e}')
 
 
 def main(args=None):

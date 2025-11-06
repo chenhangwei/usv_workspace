@@ -18,7 +18,7 @@ def demo_metadata():
     
     # 加载元数据
     load_all_metadata()
-    print("✓ 元数据已加载\n")
+    print("[√] 元数据已加载\n")
     
     # 测试几个常用参数
     test_params = [
@@ -54,7 +54,7 @@ def demo_metadata():
                 for bit, desc in sorted(meta.bitmask.items()):
                     print(f"  Bit {bit}: {desc}")
         else:
-            print("❌ 无元数据")
+            print("[X] 无元数据")
 
 
 def demo_validation():
@@ -90,7 +90,7 @@ def demo_validation():
         # 验证
         valid, error_msg = ParamValidator.validate(param, test_val)
         
-        result_symbol = "✓" if valid == expected else "✗"
+        result_symbol = "[√]" if valid == expected else "[×]"
         print(f"  {result_symbol} 验证结果: {'有效' if valid else '无效'}")
         
         if not valid:
@@ -99,12 +99,12 @@ def demo_validation():
         # 建议值
         suggested = ParamValidator.suggest_valid_value(param, test_val)
         if suggested != test_val:
-            print(f"  💡 建议值: {suggested}")
+            print(f"  [*] 建议值: {suggested}")
         
         # 值描述
         desc = ParamValidator.get_value_description(param, test_val)
         if desc:
-            print(f"  📝 值描述: {desc}")
+            print(f"  ▪ 值描述: {desc}")
 
 
 def demo_warnings():
@@ -184,7 +184,7 @@ def demo_value_descriptions():
 
 def main():
     """主函数"""
-    print("\n🚀 USV 参数管理 QGC 同级功能演示\n")
+    print("\n>> USV 参数管理 QGC 同级功能演示\n")
     
     try:
         demo_metadata()
@@ -193,7 +193,7 @@ def main():
         demo_value_descriptions()
         
         print("\n" + "=" * 60)
-        print("✅ 演示完成！")
+        print("[OK] 演示完成！")
         print("=" * 60)
         print("\n下一步：")
         print("1. 启动地面站: ros2 launch gs_bringup gs_launch.py")
@@ -201,7 +201,7 @@ def main():
         print("3. 查看 PARAM_QGC_UPGRADE_GUIDE.md 了解更多")
         
     except Exception as e:
-        print(f"\n❌ 演示过程中出错: {e}")
+        print(f"\n[X] 演示过程中出错: {e}")
         import traceback
         traceback.print_exc()
 

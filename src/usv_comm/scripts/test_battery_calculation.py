@@ -51,11 +51,11 @@ def test_battery_calculation():
         (11.85, 50, "中等"),
         (11.7, 40, "中等"),
         (11.55, 30, "偏低"),
-        (11.4, 20, "低电量 ⚠️"),
-        (11.25, 10, "低电量 ⚠️"),
+        (11.4, 20, "低电量 [!]"),
+        (11.25, 10, "低电量 [!]"),
         (11.1, 0, "空电 🔴 需充电"),
-        (11.0, 0, "过放 ⚠️ 风险"),
-        (10.5, 0, "严重过放 ⚠️"),
+        (11.0, 0, "过放 [!] 风险"),
+        (10.5, 0, "严重过放 [!]"),
     ]
     
     print(f"\n{'电压(V)':<10} {'实际电量(%)':<15} {'预期电量(%)':<15} {'误差':<10} {'状态':<20}")
@@ -70,7 +70,7 @@ def test_battery_calculation():
         total_error += error
         max_error = max(max_error, error)
         
-        error_str = f"{error:.1f}%" if error > 0.1 else "✓"
+        error_str = f"{error:.1f}%" if error > 0.1 else "[√]"
         status_color = ""
         if actual_pct <= 20:
             status_color = "🔴"
@@ -90,9 +90,9 @@ def test_battery_calculation():
     print(f"  最大误差: {max_error:.2f}%")
     
     if max_error < 1.0:
-        print(f"  结果: ✅ 所有测试通过（误差 < 1%）")
+        print(f"  结果: [OK] 所有测试通过（误差 < 1%）")
     else:
-        print(f"  结果: ⚠️ 存在误差 > 1% 的测试用例")
+        print(f"  结果: [!] 存在误差 > 1% 的测试用例")
     
     print("="*70)
 
@@ -109,8 +109,8 @@ def test_user_reported_case():
     
     print(f"\nUSV 实际情况:")
     print(f"  电压: {voltage}V")
-    print(f"  修改前显示: {old_percentage}% ❌ 错误！")
-    print(f"  修改后显示: {new_percentage:.1f}% ✅ 正确")
+    print(f"  修改前显示: {old_percentage}% [X] 错误！")
+    print(f"  修改后显示: {new_percentage:.1f}% [OK] 正确")
     
     print(f"\n分析:")
     print(f"  1. 电压 {voltage}V 在满电(12.6V)和空电(11.1V)之间")
@@ -190,10 +190,10 @@ def generate_voltage_table():
             action = "准备充电"
         elif pct > 0:
             status = "🔴 低电量"
-            action = "⚠️ 立即充电"
+            action = "[!] 立即充电"
         else:
             status = "🔴🔴 空电"
-            action = "⚠️⚠️ 禁止使用"
+            action = "[!][!] 禁止使用"
         
         print(f"{voltage:<10.1f} {pct:<12.1f} {status:<15} {action:<20}")
     
@@ -213,4 +213,4 @@ if __name__ == '__main__':
     test_different_battery_types()
     generate_voltage_table()
     
-    print("\n✅ 所有验证完成！\n")
+    print("\n[OK] 所有验证完成！\n")

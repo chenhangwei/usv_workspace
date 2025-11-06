@@ -220,7 +220,7 @@ def demo_phase35_monitor():
         print(f"  [回调] {event.param_name}: {event.old_value:.6g} → {event.new_value:.6g} ({percent})")
     
     monitor.register_callback(on_param_changed)
-    print("✅ 监控器已创建，回调已注册")
+    print("[OK] 监控器已创建，回调已注册")
     
     # 2. 开始监控参数
     print("\n2. 开始监控参数")
@@ -228,7 +228,7 @@ def demo_phase35_monitor():
     
     for name, param in params.items():
         monitor.watch_param(name, param.original_value)
-    print(f"✅ 正在监控 {len(params)} 个参数")
+    print(f"[OK] 正在监控 {len(params)} 个参数")
     
     # 3. 模拟参数变化
     print("\n3. 模拟参数变化")
@@ -276,7 +276,7 @@ def demo_phase35_monitor():
     
     success = monitor.export_log(log_file)
     if success:
-        print(f"✅ 日志已导出到: {log_file}")
+        print(f"[OK] 日志已导出到: {log_file}")
         print("\n日志内容预览:")
         with open(log_file, 'r') as f:
             lines = f.readlines()
@@ -302,29 +302,29 @@ def main():
     demo_phase35_monitor()
     
     print("=" * 70)
-    print("✅ 所有演示完成！")
+    print("[OK] 所有演示完成！")
     print("=" * 70)
-    print("\n💡 功能特性总结：")
-    print("\n📊 Phase 3.3 - 参数对比：")
-    print("   1. ✅ 默认值对比")
-    print("   2. ✅ USV 间对比")
-    print("   3. ✅ 差异统计")
-    print("   4. ✅ TOP 差异分析")
-    print("   5. ✅ 同步脚本生成")
-    print("\n🔍 Phase 3.4 - 高级搜索：")
-    print("   1. ✅ 名称搜索")
-    print("   2. ✅ 描述搜索")
-    print("   3. ✅ 正则表达式")
-    print("   4. ✅ 分组过滤")
-    print("   5. ✅ 修改状态过滤")
-    print("   6. ✅ 值范围过滤")
-    print("   7. ✅ 组合搜索（AND）")
-    print("\n📈 Phase 3.5 - 实时监控：")
-    print("   1. ✅ 变化检测")
-    print("   2. ✅ 回调通知")
-    print("   3. ✅ 历史记录")
-    print("   4. ✅ 变化统计")
-    print("   5. ✅ 日志导出")
+    print("\n[*] 功能特性总结：")
+    print("\n▪ Phase 3.3 - 参数对比：")
+    print("   1. [OK] 默认值对比")
+    print("   2. [OK] USV 间对比")
+    print("   3. [OK] 差异统计")
+    print("   4. [OK] TOP 差异分析")
+    print("   5. [OK] 同步脚本生成")
+    print("\n>> Phase 3.4 - 高级搜索：")
+    print("   1. [OK] 名称搜索")
+    print("   2. [OK] 描述搜索")
+    print("   3. [OK] 正则表达式")
+    print("   4. [OK] 分组过滤")
+    print("   5. [OK] 修改状态过滤")
+    print("   6. [OK] 值范围过滤")
+    print("   7. [OK] 组合搜索（AND）")
+    print("\n↗ Phase 3.5 - 实时监控：")
+    print("   1. [OK] 变化检测")
+    print("   2. [OK] 回调通知")
+    print("   3. [OK] 历史记录")
+    print("   4. [OK] 变化统计")
+    print("   5. [OK] 日志导出")
     print()
 
 

@@ -26,7 +26,10 @@ class ParamConnectionDialog(QDialog):
         
         self._setup_ui()
         self._load_available_ports()
-    
+        
+        # 窗口居中显示
+        self._center_on_screen()
+
     def _setup_ui(self):
         """设置 UI"""
         self.setWindowTitle("连接到飞控（串口）")
@@ -86,7 +89,7 @@ class ParamConnectionDialog(QDialog):
         
         # ==================== 提示信息 ====================
         info_label = QLabel(
-            "💡 提示：\n"
+            "[*] 提示：\n"
             "• 确保飞控已通过 USB 连接到计算机\n"
             "• 推荐使用 115200 波特率（稳定性最佳）\n"
             "• 系统 ID 通常为 1（与飞控 SYSID_THISMAV 一致）"
@@ -160,3 +163,14 @@ class ParamConnectionDialog(QDialog):
             'system_id': self.system_id,
             'component_id': self.component_id
         }
+
+
+    def _center_on_screen(self):
+        """将窗口居中显示在屏幕上"""
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.desktop().screenGeometry()
+        size = self.geometry()
+        self.move(
+            (screen.width() - size.width()) // 2,
+            (screen.height() - size.height()) // 2
+        )

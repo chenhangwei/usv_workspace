@@ -32,16 +32,16 @@ class ParamDiagnostic(Node):
         
         print(f"   ParamPull 服务: {pull_service}")
         if pull_client.wait_for_service(timeout_sec=3.0):
-            print(f"   ✅ ParamPull 服务可用")
+            print(f"   [OK] ParamPull 服务可用")
         else:
-            print(f"   ❌ ParamPull 服务不可用（超时 3秒）")
+            print(f"   [X] ParamPull 服务不可用（超时 3秒）")
             return
         
         print(f"\n   ParamGet 服务: {get_service}")
         if get_client.wait_for_service(timeout_sec=3.0):
-            print(f"   ✅ ParamGet 服务可用")
+            print(f"   [OK] ParamGet 服务可用")
         else:
-            print(f"   ❌ ParamGet 服务不可用（超时 3秒）")
+            print(f"   [X] ParamGet 服务不可用（超时 3秒）")
             return
         
         # 2. 测试 ParamGet（获取单个参数）
@@ -56,15 +56,15 @@ class ParamDiagnostic(Node):
             try:
                 response = future.result()
                 if response.success:
-                    print(f"   ✅ ParamGet 成功")
+                    print(f"   [OK] ParamGet 成功")
                     print(f"   参数: {request.param_id}")
                     print(f"   值: {response.value.integer if response.value.integer != 0 else response.value.real}")
                 else:
-                    print(f"   ❌ ParamGet 失败")
+                    print(f"   [X] ParamGet 失败")
             except Exception as e:
-                print(f"   ❌ ParamGet 异常: {e}")
+                print(f"   [X] ParamGet 异常: {e}")
         else:
-            print(f"   ❌ ParamGet 超时（5秒）")
+            print(f"   [X] ParamGet 超时（5秒）")
             print(f"   → 可能原因：飞控通信异常或参数同步未完成")
             return
         
@@ -77,7 +77,7 @@ class ParamDiagnostic(Node):
             self.param_callback,
             10
         )
-        print(f"   ✅ 订阅成功，等待参数消息...")
+        print(f"   [OK] 订阅成功，等待参数消息...")
         
         # 4. 调用 ParamPull
         print(f"\n4. 调用 ParamPull（拉取所有参数）...")
@@ -93,7 +93,7 @@ class ParamDiagnostic(Node):
         while not pull_future.done():
             rclpy.spin_once(self, timeout_sec=0.1)
             if time.time() - start_time > timeout:
-                print(f"   ❌ ParamPull 超时（{timeout}秒）")
+                print(f"   [X] ParamPull 超时（{timeout}秒）")
                 print(f"   → 可能原因：")
                 print(f"      - 飞控未完全初始化")
                 print(f"      - MAVROS param 插件配置问题")
@@ -102,7 +102,7 @@ class ParamDiagnostic(Node):
         
         try:
             pull_response = pull_future.result()
-            print(f"   ✅ ParamPull 响应")
+            print(f"   [OK] ParamPull 响应")
             print(f"   成功: {pull_response.success}")
             print(f"   接收参数数: {pull_response.param_received}")
             
@@ -115,20 +115,20 @@ class ParamDiagnostic(Node):
                 while time.time() - start < wait_time:
                     rclpy.spin_once(self, timeout_sec=0.1)
                 
-                print(f"   ✅ 通过 topic 接收到 {self.param_count} 个参数")
+                print(f"   [OK] 通过 topic 接收到 {self.param_count} 个参数")
                 
                 if self.param_count == 0:
-                    print(f"   ⚠️  警告：ParamPull 成功但未收到参数消息")
+                    print(f"   [!]  警告：ParamPull 成功但未收到参数消息")
                     print(f"   → 可能原因：参数已在缓存中，未重新发布")
                 elif self.param_count < pull_response.param_received:
-                    print(f"   ⚠️  警告：接收参数数少于预期")
+                    print(f"   [!]  警告：接收参数数少于预期")
                     print(f"   预期: {pull_response.param_received}")
                     print(f"   实际: {self.param_count}")
             else:
-                print(f"   ❌ ParamPull 失败")
+                print(f"   [X] ParamPull 失败")
                 
         except Exception as e:
-            print(f"   ❌ ParamPull 异常: {e}")
+            print(f"   [X] ParamPull 异常: {e}")
         
         print(f"\n{'='*60}")
         print(f"诊断完成")

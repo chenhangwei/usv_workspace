@@ -70,7 +70,7 @@ class UsvInfoPanelIntegrator:
                     import_line,
                     f"{import_line}\nfrom gs_gui.usv_info_panel import UsvInfoPanel"
                 )
-                self.log("  ✓ 添加了 UsvInfoPanel 导入")
+                self.log("  [√] 添加了 UsvInfoPanel 导入")
             
             # 在 __init__ 中添加面板创建代码
             init_marker = "# 在初始化最后刷新表格表头"
@@ -89,7 +89,7 @@ class UsvInfoPanelIntegrator:
         
         """
                 content = content.replace(init_marker, insert_code + init_marker)
-                self.log("  ✓ 添加了面板初始化代码")
+                self.log("  [√] 添加了面板初始化代码")
             
             # 修改 StateHandler 初始化，传入 usv_info_panel
             state_handler_pattern = r'self\.state_handler = StateHandler\(\s*self\.table_manager,\s*self\.list_manager,\s*self\.ui_utils\.append_warning\s*\)'
@@ -99,12 +99,12 @@ class UsvInfoPanelIntegrator:
                     'self.state_handler = StateHandler(\n            self.table_manager,\n            self.list_manager,\n            self.ui_utils.append_warning,\n            self.usv_info_panel\n        )',
                     content
                 )
-                self.log("  ✓ 修改了 StateHandler 初始化")
+                self.log("  [√] 修改了 StateHandler 初始化")
             
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            self.log(f"✅ 成功修改 {file_path.name}")
+            self.log(f"[OK] 成功修改 {file_path.name}")
             return True
         
         except Exception as e:
@@ -131,7 +131,7 @@ class UsvInfoPanelIntegrator:
                     'def __init__(self, table_manager, list_manager, append_warning, usv_info_panel=None):',
                     content
                 )
-                self.log("  ✓ 修改了 __init__ 方法签名")
+                self.log("  [√] 修改了 __init__ 方法签名")
                 
                 # 在 __init__ 中保存 usv_info_panel
                 if 'self.usv_info_panel = usv_info_panel' not in content:
@@ -140,7 +140,7 @@ class UsvInfoPanelIntegrator:
                         'self.append_warning = append_warning',
                         'self.append_warning = append_warning\n        self.usv_info_panel = usv_info_panel'
                     )
-                    self.log("  ✓ 添加了 usv_info_panel 属性")
+                    self.log("  [√] 添加了 usv_info_panel 属性")
             
             # 在 _refresh_table 方法中添加面板更新逻辑
             refresh_method_pattern = r'def _refresh_table\(self\):.*?(?=\n    def |\Z)'
@@ -169,7 +169,7 @@ class UsvInfoPanelIntegrator:
                     count=1,
                     flags=re.DOTALL
                 )
-                self.log("  ✓ 添加了面板更新逻辑")
+                self.log("  [√] 添加了面板更新逻辑")
             
             # 添加 _get_selected_namespace 辅助方法
             if '_get_selected_namespace' not in content:
@@ -198,12 +198,12 @@ class UsvInfoPanelIntegrator:
 '''
                 # 在类的末尾添加
                 content = content.rstrip() + '\n' + helper_method + '\n'
-                self.log("  ✓ 添加了 _get_selected_namespace 方法")
+                self.log("  [√] 添加了 _get_selected_namespace 方法")
             
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            self.log(f"✅ 成功修改 {file_path.name}")
+            self.log(f"[OK] 成功修改 {file_path.name}")
             return True
         
         except Exception as e:
@@ -234,12 +234,12 @@ class UsvInfoPanelIntegrator:
     # 保留此方法是为了向后兼容
     def update_selected_table_row('''
                 )
-                self.log("  ✓ 添加了废弃注释")
+                self.log("  [√] 添加了废弃注释")
             
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             
-            self.log(f"✅ 成功修改 {file_path.name}")
+            self.log(f"[OK] 成功修改 {file_path.name}")
             return True
         
         except Exception as e:
@@ -274,7 +274,7 @@ class UsvInfoPanelIntegrator:
                 
                 f.write("如果遇到问题，可以从备份目录恢复文件。\n")
             
-            self.log(f"✅ 集成报告已生成")
+            self.log(f"[OK] 集成报告已生成")
             return True
         
         except Exception as e:
@@ -300,11 +300,11 @@ class UsvInfoPanelIntegrator:
                 self.log(f"错误：文件不存在 {file_path}", "ERROR")
                 return False
         
-        self.log("✓ 所有必需文件存在")
+        self.log("[√] 所有必需文件存在")
         
         # 创建备份目录
         self.backup_dir.mkdir(parents=True, exist_ok=True)
-        self.log(f"✓ 创建备份目录: {self.backup_dir}")
+        self.log(f"[√] 创建备份目录: {self.backup_dir}")
         
         # 执行修改
         success = True
@@ -317,7 +317,7 @@ class UsvInfoPanelIntegrator:
         
         if success:
             self.log("=" * 70)
-            self.log("✅ 集成完成！")
+            self.log("[OK] 集成完成！")
             self.log("=" * 70)
             self.log("\n请执行以下命令完成最后步骤：")
             self.log("  cd /home/chenhangwei/usv_workspace")
@@ -326,7 +326,7 @@ class UsvInfoPanelIntegrator:
             self.log("  ros2 launch gs_bringup gs_launch.py")
         else:
             self.log("=" * 70)
-            self.log("❌ 集成过程中出现错误，请查看日志", "ERROR")
+            self.log("[X] 集成过程中出现错误，请查看日志", "ERROR")
             self.log("=" * 70)
         
         return success

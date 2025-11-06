@@ -36,7 +36,7 @@ class AutoSetHomeNode(Node):
         self.declare_parameter('set_delay_sec', 3.0)
         self.declare_parameter('use_current_gps', False)
         
-        # ⚠️ 重要：以下坐标应该是定位基站A0的GPS原点坐标，不是USV上电位置！
+        # [!] 重要：以下坐标应该是定位基站A0的GPS原点坐标，不是USV上电位置！
         # 这个Home点将作为所有USV共享的全局坐标系原点
         # 所有USV应该使用相同的Home点坐标（定位基站A0的位置）
         self.declare_parameter('home_latitude', 22.5180977)   # A0基站纬度
@@ -100,7 +100,7 @@ class AutoSetHomeNode(Node):
         if self.use_current_gps:
             home_mode = 'current GPS position (当前GPS位置)'
             self.get_logger().warning(
-                '⚠️ 使用当前GPS位置作为Home点！'
+                '[!] 使用当前GPS位置作为Home点！'
                 '如果你的系统使用定位基站A0，请将 use_current_gps 设为 false'
             )
         else:
@@ -119,7 +119,7 @@ class AutoSetHomeNode(Node):
         self.gps_fix_type = msg.status.status
         # NavSatFix status.status 定义:
         # -1 = STATUS_NO_FIX (无定位)
-        #  0 = STATUS_FIX (有定位，未经差分校正) ✅
+        #  0 = STATUS_FIX (有定位，未经差分校正) [OK]
         #  1 = STATUS_SBAS_FIX (SBAS 差分定位)
         #  2 = STATUS_GBAS_FIX (GBAS 差分定位)
         # 我们需要至少有定位 (status >= 0)
@@ -167,7 +167,7 @@ class AutoSetHomeNode(Node):
         status_desc = {-1: 'NO_FIX', 0: 'FIX', 1: 'SBAS_FIX', 2: 'GBAS_FIX'}.get(
             self.gps_fix_type, 'UNKNOWN')
         self.get_logger().info(
-            f'✅ GPS positioning ready ({status_desc}), system connected. '
+            f'[OK] GPS positioning ready ({status_desc}), system connected. '
             f'Setting Home point in {self.set_delay_sec:.1f}s...'
         )
         self.set_home_sent = True
@@ -202,7 +202,7 @@ class AutoSetHomeNode(Node):
         
         if self.retry_attempt > self.max_retries:
             self.get_logger().error(
-                f'❌ Failed to set EKF origin after {self.max_retries} attempts. Giving up.'
+                f'[X] Failed to set EKF origin after {self.max_retries} attempts. Giving up.'
             )
             return
 
@@ -250,19 +250,19 @@ class AutoSetHomeNode(Node):
             result = future.result()
             if result is not None and getattr(result, 'success', False):
                 self._clear_retry_timer()
-                self.get_logger().info('✅ EKF origin set successfully via MAV_CMD_DO_SET_HOME!')
+                self.get_logger().info('[OK] EKF origin set successfully via MAV_CMD_DO_SET_HOME!')
             else:
                 result_code = getattr(result, 'result', None)
                 # 注意：这里不需要 retry_attempt +1，因为 _try_set_home 中已经递增过了
                 if self.retry_attempt >= self.max_retries:
                     self.get_logger().error(
-                        f'❌ Failed to set EKF origin after {self.retry_attempt} attempts '
+                        f'[X] Failed to set EKF origin after {self.retry_attempt} attempts '
                         f'(last result={result_code}).'
                     )
                     return
 
                 self._schedule_retry(
-                    f'❌ Failed to set EKF origin (success={getattr(result, "success", None)}, '
+                    f'[X] Failed to set EKF origin (success={getattr(result, "success", None)}, '
                     f'result={result_code})'
                 )
         except Exception as e:

@@ -46,15 +46,19 @@ class GroundStationNode(Node):
     MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
     PREARM_WARNING_EXPIRY = 15.0  # PreArm 报警保留时长（秒）
     
-    def __init__(self, signal):
+    def __init__(self, signal, append_info=None, append_warning=None):
         """
         初始化地面站节点
         
         Args:
             signal: ROS信号对象，用于与GUI界面通信
+            append_info: GUI 信息输出回调函数（可选）
+            append_warning: GUI 警告输出回调函数（可选）
         """
         super().__init__('groundstationnode')  # 调用父类Node的初始化方法，设置节点名称为'groundstationnode'
         self.ros_signal = signal  # 保存ROS信号对象引用
+        self.append_info = append_info if append_info else lambda x: None  # GUI 输出回调
+        self.append_warning = append_warning if append_warning else lambda x: None  # GUI 警告回调
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)  # 创建QoS配置对象，深度为10，可靠性策略为可靠传输
 
         # 初始化子模块
@@ -336,7 +340,7 @@ class GroundStationNode(Node):
                     now_sec = 0.0
                 self._ns_last_seen[usv_id] = now_sec
                 # 输出简洁的汇总日志
-                self.get_logger().info(f"✅ USV上线: {ns} (检测到 {node_count} 个节点)")
+                self.get_logger().info(f"[OK] USV上线: {ns} (检测到 {node_count} 个节点)")
 
         # 处理移除的USV命名空间
         safe_removed_ns = []
@@ -830,9 +834,9 @@ class GroundStationNode(Node):
             
             # 等待服务可用
             if not client.wait_for_service(timeout_sec=3.0):
-                self.get_logger().error(f'❌ 服务不可用: {service_name}')
+                self.get_logger().error(f'[X] 服务不可用: {service_name}')
                 try:
-                    self.ros_signal.node_info.emit(f'❌ {usv_namespace} 飞控重启失败：服务不可用')
+                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 飞控重启失败：服务不可用')
                 except Exception:
                     pass
                 return
@@ -856,16 +860,16 @@ class GroundStationNode(Node):
                 lambda f: self._handle_reboot_response(f, usv_namespace)
             )
             
-            self.get_logger().info(f'✅ 已向 {usv_namespace} 发送飞控重启命令 (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN)')
+            self.get_logger().info(f'[OK] 已向 {usv_namespace} 发送飞控重启命令 (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN)')
             try:
-                self.ros_signal.node_info.emit(f'✅ 已向 {usv_namespace} 发送飞控重启命令')
+                self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送飞控重启命令')
             except Exception:
                 pass
             
         except Exception as e:
-            self.get_logger().error(f'❌ 发送重启命令失败: {e}')
+            self.get_logger().error(f'[X] 发送重启命令失败: {e}')
             try:
-                self.ros_signal.node_info.emit(f'❌ 发送重启命令失败: {e}')
+                self.ros_signal.node_info.emit(f'[X] 发送重启命令失败: {e}')
             except Exception:
                 pass
     
@@ -874,23 +878,23 @@ class GroundStationNode(Node):
         try:
             response = future.result()
             if response.success:
-                self.get_logger().info(f'✅ {usv_namespace} 飞控重启命令已确认')
+                self.get_logger().info(f'[OK] {usv_namespace} 飞控重启命令已确认')
                 try:
-                    self.ros_signal.node_info.emit(f'✅ {usv_namespace} 飞控重启命令已确认，请等待 10-20 秒')
+                    self.ros_signal.node_info.emit(f'[OK] {usv_namespace} 飞控重启命令已确认，请等待 10-20 秒')
                 except Exception:
                     pass
             else:
                 self.get_logger().warn(
-                    f'⚠️ {usv_namespace} 飞控重启命令失败: result={response.result}'
+                    f'[!] {usv_namespace} 飞控重启命令失败: result={response.result}'
                 )
                 try:
-                    self.ros_signal.node_info.emit(f'⚠️ {usv_namespace} 飞控重启命令失败')
+                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 飞控重启命令失败')
                 except Exception:
                     pass
         except Exception as e:
-            self.get_logger().error(f'❌ 重启命令响应处理失败: {e}')
+            self.get_logger().error(f'[X] 重启命令响应处理失败: {e}')
             try:
-                self.ros_signal.node_info.emit(f'❌ 重启命令响应处理失败: {e}')
+                self.ros_signal.node_info.emit(f'[X] 重启命令响应处理失败: {e}')
             except Exception:
                 pass
 
@@ -904,13 +908,22 @@ class GroundStationNode(Node):
         if not text:
             return
         
-        # DEBUG: 记录收到的 statustext 消息
-        self.get_logger().info(f"[StatusText] {usv_id}: {text}")
-
         try:
             severity = int(getattr(msg, 'severity', 6))
         except (TypeError, ValueError):
             severity = 6
+        
+        # 根据 severity 输出到不同窗口
+        # 0-2: EMERGENCY/ALERT/CRITICAL → warning 窗口
+        # 3: ERROR → warning 窗口
+        # 4: WARNING → warning 窗口
+        # 5-7: NOTICE/INFO/DEBUG → info 窗口
+        if severity <= 4:  # 错误和警告
+            self.append_warning(f"⚠️ [{usv_id}] {text}")
+        else:  # 普通信息
+            self.append_info(f"📡 [{usv_id}] {text}")
+        
+        self.get_logger().info(f"[StatusText] {usv_id}: {text}")
 
         now_sec = self._now_seconds()
         entry = {
@@ -998,11 +1011,23 @@ class GroundStationNode(Node):
                 fix_int = int(fix_type)
             except (TypeError, ValueError):
                 fix_int = -1
-            if fix_int <= 1:
+            
+            # 综合判断：fix_type + 卫星数 + HDOP
+            # 优先级：卫星数 > HDOP > fix_type
+            if sat_int is not None and sat_int < 4:
+                # 卫星数少于4颗，无法可靠定位 → 错误
                 gps_level = 'error'
-            elif fix_int == 2:
+            elif eph_val is not None and eph_val > 10.0:
+                # HDOP > 10（精度极差）→ 错误
+                gps_level = 'error'
+            elif fix_int <= 1:
+                # No GPS 或 No Fix → 错误
+                gps_level = 'error'
+            elif fix_int == 2 or (eph_val is not None and eph_val > 5.0):
+                # 2D Fix 或 HDOP > 5（精度较差）→ 警告
                 gps_level = 'warn'
             else:
+                # 3D Fix 及以上，且卫星数≥4，且 HDOP ≤ 5 → 正常
                 gps_level = 'ok'
 
         statuses.append({

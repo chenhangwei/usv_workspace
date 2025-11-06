@@ -189,7 +189,7 @@ class UsvInfoPanel(QWidget):
     
     def _create_basic_info_group(self):
         """创建基本信息组"""
-        group = QGroupBox("📌 基本信息")
+        group = QGroupBox("📝 基本信息")
         group.setStyleSheet(self.GROUPBOX_STYLE)
         
         layout = QGridLayout()
@@ -208,7 +208,7 @@ class UsvInfoPanel(QWidget):
                 border-radius: 3px;
             }
         """)
-        layout.addWidget(QLabel("🆔 USV ID:"), 0, 0)
+        layout.addWidget(QLabel("📋 USV ID:"), 0, 0)
         layout.addWidget(self.id_label, 0, 1)
         
         # 模式
@@ -220,7 +220,7 @@ class UsvInfoPanel(QWidget):
                 border-radius: 4px;
             }
         """)
-        layout.addWidget(QLabel("🎯 模式:"), 1, 0)
+        layout.addWidget(QLabel("📋 模式:"), 1, 0)
         layout.addWidget(self.mode_label, 1, 1)
         
         # 状态
@@ -232,7 +232,7 @@ class UsvInfoPanel(QWidget):
                 border-radius: 4px;
             }
         """)
-        layout.addWidget(QLabel("📊 状态:"), 2, 0)
+        layout.addWidget(QLabel("📋 状态:"), 2, 0)
         layout.addWidget(self.status_label, 2, 1)
         
         # 解锁状态
@@ -244,7 +244,7 @@ class UsvInfoPanel(QWidget):
                 border-radius: 4px;
             }
         """)
-        layout.addWidget(QLabel("🔓 解锁:"), 3, 0)
+        layout.addWidget(QLabel("📋 解锁:"), 3, 0)
         layout.addWidget(self.armed_label, 3, 1)
         
         layout.setColumnStretch(1, 1)
@@ -253,7 +253,7 @@ class UsvInfoPanel(QWidget):
 
     def _create_readiness_group(self):
         """创建 Ready 状态展示组"""
-        group = QGroupBox("🚦 Ready 检查")
+        group = QGroupBox("🎯 Ready 检查")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#16a085"))
 
         layout = QVBoxLayout()
@@ -302,7 +302,7 @@ class UsvInfoPanel(QWidget):
     
     def _create_position_info_group(self):
         """创建位置信息组"""
-        group = QGroupBox("🗺️ 位置信息")
+        group = QGroupBox("📋 位置信息")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#27ae60"))
         
         layout = QGridLayout()
@@ -339,7 +339,7 @@ class UsvInfoPanel(QWidget):
     
     def _create_battery_info_group(self):
         """创建电池信息组"""
-        group = QGroupBox("🔋 电池信息")
+        group = QGroupBox("📋 电池信息")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#f39c12"))
         
         layout = QVBoxLayout()
@@ -396,7 +396,7 @@ class UsvInfoPanel(QWidget):
     
     def _create_gps_info_group(self):
         """创建GPS信息组"""
-        group = QGroupBox("🛰️ GPS 信息")
+        group = QGroupBox("📋 GPS 信息")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#9b59b6"))
         
         layout = QGridLayout()
@@ -420,7 +420,7 @@ class UsvInfoPanel(QWidget):
     
     def _create_velocity_info_group(self):
         """创建速度信息组（带罗盘显示）"""
-        group = QGroupBox("💨 速度 & 航向")
+        group = QGroupBox("📋 速度 & 航向")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#e74c3c"))
         
         main_layout = QVBoxLayout()
@@ -460,7 +460,7 @@ class UsvInfoPanel(QWidget):
 
     def _create_vehicle_message_group(self):
         """创建飞控消息展示组"""
-        group = QGroupBox("📣 飞控消息")
+        group = QGroupBox("📋 飞控消息")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#34495e"))
 
         layout = QVBoxLayout()
@@ -993,13 +993,10 @@ class UsvInfoPanel(QWidget):
         """根据卫星数量更新样式"""
         try:
             count = int(satellite_count)
-            print(f"[DEBUG] 卫星数量: {count}")  # 调试输出
             if count >= 4:
                 color = "#27ae60"  # 绿色 - 正常（4颗及以上可定位）
-                print(f"[DEBUG] 使用绿色")
             else:
                 color = "#e74c3c"  # 红色 - 信号弱（少于4颗无法定位）
-                print(f"[DEBUG] 使用红色")
             
             self.satellite_label.setStyleSheet(f"""
                 QLabel {{
@@ -1011,8 +1008,7 @@ class UsvInfoPanel(QWidget):
                     font-size: 13px;
                 }}
             """)
-        except (ValueError, TypeError) as e:
-            print(f"[DEBUG] 异常: {e}, satellite_count={satellite_count}")  # 调试输出
+        except (ValueError, TypeError):
             self.satellite_label.setStyleSheet("""
                 QLabel {
                     color: #34495e;

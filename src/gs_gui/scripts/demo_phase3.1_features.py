@@ -18,12 +18,12 @@ def demo_custom_editors():
     print("1. 自定义编辑器演示")
     print("=" * 60)
     
-    print("\n✅ 已实现的编辑器类型：")
+    print("\n[OK] 已实现的编辑器类型：")
     print("  • 枚举参数：QComboBox 下拉列表")
     print("  • 整数参数：QSpinBox 整数输入框")
     print("  • 浮点数参数：QDoubleSpinBox 浮点数输入框")
     
-    print("\n📋 示例参数：")
+    print("\n▪ 示例参数：")
     
     # GPS_TYPE - 枚举参数
     meta_gps = get_param_metadata("GPS_TYPE")
@@ -56,7 +56,7 @@ def demo_tooltips():
     print("2. 工具提示演示")
     print("=" * 60)
     
-    print("\n✅ 工具提示包含以下信息：")
+    print("\n[OK] 工具提示包含以下信息：")
     print("  • 参数名称和显示名称")
     print("  • 完整描述和详细说明")
     print("  • 当前值和默认值对比")
@@ -66,7 +66,7 @@ def demo_tooltips():
     print("  • 重启提示")
     print("  • 警告信息")
     
-    print("\n📋 GPS_TYPE 工具提示示例：")
+    print("\n▪ GPS_TYPE 工具提示示例：")
     print("""
     ┌─────────────────────────────────────────┐
     │ GPS_TYPE                                │
@@ -89,7 +89,7 @@ def demo_tooltips():
     │   • 9: UAVCAN                           │
     │   ... 共 19 个选项                      │
     │                                         │
-    │ ⚠️ 修改此参数需要重启飞控              │
+    │ [!] 修改此参数需要重启飞控              │
     └─────────────────────────────────────────┘
     """)
 
@@ -100,11 +100,11 @@ def demo_new_columns():
     print("3. 新增列演示")
     print("=" * 60)
     
-    print("\n✅ 表格新增列：")
+    print("\n[OK] 表格新增列：")
     print("  • 单位列：显示参数单位（mAh, V, A, bit/s 等）")
     print("  • 默认值列：显示出厂默认值")
     
-    print("\n📋 表格结构对比：")
+    print("\n▪ 表格结构对比：")
     print("\nBefore (Phase 3.0):")
     print("┌──────────────┬────────┬────────┬──────┬────────────┐")
     print("│ 参数名称     │ 当前值 │ 原始值 │ 分组 │ 描述       │")
@@ -129,15 +129,15 @@ def demo_restore_default():
     print("4. 恢复默认值功能")
     print("=" * 60)
     
-    print("\n✅ 功能特点：")
+    print("\n[OK] 功能特点：")
     print("  • 支持单个参数恢复")
     print("  • 支持批量选择恢复")
     print("  • 自动过滤无默认值的参数")
     print("  • 确认对话框（防止误操作）")
     
-    print("\n📋 使用流程：")
+    print("\n▪ 使用流程：")
     print("  1. 选中一个或多个参数")
-    print("  2. 点击 '🔄 恢复默认' 按钮")
+    print("  2. 点击 '↻ 恢复默认' 按钮")
     print("  3. 确认对话框：显示将恢复的参数数量")
     print("  4. 确认后恢复到出厂默认值")
     print("  5. 表格刷新，显示恢复后的值")
@@ -155,7 +155,7 @@ def demo_validation():
     print("5. 验证和警告系统集成")
     print("=" * 60)
     
-    print("\n✅ 验证流程：")
+    print("\n[OK] 验证流程：")
     print("""
     用户修改参数
         ↓
@@ -174,13 +174,13 @@ def demo_validation():
     用户取消 → 恢复原值
     """)
     
-    print("\n📋 示例1：类型验证失败")
+    print("\n▪ 示例1：类型验证失败")
     print("  修改: GPS_TYPE = 1.5")
     print("  错误: 参数 GPS_TYPE 必须是整数")
     print("  建议: 2.0")
     print("  结果: 修改被阻止")
     
-    print("\n📋 示例2：危险操作警告")
+    print("\n▪ 示例2：危险操作警告")
     print("  修改: ARMING_CHECK = 0")
     print("  警告: 🚨 禁用所有解锁检查非常危险！")
     print("  级别: Level 3 (严重警告)")
@@ -194,13 +194,13 @@ def demo_visual_enhancements():
     print("6. 视觉增强")
     print("=" * 60)
     
-    print("\n✅ 视觉标记：")
+    print("\n[OK] 视觉标记：")
     print("  • 已修改参数：淡黄色背景")
     print("  • 需重启参数：橙色粗体文本")
     print("  • 偏离默认值：工具提示中橙色警告")
     print("  • 警告参数：工具提示中红色警告")
     
-    print("\n📋 颜色说明：")
+    print("\n▪ 颜色说明：")
     print("  🟡 淡黄色：参数已修改（未保存）")
     print("  🟠 橙色：需要重启飞控")
     print("  🔴 红色：警告或错误")
@@ -221,26 +221,26 @@ def main():
     
     # 总结
     print("\n\n" + "=" * 60)
-    print("✅ Phase 3.1 完成情况")
+    print("[OK] Phase 3.1 完成情况")
     print("=" * 60)
     
     print("\n已实现功能：")
-    print("  ✅ 1. 自定义参数编辑器（枚举/整数/浮点数）")
-    print("  ✅ 2. 工具提示显示元数据")
-    print("  ✅ 3. 新增单位和默认值列")
-    print("  ✅ 4. 恢复默认值功能")
-    print("  ✅ 5. 集成参数验证和警告")
+    print("  [OK] 1. 自定义参数编辑器（枚举/整数/浮点数）")
+    print("  [OK] 2. 工具提示显示元数据")
+    print("  [OK] 3. 新增单位和默认值列")
+    print("  [OK] 4. 恢复默认值功能")
+    print("  [OK] 5. 集成参数验证和警告")
     
     print("\n用户体验提升：")
-    print("  📈 编辑效率提升：80%")
-    print("  📉 学习门槛降低：90%")
-    print("  📉 错误率降低：95%")
-    print("  📈 操作流畅度提升：70%")
+    print("  ↗ 编辑效率提升：80%")
+    print("  ↘ 学习门槛降低：90%")
+    print("  ↘ 错误率降低：95%")
+    print("  ↗ 操作流畅度提升：70%")
     
     print("\n与 QGroundControl 对标：")
-    print("  核心功能：100% ✅")
-    print("  UI 功能：60% 🚀 (Phase 3.1 完成后)")
-    print("  总体：70% 🎯")
+    print("  核心功能：100% [OK]")
+    print("  UI 功能：60% >> (Phase 3.1 完成后)")
+    print("  总体：70% ●")
     
     print("\n下一步：")
     print("  1. 启动地面站体验新功能：")

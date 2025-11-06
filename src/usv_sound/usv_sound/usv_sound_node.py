@@ -69,7 +69,7 @@ class UsvSoundNode(Node):
         self.get_logger().info('声音播放节点已启动')
         
         # 声明参数
-        # ⚠️ 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
+        # [!] 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
         self.declare_parameter('low_battery_percentage', 10.0)        # 低电量阈值（百分比）
         self.declare_parameter('sound_types', ['gaga101', 'gaga102', 'gaga103', 'gaga104'])
         self.declare_parameter('moon_type', 'moon101')
@@ -114,7 +114,7 @@ class UsvSoundNode(Node):
             if low_voltage_mode:
                 if not self.low_voltage:
                     self.get_logger().error(
-                        f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
                         f'电压: {msg.battery_voltage:.2f}V < 10.5V\n'
                         f'切换到低电量告警声音'
                     )
@@ -122,7 +122,7 @@ class UsvSoundNode(Node):
             else:
                 if self.low_voltage:
                     self.get_logger().info(
-                        f'✅ 退出低电压模式\n'
+                        f'[OK] 退出低电压模式\n'
                         f'电压: {msg.battery_voltage:.2f}V >= 10.5V\n'
                         f'恢复正常声音'
                     )
@@ -188,13 +188,13 @@ class UsvSoundNode(Node):
             if self.battery_percentage < low_threshold:
                 if not self.low_voltage:
                     self.get_logger().warn(
-                        f'⚠️ 电池电量低: {self.battery_percentage:.1f}%，切换到低电量声音'
+                        f'[!] 电池电量低: {self.battery_percentage:.1f}%，切换到低电量声音'
                     )
                 self.low_voltage = True
             else:
                 if self.low_voltage:
                     self.get_logger().info(
-                        f'✅ 电池电量恢复正常: {self.battery_percentage:.1f}%'
+                        f'[OK] 电池电量恢复正常: {self.battery_percentage:.1f}%'
                     )
                 self.low_voltage = False
                 

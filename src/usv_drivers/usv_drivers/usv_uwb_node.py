@@ -22,14 +22,30 @@ class UsvUwbNode(Node):
 
     def __init__(self):
         """初始化无人船UWB定位节点"""
-        super().__init__('usv_uwb_node') 
-        self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10) 
-        # 假设串口为 "/dev/ttyUSB0"，波特率为 115200
+        super().__init__('usv_uwb_node')
+        
+        # ==================== 参数声明 ====================
+        # 声明 UWB 串口配置参数，支持多 USV 并行使用不同串口
+        self.declare_parameter('uwb_port', '/dev/ttyUSB0')
+        self.declare_parameter('uwb_baudrate', 115200)
+        self.declare_parameter('uwb_timeout', 1.0)
+        
+        # 获取参数值
+        port = self.get_parameter('uwb_port').value
+        baudrate = self.get_parameter('uwb_baudrate').value
+        timeout = self.get_parameter('uwb_timeout').value
+        
+        # 创建发布器
+        self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10)
+        
+        # ==================== 串口初始化 ====================
+        # 使用参数化配置打开串口，避免多 USV 冲突
         try:
-            self.serial_port = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
-            self.get_logger().info('UWB串口打开成功')
+            self.serial_port = serial.Serial(port, baudrate, timeout=timeout)
+            self.get_logger().info(f'UWB 串口打开成功: {port} @ {baudrate} baud')
         except serial.SerialException as e:
-            self.get_logger().error(f'打开UWB串口失败: {e}')
+            self.get_logger().error(f'打开 UWB 串口失败 ({port}): {e}')
+            self.serial_port = None
             return
          
         # 100 Hz 定时器
@@ -43,6 +59,10 @@ class UsvUwbNode(Node):
         
         从串口读取UWB定位数据，转换为PoseStamped消息格式并发布。
         """
+        # 检查串口是否成功打开
+        if self.serial_port is None:
+            return
+        
         try:  
             # 读取一行数据
             data = self.serial_port.readline().decode('ASCII').strip()

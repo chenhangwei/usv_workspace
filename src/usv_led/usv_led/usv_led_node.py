@@ -49,7 +49,7 @@ class UsvLedNode(Node):
         self.declare_parameter('transition_duration', 3.0)  # 渐变持续时间（秒）
         self.declare_parameter('hold_duration', 10.0)       # 颜色停留时间（秒）
         
-        # ⚠️ 电池低电量阈值配置 - 基于飞控百分比
+        # [!] 电池低电量阈值配置 - 基于飞控百分比
         # 需要在 QGroundControl 中配置 BATT_CAPACITY 参数
         self.declare_parameter('low_battery_percentage', 10.0)     # 低电量阈值（百分比）
         self.declare_parameter('recover_battery_percentage', 15.0) # 恢复电量阈值（百分比）
@@ -362,7 +362,7 @@ class UsvLedNode(Node):
                         self.last_mode_before_low_battery = self.mode
                         self.mode = 'low_battery_breath'
                         self.get_logger().error(
-                            f'⚠️⚠️⚠️ 低电压模式触发！ ⚠️⚠️⚠️\n'
+                            f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
                             f'电压: {msg.battery_voltage:.2f}V < 10.5V\n'
                             f'进入低电量红色呼吸灯模式'
                         )
@@ -373,7 +373,7 @@ class UsvLedNode(Node):
                         # 恢复原有模式
                         self.mode = self.last_mode_before_low_battery or 'color_switching'
                         self.get_logger().info(
-                            f'✅ 退出低电压模式\n'
+                            f'[OK] 退出低电压模式\n'
                             f'电压: {msg.battery_voltage:.2f}V >= 10.5V\n'
                             f'恢复正常LED模式'
                         )
@@ -414,7 +414,7 @@ class UsvLedNode(Node):
                         self.last_mode_before_low_battery = self.mode
                         self.mode = 'low_battery_breath'
                         self.get_logger().warn(
-                            f'⚠️ USV 电池电量低于 {low_threshold}% '
+                            f'[!] USV 电池电量低于 {low_threshold}% '
                             f'(当前: {battery_percentage:.1f}%)，进入低电量红色呼吸灯模式'
                         )
                     self._color_select_transition_active = False
@@ -425,7 +425,7 @@ class UsvLedNode(Node):
                         # 恢复原有模式
                         self.mode = self.last_mode_before_low_battery or 'color_switching'
                         self.get_logger().info(
-                            f'✅ USV 电池电量恢复至 {recover_threshold}% 以上 '
+                            f'[OK] USV 电池电量恢复至 {recover_threshold}% 以上 '
                             f'(当前: {battery_percentage:.1f}%)，退出低电量模式'
                         )
                     self.is_low_battery_level = False

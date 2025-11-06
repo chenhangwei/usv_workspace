@@ -35,6 +35,9 @@ class AreaOffsetDialog(QDialog):
         # 创建UI
         self._setup_ui()
         
+        # 窗口居中显示
+        self._center_on_screen()
+
     def _setup_ui(self):
         """设置用户界面"""
         layout = QVBoxLayout(self)
@@ -137,3 +140,14 @@ class AreaOffsetDialog(QDialog):
             'y': self.y_spinbox.value(),
             'z': self.z_spinbox.value()
         }
+
+
+    def _center_on_screen(self):
+        """将窗口居中显示在屏幕上"""
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.desktop().screenGeometry()
+        size = self.geometry()
+        self.move(
+            (screen.width() - size.width()) // 2,
+            (screen.height() - size.height()) // 2
+        )

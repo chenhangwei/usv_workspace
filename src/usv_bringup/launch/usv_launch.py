@@ -39,7 +39,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_01',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -59,7 +59,7 @@ def generate_launch_description():
     # 飞控串口参数
     fcu_url_arg = DeclareLaunchArgument(
         'fcu_url',
-        default_value='serial:///dev/ttyACM0:115200',
+        default_value='serial:///dev/ttyACM0:921600',
         description='飞控通信串口和波特率'
     )
     
@@ -73,7 +73,7 @@ def generate_launch_description():
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='1',
+        default_value='3',
         description='MAVROS目标系统ID'
     )
     

@@ -137,7 +137,7 @@ class ParamSerialManager:
             self.mavlink_conn = None
         
         self.connected = False
-        print("🔌 已断开飞控连接")
+        print("± 已断开飞控连接")
     
     def _start_heartbeat_thread(self):
         """启动心跳线程（保持连接活跃）"""

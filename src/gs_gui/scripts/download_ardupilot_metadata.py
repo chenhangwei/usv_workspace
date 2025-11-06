@@ -37,11 +37,11 @@ def download_metadata(vehicle_type: str = "Rover") -> str:
         with urllib.request.urlopen(url, timeout=30) as response:
             xml_content = response.read().decode('utf-8')
         
-        print(f"✅ 下载成功！")
+        print(f"[OK] 下载成功！")
         return xml_content
         
     except Exception as e:
-        print(f"❌ 下载失败: {e}")
+        print(f"[X] 下载失败: {e}")
         raise
 
 
@@ -105,7 +105,7 @@ def convert_xml_to_json(xml_content: str) -> Dict[str, Dict[str, Any]]:
     Returns:
         参数元数据字典
     """
-    print("🔄 解析 XML 并转换格式...")
+    print("↻ 解析 XML 并转换格式...")
     
     root = ET.fromstring(xml_content)
     metadata = {}
@@ -198,7 +198,7 @@ def convert_xml_to_json(xml_content: str) -> Dict[str, Dict[str, Any]]:
             'read_only': read_only
         }
     
-    print(f"✅ 解析完成！共 {len(metadata)} 个参数")
+    print(f"[OK] 解析完成！共 {len(metadata)} 个参数")
     return metadata
 
 
@@ -219,7 +219,7 @@ def save_metadata(metadata: Dict[str, Dict[str, Any]], output_path: Path):
     with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(metadata, f, indent=2, ensure_ascii=False)
     
-    print(f"✅ 保存成功！文件大小: {output_path.stat().st_size / 1024:.1f} KB")
+    print(f"[OK] 保存成功！文件大小: {output_path.stat().st_size / 1024:.1f} KB")
 
 
 def main():
@@ -249,7 +249,7 @@ def main():
         
         # 4. 显示统计
         print("\n" + "=" * 70)
-        print("📊 统计信息：")
+        print("▪ 统计信息：")
         print(f"   • 参数总数: {len(metadata)}")
         
         # 统计有单位的参数
@@ -273,12 +273,12 @@ def main():
         print(f"   • 有位掩码: {with_bitmask}")
         
         print("=" * 70)
-        print("\n✅ 完成！元数据已保存到:")
+        print("\n[OK] 完成！元数据已保存到:")
         print(f"   {output_path}")
-        print("\n💡 重启 GUI 后，所有参数都将显示完整的单位和描述信息。")
+        print("\n[*] 重启 GUI 后，所有参数都将显示完整的单位和描述信息。")
         
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n[X] 错误: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

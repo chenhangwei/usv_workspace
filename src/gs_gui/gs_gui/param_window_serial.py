@@ -58,11 +58,7 @@ class ParamWindowSerial(QMainWindow):
         super().__init__(parent)
         
         # 加载参数元数据（描述、单位等）
-        print("🔧 加载参数元数据...")
-        if load_all_metadata():
-            print("✅ 参数元数据加载成功")
-        else:
-            print("⚠️ 参数元数据加载失败，将使用默认值")
+        load_all_metadata()
         
         # 参数管理器
         self.param_manager = ParamSerialManager()
@@ -80,6 +76,9 @@ class ParamWindowSerial(QMainWindow):
         # 初始化 UI
         self._setup_ui()
         self._update_connection_status()
+        
+        # 窗口居中显示
+        self._center_on_screen()
     
     def _setup_ui(self):
         """设置 UI"""
@@ -97,7 +96,7 @@ class ParamWindowSerial(QMainWindow):
         # 【连接】菜单
         connect_menu = menubar.addMenu("连接(&C)")
         
-        self.connect_action = QAction("🔌 连接飞控...", self)
+        self.connect_action = QAction("± 连接飞控...", self)
         self.connect_action.setShortcut(QKeySequence("Ctrl+O"))
         self.connect_action.triggered.connect(self._connect_to_fcu)
         connect_menu.addAction(self.connect_action)
@@ -157,7 +156,7 @@ class ParamWindowSerial(QMainWindow):
         
         tools_menu.addSeparator()
         
-        search_action = QAction("🔍 查找参数...", self)
+        search_action = QAction("🚀 查找参数...", self)
         search_action.setShortcut(QKeySequence("Ctrl+F"))
         search_action.triggered.connect(lambda: self.search_box.setFocus())
         tools_menu.addAction(search_action)
@@ -168,7 +167,7 @@ class ParamWindowSerial(QMainWindow):
         search_layout = QHBoxLayout()
         search_layout.setContentsMargins(10, 5, 10, 5)
         
-        search_label = QLabel("🔍 搜索:")
+        search_label = QLabel("🚀 搜索:")
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("输入参数名称...")
         self.search_box.textChanged.connect(self._on_search_changed)
@@ -669,6 +668,16 @@ class ParamWindowSerial(QMainWindow):
             self.param_manager.disconnect()
         
         event.accept()
+    
+    def _center_on_screen(self):
+        """将窗口居中显示在屏幕上"""
+        from PyQt5.QtWidgets import QApplication
+        screen = QApplication.desktop().screenGeometry()
+        size = self.geometry()
+        self.move(
+            (screen.width() - size.width()) // 2,
+            (screen.height() - size.height()) // 2
+        )
 
 
 # ==================== 测试代码 ====================
