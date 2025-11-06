@@ -79,7 +79,7 @@ class ParamItemDelegate(QStyledItemDelegate):
                 border: 2px solid #3498db;
                 border-radius: 3px;
                 background-color: white;
-                font-size: 11pt;
+                font-size: 14pt;
                 min-height: 28px;
             }
             QComboBox::drop-down {
@@ -97,7 +97,7 @@ class ParamItemDelegate(QStyledItemDelegate):
                 border: 2px solid #3498db;
                 selection-background-color: #3498db;
                 selection-color: white;
-                font-size: 11pt;
+                font-size: 14pt;
             }
         """)
         
@@ -124,7 +124,7 @@ class ParamItemDelegate(QStyledItemDelegate):
                 border: 2px solid #3498db;
                 border-radius: 3px;
                 background-color: white;
-                font-size: 11pt;
+                font-size: 14pt;
                 min-height: 28px;
             }
             QSpinBox::up-button, QSpinBox::down-button {
@@ -175,7 +175,7 @@ class ParamItemDelegate(QStyledItemDelegate):
                 border: 2px solid #3498db;
                 border-radius: 3px;
                 background-color: white;
-                font-size: 11pt;
+                font-size: 14pt;
                 min-height: 28px;
             }
             QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {

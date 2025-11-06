@@ -41,6 +41,8 @@ class UsvStatusNode(Node):
         # 创建发布者
         self.state_publisher = self.create_publisher(UsvStatus, 'usv_state', 10)
         self.temperature_publisher = self.create_publisher(Float32, 'usv_temperature', 10)
+        # 低电压模式话题发布器（用于通知 LED 和 Sound 节点立即响应）
+        self.low_voltage_mode_publisher = self.create_publisher(Bool, 'low_voltage_mode', qos_reliable)
 
         # 参数配置
         self.declare_parameter('target_reach_threshold', 1.0)
@@ -113,7 +115,8 @@ class UsvStatusNode(Node):
         self.get_logger().info(
             f"电池电压范围配置: 满电={self.battery_voltage_full}V (100%), "
             f"空电={self.battery_voltage_empty}V (0%), "
-            f"平均窗口={self.battery_avg_window}秒"
+            f"平均窗口={self.battery_avg_window}秒, "
+            f"低电量触发阈值=5%"
         )
 
         # 初始化状态变量
@@ -403,29 +406,42 @@ class UsvStatusNode(Node):
             avg_voltage = self.get_average_voltage()
             
             # 使用平均电压计算电量百分比
-            # 公式：percentage = (voltage - 10.5) / (12.6 - 10.5) * 100
+            # 公式：percentage = (voltage - v_empty) / (v_full - v_empty) * 100
             battery_pct = self.calculate_battery_percentage(avg_voltage)
             msg.battery_percentage = battery_pct
             
-            # 检查是否进入低电压模式（百分比 < 0 表示电压低于 10.5V）
-            if avg_voltage < self.battery_voltage_empty:
+            # 检查是否进入低电压模式（电量百分比 < 5%）
+            LOW_BATTERY_THRESHOLD = 5.0  # 低电量阈值：5%
+            RECOVER_THRESHOLD = 8.0      # 恢复阈值：8%（滞后设计，避免频繁切换）
+            
+            if battery_pct < LOW_BATTERY_THRESHOLD:
                 if not self.low_voltage_mode:
                     # 刚进入低电压模式
                     self.low_voltage_mode = True
                     self.get_logger().error(
-                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
+                        f'[!][!][!] 低电量模式触发！ [!][!][!]\n'
                         f'当前电压: {current_voltage:.2f}V, '
                         f'平均电压(10s): {avg_voltage:.2f}V, '
-                        f'临界电压: {self.battery_voltage_empty}V\n'
+                        f'电量百分比: {battery_pct:.1f}% < {LOW_BATTERY_THRESHOLD}%\n'
                         f'请立即返航或靠岸！'
                     )
-            else:
+                    # 立即发布低电压模式话题，通知 LED 和 Sound 节点
+                    low_voltage_msg = Bool()
+                    low_voltage_msg.data = True
+                    self.low_voltage_mode_publisher.publish(low_voltage_msg)
+                    self.get_logger().info('已发布低电压模式话题 (True) 到外设节点')
+            elif battery_pct > RECOVER_THRESHOLD:
                 if self.low_voltage_mode:
-                    # 退出低电压模式
+                    # 退出低电压模式（使用滞后阈值避免频繁切换）
                     self.low_voltage_mode = False
                     self.get_logger().info(
-                        f'[OK] 退出低电压模式 - 平均电压: {avg_voltage:.2f}V'
+                        f'[OK] 退出低电量模式 - 电量百分比: {battery_pct:.1f}% > {RECOVER_THRESHOLD}%'
                     )
+                    # 发布低电压模式恢复话题，通知 LED 和 Sound 节点
+                    low_voltage_msg = Bool()
+                    low_voltage_msg.data = False
+                    self.low_voltage_mode_publisher.publish(low_voltage_msg)
+                    self.get_logger().info('已发布低电压模式话题 (False) 到外设节点')
             
             # 定期记录电量计算日志（每10条消息记录一次，避免刷屏）
             self.battery_log_counter += 1
@@ -437,7 +453,7 @@ class UsvStatusNode(Node):
                     f"平均(10s)={avg_voltage:.2f}V, "
                     f"百分比={battery_pct:.1f}%, "
                     f"样本数={voltage_samples}, "
-                    f"低电压模式={'是' if self.low_voltage_mode else '否'}"
+                    f"低电量模式={'是' if self.low_voltage_mode else '否'} (触发阈值<5%)"
                 )
             
             msg.battery_current = getattr(self.usv_battery, 'current', 0.0)

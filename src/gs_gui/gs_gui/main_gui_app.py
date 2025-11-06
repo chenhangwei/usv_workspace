@@ -58,6 +58,14 @@ class MainWindow(QMainWindow):
         self.style_manager = StyleManager(self)
         self.style_manager.load_theme('modern_dark')
         
+        # 设置全局字体大小（增大 emoji 显示）
+        # 必须在 StyleManager 之后设置，以避免被主题覆盖
+        # 可选值：9(默认小), 10(稍大), 11(中等), 12(较大), 13(大), 14(很大)
+        from PyQt5.QtGui import QFont
+        app_font = QFont()
+        app_font.setPointSize(14)  # 设置为 14pt，emoji 明显更大
+        QApplication.instance().setFont(app_font)
+        
         # 初始化UI工具
         self.ui_utils = UIUtils(self.ui, self)
 
@@ -340,7 +348,8 @@ class MainWindow(QMainWindow):
                     self.list_manager.usv_departed_list,
                     self.state_handler.usv_nav_status
                 )
-                QMessageBox.information(self, "操作成功", f"设备 {usv_info['namespace']} 已添加到集群列表")
+                # 移除确认对话框，直接在info窗口输出
+                self.ui_utils.append_info(f"✅ 设备 {usv_info['namespace']} 已添加到集群列表")
         else:
             self.ui_utils.append_info("请先选择一行")
     
@@ -358,7 +367,8 @@ class MainWindow(QMainWindow):
                     self.list_manager.usv_departed_list,
                     self.state_handler.usv_nav_status
                 )
-                QMessageBox.information(self, "操作成功", f"设备 {usv_info['namespace']} 已添加到离群列表")
+                # 移除确认对话框，直接在info窗口输出
+                self.ui_utils.append_info(f"✅ 设备 {usv_info['namespace']} 已添加到离群列表")
         else:
             self.ui_utils.append_info("请先选择一行")
     
@@ -418,8 +428,8 @@ class MainWindow(QMainWindow):
         is_enabled = self.action_led_infection_mode.isChecked()
         self.ros_signal.led_infection_mode_changed.emit(is_enabled)
         status_text = "已开启" if is_enabled else "已关闭"
-        self.ui_utils.append_info(f"LED传染模式{status_text}")
-        QMessageBox.information(self, "LED传染模式", f"LED传染模式{status_text}")
+        # 移除确认对话框，直接在info窗口输出
+        self.ui_utils.append_info(f"✅ LED传染模式{status_text}")
 
     def toggle_led_rainbow_cycle(self):
         """切换LED彩虹循环并更新按钮文本"""

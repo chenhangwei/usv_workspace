@@ -94,7 +94,7 @@ class UsvFleetLauncher(QDialog):
         # 副标题
         subtitle_label = QLabel("管理和监控所有 USV 节点的启动与停止")
         subtitle_label.setAlignment(Qt.AlignCenter)
-        subtitle_label.setStyleSheet("color: #9e9e9e; font-size: 12px;")
+        subtitle_label.setStyleSheet("color: #9e9e9e; font-size: 16px;")
         main_layout.addWidget(subtitle_label)
         
         # ============== USV 列表区域 ==============
@@ -186,7 +186,7 @@ class UsvFleetLauncher(QDialog):
                 background-color: #1e1e1e;
                 color: #00ff00;
                 font-family: 'Courier New', monospace;
-                font-size: 11px;
+                font-size: 16px;
             }
         """)
         log_layout.addWidget(self.log_text)
@@ -413,7 +413,7 @@ class UsvFleetLauncher(QDialog):
                 padding: 4px 8px;
                 border-radius: 4px;
                 border: 1px solid #388e3c;
-                font-size: 11px;
+                font-size: 16px;
                 font-weight: bold;
             }
             QPushButton:hover {

@@ -43,7 +43,7 @@ class UsvPlotWindow(QDialog):
             QCheckBox {
                 background-color: transparent;
                 color: #2c3e50;
-                font-size: 11px;
+                font-size: 16px;
                 spacing: 8px;
                 padding: 4px;
             }
@@ -69,7 +69,7 @@ class UsvPlotWindow(QDialog):
                 border: none;
                 padding: 10px 20px;
                 border-radius: 5px;
-                font-size: 11px;
+                font-size: 16px;
                 font-weight: bold;
                 min-width: 100px;
             }
@@ -82,7 +82,7 @@ class UsvPlotWindow(QDialog):
             QLabel {
                 background-color: transparent;
                 color: #2c3e50;
-                font-size: 11px;
+                font-size: 16px;
                 padding: 4px;
             }
             QSlider::groove:horizontal {
@@ -170,7 +170,7 @@ class UsvPlotWindow(QDialog):
         # ========== Info Bar (紧凑布局) ==========
         info_layout = QHBoxLayout()
         self.info_label = QLabel("USV Count: 0 | Range: - | Last Update: -")
-        self.info_label.setStyleSheet("color: #34495e; font-size: 10px; padding: 3px; background-color: transparent;")
+        self.info_label.setStyleSheet("color: #34495e; font-size: 16px; padding: 3px; background-color: transparent;")
         self.info_label.setMaximumHeight(25)
         info_layout.addWidget(self.info_label)
         info_layout.addStretch()
@@ -469,7 +469,7 @@ class UsvPlotWindow(QDialog):
                     }
                     QLabel {
                         color: #2c3e50;
-                        font-size: 11px;
+                        font-size: 16px;
                         padding: 10px;
                     }
                     QPushButton {
@@ -478,7 +478,7 @@ class UsvPlotWindow(QDialog):
                         border: none;
                         padding: 8px 20px;
                         border-radius: 4px;
-                        font-size: 10px;
+                        font-size: 16px;
                         min-width: 80px;
                     }
                     QPushButton:hover {

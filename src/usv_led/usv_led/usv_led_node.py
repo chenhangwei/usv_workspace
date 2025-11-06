@@ -7,7 +7,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from sensor_msgs.msg import BatteryState
 from common_interfaces.msg import UsvStatus
 import serial
@@ -86,6 +86,14 @@ class UsvLedNode(Node):
             'usv_status',
             self.usv_status_callback,
             self.qos
+        )
+        
+        # 订阅专门的低电压模式话题（优先级更高，响应更快）
+        self.low_voltage_mode_sub = self.create_subscription(
+            Bool,
+            'low_voltage_mode',
+            self.low_voltage_mode_callback,
+            QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
         )
 
         # 向地面站回传当前 LED 模式与颜色，便于传染逻辑实时同步
@@ -381,6 +389,42 @@ class UsvLedNode(Node):
                     
         except Exception as e:
             self.get_logger().error(f'处理 USV 状态时发生错误: {e}')
+    
+    def low_voltage_mode_callback(self, msg):
+        """
+        低电压模式专用回调函数 - 立即响应低电量状态
+        
+        此回调优先级高于 usv_status_callback，确保快速响应
+        
+        Args:
+            msg (Bool): 低电压模式标志（True=进入低电量，False=退出低电量）
+        """
+        try:
+            if not isinstance(msg, Bool):
+                self.get_logger().warn('收到无效的低电压模式消息类型')
+                return
+            
+            if msg.data:  # 进入低电量模式
+                if not self.is_low_battery_level:
+                    self.last_mode_before_low_battery = self.mode
+                    self.mode = 'low_battery_breath'
+                    self.get_logger().error(
+                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
+                        f'进入低电量红色呼吸灯模式'
+                    )
+                self._color_select_transition_active = False
+                self.is_low_battery_level = True
+            else:  # 退出低电量模式
+                if self.is_low_battery_level:
+                    # 恢复原有模式
+                    self.mode = self.last_mode_before_low_battery or 'color_switching'
+                    self.get_logger().info(
+                        f'[OK] 退出低电压模式，恢复正常LED模式'
+                    )
+                self.is_low_battery_level = False
+                
+        except Exception as e:
+            self.get_logger().error(f'处理低电压模式回调时发生错误: {e}')
     
     def usv_batterystate_callback(self, msg):
         """

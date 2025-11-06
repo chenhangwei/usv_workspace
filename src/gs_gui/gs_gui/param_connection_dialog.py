@@ -95,7 +95,7 @@ class ParamConnectionDialog(QDialog):
             "• 系统 ID 通常为 1（与飞控 SYSID_THISMAV 一致）"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #555; font-size: 10pt;")
+        info_label.setStyleSheet("color: #555; font-size: 14pt;")
         layout.addWidget(info_label)
         
         # ==================== 按钮 ====================

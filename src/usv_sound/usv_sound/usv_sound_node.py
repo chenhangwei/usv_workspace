@@ -7,7 +7,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 from sensor_msgs.msg import BatteryState
 from common_interfaces.msg import UsvStatus
 import pyaudio
@@ -64,6 +64,14 @@ class UsvSoundNode(Node):
             'usv_status',
             self.usv_status_callback,
             qos_best_effort
+        )
+        
+        # 订阅专门的低电压模式话题（优先级更高，响应更快）
+        self.low_voltage_mode_sub = self.create_subscription(
+            Bool,
+            'low_voltage_mode',
+            self.low_voltage_mode_callback,
+            qos_reliable
         )
         
         self.get_logger().info('声音播放节点已启动')
@@ -130,6 +138,37 @@ class UsvSoundNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f'处理 USV 状态时发生错误: {e}')
+    
+    def low_voltage_mode_callback(self, msg):
+        """
+        低电压模式专用回调函数 - 立即响应低电量状态
+        
+        此回调优先级高于 usv_status_callback，确保快速响应
+        
+        Args:
+            msg (Bool): 低电压模式标志（True=进入低电量，False=退出低电量）
+        """
+        try:
+            if not isinstance(msg, Bool):
+                self.get_logger().warn('收到无效的低电压模式消息类型')
+                return
+            
+            if msg.data:  # 进入低电量模式
+                if not self.low_voltage:
+                    self.get_logger().error(
+                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
+                        f'切换到低电量告警声音'
+                    )
+                self.low_voltage = True
+            else:  # 退出低电量模式
+                if self.low_voltage:
+                    self.get_logger().info(
+                        f'[OK] 退出低电压模式，恢复正常声音'
+                    )
+                self.low_voltage = False
+                
+        except Exception as e:
+            self.get_logger().error(f'处理低电压模式回调时发生错误: {e}')
     
     def gs_sound_callback(self, msg):
         """

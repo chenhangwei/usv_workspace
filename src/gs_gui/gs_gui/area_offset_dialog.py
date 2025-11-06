@@ -50,7 +50,7 @@ class AreaOffsetDialog(QDialog):
             "• USV会自动转换为本地坐标执行"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #555; font-size: 10pt; padding: 10px;")
+        info_label.setStyleSheet("color: #555; font-size: 14pt; padding: 10px;")
         layout.addWidget(info_label)
         
         # 坐标输入组

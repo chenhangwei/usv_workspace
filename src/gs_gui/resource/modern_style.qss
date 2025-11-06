@@ -7,7 +7,7 @@
 /* ==================== 全局样式 ==================== */
 * {
     font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
-    font-size: 10pt;
+    font-size: 14pt;  /* 从 10pt 增大到 14pt，emoji 更清晰 */
 }
 
 QMainWindow {
@@ -323,7 +323,7 @@ QToolTip {
     border: 1px solid #4fc3f7;
     border-radius: 4px;
     padding: 5px;
-    font-size: 9pt;
+    font-size: 14pt;  /* 统一为 14pt */
 }
 
 /* ==================== 分隔器 Splitter ==================== */

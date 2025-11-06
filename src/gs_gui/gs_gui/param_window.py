@@ -175,7 +175,7 @@ class ParamWindow(QDialog):
         status_layout.setContentsMargins(10, 5, 10, 8)  # 减小底部边距
         
         self.status_label = QLabel("准备就绪")
-        self.status_label.setStyleSheet("font-size: 10pt;")  # 减小字体
+        self.status_label.setStyleSheet("font-size: 14pt;")  # 减小字体
         status_layout.addWidget(self.status_label)
         
         self.progress_bar = QProgressBar()
@@ -188,7 +188,7 @@ class ParamWindow(QDialog):
         
         # 统计信息
         self.stats_label = QLabel("参数: 0 | 已修改: 0")
-        self.stats_label.setStyleSheet("font-size: 10pt;")  # 减小字体
+        self.stats_label.setStyleSheet("font-size: 14pt;")  # 减小字体
         status_layout.addWidget(self.stats_label)
         
         main_layout.addLayout(status_layout)
@@ -235,7 +235,7 @@ class ParamWindow(QDialog):
         """应用样式表"""
         # 设置全局字体大小
         font = QFont()
-        font.setPointSize(10)  # 增大全局字体
+        font.setPointSize(14)  # 增大全局字体
         self.setFont(font)
         
         self.setStyleSheet("""
@@ -248,7 +248,7 @@ class ParamWindow(QDialog):
                 border-radius: 3px;
                 background-color: white;
                 color: black;
-                font-size: 11pt;
+                font-size: 14pt;
             }
             QPushButton {
                 padding: 8px 16px;
@@ -257,7 +257,7 @@ class ParamWindow(QDialog):
                 background-color: #3498db;
                 color: white;
                 font-weight: bold;
-                font-size: 11pt;
+                font-size: 14pt;
                 min-height: 32px;
             }
             QPushButton:hover {
@@ -271,7 +271,7 @@ class ParamWindow(QDialog):
                 background-color: white;
                 gridline-color: #ecf0f1;
                 border: 1px solid #bdc3c7;
-                font-size: 11pt;
+                font-size: 14pt;
                 color: black;
             }
             QTableWidget::item {
@@ -286,7 +286,7 @@ class ParamWindow(QDialog):
             QListWidget {
                 background-color: white;
                 border: 1px solid #bdc3c7;
-                font-size: 11pt;
+                font-size: 14pt;
                 color: black;
             }
             QListWidget::item {
@@ -304,18 +304,18 @@ class ParamWindow(QDialog):
                 padding: 10px 6px;
                 border: none;
                 font-weight: bold;
-                font-size: 12pt;
+                font-size: 14pt;
                 min-height: 35px;
             }
             QLabel {
-                font-size: 11pt;
+                font-size: 14pt;
                 color: black;
             }
             QProgressBar {
                 border: 1px solid #bdc3c7;
                 border-radius: 3px;
                 text-align: center;
-                font-size: 10pt;
+                font-size: 14pt;
                 font-weight: bold;
                 color: black;
             }
@@ -448,7 +448,7 @@ class ParamWindow(QDialog):
                 }
                 QLabel {
                     color: black;
-                    font-size: 11pt;
+                    font-size: 14pt;
                     background-color: transparent;
                 }
                 QPushButton {
@@ -458,7 +458,7 @@ class ParamWindow(QDialog):
                     background-color: #3498db;
                     color: white;
                     font-weight: bold;
-                    font-size: 11pt;
+                    font-size: 14pt;
                     min-height: 32px;
                     min-width: 80px;
                 }
@@ -830,7 +830,7 @@ class ParamWindow(QDialog):
         lines = []
         
         # 参数名称
-        lines.append(f"<b style='font-size:12pt'>{param.name}</b>")
+        lines.append(f"<b style='font-size: 14pt'>{param.name}</b>")
         lines.append("")
         
         # 显示名称

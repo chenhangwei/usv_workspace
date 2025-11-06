@@ -42,7 +42,7 @@ class UsvInfoPanel(QWidget):
     GROUPBOX_STYLE = """
         QGroupBox {
             font-weight: bold;
-            font-size: 11px;
+            font-size: 16px;
             border: 1.5px solid #3498db;
             border-radius: 5px;
             margin-top: 6px;
@@ -202,7 +202,7 @@ class UsvInfoPanel(QWidget):
             QLabel {
                 color: #2c3e50;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 16px;
                 background-color: #ecf0f1;
                 padding: 5px;
                 border-radius: 3px;
@@ -278,7 +278,7 @@ class UsvInfoPanel(QWidget):
         except AttributeError:
             alignment = AlignLeft | AlignVCenter
         self.ready_summary_label.setAlignment(alignment)  # type: ignore[arg-type]
-        self.ready_summary_label.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        self.ready_summary_label.setStyleSheet("color: #7f8c8d; font-size: 16px;")
         layout.addWidget(self.ready_summary_label)
 
         # 传感器状态列表
@@ -360,7 +360,7 @@ class UsvInfoPanel(QWidget):
                 text-align: center;
                 height: 20px;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 16px;
             }
             QProgressBar::chunk {
                 border-radius: 3px;
@@ -488,7 +488,7 @@ class UsvInfoPanel(QWidget):
             QLabel {
                 color: #7f8c8d;
                 font-weight: bold;
-                font-size: 11px;
+                font-size: 16px;
                 min-width: 40px;
             }
         """)
@@ -506,7 +506,7 @@ class UsvInfoPanel(QWidget):
             label.setStyleSheet("""
                 QLabel {
                     color: #2c3e50;
-                    font-size: 13px;
+                    font-size: 16px;
                     font-weight: bold;
                 }
             """)
@@ -514,7 +514,7 @@ class UsvInfoPanel(QWidget):
             label.setStyleSheet("""
                 QLabel {
                     color: #34495e;
-                    font-size: 11px;
+                    font-size: 16px;
                     font-weight: 600;
                 }
             """)
@@ -528,7 +528,7 @@ class UsvInfoPanel(QWidget):
         except AttributeError:
             alignment = AlignLeft | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("color: #2c3e50; font-size: 11px; font-weight: bold; margin-top: 4px;")
+        label.setStyleSheet("color: #2c3e50; font-size: 16px; font-weight: bold; margin-top: 4px;")
         return label
 
     def _configure_list_widget(self, widget):
@@ -577,7 +577,7 @@ class UsvInfoPanel(QWidget):
                 background-color: {background};
                 color: {text_color};
                 font-weight: bold;
-                font-size: 13px;
+                font-size: 16px;
                 border: none;
                 border-radius: 6px;
                 padding: 10px 14px;
@@ -938,7 +938,7 @@ class UsvInfoPanel(QWidget):
                 text-align: center;
                 height: 25px;
                 font-weight: bold;
-                font-size: 13px;
+                font-size: 16px;
             }}
             QProgressBar::chunk {{
                 background-color: {color};
@@ -983,7 +983,7 @@ class UsvInfoPanel(QWidget):
                 QLabel {{
                     color: {color};
                     font-weight: bold;
-                    font-size: 14px;
+                    font-size: 16px;
                 }}
             """)
         except (ValueError, TypeError):
@@ -1005,14 +1005,14 @@ class UsvInfoPanel(QWidget):
                     font-weight: bold;
                     padding: 3px 8px;
                     border-radius: 3px;
-                    font-size: 13px;
+                    font-size: 16px;
                 }}
             """)
         except (ValueError, TypeError):
             self.satellite_label.setStyleSheet("""
                 QLabel {
                     color: #34495e;
-                    font-size: 13px;
+                    font-size: 16px;
                     font-weight: 600;
                 }
             """)
