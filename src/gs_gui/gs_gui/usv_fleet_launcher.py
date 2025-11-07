@@ -40,6 +40,12 @@ class UsvFleetLauncher(QDialog):
         """
         super().__init__(parent)
         
+        # 设置窗口标志，使其不会始终置顶
+        # Qt.Window: 独立窗口
+        # 不设置 Qt.WindowStaysOnTopHint，允许其他窗口覆盖
+        from PyQt5.QtCore import Qt
+        self.setWindowFlags(Qt.Window)
+        
         self.workspace_path = workspace_path or os.path.expanduser('~/usv_workspace')
         self.fleet_config = {}
         self.usv_processes = {}  # {usv_id: subprocess.Popen}
@@ -48,16 +54,19 @@ class UsvFleetLauncher(QDialog):
         # 初始化 UI
         self._init_ui()
         
+        # 连接信号（必须在状态检测之前连接）
+        self.status_updated.connect(self._on_status_updated)
+        
         # 加载配置
         self._load_fleet_config()
+        
+        # 立即执行第一次状态检测
+        self._update_usv_status()
         
         # 启动定时器检测状态
         self.status_timer = QTimer()
         self.status_timer.timeout.connect(self._update_usv_status)
         self.status_timer.start(2000)  # 每 2 秒更新一次状态
-        
-        # 连接信号
-        self.status_updated.connect(self._on_status_updated)
         
         # 窗口居中显示
         self._center_on_screen()
@@ -371,10 +380,11 @@ class UsvFleetLauncher(QDialog):
             host_item.setFlags(host_item.flags() & ~Qt.ItemIsEditable)
             self.usv_table.setItem(row, 2, host_item)
             
-            # 列 3: 状态
-            status_item = QTableWidgetItem("检测中...")
+            # 列 3: 状态（初始化为离线，等待第一次状态检测更新）
+            status_item = QTableWidgetItem("⚫ 离线")
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
+            status_item.setForeground(QColor(150, 150, 150))
             self.usv_table.setItem(row, 3, status_item)
             
             # 列 4: 操作按钮
@@ -442,9 +452,17 @@ class UsvFleetLauncher(QDialog):
         )
     
     def _update_usv_status(self):
-        """更新所有 USV 的状态"""
+        """
+        更新所有 USV 的状态
+        
+        状态判断逻辑：
+        1. 在线（online）：机载计算机连接到局域网，可以 ping 通
+        2. 运行中（running）：节点已启动并正常运行
+        3. 启动中（launching）：启动命令已发送，等待节点上线
+        4. 离线（offline）：机载计算机未连接到网络
+        """
         try:
-            # 获取所有 ROS 节点
+            # 获取所有 ROS 节点（检测已启动的节点）
             result = subprocess.run(
                 ['ros2', 'node', 'list'],
                 capture_output=True,
@@ -459,17 +477,37 @@ class UsvFleetLauncher(QDialog):
                 if not self.fleet_config[usv_id].get('enabled', False):
                     continue
                 
-                # 检查该 USV 的关键节点是否在线
                 namespace = f"/{usv_id}"
+                hostname = self.fleet_config[usv_id].get('hostname', '')
+                
+                # 检查该 USV 的节点是否在线
                 has_nodes = any(namespace in node for node in online_nodes)
                 
-                if usv_id in self.usv_processes and self.usv_processes[usv_id].poll() is None:
-                    # 进程正在运行
-                    new_status = 'launching' if not has_nodes else 'running'
-                else:
-                    # 进程已停止
-                    new_status = 'running' if has_nodes else 'offline'
+                # 检查是否有正在运行的启动进程
+                has_process = (usv_id in self.usv_processes and 
+                             self.usv_processes[usv_id].poll() is None)
                 
+                # 检查机载计算机是否在线（通过网络可达性）
+                is_host_online = self._check_host_online(hostname)
+                
+                # 状态判断逻辑
+                if has_nodes:
+                    # 有节点在线 -> 运行中
+                    new_status = 'running'
+                elif has_process:
+                    # 有启动进程但节点未上线 -> 启动中
+                    new_status = 'launching'
+                elif is_host_online:
+                    # 主机在线但无节点 -> 在线（未启动）
+                    new_status = 'online'
+                else:
+                    # 主机离线 -> 离线
+                    new_status = 'offline'
+                
+                # 调试日志
+                self._log(f"📊 {usv_id} 状态: nodes={has_nodes}, process={has_process}, host={is_host_online} -> {new_status}")
+                
+                # 如果状态发生变化，发送信号更新 UI
                 if self.usv_status.get(usv_id) != new_status:
                     self.usv_status[usv_id] = new_status
                     self.status_updated.emit(usv_id, new_status)
@@ -478,6 +516,42 @@ class UsvFleetLauncher(QDialog):
             self._log("⚠️ 状态检测超时")
         except Exception as e:
             self._log(f"⚠️ 状态检测失败: {e}")
+    
+    def _check_host_online(self, hostname):
+        """
+        检查主机是否在线（通过 ping）
+        
+        Args:
+            hostname: 主机名或 IP 地址
+        
+        Returns:
+            bool: 主机在线返回 True，否则返回 False
+        """
+        if not hostname:
+            return False
+            
+        try:
+            # 使用 ping 命令检查主机可达性
+            # -c 1: 发送 1 个包
+            # -W 2: 超时 2 秒（增加到 2 秒以适应网络延迟）
+            result = subprocess.run(
+                ['ping', '-c', '1', '-W', '2', hostname],
+                capture_output=True,
+                timeout=3
+            )
+            is_online = result.returncode == 0
+            # 调试日志
+            if is_online:
+                self._log(f"✅ {hostname} 在线")
+            else:
+                self._log(f"❌ {hostname} 离线")
+            return is_online
+        except subprocess.TimeoutExpired:
+            self._log(f"⏱️ {hostname} ping 超时")
+            return False
+        except Exception as e:
+            self._log(f"⚠️ {hostname} ping 失败: {e}")
+            return False
     
     def _on_status_updated(self, usv_id, status):
         """状态更新时的回调"""
@@ -489,6 +563,7 @@ class UsvFleetLauncher(QDialog):
                 # 状态文本和颜色
                 status_map = {
                     'offline': ('⚫ 离线', QColor(150, 150, 150)),
+                    'online': ('🟡 在线', QColor(255, 193, 7)),      # 新增：在线但未启动
                     'launching': ('🔄 启动中...', QColor(255, 152, 0)),
                     'running': ('🟢 运行中', QColor(76, 175, 80)),
                     'stopped': ('🔴 已停止', QColor(244, 67, 54))
@@ -614,6 +689,11 @@ class UsvFleetLauncher(QDialog):
         """窗口关闭事件"""
         # 停止定时器
         self.status_timer.stop()
+        
+        # 通知父窗口清理引用
+        if self.parent():
+            if hasattr(self.parent(), '_usv_fleet_launcher'):
+                self.parent()._usv_fleet_launcher = None
         
         # 直接接受关闭事件，不再弹出确认对话框
         event.accept()

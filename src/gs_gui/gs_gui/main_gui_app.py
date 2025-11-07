@@ -390,9 +390,16 @@ class MainWindow(QMainWindow):
             if workspace_path is None:
                 workspace_path = os.path.expanduser('~/usv_workspace')
             
-            # 打开 USV 集群启动器对话框
-            launcher = UsvFleetLauncher(self, workspace_path)
-            launcher.exec_()
+            # 打开 USV 集群启动器对话框（非模态）
+            # 如果已经打开，则激活窗口
+            if hasattr(self, '_usv_fleet_launcher') and self._usv_fleet_launcher is not None:
+                # 窗口已存在，激活并置顶
+                self._usv_fleet_launcher.raise_()
+                self._usv_fleet_launcher.activateWindow()
+            else:
+                # 创建新窗口（非模态）
+                self._usv_fleet_launcher = UsvFleetLauncher(self, workspace_path)
+                self._usv_fleet_launcher.show()  # 使用 show() 而非 exec_()，允许同时操作主界面
             
         except Exception as e:
             self.ui_utils.append_info(f"❌ 打开 USV 集群启动器失败: {e}")

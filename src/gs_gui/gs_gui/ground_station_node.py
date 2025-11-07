@@ -914,16 +914,22 @@ class GroundStationNode(Node):
             severity = 6
         
         # 根据 severity 输出到不同窗口
-        # 0-2: EMERGENCY/ALERT/CRITICAL → warning 窗口
-        # 3: ERROR → warning 窗口
-        # 4: WARNING → warning 窗口
-        # 5-7: NOTICE/INFO/DEBUG → info 窗口
-        if severity <= 4:  # 错误和警告
-            self.append_warning(f"⚠️ [{usv_id}] {text}")
-        else:  # 普通信息
-            self.append_info(f"📡 [{usv_id}] {text}")
+        # 飞控状态文本消息（STATUSTEXT）不发送到 warning 窗口，也不发送到 info 窗口
+        # 只以日志形式记录，避免干扰用户操作
+        # 其他模块的错误和警告仍会正常显示在 warning 窗口
         
-        self.get_logger().info(f"[StatusText] {usv_id}: {text}")
+        # 所有飞控消息仅记录到 ROS 日志，不显示在 GUI 窗口
+        # 用户可以通过日志文件或 rqt_console 查看这些消息
+        
+        # 根据严重性级别记录到不同的日志等级
+        if severity <= 2:  # EMERGENCY/ALERT/CRITICAL
+            self.get_logger().error(f"[FCU-CRITICAL] {usv_id}: {text}")
+        elif severity == 3:  # ERROR
+            self.get_logger().error(f"[FCU-ERROR] {usv_id}: {text}")
+        elif severity == 4:  # WARNING
+            self.get_logger().warn(f"[FCU-WARNING] {usv_id}: {text}")
+        else:  # NOTICE/INFO/DEBUG
+            self.get_logger().info(f"[FCU-INFO] {usv_id}: {text}")
 
         now_sec = self._now_seconds()
         entry = {
