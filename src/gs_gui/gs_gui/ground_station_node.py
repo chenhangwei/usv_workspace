@@ -887,8 +887,141 @@ class GroundStationNode(Node):
                 self.get_logger().warn(
                     f'[!] {usv_namespace} 飞控重启命令失败: result={response.result}'
                 )
+        except Exception as e:
+            self.get_logger().error(f'[X] 处理重启命令响应失败: {e}')
+    
+    def reboot_companion_callback(self, usv_namespace):
+        """
+        机载计算机重启回调
+        
+        通过 SSH 直接重启机载计算机（更可靠的方式）
+        备选方案：MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN（某些飞控可能不支持）
+        
+        Args:
+            usv_namespace: USV 命名空间（如 'usv_01'）
+        """
+        try:
+            # 方法 1: 通过 SSH 直接重启（推荐，更可靠）
+            import subprocess
+            import os
+            import yaml
+            
+            # 读取 usv_fleet.yaml 获取机载计算机信息
+            workspace_path = os.path.expanduser('~/usv_workspace')
+            config_file = os.path.join(
+                workspace_path,
+                'install/gs_bringup/share/gs_bringup/config/usv_fleet.yaml'
+            )
+            
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    fleet_config = config.get('usv_fleet', {})
+                    
+                    if usv_namespace in fleet_config:
+                        usv_config = fleet_config[usv_namespace]
+                        hostname = usv_config.get('hostname')
+                        username = usv_config.get('username')
+                        
+                        if hostname and username:
+                            # 构建 SSH 重启命令（使用 systemctl reboot，无需 sudo）
+                            # 注意：某些系统可能需要 sudo，如果失败会自动回退到 MAVLink
+                            ssh_cmd = [
+                                'ssh',
+                                '-o', 'StrictHostKeyChecking=no',
+                                '-o', 'ConnectTimeout=5',
+                                f'{username}@{hostname}',
+                                'systemctl reboot || sudo reboot'  # 先尝试 systemctl，失败则用 sudo
+                            ]
+                            
+                            # 异步执行 SSH 命令
+                            subprocess.Popen(
+                                ssh_cmd,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL
+                            )
+                            
+                            self.get_logger().info(f'[OK] 已向 {usv_namespace} ({hostname}) 发送 SSH 重启命令')
+                            try:
+                                self.ros_signal.node_info.emit(
+                                    f'[OK] 已向 {usv_namespace} 发送重启命令，系统将在 30-60 秒后重新上线'
+                                )
+                            except Exception:
+                                pass
+                            return
+                        else:
+                            self.get_logger().error(f'[X] {usv_namespace} 配置缺少 hostname 或 username')
+                    else:
+                        self.get_logger().error(f'[X] 未找到 {usv_namespace} 的配置')
+            else:
+                self.get_logger().error(f'[X] 配置文件不存在: {config_file}')
+            
+            # 方法 2: 备选 - 通过 MAVLink 命令（如果 SSH 不可用或配置文件缺失）
+            self.get_logger().warn(f'[!] SSH 重启失败，尝试 MAVLink 命令（可能不被支持）')
+            self._reboot_companion_via_mavlink(usv_namespace)
+            
+        except Exception as e:
+            self.get_logger().error(f'[X] 机载计算机重启失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'[X] 机载计算机重启失败: {e}')
+            except Exception:
+                pass
+    
+    def _reboot_companion_via_mavlink(self, usv_namespace):
+        """
+        通过 MAVLink 命令重启机载计算机（备选方案）
+        
+        注意：某些飞控固件可能不支持此命令
+        """
+        try:
+            from mavros_msgs.srv import CommandLong
+            
+            service_name = f'/{usv_namespace}/cmd/command'
+            client = self.create_client(CommandLong, service_name)
+            
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().error(f'[X] MAVROS 服务不可用: {service_name}')
+                return
+            
+            # 构建 MAVLink 重启命令
+            request = CommandLong.Request()
+            request.broadcast = False
+            request.command = 246  # MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+            request.confirmation = 0
+            request.param1 = 0.0   # 不重启飞控
+            request.param2 = 3.0   # 重启机载计算机
+            request.param3 = 0.0
+            request.param4 = 0.0
+            request.param5 = 0.0
+            request.param6 = 0.0
+            request.param7 = 0.0
+            
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda f: self._handle_companion_reboot_response(f, usv_namespace)
+            )
+            
+            self.get_logger().info(f'[OK] 已发送 MAVLink 重启命令到 {usv_namespace}')
+            
+        except Exception as e:
+            self.get_logger().error(f'[X] MAVLink 重启命令失败: {e}')
+    
+    def _handle_companion_reboot_response(self, future, usv_namespace):
+        """处理机载计算机重启命令响应"""
+        try:
+            response = future.result()
+            if response.success:
+                self.get_logger().info(f'[OK] {usv_namespace} 机载计算机重启命令已确认')
                 try:
-                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 飞控重启命令失败')
+                    self.ros_signal.node_info.emit(f'[OK] {usv_namespace} 机载计算机重启命令已确认，系统将在 30-60 秒后重新上线')
+                except Exception:
+                    pass
+            else:
+                self.get_logger().warn(
+                    f'[!] {usv_namespace} 机载计算机重启命令失败: result={response.result}'
+                )
+                try:
+                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 机载计算机重启命令失败')
                 except Exception:
                     pass
         except Exception as e:

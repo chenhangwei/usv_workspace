@@ -8,8 +8,6 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from std_msgs.msg import String, Bool
-from sensor_msgs.msg import BatteryState
-from common_interfaces.msg import UsvStatus
 import pyaudio
 import wave
 import os
@@ -50,23 +48,7 @@ class UsvSoundNode(Node):
             qos_reliable
         )
         
-        # 订阅 MAVROS 的电池状态主题
-        self.battery_sub = self.create_subscription(
-            BatteryState,
-            'battery',
-            self.voltage_callback,
-            qos_best_effort
-        )
-        
-        # 订阅 USV 状态（用于获取低电压模式标志）
-        self.usv_status_sub = self.create_subscription(
-            UsvStatus,
-            'usv_status',
-            self.usv_status_callback,
-            qos_best_effort
-        )
-        
-        # 订阅专门的低电压模式话题（优先级更高，响应更快）
+        # 订阅专门的低电压模式话题（RELIABLE QoS 确保送达）
         self.low_voltage_mode_sub = self.create_subscription(
             Bool,
             'low_voltage_mode',
@@ -77,8 +59,6 @@ class UsvSoundNode(Node):
         self.get_logger().info('声音播放节点已启动')
         
         # 声明参数
-        # [!] 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
-        self.declare_parameter('low_battery_percentage', 10.0)        # 低电量阈值（百分比）
         self.declare_parameter('sound_types', ['gaga101', 'gaga102', 'gaga103', 'gaga104'])
         self.declare_parameter('moon_type', 'moon101')
         self.declare_parameter('min_play_interval', 2)
@@ -97,48 +77,13 @@ class UsvSoundNode(Node):
         self.loop_stop_event = threading.Event()
         self.low_voltage = False
         
+        # 用户意图标志：记录用户是否主动停止声音
+        self.user_stopped_sound = False
+        
         # 从参数读取配置
         self.sound_types = self.get_parameter('sound_types').get_parameter_value().string_array_value
         self.moon_type = self.get_parameter('moon_type').get_parameter_value().string_value
-        self.voltage = 12.0
-        self.battery_percentage = 100.0
 
-    def usv_status_callback(self, msg):
-        """
-        USV 状态回调函数 - 检测低电压模式
-        
-        Args:
-            msg (UsvStatus): 包含 USV 完整状态信息的消息
-        """
-        try:
-            if not isinstance(msg, UsvStatus):
-                self.get_logger().warn('收到无效的 USV 状态消息类型')
-                return
-            
-            # 获取低电压模式标志
-            low_voltage_mode = getattr(msg, 'low_voltage_mode', False)
-            
-            # 检查是否为低电压状态（带状态变化日志）
-            if low_voltage_mode:
-                if not self.low_voltage:
-                    self.get_logger().error(
-                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
-                        f'电压: {msg.battery_voltage:.2f}V < 10.5V\n'
-                        f'切换到低电量告警声音'
-                    )
-                self.low_voltage = True
-            else:
-                if self.low_voltage:
-                    self.get_logger().info(
-                        f'[OK] 退出低电压模式\n'
-                        f'电压: {msg.battery_voltage:.2f}V >= 10.5V\n'
-                        f'恢复正常声音'
-                    )
-                self.low_voltage = False
-                
-        except Exception as e:
-            self.get_logger().error(f'处理 USV 状态时发生错误: {e}')
-    
     def low_voltage_mode_callback(self, msg):
         """
         低电压模式专用回调函数 - 立即响应低电量状态
@@ -153,19 +98,23 @@ class UsvSoundNode(Node):
                 self.get_logger().warn('收到无效的低电压模式消息类型')
                 return
             
-            if msg.data:  # 进入低电量模式
-                if not self.low_voltage:
-                    self.get_logger().error(
-                        f'[!][!][!] 低电压模式触发！ [!][!][!]\n'
-                        f'切换到低电量告警声音'
-                    )
+            if msg.data and not self.low_voltage:
+                # 进入低电量模式
                 self.low_voltage = True
-            else:  # 退出低电量模式
-                if self.low_voltage:
-                    self.get_logger().info(
-                        f'[OK] 退出低电压模式，恢复正常声音'
-                    )
+                self.get_logger().error('[!][!][!] 低电压模式触发！')
+                
+                # 🔥 修复：仅在用户未主动停止时自动启动声音
+                if not self.user_stopped_sound:
+                    if not (self.loop_thread and self.loop_thread.is_alive()):
+                        self.get_logger().error('[!] 自动启动低电量警告声音播放')
+                        self.start_sound_loop()
+                else:
+                    self.get_logger().warn('[!] 低电量触发但用户已停止声音，保持静音')
+                
+            elif not msg.data and self.low_voltage:
+                # 退出低电量模式
                 self.low_voltage = False
+                self.get_logger().info('[OK] 退出低电压模式')
                 
         except Exception as e:
             self.get_logger().error(f'处理低电压模式回调时发生错误: {e}')
@@ -184,61 +133,16 @@ class UsvSoundNode(Node):
                 
             if msg.data == 'sound_start':
                 self.get_logger().info('收到sound_start，启动循环')
+                self.user_stopped_sound = False  # 清除用户停止标志
                 self.start_sound_loop()
             elif msg.data == 'sound_stop':
                 self.get_logger().info('收到sound_stop，停止循环')
+                self.user_stopped_sound = True  # 记录用户主动停止意图
                 self.stop_sound_loop()
             else:
                 self.get_logger().warn(f'未知的声音控制命令: {msg.data}')
         except Exception as e:
             self.get_logger().error(f'处理声音命令时发生错误: {e}')
-
-    def voltage_callback(self, msg):
-        """
-        电池状态回调函数 - 基于飞控百分比判断低电量
-        
-        Args:
-            msg (BatteryState): 包含电池状态信息的消息
-        """
-        try:
-            if not isinstance(msg, BatteryState):
-                self.get_logger().warn('收到无效的电池状态消息类型')
-                return
-                
-            # 获取飞控百分比（0.0-1.0）
-            self.voltage = msg.voltage if hasattr(msg, 'voltage') else 12.0
-            percentage = getattr(msg, 'percentage', -1.0)
-            
-            if self.voltage == 0.0:
-                return
-            
-            # 检查百分比是否有效
-            if not (0.0 <= percentage <= 1.0):
-                # 飞控未配置 BATT_CAPACITY，无法判断低电量
-                return
-            
-            # 转换为百分比（0-100）
-            self.battery_percentage = percentage * 100.0
-            
-            # 获取低电量阈值
-            low_threshold = self.get_parameter('low_battery_percentage').get_parameter_value().double_value
-            
-            # 检查是否为低电量状态（带状态变化日志）
-            if self.battery_percentage < low_threshold:
-                if not self.low_voltage:
-                    self.get_logger().warn(
-                        f'[!] 电池电量低: {self.battery_percentage:.1f}%，切换到低电量声音'
-                    )
-                self.low_voltage = True
-            else:
-                if self.low_voltage:
-                    self.get_logger().info(
-                        f'[OK] 电池电量恢复正常: {self.battery_percentage:.1f}%'
-                    )
-                self.low_voltage = False
-                
-        except Exception as e:
-            self.get_logger().error(f'处理电池状态时发生错误: {e}')
 
     def start_sound_loop(self):
         """启动声音循环播放"""

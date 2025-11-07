@@ -53,7 +53,7 @@ class UsvStatusNode(Node):
         
         # 电池电压范围参数
         self.declare_parameter('battery_voltage_full', 12.6)   # 满电电压（V）
-        self.declare_parameter('battery_voltage_empty', 10.5)  # 空电电压（V）
+        self.declare_parameter('battery_voltage_empty', 10.8)  # 空电电压（V）
         self.declare_parameter('battery_avg_window', 10.0)     # 电压平均窗口（秒）
         
         # 根据节点命名空间推断 usv_id
@@ -90,7 +90,7 @@ class UsvStatusNode(Node):
         try:
             self.battery_voltage_empty = float(self.get_parameter('battery_voltage_empty').get_parameter_value().double_value)
         except Exception:
-            self.battery_voltage_empty = 10.5
+            self.battery_voltage_empty = 10.8
         try:
             self.battery_avg_window = float(self.get_parameter('battery_avg_window').get_parameter_value().double_value)
         except Exception:
@@ -412,9 +412,14 @@ class UsvStatusNode(Node):
             
             # 检查是否进入低电压模式（电量百分比 < 5%）
             LOW_BATTERY_THRESHOLD = 5.0  # 低电量阈值：5%
-            RECOVER_THRESHOLD = 8.0      # 恢复阈值：8%（滞后设计，避免频繁切换）
+            RECOVER_THRESHOLD = 15.0      # 恢复阈值：8%（滞后设计，避免频繁切换）
             
-            if battery_pct < LOW_BATTERY_THRESHOLD:
+            # *** 关键修复 ***：只有在电池数据有效且 MAVROS 已连接的情况下，才进行低电量检测
+            # 避免启动初期电压为 0V 时误触发低电量模式
+            battery_data_valid = (avg_voltage > 1.0)  # 电压 > 1V 才认为有效
+            mavros_connected = getattr(self.usv_state, 'connected', False)
+            
+            if battery_data_valid and mavros_connected and battery_pct < LOW_BATTERY_THRESHOLD:
                 if not self.low_voltage_mode:
                     # 刚进入低电压模式
                     self.low_voltage_mode = True
@@ -430,7 +435,7 @@ class UsvStatusNode(Node):
                     low_voltage_msg.data = True
                     self.low_voltage_mode_publisher.publish(low_voltage_msg)
                     self.get_logger().info('已发布低电压模式话题 (True) 到外设节点')
-            elif battery_pct > RECOVER_THRESHOLD:
+            elif battery_data_valid and mavros_connected and battery_pct > RECOVER_THRESHOLD:
                 if self.low_voltage_mode:
                     # 退出低电压模式（使用滞后阈值避免频繁切换）
                     self.low_voltage_mode = False

@@ -29,7 +29,8 @@ from gs_gui.ui_utils import UIUtils
 from gs_gui.area_offset_dialog import AreaOffsetDialog
 from gs_gui.usv_info_panel import UsvInfoPanel
 from gs_gui.style_manager import StyleManager
-from gs_gui.usv_fleet_launcher import UsvFleetLauncher
+# 使用性能优化版本的集群启动器（异步检测 + 并行 ping）
+from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
 
 
 class MainWindow(QMainWindow):
@@ -767,6 +768,9 @@ def main(argv=None):
     
     # 连接飞控重启信号
     ros_signal.reboot_autopilot.connect(node.reboot_autopilot_callback)
+    
+    # 连接机载计算机重启信号
+    ros_signal.reboot_companion.connect(node.reboot_companion_callback)
     
     # 连接节点信息信号
     try:

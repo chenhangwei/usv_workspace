@@ -33,7 +33,7 @@ usv_status_node:
     
     # 电池电压范围配置（基于实际电池特性）
     battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
-    battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
+    battery_voltage_empty: 10.8           # 空电电压（V）- 电量显示0%，需要充电
 
 auto_set_home_node:
   ros__parameters:
@@ -51,7 +51,7 @@ auto_set_home_node:
     home_longitude: 113.9007239             # 基站经度（东经）
     home_altitude: -4.8                     # 基站高度（米，相对海平面）
     
-    retry_interval: 1.0                     # 重试发送命令的时间间隔（秒）
+    retry_interval: 3.0                     # 重试发送命令的时间间隔（秒）
     max_retries: 30                         # 最大重试次数
 
 # =============================================================================
@@ -110,18 +110,11 @@ usv_led_node:
     timer_period_low: 0.5                   # 低频定时器周期（秒）
     transition_duration: 3.0                # 颜色渐变持续时间（秒）
     hold_duration: 10.0                     # 颜色停留时间（秒）
-    
-    # ⚠️ 电池低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
-    low_battery_percentage: 10.0            # 低电量百分比阈值（%）- 低于此值进入红色呼吸灯
-    recover_battery_percentage: 15.0        # 恢复电量百分比阈值（%）- 高于此值退出红色呼吸灯
     breath_step: 6                          # 呼吸灯步进值
 
 usv_sound_node:
   ros__parameters:
-    # 声音播放配置
-    # ⚠️ 低电量判断 - 基于飞控百分比（需要在 QGroundControl 中配置 BATT_CAPACITY）
-    low_battery_percentage: 10.0            # 低电量百分比阈值（%）
-    
+    # 声音播放配置  
     sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']  # 常规声音类型列表
     moon_type: 'moon101'                    # 低电量声音类型
     min_play_interval: 2                    # 最小播放间隔（秒）

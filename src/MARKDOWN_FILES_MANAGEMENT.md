@@ -49,6 +49,8 @@
 - **`usv_bringup/MAVROS_STARTUP_OPTIMIZATION.md`** - MAVROS 启动优化（97s→12s）
 - **`MAVLINK_COMMAND_TIMEOUT_GUIDE.md`** - MAVLink 命令超时问题指南
 - **`gs_gui/OFFLINE_DETECTION_OPTIMIZATION.md`** - 离线检测优化
+- **`gs_gui/FLEET_LAUNCHER_OPTIMIZATION.md`** ⭐⭐ - 集群启动器性能优化（详细方案）
+- **`gs_gui/FLEET_LAUNCHER_OPTIMIZATION_SUMMARY.md`** ⭐⭐ - 集群启动器优化快速总结
 
 #### 功能实现
 - **`gs_gui/GRACEFUL_SHUTDOWN.md`** - 优雅关闭功能详细文档
@@ -60,6 +62,9 @@
 - **`gs_gui/UI_SCROLL_IMPLEMENTATION.md`** - 滚动条实现
 - **`gs_gui/REBOOT_BUTTON_FIX.md`** ⭐ - 飞控重启按钮修复（服务名称错误）
 - **`usv_comm/BATTERY_PERCENTAGE_FIX.md`** - 电池百分比修复
+- **`usv_sound/LOW_BATTERY_SOUND_FIX.md`** ⭐⭐ - 低电量声音自动播放修复
+- **`LOW_BATTERY_MODE_ANALYSIS.md`** ⭐⭐⭐ - 低电量模式完整分析（LED/Sound 协同）
+- **`usv_comm/STARTUP_LOW_BATTERY_FALSE_TRIGGER_FIX.md`** ⭐⭐⭐ - 启动时低电量误触发修复
 
 #### 参数管理功能
 - **`gs_gui/PARAM_MANAGER_DESIGN.md`** - 参数管理器架构设计（MAVROS 模式）

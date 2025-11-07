@@ -53,5 +53,8 @@ class ROSSignal(QObject):
     
     # 飞控重启命令信号
     reboot_autopilot = pyqtSignal(str)  # 飞控重启命令，参数：USV命名空间
+    
+    # 机载计算机重启命令信号
+    reboot_companion = pyqtSignal(str)  # 机载计算机重启命令，参数：USV命名空间
 
 
