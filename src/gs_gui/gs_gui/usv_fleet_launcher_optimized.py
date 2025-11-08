@@ -81,8 +81,12 @@ class UsvFleetLauncher(QDialog):
         # 加载配置
         self._load_fleet_config()
         
-        # 启动异步状态检测线程
+        #启动异步状态检测线程
         self._start_status_check_thread()
+        
+        # 立即执行首次状态检测（不等待 3 秒）
+        self._log("⏱️ 立即触发首次状态检测...")
+        Thread(target=self._update_usv_status_async, daemon=True).start()
         
         # 窗口居中显示
         self._center_on_screen()
@@ -422,12 +426,15 @@ class UsvFleetLauncher(QDialog):
             host_item.setFlags(host_item.flags() & ~Qt.ItemIsEditable)
             self.usv_table.setItem(row, 2, host_item)
             
-            # 列 3: 状态（初始化为检测中）
-            status_item = QTableWidgetItem("🔍 检测中...")
+            # 列 3: 状态（初始化为离线，等待首次检测）
+            status_item = QTableWidgetItem("⚫ 离线")
             status_item.setTextAlignment(Qt.AlignCenter)
             status_item.setFlags(status_item.flags() & ~Qt.ItemIsEditable)
-            status_item.setForeground(QColor(255, 193, 7))
+            status_item.setForeground(QColor(150, 150, 150))
             self.usv_table.setItem(row, 3, status_item)
+            
+            # 初始化状态字典（设为 None，确保首次检测会触发更新）
+            self.usv_status[usv_id] = None
             
             # 列 4: 操作按钮
             btn_widget = self._create_action_buttons(usv_id)
@@ -549,8 +556,10 @@ class UsvFleetLauncher(QDialog):
                 self._update_usv_status_async()
                 time.sleep(3)  # 每 3 秒检测一次（降低频率）
             except Exception as e:
-                if self.verbose_logging:
-                    self._log(f"⚠️ 状态检测异常: {e}")
+                # 始终记录异常（不管 verbose_logging）
+                import traceback
+                self._log(f"⚠️ 状态检测异常: {e}")
+                self._log(f"详细堆栈:\n{traceback.format_exc()}")
                 time.sleep(5)  # 异常后延长等待时间
     
     def _update_usv_status_async(self):
@@ -563,6 +572,9 @@ class UsvFleetLauncher(QDialog):
         3. 使用锁保护共享数据结构
         """
         try:
+            # 调试日志：开始检测
+            self._log("🔍 开始状态检测...")
+            
             # 步骤 1: 获取所有 ROS 节点（单次检测）
             result = subprocess.run(
                 ['ros2', 'node', 'list'],
@@ -587,21 +599,27 @@ class UsvFleetLauncher(QDialog):
                     future = self.executor.submit(self._check_host_online_fast, hostname)
                     futures[future] = hostname
             
+            self._log(f"📡 提交 {len(futures)} 个 ping 任务")
+            
             # 等待所有 ping 任务完成
             for future in as_completed(futures):
                 hostname = futures[future]
                 try:
-                    host_status[hostname] = future.result()
+                    is_online = future.result()
+                    host_status[hostname] = is_online
+                    self._log(f"  Ping {hostname}: {'✅ 在线' if is_online else '❌ 离线'}")
                 except Exception as e:
-                    if self.verbose_logging:
-                        self._log(f"⚠️ {hostname} ping 失败: {e}")
+                    self._log(f"⚠️ {hostname} ping 失败: {e}")
                     host_status[hostname] = False
             
             # 步骤 3: 批量更新所有 USV 状态
             status_updates = {}  # {usv_id: new_status}
             
+            self._log(f"📋 检查 {len(self.fleet_config)} 个 USV 状态")
+            
             for usv_id, config in self.fleet_config.items():
                 if not config.get('enabled', False):
+                    self._log(f"  ⏭️ {usv_id}: 已禁用，跳过")
                     continue
                 
                 namespace = f"/{usv_id}"
@@ -629,23 +647,31 @@ class UsvFleetLauncher(QDialog):
                 
                 # 仅记录状态变化
                 with self.status_lock:
-                    if self.usv_status.get(usv_id) != new_status:
+                    old_status = self.usv_status.get(usv_id)
+                    
+                    # 调试：总是输出状态信息
+                    self._log(f"  [{usv_id}] old={old_status}, new={new_status}, "
+                             f"host={is_host_online}, nodes={has_nodes}")
+                    
+                    if old_status != new_status:
                         self.usv_status[usv_id] = new_status
                         status_updates[usv_id] = new_status
                         
-                        if self.verbose_logging:
-                            self._log(f"📊 {usv_id}: {new_status}")
+                        # 输出状态变化日志（首次检测或状态改变）
+                        self._log(f"📊 {usv_id}: {old_status or '(首次)'} → {new_status} "
+                                 f"[nodes={has_nodes}, proc={has_process}, host={is_host_online}]")
             
             # 步骤 4: 批量发送状态更新信号（减少信号数量）
             if status_updates:
+                self._log(f"🔄 发送批量状态更新: {len(status_updates)} 个 USV")
                 self.batch_status_updated.emit(status_updates)
+            else:
+                self._log("✅ 状态检测完成，无变化")
         
         except subprocess.TimeoutExpired:
-            if self.verbose_logging:
-                self._log("⚠️ ROS 节点检测超时")
+            self._log("⚠️ ROS 节点检测超时")
         except Exception as e:
-            if self.verbose_logging:
-                self._log(f"⚠️ 状态检测失败: {e}")
+            self._log(f"⚠️ 状态检测失败: {e}")
     
     def _check_host_online_fast(self, hostname):
         """
@@ -668,11 +694,14 @@ class UsvFleetLauncher(QDialog):
             result = subprocess.run(
                 ['ping', '-c', '1', '-W', '1', '-q', hostname],
                 capture_output=True,
-                timeout=2,  # 总超时 2 秒
-                stderr=subprocess.DEVNULL  # 忽略错误输出
+                timeout=2  # 总超时 2 秒
             )
             return result.returncode == 0
-        except (subprocess.TimeoutExpired, Exception):
+        except subprocess.TimeoutExpired:
+            return False
+        except Exception as e:
+            # 记录异常信息以便调试
+            self._log(f"⚠️ Ping {hostname} 异常: {e}")
             return False
     
     def _on_status_updated(self, usv_id, status):
@@ -681,6 +710,7 @@ class UsvFleetLauncher(QDialog):
     
     def _on_batch_status_updated(self, status_dict):
         """批量状态更新时的回调"""
+        self._log(f"🎨 UI 更新回调: {list(status_dict.items())}")
         for usv_id, status in status_dict.items():
             self._update_table_row(usv_id, status)
     
