@@ -6,18 +6,48 @@
 # =============================================================================
 # 飞控通信模块参数 (MAVROS)
 # =============================================================================
-# 注意：插件白名单现在在 launch 文件中配置，此处仅保留其他参数
-mavros_node:
+mavros:
   ros__parameters:
+    # ==================== MAVLink 身份配置 ====================
+    system_id: 2                            # MAVROS 自身系统 ID
+    component_id: 191                       # MAVROS 自身组件 ID（GCS 默认值，关键！不能设为 1）
+    target_system_id: 2                     # 目标飞控系统 ID
+    target_component_id: 1                  # 目标飞控组件 ID
+    
+    # ==================== 插件白名单（精简配置，加速启动）====================
+    plugin_allowlist:
+      - 'sys_status'
+      - 'sys_time'
+      - 'command'
+      - 'local_position'
+      - 'global_position'
+      - 'home_position'
+      - 'gps_status'
+      - 'battery'
+      - 'imu'
+      - 'rc_io'
+      - 'setpoint_raw'
+      - 'waypoint'
+      - 'rallypoint'
+      - 'geofence'
+      - 'vfr_hud'
+    
+    # ==================== ArduPilot 4.7.0-dev 兼容性修复（关键！）====================
+    # sys 插件参数
+    sys:
+      disable_diag: true                    # 禁用诊断（跳过版本查询，节省 10 秒）
+    
+    # mission 插件参数  
+    mission:
+      pull_after_gcs: false                 # 禁用 GCS 连接后自动拉取任务（节省 15 秒）
+      use_mission_item_int: false           # 禁用任务项参数同步
+    # ==================== END 兼容性修复 ====================
+    
     # 连接参数
     conn:
       timeout: 5.0                          # 连接超时时间（秒）
       heartbeat_mav_type: 6                 # MAV_TYPE_SURFACE_BOAT
       heartbeat_rate: 1.0                   # 心跳频率（Hz）
-    
-    # 禁用参数同步，避免启动延迟
-    param:
-      use_mission_item_int: false           # 禁用任务项参数同步
       
     # 视觉定位配置
     vision_pose:
@@ -37,22 +67,19 @@ usv_status_node:
 
 auto_set_home_node:
   ros__parameters:
-    # Home点设置延迟
-    set_delay_sec: 3.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
+    # EKF Origin 设置延迟
+    set_delay_sec: 1.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
     
     # ⚠️ 重要说明：
-    # use_current_gps: false 表示使用固定的A0基站坐标作为Home点
-    # 所有USV共享同一个Home点（A0基站），这样所有USV的本地坐标系都统一以A0为原点
+    # use_current_gps: false 表示使用固定的A0基站坐标作为 EKF Origin
+    # 所有USV共享同一个 EKF Origin（A0基站），这样所有USV的本地坐标系都统一以A0为原点
     # 这是多USV系统的关键设计：全局坐标系 = USV本地坐标系 = 以A0为原点
     use_current_gps: false                  # false=使用A0基站坐标，true=使用USV当前位置（不推荐）
     
-    # A0定位基站的GPS坐标（所有USV共享的坐标系原点）
-    home_latitude: 22.5180977               # 基站纬度（北纬）
-    home_longitude: 113.9007239             # 基站经度（东经）
-    home_altitude: -4.8                     # 基站高度（米，相对海平面）
-    
-    retry_interval: 3.0                     # 重试发送命令的时间间隔（秒）
-    max_retries: 30                         # 最大重试次数
+    # A0定位基站的GPS坐标（所有USV共享的EKF Origin坐标）
+    origin_latitude: 22.5180977             # 基站纬度（北纬）
+    origin_longitude: 113.9007239           # 基站经度（东经）
+    origin_altitude: 0.0                  # 基站高度（米，相对海平面）
 
 # =============================================================================
 # 控制模块参数

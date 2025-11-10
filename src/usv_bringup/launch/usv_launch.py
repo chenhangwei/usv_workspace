@@ -5,7 +5,8 @@
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAction
+from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
 
@@ -39,7 +40,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_03',
+        default_value='usv_02',
         description='无人船节点的命名空间'
     )
     
@@ -66,14 +67,14 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14580@192.168.68.53:14550',#
+        default_value='udp://:14570@192.168.68.53:14550',#
         description='地面站通信地址'
     )
     
     # MAVROS目标系统ID参数
     tgt_system_arg = DeclareLaunchArgument(
         'tgt_system',
-        default_value='3',
+        default_value='2',
         description='MAVROS目标系统ID'
     )
     
@@ -101,8 +102,6 @@ def generate_launch_description():
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
     #lidar_port = LaunchConfiguration('lidar_port')
-    tgt_system = LaunchConfiguration('tgt_system')
-    tgt_component = LaunchConfiguration('tgt_component')
 
     # =============================================================================
     # 通信与状态管理节点
@@ -135,14 +134,14 @@ def generate_launch_description():
     # =============================================================================
 
     # 避障节点
-    usv_avoidance_node = Node(
-        package='usv_control',
-        executable='usv_avoidance_node',
-        name='usv_avoidance_node',
-        namespace=namespace,
-        output='screen',
-        parameters=[param_file]
-    )
+    # usv_avoidance_node = Node(
+    #     package='usv_control',
+    #     executable='usv_avoidance_node',
+    #     name='usv_avoidance_node',
+    #     namespace=namespace,
+    #     output='screen',
+    #     parameters=[param_file]
+    # )
 
     # mode和arm切换节点
     usv_command_node = Node(
@@ -274,52 +273,16 @@ def generate_launch_description():
         output='screen',
         parameters=[
             {
+                # 核心连接参数
                 'fcu_url': fcu_url,
                 'gcs_url': gcs_url,
-                # ROS 2 MAVROS 参数名：设置自身与目标的 MAVLink ID
-                'system_id': tgt_system,
-                'component_id': tgt_component,
-                'target_system_id': tgt_system,
-                'target_component_id': tgt_component,
-                
-                # ==================== 性能优化：只加载必需的插件 ====================
-                # 插件白名单配置，大幅减少启动时间（从97秒降至10-15秒）
-                # 只加载 USV 控制必需的插件，避免加载 60+ 个不需要的插件
-                # 注意：移除 'param' 插件，避免启动时同步 900+ 参数造成超时
-                #       地面站参数配置功能通过直接 MAVLink 消息实现，不需要此插件
-                'plugin_allowlist': [
-                    'sys_status',      # 系统状态（必需）
-                    'sys_time',        # 时间同步（必需）
-                    'command',         # 命令接口（解锁/模式切换）
-                    'local_position',  # 本地位置（导航必需）
-                    'setpoint_raw',    # 原始设定点（控制必需）
-                    'global_position', # GPS 全局位置
-                    'gps_status',      # GPS 状态和卫星数
-                    'battery',         # 电池状态（电量监控必需）
-                ],
-                
-                # 禁用视觉定位
-                'vision_pose.enable': False,
-                
-                # 连接优化（ArduPilot 4.7 原生支持）
-                'conn.timeout': 10.0,  # 增加连接超时到 10 秒（原 5.0）
-                'conn.heartbeat_mav_type': 'MAV_TYPE_SURFACE_BOAT',
-                
-                # 命令超时配置
-                'cmd.command_timeout': 5.0,  # 命令确认超时（秒）
-                'cmd.use_comp_id_system_control': False,  # 禁用组件 ID 系统控制
-                
-                # 系统插件配置
-                'sys.min_version': [1, 0, 0],  # 最低 MAVLink 版本要求
-                'sys.conn_timeout_ms': 10000,  # 连接超时（毫秒）
-                'sys.rate_limit': 5.0,  # 版本请求速率限制（Hz）
-                
-                # MAVLink 2.0 优化（ArduPilot 4.7 完全支持）
-                'conn.use_mavlink2': True,  # 强制使用 MAVLink 2.0
-                'sys.disable_diag': False,  # 启用系统诊断（4.7 支持）
-                # ==================== END 性能优化 ====================
+                # MAVLink身份配置（关键修复：确保使用正确的系统ID）
+                'system_id': 2,  # MAVROS自身系统ID
+                'component_id': 191,  # MAVROS自身组件ID
+                'target_system_id': 2,  # 目标飞控系统ID
+                'target_component_id': 1,  # 目标飞控组件ID
             },
-            param_file  # 最后加载 param_file，使其可以覆盖上述默认值
+            param_file,  # 其他参数（plugin_allowlist等）从YAML加载
         ]
     )
 
@@ -372,31 +335,60 @@ def generate_launch_description():
     )
 
     # =============================================================================
+    # 启动顺序控制：等待 MAVROS 连接后再启动依赖节点
+    # =============================================================================
+    
+    # 第一批：延迟 0.5 秒启动 auto_set_home_node（尽早设置 EKF 原点）
+    # 关键优化：减少延迟，在 EKF 初始化前发送 SET_GPS_GLOBAL_ORIGIN
+    delayed_home_node = TimerAction(
+        period=0.5,  # 仅等待 MAVROS 启动（0.5秒足够 topic 就绪）
+        actions=[
+           auto_set_home_node,    # 自动设置 EKF Origin（必须在 EKF 初始化前）
+        ]
+    )
+    
+    # 第二批：延迟 3 秒启动其他节点（确保 EKF 原点已设置）
+    # 计算：0.5s (auto_set_home启动) + 1s (GPS就绪) + 1s (auto_set_home延迟) + 0.5s (余量) = 3s
+    delayed_control_nodes = TimerAction(
+        period=3.0,
+        actions=[
+            usv_status_node,       # 状态管理（依赖 MAVROS）
+            usv_control_node,      # 核心控制器（依赖 MAVROS 和 EKF 原点）
+            usv_command_node,      # 命令处理（依赖 MAVROS）
+            # usv_avoidance_node,  # 避障功能（已注释）
+        ]
+    )
+    
+    # =============================================================================
     # 启动描述配置
     # =============================================================================
 
-    # 当前启用的节点列表
-    # 注意：部分节点被注释是因为在当前部署环境中不使用
-    # 如需启用，请取消相应注释并确保硬件连接正确
+    # 启动顺序（优化后总时间约 3 秒）：
+    # 阶段 1 (t=0s):   启动 MAVROS（开始连接飞控）
+    # 阶段 2 (t=0.5s): 启动 auto_set_home_node（尽早发送 SET_GPS_GLOBAL_ORIGIN）
+    # 阶段 3 (t=3s):   启动控制节点（确保 EKF 原点已设置，避免 "no origin" 警告）
+    # 阶段 4 (t=0s):   辅助功能节点并行启动（不依赖 MAVROS）
     return LaunchDescription([
-    # 基础参数配置
-    namespace_arg,
-    param_file_arg,
-    fcu_url_arg,
-    gcs_url_arg,
-    tgt_system_arg,
-    tgt_component_arg,
-    #lidar_port_arg,
+        # 基础参数配置
+        namespace_arg,
+        param_file_arg,
+        fcu_url_arg,
+        gcs_url_arg,
+        tgt_system_arg,
+        tgt_component_arg,
+        #lidar_port_arg,
         
-        # 核心功能节点
-        mavros_node,           # 飞控通信
-        usv_status_node,       # 状态管理
-        usv_control_node,      # 核心控制器
-        usv_command_node,      # 命令处理
-        usv_avoidance_node,    # 避障功能
-        auto_set_home_node,    # 自动设置home点
+        # 阶段 1：立即启动 MAVROS
+        mavros_node,           # 飞控通信（优先启动）
+       
         
-        # 辅助功能节点
+        # 阶段 2：延迟 0.5 秒启动 EKF Origin 设置（关键优化）
+        delayed_home_node,
+        
+        # 阶段 3：延迟 3 秒启动控制节点
+        delayed_control_nodes,
+        
+        # 第三阶段：辅助功能节点（不依赖 MAVROS，可并行启动）
         usv_led_node,          # LED控制
         usv_sound_node,        # 声音控制
         usv_fan_node,          # 风扇控制

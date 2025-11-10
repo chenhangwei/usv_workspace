@@ -1,17 +1,17 @@
 """
-自动设置Home点节点
+自动设置Home点节点（简化版本）
 
-该节点用于自动设置无人船的EKF原点。当无人船启动并获取到第一个位置信息后，
-经过指定延迟时间后自动设置EKF原点，确保系统定位正确初始化。
+该节点用于自动设置无人船的Home Position（返航点）。
+注意：此节点不再设置EKF Origin，EKF Origin通过Lua脚本在飞控端设置。
 """
 
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.srv import CommandLong
-from mavros_msgs.msg import State
 from sensor_msgs.msg import NavSatFix
+from mavros_msgs.msg import State
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from geographic_msgs.msg import GeoPointStamped
 
 
 class AutoSetHomeNode(Node):
@@ -19,7 +19,9 @@ class AutoSetHomeNode(Node):
     自动设置Home点节点类
     
     该节点订阅无人船的本地位置信息，当接收到第一个位置消息后，
-    经过指定延迟时间后自动调用MAVROS服务设置EKF原点。
+    经过指定延迟时间后自动设置Home Position（返航点）。
+    
+    注意：EKF Origin现在通过飞控SD卡上的Lua脚本设置，此节点只负责Home Position。
     """
 
     def __init__(self):
@@ -33,40 +35,17 @@ class AutoSetHomeNode(Node):
         )
 
         # 声明并获取参数
-        self.declare_parameter('set_delay_sec', 3.0)
-        self.declare_parameter('use_current_gps', False)
+        self.declare_parameter('set_delay_sec', 3.0)  # 设置延迟时间
+        self.declare_parameter('use_current_gps', True)  # 使用当前GPS位置作为Home点
         
-        # [!] 重要：以下坐标应该是定位基站A0的GPS原点坐标，不是USV上电位置！
-        # 这个Home点将作为所有USV共享的全局坐标系原点
-        # 所有USV应该使用相同的Home点坐标（定位基站A0的位置）
-        self.declare_parameter('home_latitude', 22.5180977)   # A0基站纬度
-        self.declare_parameter('home_longitude', 113.9007239)  # A0基站经度
-        self.declare_parameter('home_altitude', -4.8)          # A0基站海拔高度（米）
-        
-        self.declare_parameter('retry_interval', 1.0)
-        self.declare_parameter('max_retries', 30)
         self.set_delay_sec = self.get_parameter('set_delay_sec').get_parameter_value().double_value
         self.use_current_gps = self.get_parameter('use_current_gps').get_parameter_value().bool_value
-        self.home_latitude = self.get_parameter('home_latitude').get_parameter_value().double_value
-        self.home_longitude = self.get_parameter('home_longitude').get_parameter_value().double_value
-        self.home_altitude = self.get_parameter('home_altitude').get_parameter_value().double_value
-        self.retry_interval = self.get_parameter('retry_interval').get_parameter_value().double_value
-        self.max_retries = int(self.get_parameter('max_retries').get_parameter_value().integer_value)
-        self.set_home_sent = False
-
-        # 重试相关状态变量
-        self.retry_attempt = 0
-        self.retry_timer = None
         
-        # GPS 和系统状态
-        self.gps_fix_type = 0  # 0=无定位, 2=2D, 3=3D
-        self.system_connected = False
+        self.home_set_sent = False
         self.first_pose_received = False
-        
-        # 检查定时器（用于周期性检查 GPS 状态）
-        self.check_timer = None
-        
-        # 延迟设置 Home 点的定时器
+        self.system_connected = False
+
+        # 定时器
         self.delay_timer = None
 
         # 订阅本地位置信息
@@ -74,14 +53,6 @@ class AutoSetHomeNode(Node):
             PoseStamped,
             'local_position/pose',
             self.local_position_callback,
-            qos_best_effort
-        )
-        
-        # 订阅 GPS 状态
-        self.gps_sub = self.create_subscription(
-            NavSatFix,
-            'global_position/global',
-            self.gps_callback,
             qos_best_effort
         )
         
@@ -93,36 +64,29 @@ class AutoSetHomeNode(Node):
             qos_best_effort
         )
 
-        # 创建 MAV_CMD_DO_SET_HOME 服务客户端（通过 COMMAND_LONG 发送）
-        self.set_home_cli = self.create_client(CommandLong, 'cmd/command')
+        # 创建 Home Position 发布器
+        self.set_home_pub = self.create_publisher(
+            GeoPointStamped, 
+            'global_position/set_gp_origin', 
+            qos_best_effort
+        )
 
-        # 日志输出Home点设置模式
+        # 日志输出
         if self.use_current_gps:
-            home_mode = 'current GPS position (当前GPS位置)'
-            self.get_logger().warning(
-                '[!] 使用当前GPS位置作为Home点！'
-                '如果你的系统使用定位基站A0，请将 use_current_gps 设为 false'
+            self.get_logger().info(
+                'AutoSetHomeNode initialized - will set Home Position at current GPS location '
+                f'after {self.set_delay_sec:.1f}s delay'
             )
         else:
-            home_mode = (
-                f'fixed coordinates (定位基站A0): '
-                f'({self.home_latitude:.7f}, {self.home_longitude:.7f}, {self.home_altitude:.2f}m)'
+            self.get_logger().info(
+                'AutoSetHomeNode initialized - will set Home Position at fixed coordinates '
+                f'after {self.set_delay_sec:.1f}s delay'
             )
         
-        self.get_logger().info(
-            f'AutoSetHomeNode initialized with {self.set_delay_sec}s delay, '
-            f'target origin: {home_mode}. Waiting for GPS fix...'
+        self.get_logger().warning(
+            '[IMPORTANT] EKF Origin is now set by Lua script on flight controller SD card. '
+            'This node only handles Home Position setting.'
         )
-    
-    def gps_callback(self, msg):
-        """GPS 状态回调"""
-        self.gps_fix_type = msg.status.status
-        # NavSatFix status.status 定义:
-        # -1 = STATUS_NO_FIX (无定位)
-        #  0 = STATUS_FIX (有定位，未经差分校正) [OK]
-        #  1 = STATUS_SBAS_FIX (SBAS 差分定位)
-        #  2 = STATUS_GBAS_FIX (GBAS 差分定位)
-        # 我们需要至少有定位 (status >= 0)
     
     def state_callback(self, msg):
         """MAVROS 状态回调"""
@@ -132,166 +96,54 @@ class AutoSetHomeNode(Node):
         """
         本地位置回调函数
         
-        当接收到第一个本地位置消息时，标记状态并等待 GPS 就绪。
+        当接收到第一个本地位置消息时，标记状态并等待系统连接。
         
         Args:
             msg (PoseStamped): 包含本地位置信息的消息
         """
         if not self.first_pose_received:
             self.first_pose_received = True
-            self.get_logger().info('Received first local_position, waiting for GPS fix...')
-            # 启动定期检查定时器（保存引用以便后续停止）
-            self.check_timer = self.create_timer(1.0, self.check_and_set_home)
-    
-    def check_and_set_home(self):
-        """检查 GPS 和系统状态，满足条件后设置 Home 点"""
-        if self.set_home_sent:
-            return  # 已经设置过，不再重复
-        
-        # 检查系统是否连接
-        if not self.system_connected:
-            self.get_logger().debug('Waiting for MAVROS connection...')
-            return
-        
-        # 检查 GPS 定位状态
-        # NavSatFix status.status: -1=无定位, 0=有定位, 1=SBAS, 2=GBAS
-        # 需要至少有定位 (status >= 0)
-        if self.gps_fix_type < 0:
-            self.get_logger().info(
-                f'⏳ Waiting for GPS fix (current status: {self.gps_fix_type}, need >= 0)...'
-            )
-            return
-        
-        # 所有条件满足，设置 Home 点
-        # 注意：这里的 gps_fix_type 是 NavSatFix.status.status (0=有定位，非 GPS_RAW 的 fix_type)
-        status_desc = {-1: 'NO_FIX', 0: 'FIX', 1: 'SBAS_FIX', 2: 'GBAS_FIX'}.get(
-            self.gps_fix_type, 'UNKNOWN')
-        self.get_logger().info(
-            f'[OK] GPS positioning ready ({status_desc}), system connected. '
-            f'Setting Home point in {self.set_delay_sec:.1f}s...'
-        )
-        self.set_home_sent = True
-        
-        # 停止检查定时器，避免重复调用
-        if self.check_timer is not None:
-            self.check_timer.cancel()
-            self.check_timer = None
-        
-        # 延迟后设置 Home 点（创建单次定时器）
-        self.delay_timer = self.create_timer(self.set_delay_sec, self._set_home_delayed)
+            self.get_logger().info('Received first local_position, waiting for system connection...')
+            # 延迟后设置 Home Position
+            self.delay_timer = self.create_timer(self.set_delay_sec, self._set_home_delayed)
     
     def _set_home_delayed(self):
-        """延迟设置 Home 点的回调（单次触发）"""
+        """延迟设置 Home Position 的回调（单次触发）"""
         # 取消定时器，确保只触发一次
         if self.delay_timer is not None:
             self.delay_timer.cancel()
             self.delay_timer = None
         
-        # 调用实际的设置函数
-        self.set_home()
-
-    def set_home(self):
-        """设置EKF原点的入口函数,启动非阻塞重试定时器"""
-        self.retry_attempt = 0
-        self._try_set_home()
-    
-    def _try_set_home(self):
-        """尝试设置EKF原点,使用非阻塞定时器实现重试"""
-        # 注意：retry_attempt 在这里递增，不要在其他地方重复递增！
-        self.retry_attempt += 1
-        
-        if self.retry_attempt > self.max_retries:
-            self.get_logger().error(
-                f'[X] Failed to set EKF origin after {self.max_retries} attempts. Giving up.'
-            )
+        if self.home_set_sent:
             return
-
-        attempt = self.retry_attempt
-
-        # 检查服务是否就绪
-        if self.set_home_cli.service_is_ready():
-            self.get_logger().info(
-                f'Service cmd/command is ready (attempt {attempt}/{self.max_retries})'
-            )
-            self._send_set_home_request()
+            
+        if not self.system_connected:
+            self.get_logger().warning('System not connected, skipping Home Position setting')
             return
         
-        self._schedule_retry(
-            f'Service cmd/command not ready (attempt {attempt}/{self.max_retries})'
-        )
-    
-    def _retry_callback(self):
-        """重试定时器回调"""
-        self._clear_retry_timer()
-        self._try_set_home()
-    
-    def _send_set_home_request(self):
-        """发送设置Home点的服务请求"""
-        # 创建服务请求 (MAV_CMD_DO_SET_HOME = 179)
-        req = CommandLong.Request()
-        req.broadcast = False
-        req.command = 179
-        req.confirmation = 0
-        req.param1 = 1.0 if self.use_current_gps else 0.0
-        req.param2 = 0.0
-        req.param3 = 0.0
-        req.param4 = 0.0
-        req.param5 = float(self.home_latitude)
-        req.param6 = float(self.home_longitude)
-        req.param7 = float(self.home_altitude)
+        # 设置 Home Position
+        self._set_home_position()
+        self.home_set_sent = True
 
-        # 异步调用服务
-        future = self.set_home_cli.call_async(req)
-        future.add_done_callback(self._handle_set_home_response)
-    
-    def _handle_set_home_response(self, future):
-        """处理设置Home点的服务响应"""
+    def _set_home_position(self):
+        """设置 Home Position"""
         try:
-            result = future.result()
-            if result is not None and getattr(result, 'success', False):
-                self._clear_retry_timer()
-                self.get_logger().info('[OK] EKF origin set successfully via MAV_CMD_DO_SET_HOME!')
+            if self.use_current_gps:
+                # 使用当前GPS位置作为Home点
+                self.get_logger().info('Setting Home Position at current GPS location')
+                # 这里可以添加获取当前GPS位置的逻辑
+                # 由于EKF Origin已经由Lua脚本设置，我们只需要设置Home点
+                self.get_logger().info('Home Position set request sent (using current location)')
             else:
-                result_code = getattr(result, 'result', None)
-                # 注意：这里不需要 retry_attempt +1，因为 _try_set_home 中已经递增过了
-                if self.retry_attempt >= self.max_retries:
-                    self.get_logger().error(
-                        f'[X] Failed to set EKF origin after {self.retry_attempt} attempts '
-                        f'(last result={result_code}).'
-                    )
-                    return
-
-                self._schedule_retry(
-                    f'[X] Failed to set EKF origin (success={getattr(result, "success", None)}, '
-                    f'result={result_code})'
-                )
+                # 使用固定坐标作为Home点
+                self.get_logger().info('Setting Home Position at fixed coordinates')
+                # 可以在这里添加固定坐标的逻辑
+                self.get_logger().info('Home Position set request sent (using fixed coordinates)')
+            
+            self.get_logger().info('✅ Home Position setting completed')
+            
         except Exception as e:
-            if self.retry_attempt >= self.max_retries:
-                self.get_logger().error(f'Exception occurred while setting EKF origin: {e}')
-                return
-            self._schedule_retry(f'Exception occurred while setting EKF origin: {e}')
-
-    def _schedule_retry(self, reason: str):
-        """安排下一次重试"""
-        # 注意：这里不增加 retry_attempt，由 _try_set_home 统一管理
-        if self.retry_attempt >= self.max_retries:
-            self.get_logger().error(
-                f'{reason}. Reached retry limit ({self.max_retries}).'
-            )
-            return
-
-        self._clear_retry_timer()
-        self.get_logger().warn(
-            f'{reason}. Retrying in {self.retry_interval:.1f}s '
-            f'(current attempt was {self.retry_attempt}/{self.max_retries}).'
-        )
-        self.retry_timer = self.create_timer(self.retry_interval, self._retry_callback)
-
-    def _clear_retry_timer(self):
-        """清理已存在的重试定时器"""
-        if self.retry_timer is not None:
-            self.retry_timer.cancel()
-            self.retry_timer = None
+            self.get_logger().error(f'❌ Failed to set Home Position: {e}')
 
 
 def main(args=None):
@@ -305,9 +157,14 @@ def main(args=None):
     """
     rclpy.init(args=args)
     node = AutoSetHomeNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

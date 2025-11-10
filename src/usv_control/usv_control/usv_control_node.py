@@ -8,7 +8,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.msg import State, PositionTarget
+from mavros_msgs.msg import State, PositionTarget, HomePosition
 from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
@@ -67,6 +67,14 @@ class UsvControlNode(Node):
         self.avoidance_flag_sub = self.create_subscription(
             Bool, 'avoidance_flag', self.set_avoidance_flag_callback, qos_reliable)
         
+        # 订阅 Home Position（用于检查 EKF 原点是否设置）
+        self.home_position_sub = self.create_subscription(
+            HomePosition, 'home_position/home', self.home_position_callback, qos_best_effort)
+        
+        # 订阅本地位置（用于验证 EKF 原点是否真正生效）
+        self.local_position_sub = self.create_subscription(
+            PoseStamped, 'local_position/pose', self.local_position_callback, qos_best_effort)
+        
         # 发送目标位置循环     
         self.publish_target_timer = self.create_timer(1.0/publish_rate, self.publish_target)
     
@@ -75,6 +83,9 @@ class UsvControlNode(Node):
         self.current_target_position = PoseStamped()  # 常规目标点
         self.avoidance_position = PositionTarget()    # 避障目标点
         self.avoidance_flag = Bool(data=False)        # 避障标记，默认为False
+        self.home_position_set = False                # Home Position 是否已设置
+        self.local_position_valid = False             # 本地位置是否有效（验证 EKF Origin）
+        self.ekf_origin_ready = False                 # EKF 原点就绪标志（Home + LocalPos 都有效）
         
         # 初始化消息对象和状态跟踪
         self.point_msg = PositionTarget()         # 目标点消息
@@ -94,6 +105,48 @@ class UsvControlNode(Node):
         """
         if isinstance(msg, State):
             self.current_state = msg
+
+    def home_position_callback(self, msg):
+        """
+        Home Position 回调函数（检查 Home 位置是否设置）
+        
+        Args:
+            msg (HomePosition): 包含 Home 位置信息的消息
+        """
+        if isinstance(msg, HomePosition):
+            # 检查是否为有效的 Home Position（纬度/经度不为 0）
+            if abs(msg.geo.latitude) > 0.0001 or abs(msg.geo.longitude) > 0.0001:
+                if not self.home_position_set:
+                    self.home_position_set = True
+                    self.get_logger().info(
+                        f'✅ Home Position 已设置: '
+                        f'({msg.geo.latitude:.7f}, {msg.geo.longitude:.7f}, {msg.geo.altitude:.2f}m)'
+                    )
+                    self._check_ekf_origin_ready()
+    
+    def local_position_callback(self, msg):
+        """
+        本地位置回调函数（验证 EKF 原点是否生效）
+        
+        Args:
+            msg (PoseStamped): 包含本地位置信息的消息
+        """
+        if isinstance(msg, PoseStamped):
+            # 检查本地位置是否有效（不是全0或NaN）
+            pos = msg.pose.position
+            if not (pos.x == 0.0 and pos.y == 0.0 and pos.z == 0.0):
+                if not self.local_position_valid:
+                    self.local_position_valid = True
+                    self.get_logger().info(
+                        f'✅ Local Position 有效: ({pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f})'
+                    )
+                    self._check_ekf_origin_ready()
+    
+    def _check_ekf_origin_ready(self):
+        """检查 EKF 原点是否完全就绪（Home + LocalPos 都有效）"""
+        if self.home_position_set and self.local_position_valid and not self.ekf_origin_ready:
+            self.ekf_origin_ready = True
+            self.get_logger().info('🎯 EKF Origin 完全就绪，可以安全发布目标点！')
 
     def set_target_point_callback(self, msg):
         """
@@ -176,7 +229,17 @@ class UsvControlNode(Node):
         并将选定的目标点发布给飞控系统。
         """
         try:
-            # 检查飞控是否已连接、已解锁且处于GUIDED模式
+            # 🔒 关键检查：EKF 原点是否完全就绪（Home + LocalPos 都有效）
+            if not self.ekf_origin_ready:
+                if not self.home_position_set:
+                    self.get_logger().debug('⏳ 等待 Home Position 设置...')
+                elif not self.local_position_valid:
+                    self.get_logger().debug('⏳ 等待 Local Position 生效...')
+                else:
+                    self.get_logger().debug('⏳ EKF Origin 未完全就绪...')
+                return
+            
+            # 检查飞控连接状态
             if not self.current_state.connected:
                 self.get_logger().debug('飞控未连接，等待连接...')
                 return
@@ -187,7 +250,7 @@ class UsvControlNode(Node):
                 
             if self.current_state.mode != "GUIDED":
                 self.get_logger().debug(f'当前模式: {self.current_state.mode}，需要GUIDED模式')
-                return  
+                return
             
             # 根据避障标志选择目标点
             if not self.avoidance_flag.data:    

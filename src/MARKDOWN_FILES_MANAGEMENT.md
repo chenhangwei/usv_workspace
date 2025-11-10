@@ -56,6 +56,10 @@
 - **`gs_gui/GRACEFUL_SHUTDOWN.md`** - 优雅关闭功能详细文档
 - **`gs_gui/LED_INFECTION_MODE.md`** - LED 传染模式实现
 - **`gs_gui/AREA_OFFSET_GUIDE.md`** - 坐标偏移功能指南
+- **`HOME_POSITION_SETTING_GUIDE.md`** ⭐⭐⭐ - Home Position 设置功能完整实现指南
+- **`HOME_POSITION_QUICK_REF.md`** ⭐ - Home Position 快速参考
+- **`HOME_POSITION_CHECKLIST.md`** - 实现检查清单
+- **`HOME_POSITION_TEST_GUIDE.md`** ⭐⭐ - 功能测试步骤和验证方法
 - **`gs_gui/USV_INFO_PANEL_GUIDE.md`** - USV 信息面板使用指南
 - **`gs_gui/UI_MODERNIZATION_GUIDE.md`** - UI 现代化设计指南
 - **`gs_gui/UI_RESPONSIVE_DESIGN.md`** - 响应式设计文档

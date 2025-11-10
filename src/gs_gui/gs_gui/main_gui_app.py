@@ -199,6 +199,7 @@ class MainWindow(QMainWindow):
         self.action_launch_usv_fleet.triggered.connect(self.launch_usv_fleet)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
+        self.action_set_home.triggered.connect(self.open_set_home_dialog)
         self.action_param_config.triggered.connect(self.open_param_config_window)
 
     def _init_custom_menu(self):
@@ -224,6 +225,17 @@ class MainWindow(QMainWindow):
         
         # 工具菜单
         tools_menu = self.ui.menubar.addMenu("工具(&T)")
+        
+        # Home Position 设置
+        self.action_set_home = QAction("🏠 设置 Home Position", self)
+        self.action_set_home.setShortcut("Ctrl+H")
+        self.action_set_home.setToolTip("设置 USV 的 Home Position（RTL 返航点）")
+        tools_menu.addAction(self.action_set_home)
+        
+        # 分隔线
+        tools_menu.addSeparator()
+        
+        # 飞控参数配置
         self.action_param_config = QAction("[+] 飞控参数配置...", self)
         self.action_param_config.setShortcut("Ctrl+P")
         self.action_param_config.setToolTip("通过串口直连配置飞控参数")
@@ -554,6 +566,50 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
     
+    def open_set_home_dialog(self):
+        """打开设置 Home Position 对话框"""
+        try:
+            from .set_home_dialog import SetHomeDialog
+            from PyQt5.QtWidgets import QMessageBox
+            
+            # 获取在线 USV 列表
+            online_usvs = self.list_manager.usv_online_list
+            
+            if not online_usvs:
+                QMessageBox.warning(
+                    self,
+                    "无在线 USV",
+                    "当前没有在线的 USV，无法设置 Home Position。\n"
+                    "请确保至少有一艘 USV 在线后再试。"
+                )
+                return
+            
+            # 创建并显示对话框
+            dialog = SetHomeDialog(online_usvs, self)
+            
+            if dialog.exec_() == QDialog.Accepted:
+                # 获取对话框结果
+                usv_namespace, use_current, coords = dialog.get_result()
+                
+                if usv_namespace:
+                    # 发送设置 Home Position 信号
+                    self.ros_signal.set_home_position.emit(usv_namespace, use_current, coords)
+                    
+                    if use_current:
+                        self.ui_utils.append_info(
+                            f"📍 已向 {usv_namespace} 发送设置 Home Position 命令（使用当前位置）"
+                        )
+                    else:
+                        self.ui_utils.append_info(
+                            f"📍 已向 {usv_namespace} 发送设置 Home Position 命令\n"
+                            f"    坐标: {coords.get('lat'):.7f}, {coords.get('lon'):.7f}, {coords.get('alt'):.2f}m"
+                        )
+        
+        except Exception as e:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "错误", f"打开设置 Home Position 对话框失败: {e}")
+            self.ui_utils.append_info(f"❌ 打开设置 Home Position 对话框失败: {e}")
+    
     def open_param_config_window(self):
         """
         打开参数配置窗口（串口直连模式）
@@ -771,6 +827,9 @@ def main(argv=None):
     
     # 连接机载计算机重启信号
     ros_signal.reboot_companion.connect(node.reboot_companion_callback)
+    
+    # 连接 Home Position 设置信号
+    ros_signal.set_home_position.connect(node.set_home_position_callback)
     
     # 连接节点信息信号
     try:

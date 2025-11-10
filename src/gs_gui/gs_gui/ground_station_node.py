@@ -1031,6 +1031,122 @@ class GroundStationNode(Node):
             except Exception:
                 pass
 
+    def set_home_position_callback(self, usv_namespace, use_current, coords):
+        """
+        设置 Home Position 回调
+        
+        发送 MAV_CMD_DO_SET_HOME 命令设置 Home Position
+        
+        Args:
+            usv_namespace: USV 命名空间（如 'usv_01'）
+            use_current: 是否使用当前位置（True=使用当前位置, False=使用指定坐标）
+            coords: 坐标字典 {'lat': float, 'lon': float, 'alt': float}（仅当 use_current=False 时使用）
+        """
+        try:
+            # 导入 MAVROS 命令服务
+            from mavros_msgs.srv import CommandLong
+            
+            # 创建服务客户端
+            service_name = f'/{usv_namespace}/cmd/command'
+            client = self.create_client(CommandLong, service_name)
+            
+            # 等待服务可用
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().error(f'[X] 服务不可用: {service_name}')
+                try:
+                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home Position 失败：服务不可用')
+                except Exception:
+                    pass
+                return
+            
+            # 构建 MAV_CMD_DO_SET_HOME 命令
+            request = CommandLong.Request()
+            request.broadcast = False
+            request.command = 179  # MAV_CMD_DO_SET_HOME
+            request.confirmation = 0
+            
+            if use_current:
+                # 使用当前位置作为 Home Position
+                request.param1 = 1.0  # 1=使用当前位置
+                request.param2 = 0.0
+                request.param3 = 0.0
+                request.param4 = 0.0
+                request.param5 = 0.0  # 纬度（使用当前位置时忽略）
+                request.param6 = 0.0  # 经度（使用当前位置时忽略）
+                request.param7 = 0.0  # 高度（使用当前位置时忽略）
+                
+                self.get_logger().info(f'[OK] 设置 {usv_namespace} Home Position 为当前位置')
+            else:
+                # 使用指定坐标作为 Home Position
+                request.param1 = 0.0  # 0=使用指定坐标
+                request.param2 = 0.0
+                request.param3 = 0.0
+                request.param4 = 0.0
+                request.param5 = float(coords.get('lat', 0.0))  # 纬度
+                request.param6 = float(coords.get('lon', 0.0))  # 经度
+                request.param7 = float(coords.get('alt', 0.0))  # 高度
+                
+                self.get_logger().info(
+                    f'[OK] 设置 {usv_namespace} Home Position 为指定坐标: '
+                    f'lat={request.param5:.7f}, lon={request.param6:.7f}, alt={request.param7:.2f}m'
+                )
+            
+            # 异步发送命令
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda f: self._handle_set_home_response(f, usv_namespace, use_current, coords)
+            )
+            
+            try:
+                if use_current:
+                    self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令（使用当前位置）')
+                else:
+                    self.ros_signal.node_info.emit(
+                        f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令\n'
+                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
+                    )
+            except Exception:
+                pass
+            
+        except Exception as e:
+            self.get_logger().error(f'[X] 发送设置 Home Position 命令失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'[X] 发送设置 Home Position 命令失败: {e}')
+            except Exception:
+                pass
+    
+    def _handle_set_home_response(self, future, usv_namespace, use_current, coords):
+        """处理设置 Home Position 命令响应"""
+        try:
+            response = future.result()
+            if response.success:
+                if use_current:
+                    msg = f'[OK] {usv_namespace} Home Position 已设置为当前位置'
+                else:
+                    msg = (
+                        f'[OK] {usv_namespace} Home Position 已设置为指定坐标\n'
+                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
+                    )
+                self.get_logger().info(msg)
+                try:
+                    self.ros_signal.node_info.emit(msg)
+                except Exception:
+                    pass
+            else:
+                self.get_logger().warn(
+                    f'[!] {usv_namespace} 设置 Home Position 命令失败: result={response.result}'
+                )
+                try:
+                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 设置 Home Position 命令失败')
+                except Exception:
+                    pass
+        except Exception as e:
+            self.get_logger().error(f'[X] 处理设置 Home Position 命令响应失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'[X] 处理设置 Home Position 命令响应失败: {e}')
+            except Exception:
+                pass
+
     def handle_status_text(self, usv_id, msg):
         """处理飞控 status_text 消息，收集预检提示与车辆消息."""
         if msg is None:

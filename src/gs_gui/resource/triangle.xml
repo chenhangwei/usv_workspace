@@ -5,8 +5,8 @@
             <usv>
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>-6.1</x>
-                    <y>-6.1</y>
+                    <x>-3</x>
+                    <y>3</y>
                 </position>
                 <yaw>
                     <value>0.5</value>

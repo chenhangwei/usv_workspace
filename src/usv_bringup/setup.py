@@ -20,6 +20,7 @@ setup(
             ['launch/usv_launch.py']),
         ('share/' + package_name + '/config', 
             ['config/usv_params.yaml']),
+
     ],
     install_requires=[
         'setuptools',

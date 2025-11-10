@@ -49,6 +49,9 @@ class ROSSignal(QObject):
     update_area_center = pyqtSignal(dict)  # 更新任务坐标系偏移量，参数：{'x': float, 'y': float, 'z': float}
     
     # LED传染模式控制信号
+    
+    # Home Position 设置信号
+    set_home_position = pyqtSignal(str, bool, dict)  # 参数：USV命名空间, 是否使用当前位置, 坐标字典{'lat':float,'lon':float,'alt':float}
     led_infection_mode_changed = pyqtSignal(bool)  # LED传染模式开关，参数：True开启/False关闭
     
     # 飞控重启命令信号
