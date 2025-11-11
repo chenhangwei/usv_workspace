@@ -40,7 +40,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_02',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -67,22 +67,8 @@ def generate_launch_description():
     # 地面站通信参数
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://:14570@192.168.68.53:14550',#
+        default_value='udp://:14580@192.168.68.50:14550',#192.168.68.50是本机IP地址，需要修改为实际的IP地址
         description='地面站通信地址'
-    )
-    
-    # MAVROS目标系统ID参数
-    tgt_system_arg = DeclareLaunchArgument(
-        'tgt_system',
-        default_value='2',
-        description='MAVROS目标系统ID'
-    )
-    
-    # MAVROS目标组件ID参数
-    tgt_component_arg = DeclareLaunchArgument(
-        'tgt_component',
-        default_value='1',
-        description='MAVROS目标组件ID'
     )
     
     # 激光雷达串口参数
@@ -108,6 +94,20 @@ def generate_launch_description():
     # =============================================================================
 
   
+
+    # GPS 到本地坐标转换节点（新增）
+    gps_to_local_node = Node(
+        package='usv_comm',
+        executable='gps_to_local_node',
+        name='gps_to_local_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+        # ⚠️ 移除重映射，避免与 MAVROS 的 local_position/pose 冲突
+        # 其他节点可以选择订阅：
+        # - local_position/pose (MAVROS 原生，飞控 EKF Origin)
+        # - local_position/pose_from_gps (GPS 转换，A0 基站原点)
+    )
 
     # 状态处理节点
     usv_status_node = Node(
@@ -158,6 +158,16 @@ def generate_launch_description():
         package='usv_control',
         executable='usv_control_node',
         name='usv_control_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
+    # 坐标转换节点（XYZ → GPS）（新增）
+    coord_transform_node = Node(
+        package='usv_control',
+        executable='coord_transform_node',
+        name='coord_transform_node',
         namespace=namespace,
         output='screen',
         parameters=[param_file]
@@ -272,17 +282,104 @@ def generate_launch_description():
         namespace=namespace,
         output='screen',
         parameters=[
+            param_file,  # 加载YAML文件的其他参数
             {
                 # 核心连接参数
                 'fcu_url': fcu_url,
                 'gcs_url': gcs_url,
-                # MAVLink身份配置（关键修复：确保使用正确的系统ID）
-                'system_id': 2,  # MAVROS自身系统ID
-                'component_id': 191,  # MAVROS自身组件ID
-                'target_system_id': 2,  # 目标飞控系统ID
-                'target_component_id': 1,  # 目标飞控组件ID
+                
+                # MAVLink 身份配置 (直接在启动文件设置,优先级最高)
+                'system_id': 103,           # MAVROS 自身系统 ID
+                'component_id': 191,        # MAVROS 自身组件 ID
+                'target_system_id': 3,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
+                'target_component_id': 1,   # 目标飞控组件 ID (固定为1)
+                
+                # ==================== 插件黑名单（加速启动，关键优化！）====================
+                # 禁用不需要的插件，从 50+ 个插件减少到 15 个核心插件
+                # 预期节省启动时间：约 270 秒
+                # ⚠️ 注意：ROS 2 中参数名为 plugin_denylist (不是 plugin_blacklist)
+                'plugin_denylist': [
+                    'actuator_control',      # 执行器控制（不需要）
+                    'adsb',                  # ADS-B 防撞（水面船不需要）
+                    'altitude',              # 高度传感器（已有 GPS）
+                    'cam_imu_sync',          # 相机同步（无相机）
+                    'camera',                # 相机控制（无相机）
+                    'cellular_status',       # 蜂窝网络（无蜂窝模块）
+                    'companion_process_status',  # 伴随计算机状态（已用 ROS）
+                    'debug_value',           # 调试值（生产环境不需要）
+                    'distance_sensor',       # 距离传感器（无超声波/激光高度计）
+                    'esc_status',            # ESC 状态（不需要）
+                    'esc_telemetry',         # ESC 遥测（不需要）
+                    'fake_gps',              # 虚假 GPS（实际 GPS 工作）
+                    'ftp',                   # FTP 文件传输（用 SSH）
+                    'gimbal_control',        # 云台控制（无云台）
+                    'gps_input',             # GPS 输入（使用飞控内置 GPS）
+                    'gps_rtk',               # RTK GPS（使用飞控内置 GPS）
+                    'guided_target',         # GUIDED 目标（用 setpoint_raw）
+                    'hil',                   # 硬件在环（实际硬件）
+                    'landing_target',        # 着陆目标（水面船不需要）
+                    'log_transfer',          # 日志传输（用 SD 卡）
+                    'mag_calibration_status',  # 磁力计校准（飞控上操作）
+                    'manual_control',        # 手动控制（用遥控器）
+                    'mocap_pose_estimate',   # 动捕姿态（无动捕系统）
+                    'mount_control',         # 挂载控制（无云台）
+                    'nav_controller_output', # 导航控制器（内部使用）
+                    'obstacle_distance',     # 障碍物距离（已有超声波节点）
+                    'odometry',              # 里程计（用 GPS）
+                    'onboard_computer_status',  # 机载计算机（已用 ROS）
+                    'open_drone_id',         # 无人机远程识别（水面船不需要）
+                    'optical_flow',          # 光流（无光流传感器）
+                    'param',                 # ⚠️ 参数同步（加速启动，需修改参数请用 QGC）
+                    'play_tune',             # 播放音调（无蜂鸣器）
+                    'px4flow',               # PX4 光流（无光流）
+                    'rangefinder',           # 测距仪（已有 GPS 高度）
+                    'setpoint_accel',        # 加速度目标点（用 setpoint_raw）
+                    'setpoint_attitude',     # 姿态目标点（用 setpoint_raw）
+                    'setpoint_position',     # 位置目标点（用 setpoint_raw）
+                    'setpoint_trajectory',   # 轨迹目标点（用 setpoint_raw）
+                    'setpoint_velocity',     # 速度目标点（用 setpoint_raw）
+                    'tdr_radio',             # 数传电台（不需要）
+                    'terrain',               # 地形跟随（水面船不需要）
+                    'trajectory',            # 轨迹规划（用 setpoint_raw）
+                    'tunnel',                # MAVLink 隧道（不需要）
+                    'vibration',             # 振动监测（生产环境不需要）
+                    'vision_pose',           # 视觉定位（无视觉系统）
+                    'vision_speed',          # 视觉速度（无视觉系统）
+                    'vfr_hud',               # HUD 数据（不需要显示 HUD）
+                    'waypoint',              # 航点任务（只用 GUIDED 模式，不需要航点）
+                    'wheel_odometry',        # 轮式里程计（无编码器）
+                    'wind_estimation',       # 风速估计（水面船不需要）
+                    'rallypoint',            # 集结点（不需要任务功能）
+                    'geofence',              # 地理围栏（不需要任务功能）
+                ],
+                
+                # ==================== 保留的核心插件（11个）====================
+                # ✅ sys_status      - 系统状态（连接、解锁、模式）
+                # ✅ sys_time        - 时间同步
+                # ✅ command         - 命令发送（解锁、模式切换）
+                # ✅ local_position  - 本地位置（EKF 输出的 XYZ 坐标）
+                # ✅ global_position - GPS 位置（经纬度、高度）
+                # ✅ home_position   - Home 点（返航位置）
+                # ✅ gps_status      - GPS 状态（卫星数、精度）
+                # ✅ battery         - 电池状态（电压、电流、电量）
+                # ✅ imu             - IMU 数据（姿态、角速度、加速度）
+                # ✅ rc_io           - 遥控器通道（遥控输入/输出）
+                # ✅ setpoint_raw    - 原始目标点（GUIDED 模式主要控制方式）
+                
+                # ==================== 性能优化参数 ====================
+                'sys.disable_diag': True,           # 禁用版本查询（节省 10-15 秒）
+                # 注意: 由于已禁用 waypoint/rallypoint/geofence 插件，
+                # 以下参数不再需要（插件都不加载了）
+                # 'mission.pull_after_gcs': False,
+                # 'waypoint.pull_after_gcs': False,
+                # 'rallypoint.pull_after_gcs': False,
+                # 'geofence.pull_after_gcs': False,
+                
+                # 连接参数
+                'conn.timeout': 10.0,               # 连接超时 10 秒
+                'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
+                'conn.heartbeat_rate': 1.0,         # 心跳频率 1 Hz
             },
-            param_file,  # 其他参数（plugin_allowlist等）从YAML加载
         ]
     )
 
@@ -352,6 +449,8 @@ def generate_launch_description():
     delayed_control_nodes = TimerAction(
         period=3.0,
         actions=[
+            gps_to_local_node,     # GPS→本地坐标转换（新增，优先启动）
+            coord_transform_node,  # XYZ→GPS坐标转换（新增）
             usv_status_node,       # 状态管理（依赖 MAVROS）
             usv_control_node,      # 核心控制器（依赖 MAVROS 和 EKF 原点）
             usv_command_node,      # 命令处理（依赖 MAVROS）
@@ -374,8 +473,6 @@ def generate_launch_description():
         param_file_arg,
         fcu_url_arg,
         gcs_url_arg,
-        tgt_system_arg,
-        tgt_component_arg,
         #lidar_port_arg,
         
         # 阶段 1：立即启动 MAVROS

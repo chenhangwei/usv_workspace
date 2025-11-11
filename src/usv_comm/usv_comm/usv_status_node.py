@@ -174,8 +174,11 @@ class UsvStatusNode(Node):
             TwistStamped, 'local_position/velocity_local', 
             self.usv_velocity_callback, qos_best_effort)
         
+        # 选择使用哪个坐标源：
+        # - 'local_position/pose': MAVROS 原生（飞控 EKF Origin）
+        # - 'local_position/pose_from_gps': GPS 转换（A0 基站原点，推荐）
         self.pos_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', 
+            PoseStamped, 'local_position/pose_from_gps',  # 使用 GPS 转换坐标
             self.usv_pose_callback, qos_best_effort)
         
         self.target_sub = self.create_subscription(

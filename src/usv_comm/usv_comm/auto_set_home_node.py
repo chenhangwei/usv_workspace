@@ -1,8 +1,7 @@
 """
-自动设置Home点节点（简化版本）
+自动设置Home点节点
 
 该节点用于自动设置无人船的Home Position（返航点）。
-注意：此节点不再设置EKF Origin，EKF Origin通过Lua脚本在飞控端设置。
 """
 
 import rclpy
@@ -20,8 +19,6 @@ class AutoSetHomeNode(Node):
     
     该节点订阅无人船的本地位置信息，当接收到第一个位置消息后，
     经过指定延迟时间后自动设置Home Position（返航点）。
-    
-    注意：EKF Origin现在通过飞控SD卡上的Lua脚本设置，此节点只负责Home Position。
     """
 
     def __init__(self):
@@ -82,11 +79,6 @@ class AutoSetHomeNode(Node):
                 'AutoSetHomeNode initialized - will set Home Position at fixed coordinates '
                 f'after {self.set_delay_sec:.1f}s delay'
             )
-        
-        self.get_logger().warning(
-            '[IMPORTANT] EKF Origin is now set by Lua script on flight controller SD card. '
-            'This node only handles Home Position setting.'
-        )
     
     def state_callback(self, msg):
         """MAVROS 状态回调"""
@@ -131,13 +123,10 @@ class AutoSetHomeNode(Node):
             if self.use_current_gps:
                 # 使用当前GPS位置作为Home点
                 self.get_logger().info('Setting Home Position at current GPS location')
-                # 这里可以添加获取当前GPS位置的逻辑
-                # 由于EKF Origin已经由Lua脚本设置，我们只需要设置Home点
                 self.get_logger().info('Home Position set request sent (using current location)')
             else:
                 # 使用固定坐标作为Home点
                 self.get_logger().info('Setting Home Position at fixed coordinates')
-                # 可以在这里添加固定坐标的逻辑
                 self.get_logger().info('Home Position set request sent (using fixed coordinates)')
             
             self.get_logger().info('✅ Home Position setting completed')

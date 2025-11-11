@@ -5,47 +5,51 @@
 
 # =============================================================================
 # 飞控通信模块参数 (MAVROS)
+# 
+# 多 USV 机载计算机的 system_id 配置说明:
+# 
+# 场景: 多台独立 USV,每台有自己的机载计算机(gauss02/gauss03)和飞控
+# 
+# system_id 设置原则:
+# 1. 每个机载计算机使用唯一的 system_id (推荐: usv_02用2, usv_03用3)
+# 2. 所有飞控统一使用 system_id=1 (ArduPilot 标准)
+# 3. 地面站使用 system_id=255 (GCS 标准)
+# 
+# MAVLink 路由工作原理:
+# - 飞控会记住"从哪个串口收到哪个 sysid 的消息"
+# - 当收到目标为某 sysid 的消息时,飞控会转发到对应串口
+# - 这样地面站(sysid=255)可以通过飞控与机载电脑(sysid=2/3)通信
+# 
+# ⚠️ 关键: target_system_id 必须设为 1 (飞控ID),否则无法接收飞控心跳!
 # =============================================================================
 mavros:
   ros__parameters:
     # ==================== MAVLink 身份配置 ====================
-    system_id: 2                            # MAVROS 自身系统 ID
-    component_id: 191                       # MAVROS 自身组件 ID（GCS 默认值，关键！不能设为 1）
-    target_system_id: 2                     # 目标飞控系统 ID
-    target_component_id: 1                  # 目标飞控组件 ID
+    # 注意: system_id/target_system_id 等参数已移至 launch 文件中配置
+    # 请在 usv_launch.py 中修改 target_system_id:
+    # - usv_02: target_system_id = 2 (匹配飞控 SYSID_THISMAV=2)
+    # - usv_03: target_system_id = 3 (匹配飞控 SYSID_THISMAV=3)
     
-    # ==================== 插件白名单（精简配置，加速启动）====================
-    plugin_allowlist:
-      - 'sys_status'
-      - 'sys_time'
-      - 'command'
-      - 'local_position'
-      - 'global_position'
-      - 'home_position'
-      - 'gps_status'
-      - 'battery'
-      - 'imu'
-      - 'rc_io'
-      - 'setpoint_raw'
-      - 'waypoint'
-      - 'rallypoint'
-      - 'geofence'
-      - 'vfr_hud'
+    # ==================== 插件配置（已移至 launch 文件）====================
+    # ⚠️ 插件黑名单配置已移至 usv_launch.py，此处配置已失效
+    # 请在 launch 文件中修改 plugin_blacklist 参数
+    # 
+    # 保留的核心插件（15个）：
+    # sys_status, sys_time, command, local_position, global_position,
+    # home_position, gps_status, battery, imu, rc_io, setpoint_raw,
+    # waypoint, rallypoint, geofence, vfr_hud
     
-    # ==================== ArduPilot 4.7.0-dev 兼容性修复（关键！）====================
-    # sys 插件参数
-    sys:
-      disable_diag: true                    # 禁用诊断（跳过版本查询，节省 10 秒）
+    # ==================== 性能优化参数（已移至 launch 文件）====================
+    # 以下参数已在 launch 文件中配置，此处保留仅作为文档参考
+    # sys.disable_diag: true
+    # mission.pull_after_gcs: false
+    # waypoint.pull_after_gcs: false
+    # rallypoint.pull_after_gcs: false
+    # geofence.pull_after_gcs: false
     
-    # mission 插件参数  
-    mission:
-      pull_after_gcs: false                 # 禁用 GCS 连接后自动拉取任务（节省 15 秒）
-      use_mission_item_int: false           # 禁用任务项参数同步
-    # ==================== END 兼容性修复 ====================
-    
-    # 连接参数
+    # 连接参数（保留作为默认值）
     conn:
-      timeout: 5.0                          # 连接超时时间（秒）
+      timeout: 10.0                         # 连接超时时间（秒）
       heartbeat_mav_type: 6                 # MAV_TYPE_SURFACE_BOAT
       heartbeat_rate: 1.0                   # 心跳频率（Hz）
       
@@ -63,23 +67,33 @@ usv_status_node:
     
     # 电池电压范围配置（基于实际电池特性）
     battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
-    battery_voltage_empty: 10.8           # 空电电压（V）- 电量显示0%，需要充电
+    battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
 
-auto_set_home_node:
+# =============================================================================
+# GPS 坐标转换模块参数（统一的 GPS 原点配置）
+# 
+# ⚠️ 重要说明：
+# 所有 USV 使用统一的 GPS 原点（A0 基站）进行坐标转换
+# - gps_to_local_node: 将飞控的 GPS 位置转换为本地 XYZ 坐标
+# - coord_transform_node: 将地面站的 XYZ 目标点转换为 GPS 坐标
+# 
+# GPS 原点（A0 基站）：22.5180977°N, 113.9007239°E, -5.17m
+# =============================================================================
+
+gps_to_local_node:
   ros__parameters:
-    # EKF Origin 设置延迟
-    set_delay_sec: 1.0                      # 接收到第一个位置消息后设置EKF原点的延迟时间（秒）
-    
-    # ⚠️ 重要说明：
-    # use_current_gps: false 表示使用固定的A0基站坐标作为 EKF Origin
-    # 所有USV共享同一个 EKF Origin（A0基站），这样所有USV的本地坐标系都统一以A0为原点
-    # 这是多USV系统的关键设计：全局坐标系 = USV本地坐标系 = 以A0为原点
-    use_current_gps: false                  # false=使用A0基站坐标，true=使用USV当前位置（不推荐）
-    
-    # A0定位基站的GPS坐标（所有USV共享的EKF Origin坐标）
-    origin_latitude: 22.5180977             # 基站纬度（北纬）
-    origin_longitude: 113.9007239           # 基站经度（东经）
-    origin_altitude: 0.0                  # 基站高度（米，相对海平面）
+    gps_origin_lat: 22.5180977              # 北纬（度）
+    gps_origin_lon: 113.9007239             # 东经（度）
+    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
+    publish_rate: 10.0                      # 发布频率（Hz），推荐 10-20 Hz
+    enable_gps_to_local: true               # 启用 GPS→本地坐标转换
+
+coord_transform_node:
+  ros__parameters:
+    gps_origin_lat: 22.5180977              # 北纬（度）
+    gps_origin_lon: 113.9007239             # 东经（度）
+    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
+    enable_coord_transform: true            # 启用 XYZ→GPS 坐标转换
 
 # =============================================================================
 # 控制模块参数
