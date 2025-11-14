@@ -25,7 +25,7 @@ usv_fleet:
     username: "chenhangwei"                                  # SSH 用户名
     workspace: "/home/chenhangwei/usv_workspace"             # 机载工作空间路径
     namespace: "usv_01"                              # ROS 2 命名空间
-    fcu_url: "serial:///dev/ttyACM0:921600"          # 飞控串口
+    fcu_url: "udp://192.168.10.1:14550@192.168.10.2:14550"          # 飞控串口
     system_id: 1                                     # MAVLink 系统 ID
     gcs_url: "udp://:14560@192.168.68.53:14550"      # 地面站通信地址（可选）
     
