@@ -5,8 +5,8 @@
             <usv>
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>-3</x>
-                    <y>3</y>
+                    <x>-1.4</x>
+                    <y>6.1</y>
                 </position>
                 <yaw>
                     <value>0.5</value>
@@ -18,8 +18,8 @@
             <usv>
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>15.7</x>
-                    <y>25.1</y>
+                    <x>1.0</x>
+                    <y>6.4</y>
                 </position>
                 <yaw>
                     <value>0.5</value>
@@ -31,8 +31,8 @@
             <usv>
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>12.9</x>
-                    <y>22.8</y>
+                    <x>0.9</x>
+                    <y>5.9</y>
                 </position>
                 <yaw>
                     <value>0.5</value>
@@ -48,8 +48,8 @@
             <usv>
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>15.5</x>
-                    <y>25.3</y>
+                    <x>2.6</x>
+                    <y>0.8</y>
                 </position>
                 <yaw>
                     <value>0.5</value>
@@ -61,8 +61,8 @@
             <usv>
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>18.7</x>
-                    <y>28.1</y>
+                    <x>2.9</x>
+                    <y>1.4</y>
                 </position>
                 <yaw>
                     <value>0.5</value>
@@ -74,8 +74,8 @@
             <usv>
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>20.9</x>
-                    <y>30.8</y>
+                    <x>2.8</x>
+                    <y>1.8</y>
                 </position>
                 <yaw>
                     <value>0.5</value>

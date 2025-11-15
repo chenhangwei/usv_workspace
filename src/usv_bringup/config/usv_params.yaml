@@ -93,7 +93,8 @@ coord_transform_node:
     gps_origin_lat: 22.5180977              # 北纬（度）
     gps_origin_lon: 113.9007239             # 东经（度）
     gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
-    enable_coord_transform: true            # 启用 XYZ→GPS 坐标转换
+    enable_coord_transform: true            # 启用 XYZ→GPS 坐标转换（接收地面站+避障目标点）
+    use_global_position_target: true        # true=GlobalPositionTarget (推荐), false=GeoPoseStamped
 
 # =============================================================================
 # 控制模块参数
@@ -114,7 +115,10 @@ usv_command_node:
 
 usv_control_node:
   ros__parameters:
-    dummy_param: true                       # 占位参数
+    publish_rate: 20.0                      # 目标点发布频率（Hz）
+    frame_id: 'map'                         # 坐标系ID
+    coordinate_frame: 8                     # FRAME_LOCAL_NED = 8
+    enable_local_control: false             # 是否启用局部控制（false=使用coord_transform_node的全局GPS模式）
 
 # =============================================================================
 # 传感器驱动模块参数

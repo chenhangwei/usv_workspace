@@ -52,44 +52,75 @@ class ClusterTaskManager:
                     tree = ET.parse(xml_file)
                     root = tree.getroot()
                     
-                    # 获取step节点
-                    step = root.find("step")
-                    if step is not None:
-                        step_number = step.get("number")
-                        
-                        # 遍历usvs下的所有usv节点
-                        usvs_elem = step.find("usvs")
-                        if usvs_elem is not None:
-                            for usv in usvs_elem.findall("usv"):
-                                usv_id_elem = usv.find("usv_id")
-                                pos_x_elem = usv.find("position/x")
-                                pos_y_elem = usv.find("position/y")
-                                pos_z_elem = usv.find("position/z")
-                                yaw_elem = usv.find("yaw/value")
-                                velocity_elem = usv.find("velocity/value")
-                                
-                                usv_data = {
-                                    "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
-                                    "position": {
-                                        "x": float(pos_x_elem.text) if pos_x_elem is not None and pos_x_elem.text is not None else 0.0,
-                                        "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
-                                        "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
-                                    },
-                                    "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
-                                    "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
-                                    "step": int(step_number) if step_number is not None else 0
-                                }
-                                usv_list.append(usv_data)
-                            
-                            self.cluster_position_list = usv_list
-                            self.append_info(f"读取数据成功，共 {len(usv_list)} 个 USV 数据")
-                            self.append_info(f"数据： {self.cluster_position_list}")
-                            
-                            # 重置任务状态
-                            self.cluster_task_running = False
-                            self.cluster_task_paused = False
-                    else:
+                    # 获取所有 step 节点
+                    steps = root.findall("step")
+                    if not steps:
                         error_msg = "XML文件格式错误：未找到step节点"
+                        self.append_info(error_msg)
+                        self.cluster_position_list = []
+                        return
+
+                    combined_list = []
+                    step_summaries = []
+
+                    for idx, step in enumerate(steps, start=1):
+                        raw_step_number = step.get("number")
+                        try:
+                            step_number = int(raw_step_number) if raw_step_number is not None else idx
+                        except ValueError:
+                            step_number = idx
+                            self.append_warning(
+                                f"Step 节点 number='{raw_step_number}' 解析失败，使用顺序值 {idx}"
+                            )
+
+                        usvs_elem = step.find("usvs")
+                        if usvs_elem is None:
+                            self.append_warning(f"step {step_number} 缺少 usvs 节点，已跳过")
+                            continue
+
+                        step_usv_count = 0
+                        for usv in usvs_elem.findall("usv"):
+                            usv_id_elem = usv.find("usv_id")
+                            pos_x_elem = usv.find("position/x")
+                            pos_y_elem = usv.find("position/y")
+                            pos_z_elem = usv.find("position/z")
+                            yaw_elem = usv.find("yaw/value")
+                            velocity_elem = usv.find("velocity/value")
+
+                            usv_data = {
+                                "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
+                                "position": {
+                                    "x": float(pos_x_elem.text) if pos_x_elem is not None and pos_x_elem.text is not None else 0.0,
+                                    "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
+                                    "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
+                                },
+                                "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
+                                "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
+                                "step": step_number
+                            }
+                            combined_list.append(usv_data)
+                            step_usv_count += 1
+
+                        if step_usv_count:
+                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘")
+
+                    if combined_list:
+                        combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
+                        self.cluster_position_list = combined_list
+                        total_steps = len({item.get("step", 0) for item in combined_list})
+                        self.append_info(
+                            f"读取数据成功，共 {len(combined_list)} 个 USV 数据，涵盖 {total_steps} 个步骤"
+                        )
+                        if step_summaries:
+                            self.append_info("步骤分布：" + "，".join(step_summaries))
+                        else:
+                            self.append_info(f"数据： {self.cluster_position_list}")
+
+                        # 重置任务状态
+                        self.cluster_task_running = False
+                        self.cluster_task_paused = False
+                    else:
+                        error_msg = "XML文件中未找到任何 USV 数据"
                         self.append_info(error_msg)
                         self.cluster_position_list = []
                 

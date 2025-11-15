@@ -54,9 +54,9 @@ class UsvAvoidanceNode(Node):
         self.target_sub = self.create_subscription(
             PositionTarget, 'setpoint_raw/local', self.target_callback, qos_best_effort)
         
-        # 订阅当前 UWB 位置
+        # 订阅当前位置（使用 GPS 转换的统一坐标系）
         self.position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.position_callback, qos_best_effort)
+            PoseStamped, 'local_position/pose_from_gps', self.position_callback, qos_best_effort)
 
         # 发布调整后的目标点
         self.target_pub = self.create_publisher(PositionTarget, 'avoidance_position', 10)

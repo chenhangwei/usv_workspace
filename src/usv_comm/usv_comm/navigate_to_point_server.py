@@ -46,25 +46,29 @@ class NavigateToPointServer(Node):
             self.execute_callback,
             callback_group=self.callback_group)
         
-        # 创建订阅者，订阅当前姿态
-        self.current_pose = None
-        self.pose_sub = self.create_subscription(
-            PoseStamped, 
-            'local_position/pose', 
-            self.pose_cb, 
-            10,
-            callback_group=self.callback_group)
-        
-        # 创建目标点发布者，发布到usv_control_node
+        # 创建QoS配置
         qos_best_effort = QoSProfile(
             depth=10,
             reliability=QoSReliabilityPolicy.BEST_EFFORT
         )
+        qos_reliable = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        
+        # 创建订阅者，订阅当前姿态（使用 GPS 转换的统一坐标系）
+        self.current_pose = None
+        self.pose_sub = self.create_subscription(
+            PoseStamped, 
+            'local_position/pose_from_gps',  # 使用 GPS 转换坐标（A0 基站原点）
+            self.pose_cb, 
+            qos_best_effort,
+            callback_group=self.callback_group)
         
         self.target_pub = self.create_publisher(
             PoseStamped, 
             'set_usv_target_position', 
-            qos_best_effort)
+            qos_reliable)
         
         
         # 导航参数
@@ -145,9 +149,18 @@ class NavigateToPointServer(Node):
         Returns:
             NavigateToPoint.Result: Action执行结果
         """
-        self.get_logger().info(f'接收到导航目标点: x={goal_handle.request.goal.pose.position.x:.2f}, '
-                              f'y={goal_handle.request.goal.pose.position.y:.2f}, '
-                              f'z={goal_handle.request.goal.pose.position.z:.2f}')
+        # 🔍 调试日志：Action Server接收到目标点
+        target_x = goal_handle.request.goal.pose.position.x
+        target_y = goal_handle.request.goal.pose.position.y
+        target_z = goal_handle.request.goal.pose.position.z
+        
+        self.get_logger().info(
+            f"📥 [Action Server 接收] 导航目标点\n"
+            f"  ├─ X坐标: {target_x:.3f} m\n"
+            f"  ├─ Y坐标: {target_y:.3f} m\n"
+            f"  ├─ Z坐标: {target_z:.3f} m\n"
+            f"  └─ 超时: {goal_handle.request.timeout:.1f} s"
+        )
         
         # 获取目标点和超时设置
         target_pose = goal_handle.request.goal
@@ -249,6 +262,14 @@ class NavigateToPointServer(Node):
         Args:
             target_pose (PoseStamped): 目标点位姿
         """
+        # 🔍 调试日志：转发到控制节点
+        self.get_logger().info(
+            f"📨 [Action Server 转发] → set_usv_target_position\n"
+            f"  ├─ X: {target_pose.pose.position.x:.3f} m\n"
+            f"  ├─ Y: {target_pose.pose.position.y:.3f} m\n"
+            f"  └─ Z: {target_pose.pose.position.z:.3f} m"
+        )
+        
         # 发布目标点到usv_control_node
         self.target_pub.publish(target_pose)
 

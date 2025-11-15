@@ -632,6 +632,15 @@ class ClusterController:
                 # 将 area-relative 转为全局，再转换为 usv 本地坐标（以 usv 启动点为0,0,0）
                 p_global = self._area_to_global(pos)
                 p_local = self._global_to_usv_local(usv_id, p_global)
+                
+                # 🔍 调试日志：集群控制器坐标转换
+                self.node.get_logger().info(
+                    f"📤 [集群控制器] Step {self.node.run_step} → {usv_id}\n"
+                    f"  ├─ Area坐标: X={pos.get('x', 0.0):.2f}, Y={pos.get('y', 0.0):.2f}, Z={pos.get('z', 0.0):.2f}\n"
+                    f"  ├─ Global坐标: X={p_global.get('x', 0.0):.2f}, Y={p_global.get('y', 0.0):.2f}, Z={p_global.get('z', 0.0):.2f}\n"
+                    f"  └─ Local坐标: X={p_local.get('x', 0.0):.2f}, Y={p_local.get('y', 0.0):.2f}, Z={p_local.get('z', 0.0):.2f}"
+                )
+                
                 # 支持z坐标
                 self.node.send_nav_goal_via_action(
                     usv_id,

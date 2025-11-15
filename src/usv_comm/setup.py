@@ -34,6 +34,8 @@ including status processing, data exchange, and command transmission functionali
             'usv_status_node = usv_comm.usv_status_node:main',
             'auto_set_home_node = usv_comm.auto_set_home_node:main',
             'gps_to_local_node = usv_comm.gps_to_local_node:main',
+            'mock_usv_data = usv_comm.mock_usv_data:main',
+            'navigate_to_point_server = usv_comm.navigate_to_point_server:main',
         ],
     },
     classifiers=[

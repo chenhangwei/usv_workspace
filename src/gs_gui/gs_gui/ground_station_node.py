@@ -704,10 +704,18 @@ class GroundStationNode(Node):
                 yaw = ns.get('yaw', 0.0)
                 p_global = self.cluster_controller._area_to_global(pos)
                 p_local = self.cluster_controller._global_to_usv_local(usv_id, p_global)
+                
+                # 🔍 调试日志：完整坐标转换链路
+                self.get_logger().info(
+                    f"📤 [地面站发送] {usv_id}\n"
+                    f"  ├─ Area坐标(XML): X={pos.get('x', 0.0):.2f}, Y={pos.get('y', 0.0):.2f}, Z={pos.get('z', 0.0):.2f}\n"
+                    f"  ├─ Global坐标: X={p_global.get('x', 0.0):.2f}, Y={p_global.get('y', 0.0):.2f}, Z={p_global.get('z', 0.0):.2f}\n"
+                    f"  ├─ Local坐标: X={p_local.get('x', 0.0):.2f}, Y={p_local.get('y', 0.0):.2f}, Z={p_local.get('z', 0.0):.2f}\n"
+                    f"  └─ Yaw: {yaw:.2f} rad"
+                )
+                
                 # 支持z坐标
                 self.send_nav_goal_via_action(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
-                # 记录日志信息（记录全局和本地坐标以便调试）
-                self.get_logger().info(f"已下发目标点到 {usv_id}: global={p_global}, local={p_local}, yaw: {yaw}")
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")

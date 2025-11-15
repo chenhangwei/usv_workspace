@@ -30,12 +30,14 @@ class UsvControlNode(Node):
         self.declare_parameter('publish_rate', 20.0)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('coordinate_frame', PositionTarget.FRAME_LOCAL_NED)
+        self.declare_parameter('enable_local_control', True)  # 是否启用局部控制（默认启用）
         
         # 获取参数值
         publish_rate_param = self.get_parameter('publish_rate').value
         publish_rate = 20.0 if publish_rate_param is None else float(publish_rate_param)
         self.frame_id = self.get_parameter('frame_id').value
         self.coordinate_frame = self.get_parameter('coordinate_frame').value
+        self.enable_local_control = bool(self.get_parameter('enable_local_control').value)
         
         # 创建 QoS 配置
         qos_best_effort = QoSProfile(
@@ -71,9 +73,9 @@ class UsvControlNode(Node):
         self.home_position_sub = self.create_subscription(
             HomePosition, 'home_position/home', self.home_position_callback, qos_best_effort)
         
-        # 订阅本地位置（用于验证 EKF 原点是否真正生效）
+        # 订阅本地位置（使用 GPS 转换的统一坐标系）
         self.local_position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.local_position_callback, qos_best_effort)
+            PoseStamped, 'local_position/pose_from_gps', self.local_position_callback, qos_best_effort)
         
         # 发送目标位置循环     
         self.publish_target_timer = self.create_timer(1.0/publish_rate, self.publish_target)
@@ -95,6 +97,13 @@ class UsvControlNode(Node):
         self.get_logger().info(f'USV 控制节点已启动')
         self.get_logger().info(f'发布频率: {publish_rate} Hz')
         self.get_logger().info(f'坐标系: {self.frame_id}')
+        
+        # 根据配置判断是否启用局部控制
+        if not self.enable_local_control:
+            self.get_logger().warning('⚠️  局部控制已禁用 - 本节点不会发送控制指令')
+            self.get_logger().info('💡 坐标转换由 coord_transform_node 处理')
+        else:
+            self.get_logger().info('✅ 局部控制已启用 - 使用 FRAME_LOCAL_NED')
 
     def state_callback(self, msg):
         """
@@ -229,6 +238,10 @@ class UsvControlNode(Node):
         并将选定的目标点发布给飞控系统。
         """
         try:
+            # 检查是否启用局部控制
+            if not self.enable_local_control:
+                return  # 如果禁用，直接返回，不发送任何控制指令
+            
             # 🔒 关键检查：EKF 原点是否完全就绪（Home + LocalPos 都有效）
             if not self.ekf_origin_ready:
                 if not self.home_position_set:

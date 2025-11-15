@@ -45,10 +45,11 @@ class AutoSetHomeNode(Node):
         # 定时器
         self.delay_timer = None
 
-        # 订阅本地位置信息
+        # 订阅本地位置信息（使用 MAVROS 原生话题检测首次定位）
+        # 注意：此节点用于检测 EKF 原点设置，使用 MAVROS 原生话题
         self.pose_sub = self.create_subscription(
             PoseStamped,
-            'local_position/pose',
+            'local_position/pose',  # 保持使用 MAVROS 原生话题
             self.local_position_callback,
             qos_best_effort
         )
