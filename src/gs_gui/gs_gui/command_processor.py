@@ -118,20 +118,49 @@ class CommandProcessor:
         """
         # 如果消息是列表则直接使用，否则创建包含单个元素的列表
         usv_list = msg if isinstance(msg, list) else [msg]
+        
+        sent_count = 0
+        offline_count = 0
+        invalid_count = 0
+        
         # 遍历USV列表
         for ns in usv_list:
-            # 提取USV ID
-            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
-            # 检查USV是否存在对应的武装状态发布者
-            if usv_id in self.node.usv_manager.set_usv_arming_pubs:
-                # 创建武装状态消息
-                arming_msg = String()
-                arming_msg.data = arming_state
-                # 将消息添加到发布队列
-                self.node.publish_queue.put((self.node.usv_manager.set_usv_arming_pubs[usv_id], arming_msg))
+            # 提取USV ID和namespace
+            if isinstance(ns, dict):
+                usv_id = ns.get('namespace', '').lstrip('/')
             else:
-                # 记录警告日志
-                self.node.get_logger().warn(f"无效的命名空间 {usv_id}，跳过")
+                usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            
+            # 检查USV是否存在对应的武装状态发布者
+            if usv_id not in self.node.usv_manager.set_usv_arming_pubs:
+                invalid_count += 1
+                self.node.get_logger().warn(f"⚠️  {usv_id}: 发布者不存在，跳过")
+                continue
+            
+            # 检查USV是否在线（即使不在集群列表中，只要有状态信息就尝试发送）
+            is_online = False
+            if usv_id in self.node.usv_states:
+                is_online = self.node.usv_states[usv_id].get('connected', False)
+            
+            if not is_online:
+                offline_count += 1
+                self.node.get_logger().warn(f"⚠️  {usv_id}: USV离线，跳过 {arming_state} 命令")
+                continue
+            
+            # 创建武装状态消息并发送
+            arming_msg = String()
+            arming_msg.data = arming_state
+            self.node.publish_queue.put((self.node.usv_manager.set_usv_arming_pubs[usv_id], arming_msg))
+            sent_count += 1
+            self.node.get_logger().info(f"✓ {usv_id}: 发送 {arming_state} 命令")
+        
+        # 输出统计信息
+        if sent_count > 0:
+            self.node.get_logger().info(f"📤 {arming_state} 命令已发送至 {sent_count} 艘在线USV")
+        if offline_count > 0:
+            self.node.get_logger().warn(f"⚠️  跳过 {offline_count} 艘离线USV")
+        if invalid_count > 0:
+            self.node.get_logger().warn(f"⚠️  跳过 {invalid_count} 个无效USV")
 
     def str_command_callback(self, msg):
         """
@@ -203,25 +232,48 @@ class CommandProcessor:
                 command_type = self._identify_command_type(msg)
 
                 # 遍历命名空间列表（在节点线程访问 last_ns_list 是安全的）
+                sent_count = 0
+                skipped_count = 0
+                
                 for ns in list(self.node.last_ns_list):
                     usv_id = ns.lstrip('/')
+                    
+                    # 检查USV是否在线（连接状态）
+                    is_online = False
+                    if usv_id in self.node.usv_states:
+                        is_online = self.node.usv_states[usv_id].get('connected', False)
+                    
+                    # 如果USV离线，跳过命令发送
+                    if not is_online:
+                        skipped_count += 1
+                        continue
+                    
                     if command_type == 'led' and usv_id in self.node.usv_manager.led_pubs:
                         self.node._update_local_led_state(usv_id, command_str)
                         # 使用发布队列异步发布
                         try:
                             self.node.publish_queue.put_nowait((self.node.usv_manager.led_pubs[usv_id], command_str))
+                            sent_count += 1
                         except queue.Full:
                             self.node.get_logger().warn('发布队列已满，无法发送 LED 命令')
                     if command_type == 'sound' and usv_id in self.node.usv_manager.sound_pubs:
                         try:
                             self.node.publish_queue.put_nowait((self.node.usv_manager.sound_pubs[usv_id], command_str))
+                            sent_count += 1
                         except queue.Full:
                             self.node.get_logger().warn('发布队列已满，无法发送声音命令')
                     if command_type == 'action' and usv_id in self.node.usv_manager.action_pubs:
                         try:
                             self.node.publish_queue.put_nowait((self.node.usv_manager.action_pubs[usv_id], command_str))
+                            sent_count += 1
                         except queue.Full:
                             self.node.get_logger().warn('发布队列已满，无法发送动作命令')
+                
+                # 记录发送统计
+                if sent_count > 0:
+                    self.node.get_logger().info(f"✓ 命令已发送至 {sent_count} 艘在线USV")
+                if skipped_count > 0:
+                    self.node.get_logger().warn(f"⚠️  跳过 {skipped_count} 艘离线USV")
 
                 processed += 1
         except Exception as e:

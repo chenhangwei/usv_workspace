@@ -15,6 +15,10 @@ import yaml
 import subprocess
 import time
 from typing import Dict, List, Optional
+
+# 导入common_utils工具
+from common_utils import ProcessTracker
+
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QMessageBox, QCheckBox, QGroupBox,
@@ -50,6 +54,9 @@ class UsvFleetLauncher(QDialog):
         self.fleet_config = {}
         self.usv_processes = {}  # {usv_id: subprocess.Popen}
         self.usv_status = {}  # {usv_id: 'offline'|'launching'|'running'|'stopped'}
+        
+        # 初始化进程追踪器
+        self.process_tracker = ProcessTracker()
         
         # 初始化 UI
         self._init_ui()
@@ -662,13 +669,16 @@ class UsvFleetLauncher(QDialog):
                 remote_cmd
             ]
             
-            # 启动进程
+            # 启动进程并追踪
             process = subprocess.Popen(
                 ssh_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
+            
+            # 追踪进程
+            self.process_tracker.track(process, f'USV {usv_id} SSH Launch')
             
             self.usv_processes[usv_id] = process
             self.usv_status[usv_id] = 'launching'
@@ -809,10 +819,13 @@ class UsvFleetLauncher(QDialog):
         # 停止定时器
         self.status_timer.stop()
         
+        # 清理所有进程
+        self.process_tracker.cleanup_all()
+        
         # 通知父窗口清理引用
         if self.parent():
             if hasattr(self.parent(), '_usv_fleet_launcher'):
                 self.parent()._usv_fleet_launcher = None
         
-        # 直接接受关闭事件，不再弹出确认对话框
+        # 直接接受关闭事件
         event.accept()

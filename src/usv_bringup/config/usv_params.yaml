@@ -62,12 +62,23 @@ mavros:
 # =============================================================================
 usv_status_node:
   ros__parameters:
-    # 目标点判断阈值
-    target_reach_threshold: 1.0             # 到达目标点的距离阈值（米）
-    
     # 电池电压范围配置（基于实际电池特性）
     battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
     battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
+
+# NavigateToPoint Action Server 参数（统一的导航到达阈值配置）
+navigate_to_point_server:
+  ros__parameters:
+    nav_arrival_threshold: 1.0              # 到达目标点的距离阈值（米）- 统一使用此参数
+    nav_timeout_check_period: 1.0           # 超时检查周期（秒）
+    nav_feedback_period: 0.5                # 反馈发布周期（秒）
+    distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
+
+# Auto Set Home 参数（关键：延长 GPS 初始化时间，避免 z 坐标误差）
+auto_set_home_node:
+  ros__parameters:
+    set_delay_sec: 10.0                     # GPS 高度收敛等待时间（秒），建议 8-15 秒
+    use_current_gps: true                   # 使用当前 GPS 位置作为 Home 点
 
 # =============================================================================
 # GPS 坐标转换模块参数（统一的 GPS 原点配置）

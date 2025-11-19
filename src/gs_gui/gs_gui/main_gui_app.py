@@ -28,6 +28,7 @@ from gs_gui.state_handler import StateHandler
 from gs_gui.ui_utils import UIUtils
 from gs_gui.area_offset_dialog import AreaOffsetDialog
 from gs_gui.usv_info_panel import UsvInfoPanel
+from gs_gui.usv_navigation_panel import UsvNavigationPanel
 from gs_gui.style_manager import StyleManager
 # 使用性能优化版本的集群启动器（异步检测 + 并行 ping）
 from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
@@ -76,6 +77,9 @@ class MainWindow(QMainWindow):
         # 初始化 USV 信息面板并替换原有的 groupBox_3
         self._init_usv_info_panel()
         
+        # 初始化 USV 导航面板（插入到 USV Details 和 Message 之间）
+        self._init_usv_navigation_panel()
+        
         # 初始化表格管理器
         self.table_manager = TableManager(
             self.ui.cluster_tableView,
@@ -97,12 +101,13 @@ class MainWindow(QMainWindow):
         # 初始化USV列表管理器
         self.list_manager = USVListManager(self.ui_utils.append_info)
         
-        # 初始化状态处理器（传入信息面板更新回调）
+        # 初始化状态处理器（传入信息面板和导航面板更新回调）
         self.state_handler = StateHandler(
             self.table_manager,
             self.list_manager,
             self.ui_utils.append_warning,
-            self._refresh_selected_usv_info  # 传入更新回调
+            self._refresh_selected_usv_info,  # 传入USV信息面板更新回调
+            self._refresh_selected_usv_navigation  # 传入USV导航面板更新回调
         )
         
         # 初始化命令处理器
@@ -139,7 +144,10 @@ class MainWindow(QMainWindow):
         # 导航状态更新信号
         self.ros_signal.nav_status_update.connect(self.state_handler.update_nav_status)
         
-        # 导航反馈信号
+        # 导航反馈信号（连接到 StateHandler 进行缓存）
+        self.ros_signal.navigation_feedback.connect(self.state_handler.update_navigation_feedback)
+        
+        # 导航反馈信号（连接到主窗口进行日志显示）
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
     
     def _connect_ui_signals(self):
@@ -264,38 +272,139 @@ class MainWindow(QMainWindow):
             else:
                 parent_layout.addWidget(self.usv_info_panel)
     
+    def _init_usv_navigation_panel(self):
+        """初始化 USV 导航面板，插入到 mainSplitter 中（USV Details 和 Message 之间）"""
+        # 创建 USV 导航面板
+        self.usv_navigation_panel = UsvNavigationPanel()
+        
+        # 创建一个 GroupBox 包装导航面板（保持与其他面板风格一致）
+        from PyQt5.QtWidgets import QGroupBox, QVBoxLayout
+        navigation_group = QGroupBox("USV Navigation")
+        navigation_layout = QVBoxLayout(navigation_group)
+        navigation_layout.setContentsMargins(5, 5, 5, 5)
+        navigation_layout.addWidget(self.usv_navigation_panel)
+        
+        # 获取 mainSplitter
+        main_splitter = self.ui.mainSplitter
+        
+        # mainSplitter 的结构：
+        # 0: groupBox_usv_details (USV Details)
+        # 1: groupBox_2 (Message 区域)
+        # 我们要在它们之间插入导航面板
+        
+        # 在索引 1 的位置插入导航面板
+        main_splitter.insertWidget(1, navigation_group)
+        
+        # 调整 splitter 的拉伸比例（可选）
+        # 设置各个部分的初始大小比例：USV Details : Navigation : Message = 3 : 2 : 3
+        main_splitter.setStretchFactor(0, 3)  # USV Details
+        main_splitter.setStretchFactor(1, 2)  # Navigation
+        main_splitter.setStretchFactor(2, 3)  # Message
+    
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):
-        """集群解锁命令"""
+        """集群解锁命令（带防抖）"""
+        # 防抖：2秒内只允许一次 arm 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_arm_time'):
+            self._last_arm_time = 0
+        if now - self._last_arm_time < 2.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 2 秒后再试")
+            return
+        self._last_arm_time = now
         self.command_handler.set_cluster_arming(self.list_manager.usv_cluster_list)
     
     def cluster_disarming_command(self):
-        """集群加锁命令"""
+        """集群加锁命令（带防抖）"""
+        # 防抖：2秒内只允许一次 disarm 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_disarm_time'):
+            self._last_disarm_time = 0
+        if now - self._last_disarm_time < 2.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 2 秒后再试")
+            return
+        self._last_disarm_time = now
         self.command_handler.cluster_disarming(self.list_manager.usv_cluster_list)
     
     def set_cluster_guided_command(self):
-        """集群设置guided模式"""
+        """集群设置guided模式（带防抖）"""
+        # 防抖：1秒内只允许一次 guided 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_guided_time'):
+            self._last_guided_time = 0
+        if now - self._last_guided_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_guided_time = now
         self.command_handler.set_cluster_guided(self.list_manager.usv_cluster_list)
     
     def set_cluster_manual_command(self):
-        """集群设置manual模式"""
+        """集群设置manual模式（带防抖）"""
+        # 防抖：1秒内只允许一次 manual 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_manual_time'):
+            self._last_manual_time = 0
+        if now - self._last_manual_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_manual_time = now
         self.command_handler.set_cluster_manual(self.list_manager.usv_cluster_list)
     
     # ============== 离群命令包装方法 ==============
     def departed_arming_command(self):
-        """离群解锁命令"""
+        """离群解锁命令（带防抖）"""
+        # 防抖：2秒内只允许一次 arm 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_departed_arm_time'):
+            self._last_departed_arm_time = 0
+        if now - self._last_departed_arm_time < 2.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 2 秒后再试")
+            return
+        self._last_departed_arm_time = now
         self.command_handler.departed_arming(self.list_manager.usv_departed_list)
     
     def departed_disarming_command(self):
-        """离群加锁命令"""
+        """离群加锁命令（带防抖）"""
+        # 防抖：2秒内只允许一次 disarm 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_departed_disarm_time'):
+            self._last_departed_disarm_time = 0
+        if now - self._last_departed_disarm_time < 2.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 2 秒后再试")
+            return
+        self._last_departed_disarm_time = now
         self.command_handler.departed_disarming(self.list_manager.usv_departed_list)
     
     def set_departed_guided_command(self):
-        """离群设置guided模式"""
+        """离群设置guided模式（带防抖）"""
+        # 防抖：1秒内只允许一次 guided 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_departed_guided_time'):
+            self._last_departed_guided_time = 0
+        if now - self._last_departed_guided_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_departed_guided_time = now
         self.command_handler.set_departed_guided(self.list_manager.usv_departed_list)
     
     def set_departed_manual_command(self):
-        """离群设置manual模式"""
+        """离群设置manual模式（带防抖）"""
+        # 防抖：1秒内只允许一次 manual 命令
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_departed_manual_time'):
+            self._last_departed_manual_time = 0
+        if now - self._last_departed_manual_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_departed_manual_time = now
         self.command_handler.set_departed_manual(self.list_manager.usv_departed_list)
     
     def set_departed_arco_command(self):
@@ -542,6 +651,45 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.usv_info_panel.update_state(None)
+    
+    def _refresh_selected_usv_navigation(self):
+        """
+        刷新当前选中USV的导航信息（由状态更新定时器调用）
+        
+        该方法会根据当前选中的表格和行，实时更新USV导航面板
+        """
+        try:
+            # 确定当前选中的是哪个表格
+            is_cluster = getattr(self, '_current_selected_table', 'cluster') == 'cluster'
+            
+            # 获取选中的USV信息
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster)
+            
+            if not usv_info:
+                # 没有选中时清空显示
+                self.usv_navigation_panel.update_navigation_state(None)
+                return
+            
+            # 获取 USV 的详细状态（实时从缓存中获取最新状态）
+            namespace = usv_info.get('namespace')
+            state = self.state_handler.get_usv_state(namespace)
+            
+            # 获取导航反馈数据
+            feedback = self.state_handler.get_usv_navigation_feedback(namespace)
+            
+            # 获取导航状态
+            nav_status = self.state_handler.usv_nav_status.get(namespace, "空闲")
+            
+            # 更新导航面板
+            self.usv_navigation_panel.update_navigation_state(state, feedback, nav_status)
+                
+        except Exception as e:
+            # 出错时清空显示
+            try:
+                self.ui_utils.append_info(f"更新USV导航信息显示时出错: {e}")
+            except Exception:
+                pass
+            self.usv_navigation_panel.update_navigation_state(None)
 
     def _handle_table_clicked(self, index, is_cluster):
         """处理表格单击事件，确保仅选中当前行并刷新详情"""
@@ -779,12 +927,13 @@ def main(argv=None):
                 params = yaml.safe_load(f) or {}
             try:
                 param_list = []
+                # 地面站集群控制参数白名单
+                # 注意: target_reach_threshold 和 distance_mode 已移除
+                # 这些参数由 USV 端的 navigate_to_point_server 控制
                 whitelist = (
                     'step_timeout',
                     'max_retries',
-                    'min_ack_rate_for_proceed',
-                    'target_reach_threshold',
-                    'distance_mode'
+                    'min_ack_rate_for_proceed'
                 )
                 for k in whitelist:
                     if k in params:

@@ -11,6 +11,9 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped 
 import re
 
+# 导入common_utils工具
+from common_utils import SerialResourceManager, ParamLoader, ParamValidator
+
 
 class UsvUwbNode(Node):
     """
@@ -24,29 +27,39 @@ class UsvUwbNode(Node):
         """初始化无人船UWB定位节点"""
         super().__init__('usv_uwb_node')
         
-        # ==================== 参数声明 ====================
-        # 声明 UWB 串口配置参数，支持多 USV 并行使用不同串口
-        self.declare_parameter('uwb_port', '/dev/ttyUSB0')
-        self.declare_parameter('uwb_baudrate', 115200)
-        self.declare_parameter('uwb_timeout', 1.0)
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
         
-        # 获取参数值
-        port = self.get_parameter('uwb_port').value
-        baudrate = self.get_parameter('uwb_baudrate').value
-        timeout = self.get_parameter('uwb_timeout').value
+        # 加载串口参数
+        port = param_loader.load_param(
+            'uwb_port',
+            '/dev/ttyUSB0',
+            ParamValidator.non_empty_string,
+            'UWB串口路径'
+        )
+        baudrate = param_loader.load_param(
+            'uwb_baudrate',
+            115200,
+            lambda x: x in [9600, 19200, 38400, 57600, 115200],
+            'UWB波特率'
+        )
+        timeout = param_loader.load_param(
+            'uwb_timeout',
+            1.0,
+            ParamValidator.positive,
+            '串口超时(秒)'
+        )
+        
+        # 创建串口资源管理器
+        self.serial_manager = SerialResourceManager(self.get_logger())
+        
+        # 打开串口
+        if not self.serial_manager.open(port, baudrate, timeout):
+            self.get_logger().error('初始化UWB串口失败，节点退出')
+            raise RuntimeError(f'Failed to open serial port {port}')
         
         # 创建发布器
         self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10)
-        
-        # ==================== 串口初始化 ====================
-        # 使用参数化配置打开串口，避免多 USV 冲突
-        try:
-            self.serial_port = serial.Serial(port, baudrate, timeout=timeout)
-            self.get_logger().info(f'UWB 串口打开成功: {port} @ {baudrate} baud')
-        except serial.SerialException as e:
-            self.get_logger().error(f'打开 UWB 串口失败 ({port}): {e}')
-            self.serial_port = None
-            return
          
         # 100 Hz 定时器
         self.timer = self.create_timer(0.01, self.read_and_publish)
@@ -59,16 +72,17 @@ class UsvUwbNode(Node):
         
         从串口读取UWB定位数据，转换为PoseStamped消息格式并发布。
         """
-        # 检查串口是否成功打开
-        if self.serial_port is None:
+        # 检查串口是否打开
+        if not self.serial_manager.is_open:
             return
         
         try:  
             # 读取一行数据
-            data = self.serial_port.readline().decode('ASCII').strip()
-            if not data:
+            line = self.serial_manager.readline()
+            if not line:
                 self.get_logger().debug("没有接收到数据")
                 return
+            data = line.decode('ASCII').strip()
             # self.get_logger().info(f"Raw data: {data}")
 
             # 查找 LO=[...]
@@ -102,12 +116,11 @@ class UsvUwbNode(Node):
                 # self.get_logger().warning(f'括号内数据不符合三个数值的要求')  
         except Exception as e:
             self.get_logger().error(f'读取UWB数据出错: {e}')
-
-    def __del__(self):
-        """关闭串口"""
-        if hasattr(self, 'serial_port') and self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-            self.get_logger().info('UWB串口已关闭')
+    
+    def destroy_node(self):
+        """节点销毁时关闭串口"""
+        self.serial_manager.close()
+        super().destroy_node()
 
 
 def main():

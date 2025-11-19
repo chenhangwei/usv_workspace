@@ -184,6 +184,12 @@ class UsvAvoidanceNode(Node):
         except Exception as e:
             self.get_logger().error(f'避障程序运行异常: {str(e)}')
 
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if hasattr(self, 'avoidance_timer'):
+            self.avoidance_timer.cancel()
+        super().destroy_node()
+
 
 def main(args=None):
     """

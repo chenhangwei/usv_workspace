@@ -23,6 +23,10 @@ import time
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Thread, Lock
+
+# 导入common_utils工具
+from common_utils import ProcessTracker
+
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QMessageBox, QCheckBox, QGroupBox,
@@ -58,6 +62,9 @@ class UsvFleetLauncher(QDialog):
         self.fleet_config = {}
         self.usv_processes = {}  # {usv_id: subprocess.Popen}
         self.usv_status = {}  # {usv_id: 'offline'|'launching'|'running'|'stopped'}
+        
+        # 初始化进程追踪器
+        self.process_tracker = ProcessTracker()
         
         # 状态检测线程相关
         self.status_check_thread = None
@@ -779,13 +786,16 @@ class UsvFleetLauncher(QDialog):
                 remote_cmd
             ]
             
-            # 启动进程
+            # 启动进程并追踪
             process = subprocess.Popen(
                 ssh_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
+            
+            # 追踪进程
+            self.process_tracker.track(process, f'USV {usv_id} SSH Launch')
             
             self.usv_processes[usv_id] = process
             
@@ -922,6 +932,9 @@ class UsvFleetLauncher(QDialog):
         
         # 关闭线程池
         self.executor.shutdown(wait=False)
+        
+        # 清理所有进程
+        self.process_tracker.cleanup_all()
         
         # 通知父窗口清理引用
         if self.parent():

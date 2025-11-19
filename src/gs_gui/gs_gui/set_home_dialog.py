@@ -32,8 +32,10 @@ class SetHomeDialog(QDialog):
         self._init_ui()
         
         # 默认坐标（A0 基站）
-        self.default_lat = 22.5180977
-        self.default_lon = 113.9007239
+        # 注意: 这些默认值应与 usv_params.yaml 中的 gps_origin_* 参数保持一致
+        # 如需修改,请同步更新配置文件以确保所有节点使用统一的GPS原点
+        self.default_lat = 22.5180977  # 与ParamLoader.DEFAULT_GPS_ORIGIN_LAT一致
+        self.default_lon = 113.9007239  # 与ParamLoader.DEFAULT_GPS_ORIGIN_LON一致
         self.default_alt = 0.0  # 修改为与 usv_params.yaml 一致
         
         # 设置默认值

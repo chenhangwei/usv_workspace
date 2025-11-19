@@ -10,6 +10,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Int32
 import gpiod
+from common_utils import ParamLoader
 
 
 class UsvFanNode(Node):
@@ -24,17 +25,12 @@ class UsvFanNode(Node):
         """初始化无人船散热风扇控制节点"""
         super().__init__('usv_fan_node')
         
-        # 声明参数
-        self.declare_parameter('fan_pin', 17)
-        self.declare_parameter('gpio_chip', 'gpiochip4')
-        self.declare_parameter('temp_threshold_on', 50000)    # 50°C (毫摄氏度)
-        self.declare_parameter('temp_threshold_off', 45000)   # 45°C (毫摄氏度)
-        
-        # 获取参数值
-        self.fan_pin = self.get_parameter('fan_pin').get_parameter_value().integer_value
-        self.gpio_chip_name = self.get_parameter('gpio_chip').get_parameter_value().string_value
-        self.temp_threshold_on = self.get_parameter('temp_threshold_on').get_parameter_value().integer_value
-        self.temp_threshold_off = self.get_parameter('temp_threshold_off').get_parameter_value().integer_value
+        # 使用ParamLoader统一加载参数
+        loader = ParamLoader(self)
+        self.fan_pin = loader.load_param('fan_pin', 17)
+        self.gpio_chip_name = loader.load_param('gpio_chip', 'gpiochip4')
+        self.temp_threshold_on = loader.load_param('temp_threshold_on', 50000)    # 50°C (毫摄氏度)
+        self.temp_threshold_off = loader.load_param('temp_threshold_off', 45000)  # 45°C (毫摄氏度)
         
         self.get_logger().info(f'风扇控制引脚: {self.fan_pin}')
         self.get_logger().info(f'GPIO芯片: {self.gpio_chip_name}')
@@ -90,8 +86,8 @@ class UsvFanNode(Node):
         except Exception as e:
             self.get_logger().error(f'处理温度数据时发生错误: {e}')
 
-    def __del__(self):
-        """清理GPIO资源"""
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
         try:
             if hasattr(self, 'line') and self.line:
                 self.line.set_value(0)
@@ -101,6 +97,18 @@ class UsvFanNode(Node):
             self.get_logger().info('GPIO资源已清理')
         except Exception as e:
             self.get_logger().warn(f'清理GPIO资源时发生错误: {e}')
+        super().destroy_node()
+
+    def __del__(self):
+        """清理GPIO资源"""
+        try:
+            if hasattr(self, 'line') and self.line:
+                self.line.set_value(0)
+                self.line.release()
+            if hasattr(self, 'chip') and self.chip:
+                self.chip.close()
+        except Exception as e:
+            pass
 
 
 def main(args=None):
@@ -117,7 +125,7 @@ def main(args=None):
         fan_controller_node = UsvFanNode()
         rclpy.spin(fan_controller_node)
     except Exception as e:
-        print(f'节点运行时发生错误: {e}')
+        rclpy.logging.get_logger('usv_fan_node').error(f'节点运行时发生错误: {e}')
     finally:
         if 'fan_controller_node' in locals():
             fan_controller_node.destroy_node()

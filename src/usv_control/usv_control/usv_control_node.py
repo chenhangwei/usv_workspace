@@ -8,10 +8,13 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.msg import State, PositionTarget, HomePosition
+from mavros_msgs.msg import State, PositionTarget, HomePosition, GlobalPositionTarget
 from std_msgs.msg import Bool
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
+
+# 导入common_utils工具
+from common_utils import ParamLoader
 
 
 class UsvControlNode(Node):
@@ -26,11 +29,24 @@ class UsvControlNode(Node):
         """初始化无人船控制节点"""
         super().__init__('usv_control_node')
 
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
         # 声明参数
         self.declare_parameter('publish_rate', 20.0)
         self.declare_parameter('frame_id', 'map')
         self.declare_parameter('coordinate_frame', PositionTarget.FRAME_LOCAL_NED)
         self.declare_parameter('enable_local_control', True)  # 是否启用局部控制（默认启用）
+        
+        # GPS 原点配置（用于 XYZ → GPS 转换）- 使用统一加载方法
+        gps_origin = param_loader.load_gps_origin(
+            default_lat=22.5180977,
+            default_lon=113.9007239,
+            default_alt=-5.17
+        )
+        self.origin_lat = gps_origin['lat']
+        self.origin_lon = gps_origin['lon']
+        self.origin_alt = gps_origin['alt']
         
         # 获取参数值
         publish_rate_param = self.get_parameter('publish_rate').value
@@ -50,8 +66,13 @@ class UsvControlNode(Node):
             reliability=QoSReliabilityPolicy.RELIABLE
         )
     
-        # 发布目标点到飞控
-        self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)   
+        # 根据模式创建不同的发布器
+        if self.enable_local_control:
+            # 局部坐标模式: 发布 PositionTarget 到 setpoint_raw/local
+            self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)
+        else:
+            # 全局GPS模式: 发布 GlobalPositionTarget 到 setpoint_raw/global
+            self.global_target_pub = self.create_publisher(GlobalPositionTarget, 'setpoint_raw/global', qos_best_effort)   
 
         # 订阅当前状态
         self.state_sub = self.create_subscription(
@@ -100,10 +121,15 @@ class UsvControlNode(Node):
         
         # 根据配置判断是否启用局部控制
         if not self.enable_local_control:
-            self.get_logger().warning('⚠️  局部控制已禁用 - 本节点不会发送控制指令')
-            self.get_logger().info('💡 坐标转换由 coord_transform_node 处理')
+            self.get_logger().info('🌍 全局GPS坐标模式已启用')
+            self.get_logger().info(f'📍 GPS 原点: ({self.origin_lat:.7f}°, {self.origin_lon:.7f}°, {self.origin_alt:.2f}m)')
+            self.get_logger().info('📤 发布话题: setpoint_raw/global (GlobalPositionTarget)')
+            self.get_logger().info('🎯 坐标系: FRAME_GLOBAL_INT (经纬度高度)')
+            self.get_logger().info('💡 XYZ → GPS 转换在本节点完成')
         else:
-            self.get_logger().info('✅ 局部控制已启用 - 使用 FRAME_LOCAL_NED')
+            self.get_logger().info('✅ 局部坐标控制已启用')
+            self.get_logger().info('📤 发布话题: setpoint_raw/local (PositionTarget)')
+            self.get_logger().info('📍 坐标系: FRAME_LOCAL_NED (相对EKF原点)')
 
     def state_callback(self, msg):
         """
@@ -230,28 +256,43 @@ class UsvControlNode(Node):
             mode = "避障模式" if msg.data else "常规模式"
             self.get_logger().info(f'切换到: {mode}')
 
+    def _xyz_to_gps(self, x, y, z):
+        """
+        将 XYZ 坐标转换为 GPS 坐标 (lat/lon/alt)
+        
+        Args:
+            x: 东向距离(米)
+            y: 北向距离(米)
+            z: 高度(米)
+        
+        Returns:
+            dict: {'lat': 纬度, 'lon': 经度, 'alt': 海拔}
+        """
+        # 地球半径常量
+        EARTH_RADIUS = 6378137.0  # 米
+        
+        # 计算纬度偏移
+        dlat = y / EARTH_RADIUS
+        lat = self.origin_lat + math.degrees(dlat)
+        
+        # 计算经度偏移(考虑纬度缩放)
+        dlon = x / (EARTH_RADIUS * math.cos(math.radians(self.origin_lat)))
+        lon = self.origin_lon + math.degrees(dlon)
+        
+        # 高度 = 原点海拔 + Z偏移
+        alt = self.origin_alt + z
+        
+        return {'lat': lat, 'lon': lon, 'alt': alt}
+
     def publish_target(self):
         """
         发布目标点函数
         
-        根据避障标志决定使用常规目标点还是避障目标点，
-        并将选定的目标点发布给飞控系统。
+        根据 enable_local_control 参数选择发布模式:
+        - True: 发布 PositionTarget 到 setpoint_raw/local (局部坐标)
+        - False: 发布 GlobalPositionTarget 到 setpoint_raw/global (GPS坐标)
         """
         try:
-            # 检查是否启用局部控制
-            if not self.enable_local_control:
-                return  # 如果禁用，直接返回，不发送任何控制指令
-            
-            # 🔒 关键检查：EKF 原点是否完全就绪（Home + LocalPos 都有效）
-            if not self.ekf_origin_ready:
-                if not self.home_position_set:
-                    self.get_logger().debug('⏳ 等待 Home Position 设置...')
-                elif not self.local_position_valid:
-                    self.get_logger().debug('⏳ 等待 Local Position 生效...')
-                else:
-                    self.get_logger().debug('⏳ EKF Origin 未完全就绪...')
-                return
-            
             # 检查飞控连接状态
             if not self.current_state.connected:
                 self.get_logger().debug('飞控未连接，等待连接...')
@@ -265,9 +306,19 @@ class UsvControlNode(Node):
                 self.get_logger().debug(f'当前模式: {self.current_state.mode}，需要GUIDED模式')
                 return
             
+            # 局部控制模式需要 EKF 原点就绪
+            if self.enable_local_control and not self.ekf_origin_ready:
+                if not self.home_position_set:
+                    self.get_logger().debug('⏳ 等待 Home Position 设置...')
+                elif not self.local_position_valid:
+                    self.get_logger().debug('⏳ 等待 Local Position 生效...')
+                else:
+                    self.get_logger().debug('⏳ EKF Origin 未完全就绪...')
+                return
+            
             # 根据避障标志选择目标点
             if not self.avoidance_flag.data:    
-                # 使用常规目标点 (PoseStamped转PositionTarget)
+                # 使用常规目标点
                 px = self.current_target_position.pose.position.x
                 py = self.current_target_position.pose.position.y
                 pz = self.current_target_position.pose.position.z
@@ -292,32 +343,71 @@ class UsvControlNode(Node):
             # 更新最后发布的坐标
             self.last_published_position = current_position
             
-            # 构造并发布目标点消息
-            self.point_msg.header.stamp = self.get_clock().now().to_msg()
-            self.point_msg.header.frame_id = self.frame_id
-            self.point_msg.coordinate_frame = self.coordinate_frame
-            self.point_msg.type_mask = (
-                PositionTarget.IGNORE_VX |
-                PositionTarget.IGNORE_VY |
-                PositionTarget.IGNORE_VZ |
-                PositionTarget.IGNORE_AFX |
-                PositionTarget.IGNORE_AFY |
-                PositionTarget.IGNORE_AFZ |
-                PositionTarget.FORCE |
-                PositionTarget.IGNORE_YAW |
-                PositionTarget.IGNORE_YAW_RATE
-            )
-            self.point_msg.position.x = px
-            self.point_msg.position.y = py
-            self.point_msg.position.z = pz  
-
-            self.target_point_pub.publish(self.point_msg)
+            # ============================================================
+            # 根据模式发布不同类型的消息
+            # ============================================================
             
-            # 记录成功发布的信息
-            self.get_logger().debug(f'发布{source}目标点: ({px:.2f}, {py:.2f}, {pz:.2f})')
+            if self.enable_local_control:
+                # ========== 局部坐标模式: PositionTarget ==========
+                self.point_msg.header.stamp = self.get_clock().now().to_msg()
+                self.point_msg.header.frame_id = self.frame_id
+                self.point_msg.coordinate_frame = self.coordinate_frame
+                self.point_msg.type_mask = (
+                    PositionTarget.IGNORE_VX |
+                    PositionTarget.IGNORE_VY |
+                    PositionTarget.IGNORE_VZ |
+                    PositionTarget.IGNORE_AFX |
+                    PositionTarget.IGNORE_AFY |
+                    PositionTarget.IGNORE_AFZ |
+                    PositionTarget.FORCE |
+                    PositionTarget.IGNORE_YAW |
+                    PositionTarget.IGNORE_YAW_RATE
+                )
+                self.point_msg.position.x = px
+                self.point_msg.position.y = py
+                self.point_msg.position.z = pz  
+
+                self.target_point_pub.publish(self.point_msg)
+                self.get_logger().debug(f'发布{source}目标点(局部): ({px:.2f}, {py:.2f}, {pz:.2f})')
+                
+            else:
+                # ========== 全局GPS模式: GlobalPositionTarget ==========
+                # XYZ → GPS 转换
+                gps_coord = self._xyz_to_gps(px, py, pz)
+                
+                global_msg = GlobalPositionTarget()
+                global_msg.header.stamp = self.get_clock().now().to_msg()
+                global_msg.header.frame_id = 'map'
+                global_msg.coordinate_frame = GlobalPositionTarget.FRAME_GLOBAL_INT
+                global_msg.type_mask = (
+                    GlobalPositionTarget.IGNORE_VX |
+                    GlobalPositionTarget.IGNORE_VY |
+                    GlobalPositionTarget.IGNORE_VZ |
+                    GlobalPositionTarget.IGNORE_AFX |
+                    GlobalPositionTarget.IGNORE_AFY |
+                    GlobalPositionTarget.IGNORE_AFZ |
+                    GlobalPositionTarget.FORCE |
+                    GlobalPositionTarget.IGNORE_YAW_RATE
+                )
+                
+                # 设置GPS坐标
+                global_msg.latitude = gps_coord['lat']
+                global_msg.longitude = gps_coord['lon']
+                global_msg.altitude = gps_coord['alt']
+                
+                self.global_target_pub.publish(global_msg)
+                self.get_logger().debug(
+                    f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
+                    f'GPS({gps_coord["lat"]:.7f}°, {gps_coord["lon"]:.7f}°, {gps_coord["alt"]:.2f}m)')
 
         except Exception as e:
             self.get_logger().error(f'发布目标点时发生异常: {str(e)}')
+
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if hasattr(self, 'publish_target_timer'):
+            self.publish_target_timer.cancel()
+        super().destroy_node()
 
 
 def main(args=None):

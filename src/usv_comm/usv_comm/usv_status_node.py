@@ -729,6 +729,12 @@ class UsvStatusNode(Node):
         self.get_logger().warn('无法读取系统温度，返回0.0')
         return 0.0
 
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if hasattr(self, 'state_timer'):
+            self.state_timer.cancel()
+        super().destroy_node()
+
 
 def main():
     """主函数"""

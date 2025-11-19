@@ -5,8 +5,9 @@ from enum import Enum
 from typing import Dict, Optional, Tuple
 
 import rclpy
-import rclpy.action
-# 保留 rclpy.action 以访问 GoalStatus 枚举
+
+# 导入线程安全工具
+from common_utils import ThreadSafeDict
 
 
 @dataclass
@@ -32,8 +33,8 @@ class ClusterTaskState(Enum):
 class ClusterController:
     def __init__(self, node):
         self.node = node
-        # 集群控制相关变量在主节点中管理
-        self._ack_states: Dict[str, AckState] = {}
+        # 集群控制相关变量在主节点中管理 (线程安全)
+        self._ack_states: Dict[str, AckState] = ThreadSafeDict()
         self._resend_interval = float(getattr(node, '_ack_resend_interval', 2.0))
         self._action_timeout = float(getattr(node, '_cluster_action_timeout', 300.0))
         self._cluster_start_time: Optional[float] = None
@@ -126,7 +127,8 @@ class ClusterController:
     def _reset_cluster_task(self, target_state: ClusterTaskState, reason: str, cancel_active: bool = True) -> None:
         """统一重置集群任务状态。"""
         if cancel_active:
-            for usv_id in list(self.node._usv_active_goals.keys()):
+            # 清理所有 USV 的导航目标缓存
+            for usv_id in list(self.node._usv_nav_target_cache.keys()):
                 self._cancel_active_goal(usv_id)
 
         self.node.current_targets = []
@@ -373,18 +375,18 @@ class ClusterController:
             self.node.get_logger().warn(f"{usv_id} 超时，重试第 {state.retry} 次")
             # 通过Action接口发送导航目标点
             pos = ns.get('position', {})
-            yaw = ns.get('yaw', 0.0)
+            # 不读取yaw参数,让ArduPilot自动调整航向
             # 检查位置信息是否完整
             if not all(k in pos for k in ('x', 'y')):
                 self.node.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                 return
-            # 支持z坐标
-            self.node.send_nav_goal_via_action(
+            # 支持z坐标,yaw设为0让ArduPilot自动调整航向
+            self.node.send_nav_goal_via_topic(
                 usv_id,
                 pos.get('x', 0.0),
                 pos.get('y', 0.0),
                 pos.get('z', 0.0),
-                yaw,
+                0.0,  # 不设置航向要求
                 self._action_timeout,
             )
         else:
@@ -483,8 +485,8 @@ class ClusterController:
         # 重置USV目标编号
         self.node.usv_target_number = 0
         
-        # 取消所有活动的Action任务（无论是否是最后一步）
-        for usv_id in list(self.node._usv_active_goals.keys()):
+        # 取消所有活动的导航任务（无论是否是最后一步）
+        for usv_id in list(self.node._usv_nav_target_cache.keys()):
             self._cancel_active_goal(usv_id)
         
         # 检查是否已完成所有步骤
@@ -517,8 +519,8 @@ class ClusterController:
             return
 
         self._set_state(ClusterTaskState.PAUSED, "用户请求暂停")
-        # 取消所有活动的Action任务
-        for usv_id in list(self.node._usv_active_goals.keys()):
+        # 取消所有活动的导航任务
+        for usv_id in list(self.node._usv_nav_target_cache.keys()):
             self._cancel_active_goal(usv_id)
         self.node.get_logger().info("集群任务已暂停")
 
@@ -612,44 +614,48 @@ class ClusterController:
                 state = AckState(step=self.node.run_step)
                 self._ack_states[usv_id] = state
 
+            # 已确认，跳过
             if state.acked:
                 continue
 
-            if state.retry == 0:
-                if state.last_send_time is not None and (now - state.last_send_time) < self._resend_interval:
-                    continue
-                # 获取位置信息（文件里的点可能是相对于 area_center）
-                pos = ns.get('position', {})
-                # 检查位置信息是否完整（包含x,y,z）
-                if not all(k in pos for k in ('x', 'y', 'z')):
-                    self.node.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
-                    continue
-                # 更新最后发送时间 ---
-                state.last_send_time = now
+            # ✅ 修复：只在首次发送（last_send_time为None）或超时重试时发送
+            # 如果已经发送过（last_send_time不为None）且没有超时，则不再发送
+            if state.last_send_time is not None:
+                # 检查是否需要超时重试（由_process_usv_ack_and_timeouts处理）
+                # 这里只处理首次发送，超时重试由_handle_usv_timeout处理
+                continue
 
-                # 通过Action接口发送导航目标点
-                yaw = ns.get('yaw', 0.0)
-                # 将 area-relative 转为全局，再转换为 usv 本地坐标（以 usv 启动点为0,0,0）
-                p_global = self._area_to_global(pos)
-                p_local = self._global_to_usv_local(usv_id, p_global)
-                
-                # 🔍 调试日志：集群控制器坐标转换
-                self.node.get_logger().info(
-                    f"📤 [集群控制器] Step {self.node.run_step} → {usv_id}\n"
-                    f"  ├─ Area坐标: X={pos.get('x', 0.0):.2f}, Y={pos.get('y', 0.0):.2f}, Z={pos.get('z', 0.0):.2f}\n"
-                    f"  ├─ Global坐标: X={p_global.get('x', 0.0):.2f}, Y={p_global.get('y', 0.0):.2f}, Z={p_global.get('z', 0.0):.2f}\n"
-                    f"  └─ Local坐标: X={p_local.get('x', 0.0):.2f}, Y={p_local.get('y', 0.0):.2f}, Z={p_local.get('z', 0.0):.2f}"
-                )
-                
-                # 支持z坐标
-                self.node.send_nav_goal_via_action(
-                    usv_id,
-                    p_local.get('x', 0.0),
-                    p_local.get('y', 0.0),
-                    p_local.get('z', 0.0),
-                    yaw,
-                    self._action_timeout,
-                )
+            # 首次发送目标点
+            # 获取位置信息（文件里的点可能是相对于 area_center）
+            pos = ns.get('position', {})
+            # 检查位置信息是否完整（至少需要x和y，z可选）
+            if not all(k in pos for k in ('x', 'y')):
+                self.node.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
+                continue
+            
+            # 更新最后发送时间
+            state.last_send_time = now
+
+            # 通过Action接口发送导航目标点
+            # 不设置航向要求,让ArduPilot在Guided模式下自动调整航向朝向目标点
+            # 将 area-relative 转为全局，再转换为 usv 本地坐标（以 usv 启动点为0,0,0）
+            p_global = self._area_to_global(pos)
+            p_local = self._global_to_usv_local(usv_id, p_global)
+            
+            # 精简日志：集群控制器发送目标点
+            self.node.get_logger().info(
+                f"📤 Step {self.node.run_step} → {usv_id}: Local({p_local.get('x', 0.0):.2f}, {p_local.get('y', 0.0):.2f}, {p_local.get('z', 0.0):.2f}) [Auto-Yaw] [首次发送]"
+            )
+            
+            # 支持z坐标,yaw设为0让ArduPilot自动调整航向
+            self.node.send_nav_goal_via_topic(
+                usv_id,
+                p_local.get('x', 0.0),
+                p_local.get('y', 0.0),
+                p_local.get('z', 0.0),
+                0.0,  # 不设置航向要求
+                self._action_timeout,
+            )
 
     # 从USV目标列表中筛选出指定步骤(step)的USV目标
     def _get_usvs_by_step(self, cluster_usv_list, step):
@@ -668,35 +674,49 @@ class ClusterController:
 
     def _cancel_active_goal(self, usv_id):
         """
-        取消指定 USV 当前活动的 Action 任务
+        取消指定 USV 当前活动的导航任务 (Topic 版本)
         """
-        if usv_id in self.node._usv_active_goals:
-            goal_handle = self.node._usv_active_goals[usv_id]
-            # 检查句柄是否仍然有效
-            if goal_handle.status in [rclpy.action.client.GoalStatus.STATUS_EXECUTING, rclpy.action.client.GoalStatus.STATUS_ACCEPTED]:
-                self.node.get_logger().warn(f"正在取消 USV {usv_id} 的上一个导航任务...")
-                cancel_future = goal_handle.cancel_goal_async()
-                
-                # 可选：等待取消结果以确保取消请求已发送，但这里不做阻塞处理
-                # cancel_future.add_done_callback(...)
-                
-            # 无论是否取消成功，都从跟踪字典中删除
-            del self.node._usv_active_goals[usv_id]
+        # 清理目标缓存 (USV 端会自动超时)
+        if usv_id in self.node._usv_nav_target_cache:
+            self.node.get_logger().warn(f"⚠️  清除 {usv_id} 导航目标缓存...")
+            del self.node._usv_nav_target_cache[usv_id]
 
-    def mark_usv_goal_result(self, usv_id: str, success: bool) -> None:
+    def mark_usv_goal_result(self, usv_id: str, success: bool, goal_step: Optional[int] = None) -> None:
         """根据导航结果更新指定 USV 的 ack 状态。"""
+        self.node.get_logger().info(
+            f"🔍 [DEBUG] mark_usv_goal_result 被调用: usv_id={usv_id}, success={success}, goal_step={goal_step}, run_step={self.node.run_step}"
+        )
+        
         state = self._ack_states.get(usv_id)
-        if state is None or state.step != self.node.run_step:
+        self.node.get_logger().info(
+            f"🔍 [DEBUG] state查询结果: state={state}, state.step={state.step if state else 'N/A'}, state.acked={state.acked if state else 'N/A'}"
+        )
+        
+        # 如果提供了 goal_step，使用它来匹配；否则使用当前 run_step
+        # 允许 goal_step 等于 state.step 或 state.step+1（任务可能已进入下一步）
+        if state is None:
+            self.node.get_logger().warning(
+                f"⚠️  {usv_id} state为None，无法更新确认状态"
+            )
+            return
+        
+        expected_step = goal_step if goal_step is not None else self.node.run_step
+        if state.step != expected_step and state.step != expected_step - 1:
+            self.node.get_logger().warning(
+                f"⚠️  {usv_id} step不匹配! state.step={state.step}, expected_step={expected_step}, run_step={self.node.run_step}"
+            )
             return
 
         if success:
             if not state.acked:
                 state.acked = True
                 state.ack_time = self._now()
+                self.node.get_logger().info(f"✅ {usv_id} 标记为已确认 (step={state.step})")
                 self._emit_current_progress()
         else:
             # 失败情况下保持未确认状态，等待重试或人工处理
             state.last_send_time = self._now()
+            self.node.get_logger().warning(f"❌ {usv_id} 导航失败，保持未确认状态")
             self._emit_current_progress()
 
 

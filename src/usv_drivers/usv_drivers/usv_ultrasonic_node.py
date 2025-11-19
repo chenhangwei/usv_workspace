@@ -12,6 +12,9 @@ from std_msgs.msg import Header
 import serial
 import time
 
+# 导入common_utils工具
+from common_utils import SerialResourceManager, ParamLoader, ParamValidator
+
 
 class UsvUltrasonicNode(Node):
     """
@@ -25,25 +28,39 @@ class UsvUltrasonicNode(Node):
         """初始化无人船超声波雷达节点"""
         super().__init__('usv_ultrasonic_node')
         
-        # 创建 LaserScan 消息发布者，发布到 'ultrasonic_scan' 话题，队列大小为 10
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
+        # 加载串口参数
+        self.serial_port = param_loader.load_param(
+            'serial_port',
+            '/dev/ttyUSB0',
+            ParamValidator.non_empty_string,
+            '串口设备路径'
+        )
+        self.baud_rate = param_loader.load_param(
+            'baud_rate',
+            115200,
+            lambda x: x in [9600, 19200, 38400, 57600, 115200],
+            '波特率'
+        )
+        self.timeout = param_loader.load_param(
+            'timeout',
+            1.0,
+            ParamValidator.positive,
+            '串口超时(秒)'
+        )
+        
+        # 创建串口资源管理器
+        self.serial_manager = SerialResourceManager(self.get_logger())
+        
+        # 打开串口
+        if not self.serial_manager.open(self.serial_port, self.baud_rate, self.timeout):
+            self.get_logger().error('初始化串口失败，节点退出')
+            raise RuntimeError(f'Failed to open serial port {self.serial_port}')
+        
+        # 创建 LaserScan 消息发布者
         self.scan_pub = self.create_publisher(LaserScan, 'ultrasonic_scan', 10)
-        
-        # 串口参数（根据实际超声雷达设备调整）
-        self.serial_port = '/dev/ttyUSB0'  # 串口设备路径
-        self.baud_rate = 115200            # 波特率
-        self.timeout = 1                   # 超时时间（秒）
-        
-        # 尝试打开串口
-        try:
-            self.ser = serial.Serial(
-                port=self.serial_port,
-                baudrate=self.baud_rate,
-                timeout=self.timeout
-            )
-            self.get_logger().info(f'串口 {self.serial_port} 打开成功')
-        except serial.SerialException as e:
-            self.get_logger().error(f'打开串口失败: {e}')
-            raise
         
         # 定向超声雷达参数设置
         # 假设超声雷达的视场角为15度，即 -7.5° ~ 7.5°（转换为弧度）
@@ -100,29 +117,40 @@ class UsvUltrasonicNode(Node):
             list: 包含距离数据的列表，如果读取失败则返回None
         """
         try:
+            # 检查串口是否打开
+            if not self.serial_manager.is_open:
+                self.get_logger().warn('串口未打开，无法读取数据')
+                return None
+            
             # 清空输入缓冲区，避免读取到旧数据
-            self.ser.reset_input_buffer()
+            if self.serial_manager.serial_port:
+                self.serial_manager.serial_port.reset_input_buffer()
+            
             # 读取一行数据
-            line = self.ser.readline().decode('utf-8').strip()
+            line = self.serial_manager.readline()
             if line:
                 # 将读取的字符串转换为浮点数
-                distance = float(line)
-                # 判断距离是否在有效范围内
-                if self.range_min <= distance <= self.range_max:
-                    return [distance]
-                else:
-                    return [float('inf')]
-            else:
-                return None
+                line_str = line.decode('utf-8').strip()
+                if line_str:
+                    distance = float(line_str)
+                    # 判断距离是否在有效范围内
+                    if self.range_min <= distance <= self.range_max:
+                        return [distance]
+                    else:
+                        return [float('inf')]
+            return None
+            
+        except ValueError as e:
+            self.get_logger().error(f'数据格式错误: {e}')
+            return None
         except Exception as e:
             self.get_logger().error(f'读取超声雷达数据出错: {e}')
             return None
-
-    def __del__(self):
-        """关闭串口"""
-        if hasattr(self, 'ser') and self.ser.is_open:
-            self.ser.close()
-            self.get_logger().info('串口已关闭')
+    
+    def destroy_node(self):
+        """节点销毁时关闭串口"""
+        self.serial_manager.close()
+        super().destroy_node()
 
 
 def main(args=None):

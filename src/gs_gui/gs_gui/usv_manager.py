@@ -5,11 +5,9 @@ USV管理模块
 
 import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from common_interfaces.msg import UsvStatus
-from mavros_msgs.msg import StatusText
+from common_interfaces.msg import UsvStatus, NavigationGoal, NavigationFeedback, NavigationResult
+from mavros_msgs.msg import StatusText, SysStatus
 from std_msgs.msg import String
-from common_interfaces.action import NavigateToPoint
-from rclpy.action import ActionClient
 
 
 class UsvManager:
@@ -22,11 +20,17 @@ class UsvManager:
         self.led_pubs = {}
         self.sound_pubs = {}
         self.action_pubs = {}
-        self.navigate_to_point_clients = {}
         self.led_state_subs = {}
         self.status_text_subs = {}
+        self.sys_status_subs = {}
+        
+        # 基于话题的导航通信
+        self.navigation_goal_pubs = {}      # 导航目标发布者
+        self.navigation_feedback_subs = {}  # 导航反馈订阅者
+        self.navigation_result_subs = {}    # 导航结果订阅者
+        
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
-        # MAVROS 的 statustext 使用 BEST_EFFORT QoS
+        # MAVROS 的 statustext 和 sys_status 使用 BEST_EFFORT QoS
         self.qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
 
     # 添加USV命名空间
@@ -78,16 +82,49 @@ class UsvManager:
             self.qos_best_effort  # 使用 BEST_EFFORT 匹配 MAVROS
         )
         self.node.get_logger().info(f"为 {usv_id} 创建 StatusText 订阅: {topic_status_text}")
+        # 创建飞控系统状态订阅者 (SYS_STATUS)
+        topic_sys_status = f"{ns}/mavros/sys_status"
+        self.sys_status_subs[usv_id] = self.node.create_subscription(
+            SysStatus,
+            topic_sys_status,
+            lambda msg, id=usv_id: self.node.handle_sys_status(id, msg),
+            self.qos_best_effort  # 使用 BEST_EFFORT 匹配 MAVROS
+        )
+        self.node.get_logger().info(f"为 {usv_id} 创建 SysStatus 订阅: {topic_sys_status}")
         # 创建声音控制发布者
         self.sound_pubs[usv_id] = self.node.create_publisher(
             String, topic_sound, self.qos_a)
         # 创建动作控制发布者
         self.action_pubs[usv_id] = self.node.create_publisher(
             String, topic_action, self.qos_a)
-        # 为每个USV创建一个NavigateToPoint动作客户端
-        self.navigate_to_point_clients[usv_id] = ActionClient(self.node, NavigateToPoint, action_server_name)
+        
+        # ==================== 基于话题的导航通信 ====================
+        # 创建导航目标发布者
+        navigation_goal_topic = f"{ns}/navigation_goal"
+        self.navigation_goal_pubs[usv_id] = self.node.create_publisher(
+            NavigationGoal,
+            navigation_goal_topic,
+            self.qos_a)
+        
+        # 创建导航反馈订阅者
+        navigation_feedback_topic = f"{ns}/navigation_feedback"
+        self.navigation_feedback_subs[usv_id] = self.node.create_subscription(
+            NavigationFeedback,
+            navigation_feedback_topic,
+            lambda msg, uid=usv_id: self.node.navigation_feedback_callback(msg, uid),
+            self.qos_a)
+        
+        # 创建导航结果订阅者
+        navigation_result_topic = f"{ns}/navigation_result"
+        self.navigation_result_subs[usv_id] = self.node.create_subscription(
+            NavigationResult,
+            navigation_result_topic,
+            lambda msg, uid=usv_id: self.node.navigation_result_callback(msg, uid),
+            self.qos_a)
+        
         # 记录日志信息
         self.node.get_logger().info(f"为USV {usv_id} 添加订阅者和发布者")
+        self.node.get_logger().info(f"  ✓ 导航话题已注册: {navigation_goal_topic}, {navigation_feedback_topic}, {navigation_result_topic}")
 
     # 移除USV命名空间
     def remove_usv_namespace(self, ns):
@@ -121,6 +158,9 @@ class UsvManager:
         if usv_id in self.status_text_subs:
             self.node.destroy_subscription(self.status_text_subs[usv_id])
             del self.status_text_subs[usv_id]
+        if usv_id in self.sys_status_subs:
+            self.node.destroy_subscription(self.sys_status_subs[usv_id])
+            del self.sys_status_subs[usv_id]
         # 销毁并删除声音控制发布者
         if usv_id in self.sound_pubs:
             self.node.destroy_publisher(self.sound_pubs[usv_id])
@@ -129,9 +169,18 @@ class UsvManager:
         if usv_id in self.action_pubs:
             self.node.destroy_publisher(self.action_pubs[usv_id])
             del self.action_pubs[usv_id]
-        # 移除对应的导航动作客户端
-        if usv_id in self.navigate_to_point_clients:
-            del self.navigate_to_point_clients[usv_id]
+        
+        # 移除基于话题的导航通信
+        if usv_id in self.navigation_goal_pubs:
+            self.node.destroy_publisher(self.navigation_goal_pubs[usv_id])
+            del self.navigation_goal_pubs[usv_id]
+        if usv_id in self.navigation_feedback_subs:
+            self.node.destroy_subscription(self.navigation_feedback_subs[usv_id])
+            del self.navigation_feedback_subs[usv_id]
+        if usv_id in self.navigation_result_subs:
+            self.node.destroy_subscription(self.navigation_result_subs[usv_id])
+            del self.navigation_result_subs[usv_id]
+        
         # 记录日志信息
         self.node.get_logger().info(f"移除USV {usv_id} 的订阅者和发布者")
 

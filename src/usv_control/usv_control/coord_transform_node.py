@@ -22,6 +22,9 @@ from mavros_msgs.msg import GlobalPositionTarget, PositionTarget
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
 
+# 导入common_utils工具
+from common_utils import ParamLoader
+
 
 class CoordTransformNode(Node):
     """
@@ -33,29 +36,28 @@ class CoordTransformNode(Node):
     def __init__(self):
         super().__init__('coord_transform_node')
         
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
         # =============================================================================
         # 参数声明
         # =============================================================================
         
-        # GPS 原点配置（A0基站坐标）
-        self.declare_parameter('gps_origin_lat', 22.5180977)  # 北纬（度）
-        self.declare_parameter('gps_origin_lon', 113.9007239) # 东经（度）
-        self.declare_parameter('gps_origin_alt', -5.17)       # 海拔（米，实测值）
+        # GPS 原点配置（A0基站坐标）- 使用统一加载方法
+        gps_origin = param_loader.load_gps_origin(
+            default_lat=22.5180977,
+            default_lon=113.9007239,
+            default_alt=-5.17
+        )
+        self.origin_lat = gps_origin['lat']
+        self.origin_lon = gps_origin['lon']
+        self.origin_alt = gps_origin['alt']
         
         # 是否启用坐标转换
         self.declare_parameter('enable_coord_transform', True)
         
         # 输出格式选择
         self.declare_parameter('use_global_position_target', True)  # true=GlobalPositionTarget, false=GeoPoseStamped
-        
-        # 获取参数
-        origin_lat_param = self.get_parameter('gps_origin_lat').value
-        origin_lon_param = self.get_parameter('gps_origin_lon').value
-        origin_alt_param = self.get_parameter('gps_origin_alt').value
-        
-        self.origin_lat = float(origin_lat_param) if origin_lat_param is not None else 22.5180977
-        self.origin_lon = float(origin_lon_param) if origin_lon_param is not None else 113.9007239
-        self.origin_alt = float(origin_alt_param) if origin_alt_param is not None else -5.17
         
         self.enabled = bool(self.get_parameter('enable_coord_transform').value)
         self.use_global_position_target = bool(self.get_parameter('use_global_position_target').value)
@@ -328,6 +330,10 @@ class CoordTransformNode(Node):
         
         return {'lat': lat, 'lon': lon, 'alt': alt}
 
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        # 该节点没有 timer，只需调用父类方法
+        super().destroy_node()
 
 
 def main(args=None):

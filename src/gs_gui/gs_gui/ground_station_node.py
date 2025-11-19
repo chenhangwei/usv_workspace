@@ -7,15 +7,14 @@
 import json
 from collections import defaultdict, deque
 from datetime import datetime
+import yaml
+import os
 import rclpy 
-import rclpy.action
 from rclpy.node import Node  # 从rclpy.node模块导入Node类，用于创建ROS2节点
 from rclpy.parameter import Parameter  # 导入Parameter类，用于参数设置
 from geometry_msgs.msg import PoseStamped  # 从geometry_msgs.msg模块导入PoseStamped消息类型，用于位姿信息
 from common_interfaces.msg import UsvStatus  # 从common_interfaces.msg模块导入UsvStatus消息类型
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy  # 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
-from rclpy.action import ActionClient  # 从rclpy.action模块导入ActionClient，用于创建动作客户端
-from common_interfaces.action import NavigateToPoint  # 从common_interfaces.action模块导入NavigateToPoint动作类型
 import queue  # 导入queue模块，用于创建消息队列
 import threading  # 导入threading模块，用于多线程处理
 from std_msgs.msg import String # 导入 String 消息类型
@@ -28,6 +27,9 @@ from .usv_manager import UsvManager
 from .cluster_controller import ClusterController
 from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
+
+# 导入线程安全工具
+from common_utils import ThreadSafeDict
 
 
 class GroundStationNode(Node):
@@ -61,20 +63,43 @@ class GroundStationNode(Node):
         self.append_warning = append_warning if append_warning else lambda x: None  # GUI 警告回调
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)  # 创建QoS配置对象，深度为10，可靠性策略为可靠传输
 
+        # 声明参数（必须在使用前声明）
+        self.declare_parameter('fleet_config_file', '')
+        self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
+        self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
+        self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
+        self.declare_parameter('offline_grace_period', 5.0)
+        self.declare_parameter('ack_resend_interval', 2.0)
+        self.declare_parameter('cluster_action_timeout', 300.0)
+        self.declare_parameter('area_center_x', 0.0)
+        self.declare_parameter('area_center_y', 0.0)
+        self.declare_parameter('area_center_z', 0.0)
+        self.declare_parameter('area_center_frame', 'map')
+
         # 初始化子模块
         self.usv_manager = UsvManager(self)
         self.cluster_controller = ClusterController(self)
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
 
-        # 预检与状态文本缓存
+        # 预检与状态文本缓存 (线程安全)
         self._vehicle_messages = defaultdict(lambda: deque(maxlen=50))
         self._prearm_warnings = defaultdict(dict)
-        self._prearm_ready = {}
-        self._sensor_status_cache = {}
+        self._prearm_ready = ThreadSafeDict()
+        self._sensor_status_cache = ThreadSafeDict()
+        # 传感器健康缓存 (SYS_STATUS)
+        self._sensor_health_cache = ThreadSafeDict()
+        self._heartbeat_status_cache = ThreadSafeDict()
+        # 导航目标信息缓存（用于导航面板显示）
+        self._usv_nav_target_cache = ThreadSafeDict()
+        
+        # 新增: 基于话题的导航管理
+        self._next_goal_id = 1  # 目标ID生成器
+        self._goal_id_lock = threading.Lock()  # 目标ID锁
+        self._goal_to_usv = ThreadSafeDict()  # 目标ID到USV的映射 {goal_id: usv_id} (线程安全)
 
         # 初始化USV状态和目标管理相关变量
-        self.usv_states = {}  # USV状态字典
+        self.usv_states = ThreadSafeDict()  # USV状态字典 (线程安全)
         self.last_ns_list = []  # 上次命名空间列表
         self.is_runing = False
         self.run_step = 0  # 当前运行步骤
@@ -87,19 +112,8 @@ class GroundStationNode(Node):
         self.publish_thread = threading.Thread(target=self.process_publish_queue, daemon=True)  # 创建发布线程，设置为守护线程
         self.publish_thread.start()  # 启动发布线程
 
-        # 将超时/重试等参数化，支持通过参数/launch调整
-        self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
-        self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
-        self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
-        self.declare_parameter('offline_grace_period', 5.0)  # 从 20.0 减少到 5.0 秒，加快移除速度
-        self.declare_parameter('ack_resend_interval', 2.0)
-        self.declare_parameter('cluster_action_timeout', 300.0)
-        # area center 参数（任务坐标系原点在全局 map 中的位置）
-        self.declare_parameter('area_center_x', 0.0)
-        self.declare_parameter('area_center_y', 0.0)
-        self.declare_parameter('area_center_z', 0.0)
-        self.declare_parameter('area_center_frame', 'map')
-        # 从参数服务器读取当前值（可被 launch/参数文件覆盖）
+        # ========== 从参数服务器读取参数值 ==========
+        # 注意：参数已在前面声明，这里只是读取值
         try:
             self._step_timeout = float(self.get_parameter('step_timeout').get_parameter_value().double_value)
         except Exception:
@@ -127,6 +141,11 @@ class GroundStationNode(Node):
             action_timeout=self._cluster_action_timeout,
         )
 
+        # ========== 从配置文件加载USV列表（Domain隔离架构）==========
+        # 注意：必须在参数声明之后调用
+        self._fleet_config = self._load_fleet_config()
+        self._static_usv_list = self._extract_usv_list_from_config()
+
         # 读取 area_center 参数
         try:
             ax = float(self.get_parameter('area_center_x').get_parameter_value().double_value)
@@ -146,37 +165,47 @@ class GroundStationNode(Node):
         # 用于通知后台线程退出的事件
         self._stop_event = threading.Event()
 
-        #Action 任务跟踪
-        self._usv_active_goals = {} # 跟踪每个 USV 当前活动的 Action 句柄
-        self._send_locks = {}  # 每个 USV 的发送锁，防止并发冲突
+        # 导航发送锁 (线程安全)
+        self._send_locks = ThreadSafeDict()  # 每个 USV 的发送锁，防止并发冲突
 
-        # 初始化传染机制相关变量
-        self._usv_led_modes = {}  # USV LED模式字典
+        # 初始化传染机制相关变量 (线程安全)
+        self._usv_led_modes = ThreadSafeDict()  # USV LED模式字典
         self._usv_infecting = set()  # 正在传染的USV集合
-        # 维护本地 LED 状态 
-        self._usv_current_led_state = {} # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
-        self._usv_infection_sources = {}  # 记录被传染USV的源映射
+        # 维护本地 LED 状态 (线程安全)
+        self._usv_current_led_state = ThreadSafeDict() # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
+        self._usv_infection_sources = ThreadSafeDict()  # 记录被传染USV的源映射
         # LED传染模式开关（默认开启）
         self._led_infection_enabled = True
      
         # 初始化命名空间检测历史记录
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
-        # 记录每个 USV 最后一次收到状态消息的时间戳（秒）
-        self._ns_last_seen = {}
+        # 记录每个 USV 最后一次收到状态消息的时间戳（秒）(线程安全)
+        self._ns_last_seen = ThreadSafeDict()
 
         # 创建定时器
-        self.ns_timer = self.create_timer(self.NAMESPACE_UPDATE_PERIOD, self.update_subscribers_and_publishers)  # 命名空间更新定时器，定期更新订阅者和发布者
+        # 注意：在Domain隔离架构下，不再使用动态节点发现，而是从配置文件读取USV列表
+        # 定时器仅用于验证topic是否可用（检测USV离线状态）
+        self.ns_timer = self.create_timer(5.0, self.check_usv_topics_availability)  # USV话题可用性检查定时器
         self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器，定期发布集群目标
         self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器，定期检查USV之间的传染逻辑
+        # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI（类似 QGC 的灵敏响应）
+        self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz，优化性能
         
-        self.update_subscribers_and_publishers()
+        # 使用静态配置初始化USV订阅和发布者（Domain隔离架构）
+        self.initialize_usv_from_config()
 
         # TF2: Buffer/Listener for coordinate transforms
+        # 注意：使用 BEST_EFFORT QoS 以匹配 USV 发布的 /tf 话题
         try:
             self.tf_buffer = tf2_ros.Buffer()
-            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            # 创建自定义 QoS 用于 TF 订阅
+            tf_qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+            self.tf_listener = tf2_ros.TransformListener(
+                self.tf_buffer, self, qos=tf_qos
+            )
             self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
-        except Exception:
+        except Exception as e:
+            self.get_logger().warn(f"TF2 初始化失败: {e}")
             self.tf_buffer = None
             self.tf_listener = None
             self.static_broadcaster = None
@@ -260,15 +289,190 @@ class GroundStationNode(Node):
         except Exception as e:
             self.get_logger().warn(f'关闭后台线程时发生异常: {e}')
 
-    # 获取当前节点的名称和命名空间，为新的 USV 节点创建订阅和发布器
+    def _load_fleet_config(self):
+        """
+        从配置文件加载USV集群配置（用于Domain隔离架构）
+        
+        Returns:
+            dict: 配置字典，如果加载失败则返回None
+        """
+        try:
+            # 1. 优先从ROS参数获取配置文件路径
+            fleet_config_file = self.get_parameter('fleet_config_file').get_parameter_value().string_value
+            
+            # 2. 如果参数为空，使用默认路径
+            if not fleet_config_file:
+                # 尝试从install目录读取
+                try:
+                    from ament_index_python.packages import get_package_share_directory
+                    share_dir = get_package_share_directory('gs_bringup')
+                    fleet_config_file = os.path.join(share_dir, 'config', 'usv_fleet.yaml')
+                except Exception:
+                    # 如果失败，使用相对路径
+                    fleet_config_file = os.path.expanduser('~/usv_workspace/src/gs_bringup/config/usv_fleet.yaml')
+            
+            # 3. 加载YAML文件
+            if os.path.exists(fleet_config_file):
+                with open(fleet_config_file, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f)
+                    self.get_logger().info(f"✓ 已加载fleet配置文件: {fleet_config_file}")
+                    return config
+            else:
+                self.get_logger().warn(f"配置文件不存在: {fleet_config_file}")
+                return None
+                
+        except Exception as e:
+            self.get_logger().error(f"加载fleet配置文件失败: {e}")
+            return None
+    
+    def _extract_usv_list_from_config(self):
+        """
+        从配置中提取已启用的USV列表
+        
+        Returns:
+            list: USV命名空间列表，例如 ['usv_01', 'usv_02', 'usv_03']
+        """
+        usv_list = []
+        
+        if not self._fleet_config:
+            self.get_logger().warn("⚠️  未加载fleet配置，将使用空USV列表")
+            return usv_list
+        
+        try:
+            fleet = self._fleet_config.get('usv_fleet', {})
+            for usv_id, config in fleet.items():
+                # 只添加启用的USV
+                if config.get('enabled', False):
+                    namespace = config.get('namespace', usv_id)
+                    usv_list.append(namespace)
+                    self.get_logger().info(f"  ├─ {namespace} (已启用)")
+                else:
+                    self.get_logger().info(f"  ├─ {usv_id} (已禁用)")
+            
+            self.get_logger().info(f"✓ 从配置文件读取到 {len(usv_list)} 艘USV: {usv_list}")
+            
+        except Exception as e:
+            self.get_logger().error(f"解析USV列表失败: {e}")
+        
+        return usv_list
+    
+    def initialize_usv_from_config(self):
+        """
+        基于配置文件静态初始化所有USV的订阅者和发布者
+        （适用于Domain隔离架构，不依赖DDS节点发现）
+        """
+        self.get_logger().info("=" * 60)
+        self.get_logger().info("🚀 初始化USV订阅者和发布者（静态配置模式）")
+        self.get_logger().info("=" * 60)
+        
+        if not self._static_usv_list:
+            self.get_logger().warn("⚠️  USV列表为空，请检查配置文件")
+            return
+        
+        # 为每个配置的USV创建订阅和发布
+        for usv_id in self._static_usv_list:
+            try:
+                # 添加命名空间（需要/前缀）
+                ns = f"/{usv_id}" if not usv_id.startswith('/') else usv_id
+                self.usv_manager.add_usv_namespace(ns)
+                
+                # 记录当前时间
+                try:
+                    now_sec = self.get_clock().now().nanoseconds / 1e9
+                except Exception:
+                    now_sec = 0.0
+                self._ns_last_seen[usv_id] = now_sec
+                
+                self.get_logger().info(f"✓ {usv_id} 初始化完成")
+                
+            except Exception as e:
+                self.get_logger().error(f"✗ {usv_id} 初始化失败: {e}")
+        
+        # 更新last_ns_list
+        self.last_ns_list = self._static_usv_list.copy()
+        
+        self.get_logger().info("=" * 60)
+        self.get_logger().info(f"✓ 完成初始化 {len(self._static_usv_list)} 艘USV")
+        self.get_logger().info("=" * 60)
+    
+    def check_usv_topics_availability(self):
+        """
+        定期检查USV topic是否可用（用于检测离线状态）
+        
+        在Domain隔离架构下，无法通过节点发现来检测USV上下线，
+        而是通过检查topic上是否有数据来判断USV是否在线。
+        
+        注意：这个方法不会添加或删除USV，只会标记离线状态。
+        """
+        if not self._static_usv_list:
+            return
+        
+        try:
+            now_sec = self.get_clock().now().nanoseconds / 1e9
+        except Exception:
+            now_sec = 0.0
+        
+        # 检查每个USV的最后接收时间
+        offline_threshold = 10.0  # 10秒未收到数据认为离线
+        state_changed = False  # 标记是否有状态变化
+        
+        for usv_id in self._static_usv_list:
+            last_seen = self._ns_last_seen.get(usv_id, 0.0)
+            elapsed = now_sec - last_seen
+            
+            # 如果USV还没有状态条目，创建初始状态
+            if usv_id not in self.usv_states:
+                self.usv_states[usv_id] = {
+                    'namespace': usv_id,
+                    'connected': False,  # 初始为离线，等待第一次数据
+                    'mode': 'UNKNOWN',
+                    'armed': False,
+                }
+            
+            # 更新状态字典中的连接状态
+            if elapsed > offline_threshold:
+                # 标记为离线
+                if self.usv_states[usv_id].get('connected', True):
+                    self.usv_states[usv_id]['connected'] = False
+                    state_changed = True
+                    self.get_logger().warn(f"⚠️  {usv_id} 已离线（{elapsed:.1f}s未收到数据）")
+            else:
+                # 标记为在线
+                if not self.usv_states[usv_id].get('connected', False):
+                    self.usv_states[usv_id]['connected'] = True
+                    state_changed = True
+                    self.get_logger().info(f"✓ {usv_id} 已上线")
+        
+        # 如果有状态变化，通知GUI更新
+        if state_changed:
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception as e:
+                self.get_logger().debug(f"推送状态更新失败: {e}")
+    
+    # =====================================================
+    # 以下是原有的动态节点发现方法（保留用于兼容性）
+    # 在Domain隔离架构下不再使用
+    # =====================================================
+    
     def update_subscribers_and_publishers(self):
         """
-        更新订阅者和发布者列表，处理USV的连接和断开
+        [已废弃 - 仅用于兼容性] 动态发现USV节点
+        
+        ⚠️  注意：在Domain隔离架构下，此方法不再使用！
+        
+        原理：通过DDS节点发现机制动态检测USV上下线
+        限制：在每个USV使用独立Domain ID的架构下，地面站无法通过DDS发现USV节点
+        
+        新方案：使用 initialize_usv_from_config() 从配置文件静态加载USV列表
         
         该方法定期检查系统中的节点命名空间，
         为新连接的USV创建订阅者和发布者，
         为断开的USV销毁订阅者和发布者
         """
+        # 在Domain隔离架构下，直接返回不执行
+        if self._static_usv_list:
+            return
         # 获取当前系统中的节点名称和命名空间
         node_names_and_namespaces = self.get_node_names_and_namespaces()
 
@@ -380,194 +584,6 @@ class GroundStationNode(Node):
         self.last_ns_list = effective_ns
 
     # 通过Action方式发送导航目标点
-    def send_nav_goal_via_action(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
-        """
-        通过Action方式向指定USV发送导航目标点
-        
-        Args:
-            usv_id (str): USV标识符
-            x (float): 目标点X坐标
-            y (float): 目标点Y坐标
-            z (float): 目标点Z坐标，默认为0.0
-            yaw (float): 目标偏航角(弧度)
-            timeout (float): 超时时间(秒)
-            
-        Returns:
-            bool: 发送是否成功
-        """
-        # 获取或创建该 USV 的发送锁
-        if usv_id not in self._send_locks:
-            self._send_locks[usv_id] = threading.Lock()
-        
-        lock = self._send_locks[usv_id]
-        
-        # 尝试获取锁（非阻塞）
-        if not lock.acquire(blocking=False):
-            self.get_logger().warning(f"USV {usv_id} 正在发送导航目标，忽略本次请求")
-            return False
-        
-        try:
-            # 验证目标点是否在安全范围内
-            try:
-                self._validate_target_position(x, y, z)
-            except ValueError as e:
-                self.get_logger().error(f"USV {usv_id} 目标点验证失败: {e}")
-                self.ros_signal.nav_status_update.emit(usv_id, "失败")
-                return False
-            
-            # 检查USV是否存在
-            if usv_id not in self.usv_manager.navigate_to_point_clients:
-                self.get_logger().error(f"未找到USV {usv_id} 的导航客户端")
-                # 更新导航状态为失败
-                self.ros_signal.nav_status_update.emit(usv_id, "失败")
-                return False
-
-            # 检查Action服务器是否可用（增加超时时间以适应网络延迟）
-            action_client = self.usv_manager.navigate_to_point_clients[usv_id]
-            if not action_client.wait_for_server(timeout_sec=3.0):
-                self.get_logger().error(f"USV {usv_id} 的导航Action服务器未响应（超时3秒）")
-                # 更新导航状态为失败
-                self.ros_signal.nav_status_update.emit(usv_id, "失败")
-                return False
-
-            # 构造目标消息
-            goal_msg = NavigateToPoint.Goal()
-            goal_msg.goal = PoseStamped()
-            # 设置时间戳为当前时间
-            goal_msg.goal.header.stamp = self.get_clock().now().to_msg()
-            # 设置坐标系为map
-            goal_msg.goal.header.frame_id = 'map'
-            # 设置目标点位置
-            goal_msg.goal.pose.position.x = float(x)
-            goal_msg.goal.pose.position.y = float(y)
-            goal_msg.goal.pose.position.z = float(z)  # 添加z坐标
-
-            # 使用四元数表示偏航角
-            from tf_transformations import quaternion_from_euler
-            # 计算四元数
-            quat = quaternion_from_euler(0, 0, float(yaw))
-            # 设置四元数
-            goal_msg.goal.pose.orientation.x = quat[0]
-            goal_msg.goal.pose.orientation.y = quat[1]
-            goal_msg.goal.pose.orientation.z = quat[2]
-            goal_msg.goal.pose.orientation.w = quat[3]
-
-            # 设置超时时间
-            goal_msg.timeout = float(timeout)
-
-            # 更新导航状态为执行中
-            self.ros_signal.nav_status_update.emit(usv_id, "执行中")
-
-            # 取消旧任务并等待取消完成（避免竞态条件）
-            cancel_future = self._cancel_active_goal(usv_id)
-            if cancel_future is not None:
-                # 等待取消完成，最多1秒
-                try:
-                    rclpy.spin_until_future_complete(self, cancel_future, timeout_sec=1.0)
-                    self.get_logger().info(f"USV {usv_id} 旧任务已取消")
-                except Exception as e:
-                    self.get_logger().warning(f"等待 USV {usv_id} 取消完成时超时: {e}")
-
-            # 异步发送目标
-            send_goal_future = action_client.send_goal_async(
-                goal_msg,
-                feedback_callback=lambda feedback_msg, uid=usv_id: self.nav_feedback_callback(feedback_msg, uid))
-
-            # 添加结果回调
-            send_goal_future.add_done_callback(
-                lambda future, uid=usv_id: self.nav_goal_response_callback(future, uid))
-
-            # 记录日志信息
-            self.get_logger().info(f"向USV {usv_id} 发送导航目标点: ({x}, {y}, {z}), 偏航: {yaw}, 超时: {timeout}")
-            return True
-            
-        finally:
-            # 释放锁
-            lock.release()
-
-    # 导航目标响应回调
-    def nav_goal_response_callback(self, future, usv_id):
-        """
-        导航目标响应回调
-        
-        Args:
-            future: 异步操作的future对象
-            usv_id (str): USV标识符
-        """
-        try:
-            # 获取目标句柄
-            goal_handle = future.result()
-            # 检查目标是否被接受
-            if not goal_handle.accepted:
-                self.get_logger().warn(f"USV {usv_id} 拒绝了导航目标")
-                # 更新导航状态为失败
-                self.ros_signal.nav_status_update.emit(usv_id, "失败")
-                return
-
-            self.get_logger().info(f"USV {usv_id} 接受了导航目标")
-
-            # 存储活动的 Action 句柄 ---
-            self._usv_active_goals[usv_id] = goal_handle 
-           
-
-
-
-
-
-
-            # 获取结果
-            get_result_future = goal_handle.get_result_async()
-            # 添加结果回调
-            get_result_future.add_done_callback(
-                lambda result_future, uid=usv_id: self.nav_get_result_callback(result_future, uid))
-
-        # 捕获异常并记录错误日志
-        except Exception as e:
-            self.get_logger().error(f"处理USV {usv_id} 导航目标响应时出错: {e}")
-            # 更新导航状态为失败
-            self.ros_signal.nav_status_update.emit(usv_id, "失败")
-
-    # 导航结果回调
-    def nav_get_result_callback(self, future, usv_id):
-        """
-        导航结果回调
-        
-        Args:
-            future: 异步操作的future对象
-            usv_id (str): USV标识符
-        """
-        try:
-            # 获取结果
-            result = future.result().result
-            # 记录日志信息
-            self.get_logger().info(
-                f"USV {usv_id} 导航任务完成 - 成功: {result.success}, "
-                f"错误码: {result.error_code}, 消息: {result.message}")
-
-            # 根据结果更新导航状态
-            if result.success:
-                self.ros_signal.nav_status_update.emit(usv_id, "成功")
-                # 标记为已确认
-                self.cluster_controller.mark_usv_goal_result(usv_id, True)
-            else:
-                self.ros_signal.nav_status_update.emit(usv_id, "失败")
-                self.cluster_controller.mark_usv_goal_result(usv_id, False)
-
-            # 可以在这里发射信号通知GUI更新状态
-            # self.ros_signal.navigation_completed.emit(usv_id, result.success, result.error_code)
-
-            # 任务完成后清除句柄 ---
-            if usv_id in self._usv_active_goals:
-                 del self._usv_active_goals[usv_id]
-
-
-
-        # 捕获异常并记录错误日志
-        except Exception as e:
-            self.get_logger().error(f"处理USV {usv_id} 导航结果时出错: {e}")
-            # 更新导航状态为失败
-            self.ros_signal.nav_status_update.emit(usv_id, "失败")
-
     def _validate_target_position(self, x, y, z):
         """
         验证目标点是否在安全范围内
@@ -601,62 +617,178 @@ class GroundStationNode(Node):
                 f"目标点高度异常: {abs(z):.2f}m > {MAX_ALTITUDE}m"
             )
 
-    def _cancel_active_goal(self, usv_id):
+    # ==================== 基于话题的导航方法 ====================
+    
+    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
         """
-        取消指定 USV 当前活动的 Action 任务
+        通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
+        
+        优势:
+        - 更适合跨Domain通信
+        - 不依赖Action的复杂服务机制
+        - 在Domain Bridge中更容易配置和调试
         
         Args:
             usv_id (str): USV标识符
-            
+            x (float): 目标点X坐标
+            y (float): 目标点Y坐标
+            z (float): 目标点Z坐标
+            yaw (float): 目标偏航角(弧度)
+            timeout (float): 超时时间(秒)
+        
         Returns:
-            Future or None: 取消操作的Future对象，如果没有活动任务则返回None
+            bool: 发送是否成功
         """
-        if usv_id in self._usv_active_goals:
-            goal_handle = self._usv_active_goals[usv_id]
-            
-            # 扩展状态检查，包含正在取消的状态
-            valid_statuses = [
-                rclpy.action.client.GoalStatus.STATUS_ACCEPTED,
-                rclpy.action.client.GoalStatus.STATUS_EXECUTING,
-                rclpy.action.client.GoalStatus.STATUS_CANCELING
-            ]
-            
-            if goal_handle.status in valid_statuses:
-                self.get_logger().warn(f"正在取消 USV {usv_id} 的上一个导航任务（状态: {goal_handle.status}）...")
-                cancel_future = goal_handle.cancel_goal_async()
-                # 从跟踪字典中删除
-                del self._usv_active_goals[usv_id]
-                return cancel_future  # 返回Future以便调用方等待
-            else:
-                # 状态不需要取消，直接删除
-                del self._usv_active_goals[usv_id]
+        from common_interfaces.msg import NavigationGoal
+        from geometry_msgs.msg import PoseStamped
         
-        return None
-
-    # 导航反馈回调
-    def nav_feedback_callback(self, feedback_msg, usv_id):
+        # 验证目标点
+        try:
+            self._validate_target_position(x, y, z)
+        except ValueError as e:
+            self.get_logger().error(f"目标点验证失败: {e}")
+            self.ros_signal.nav_status_update.emit(usv_id, "失败")
+            return False
+        
+        # 检查发布器是否存在
+        if usv_id not in self.usv_manager.navigation_goal_pubs:
+            self.get_logger().error(f"未找到USV {usv_id} 的导航目标发布器")
+            self.ros_signal.nav_status_update.emit(usv_id, "失败")
+            return False
+        
+        # 生成唯一的目标ID
+        with self._goal_id_lock:
+            goal_id = self._next_goal_id
+            self._next_goal_id += 1
+        
+        # 记录目标ID到USV的映射
+        self._goal_to_usv[goal_id] = usv_id
+        
+        # 构造目标消息
+        goal_msg = NavigationGoal()
+        goal_msg.goal_id = goal_id
+        goal_msg.target_pose = PoseStamped()
+        goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
+        goal_msg.target_pose.header.frame_id = 'map'
+        goal_msg.target_pose.pose.position.x = float(x)
+        goal_msg.target_pose.pose.position.y = float(y)
+        goal_msg.target_pose.pose.position.z = float(z)
+        
+        # 设置航向 (Quaternion)
+        from tf_transformations import quaternion_from_euler
+        q = quaternion_from_euler(0, 0, yaw)
+        goal_msg.target_pose.pose.orientation.x = q[0]
+        goal_msg.target_pose.pose.orientation.y = q[1]
+        goal_msg.target_pose.pose.orientation.z = q[2]
+        goal_msg.target_pose.pose.orientation.w = q[3]
+        
+        goal_msg.timeout = timeout
+        goal_msg.timestamp = self.get_clock().now().to_msg()
+        
+        # 发布目标
+        pub = self.usv_manager.navigation_goal_pubs[usv_id]
+        pub.publish(goal_msg)
+        
+        # 更新缓存和状态
+        self._usv_nav_target_cache[usv_id] = {
+            'goal_id': goal_id,
+            'x': float(x),
+            'y': float(y),
+            'z': float(z),
+            'yaw': float(yaw),
+            'step': self.run_step,
+            'timestamp': self.get_clock().now().nanoseconds / 1e9
+        }
+        
+        # 更新导航状态为执行中
+        self.ros_signal.nav_status_update.emit(usv_id, "执行中")
+        
+        self.get_logger().info(
+            f"📤 {usv_id} 导航目标已发送 [ID={goal_id}]: "
+            f"({x:.1f}, {y:.1f}, {z:.1f}), 超时={timeout:.0f}s")
+        
+        return True
+    
+    def navigation_feedback_callback(self, msg, usv_id):
         """
-        导航反馈回调
+        导航反馈回调 (话题版本)
         
         Args:
-            feedback_msg: 反馈消息
+            msg (NavigationFeedback): 导航反馈消息
             usv_id (str): USV标识符
         """
-        try:
-            # 获取反馈数据
-            feedback = feedback_msg.feedback
-            # 记录日志信息
+        # 检查是否是当前目标的反馈
+        cached = self._usv_nav_target_cache.get(usv_id)
+        if cached and cached.get('goal_id') != msg.goal_id:
+            return  # 忽略旧目标的反馈
+        
+        # 简化日志输出
+        self.get_logger().debug(
+            f"{usv_id}: 距离={msg.distance_to_goal:.2f}m, "
+            f"航向误差={msg.heading_error:.1f}°, "
+            f"预计={msg.estimated_time:.0f}s")
+        
+        # 发射信号更新GUI
+        # 转换为兼容格式
+        feedback_obj = type('Feedback', (), {
+            'distance_to_goal': msg.distance_to_goal,
+            'heading_error': msg.heading_error,
+            'estimated_time': msg.estimated_time
+        })()
+        self.ros_signal.navigation_feedback.emit(usv_id, feedback_obj)
+    
+    def navigation_result_callback(self, msg, usv_id):
+        """
+        导航结果回调 (话题版本)
+        
+        Args:
+            msg (NavigationResult): 导航结果消息
+            usv_id (str): USV标识符
+        """
+        # 详细调试日志
+        self.get_logger().info(
+            f"🔍 [DEBUG] 收到导航结果: usv_id={usv_id}, goal_id={msg.goal_id}, "
+            f"success={msg.success}, message={msg.message}"
+        )
+        
+        # 检查是否是当前目标的结果
+        cached = self._usv_nav_target_cache.get(usv_id)
+        if cached:
             self.get_logger().info(
-                f"USV {usv_id} 导航反馈 - 距离目标: {feedback.distance_to_goal:.2f}m, "
-                f"航向误差: {feedback.heading_error:.2f}度, "
-                f"预计剩余时间: {feedback.estimated_time:.2f}秒")
-
-            # 发射信号通知GUI更新进度条等
-            self.ros_signal.navigation_feedback.emit(usv_id, feedback)
-
-        # 捕获异常并记录错误日志
-        except Exception as e:
-            self.get_logger().error(f"处理USV {usv_id} 导航反馈时出错: {e}")
+                f"🔍 [DEBUG] 缓存目标信息: goal_id={cached.get('goal_id')}, "
+                f"step={cached.get('step')}, x={cached.get('x'):.2f}, y={cached.get('y'):.2f}"
+            )
+        else:
+            self.get_logger().warning(
+                f"⚠️ {usv_id} 没有缓存目标，可能已被清除或过期"
+            )
+        
+        if cached and cached.get('goal_id') != msg.goal_id:
+            self.get_logger().warning(
+                f"⚠️ {usv_id} 目标ID不匹配: cached={cached.get('goal_id')}, "
+                f"received={msg.goal_id}，忽略此结果"
+            )
+            return  # 忽略旧目标的结果
+        
+        # 记录日志
+        status_icon = "✅" if msg.success else "❌"
+        self.get_logger().info(
+            f"{status_icon} {usv_id} 导航完成 [ID={msg.goal_id}]: {msg.message}")
+        
+        # 获取目标的 step 信息
+        goal_step = cached.get('step') if cached else None
+        
+        # 更新状态
+        if msg.success:
+            self.ros_signal.nav_status_update.emit(usv_id, "成功")
+            self.cluster_controller.mark_usv_goal_result(usv_id, True, goal_step)
+        else:
+            self.ros_signal.nav_status_update.emit(usv_id, "失败")
+            self.cluster_controller.mark_usv_goal_result(usv_id, False, goal_step)
+        
+        # 清理映射
+        if msg.goal_id in self._goal_to_usv:
+            del self._goal_to_usv[msg.goal_id]
 
     # 设置离群目标点回调
     def set_departed_target_point_callback(self, msg):
@@ -715,7 +847,7 @@ class GroundStationNode(Node):
                 )
                 
                 # 支持z坐标
-                self.send_nav_goal_via_action(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
+                self.send_nav_goal_via_topic(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
@@ -1213,6 +1345,11 @@ class GroundStationNode(Node):
             state = {'namespace': usv_id}
             self.usv_states[usv_id] = state
 
+        # 记录消息到达时间（用于变化检测）
+        if not hasattr(self, '_last_statustext_time'):
+            self._last_statustext_time = {}
+        self._last_statustext_time[usv_id] = now_sec
+        
         self.augment_state_payload(usv_id, state)
 
         try:
@@ -1220,8 +1357,85 @@ class GroundStationNode(Node):
         except Exception as exc:
             self.get_logger().warn(f"推送 {usv_id} 状态文本更新失败: {exc}")
 
+    def handle_sys_status(self, usv_id, msg):
+        """
+        处理飞控 SYS_STATUS 消息，缓存传感器健康状态
+        
+        根据 QGC 实现，使用 onboard_control_sensors_health 位掩码来判断传感器健康状态。
+        关键传感器位定义 (MAV_SYS_STATUS_SENSOR):
+            0x01 (bit 0): 3D gyro
+            0x02 (bit 1): 3D accelerometer  
+            0x04 (bit 2): 3D magnetometer
+            0x08 (bit 3): absolute pressure
+            0x20 (bit 5): GPS
+        
+        Args:
+            usv_id: USV标识符
+            msg: mavros_msgs/SysStatus 消息
+        """
+        if msg is None:
+            return
+        
+        # 缓存原始传感器状态位掩码
+        self._sensor_health_cache[usv_id] = {
+            'onboard_control_sensors_present': msg.onboard_control_sensors_present,
+            'onboard_control_sensors_enabled': msg.onboard_control_sensors_enabled,
+            'onboard_control_sensors_health': msg.onboard_control_sensors_health,
+            'timestamp': self._now_seconds()
+        }
+        
+        # 记录日志以便调试（仅首次或状态变化时）
+        if not hasattr(self, '_last_sensor_health_log'):
+            self._last_sensor_health_log = {}
+        
+        prev = self._last_sensor_health_log.get(usv_id)
+        curr_health = msg.onboard_control_sensors_health
+        if prev != curr_health:
+            self.get_logger().info(
+                f"[SYS_STATUS] {usv_id} 传感器健康更新: "
+                f"present=0x{msg.onboard_control_sensors_present:08X}, "
+                f"enabled=0x{msg.onboard_control_sensors_enabled:08X}, "
+                f"health=0x{curr_health:08X}"
+            )
+            self._last_sensor_health_log[usv_id] = curr_health
+
+    def push_state_updates(self):
+        """
+        定期主动推送状态更新到 GUI（5Hz 优化频率）
+        
+        只在数据有变化时才重新计算，避免不必要的开销。
+        """
+        if not self.usv_states:
+            return
+        
+        try:
+            now_sec = self._now_seconds()
+            updated = False
+            
+            # 只更新有变化的 USV
+            for usv_id in list(self.usv_states.keys()):
+                # 检查是否需要更新（有新消息、PreArm 警告变化、传感器状态变化）
+                if self._should_update_augmented_state(usv_id, now_sec):
+                    self.augment_state_payload(usv_id)
+                    updated = True
+            
+            # 只在有更新时推送
+            if updated:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+        except Exception as exc:
+            # 使用 debug 级别避免刷屏，因为这是高频调用
+            pass  # 静默失败，避免日志刷屏
+    
     def augment_state_payload(self, usv_id, state_data=None):
-        """为状态字典附加车辆消息、预检标记与传感器状态."""
+        """
+        为状态字典附加车辆消息、预检标记与传感器状态
+        
+        实现 QGC 风格的综合 Ready 检查:
+        1. PreArm 警告检查 (来自 STATUSTEXT)
+        2. CRITICAL/ERROR 消息检查 (来自 STATUSTEXT)
+        3. 传感器健康检查 (来自 SYS_STATUS)
+        4. 系统状态检查 (来自 HEARTBEAT, 暂未实现)
+        """
         if state_data is None:
             state_data = self.usv_states.get(usv_id)
             if state_data is None:
@@ -1230,17 +1444,54 @@ class GroundStationNode(Node):
         now_sec = self._now_seconds()
         self._cleanup_prearm_warnings(usv_id, now_sec)
 
+        # 1. 收集所有消息
         messages = [dict(item) for item in self._vehicle_messages.get(usv_id, [])]
-        warnings = list(self._prearm_warnings.get(usv_id, {}).keys())
-        ready = len(warnings) == 0
-
+        
+        # 2. 收集 PreArm 警告
+        prearm_warnings = list(self._prearm_warnings.get(usv_id, {}).keys())
+        
+        # 3. 收集最近的 CRITICAL/ERROR 消息 (30秒内)
+        critical_errors = []
+        for msg_entry in self._vehicle_messages.get(usv_id, []):
+            severity = msg_entry.get('severity', 6)
+            timestamp = msg_entry.get('timestamp', 0)
+            # severity <= 3 表示 EMERGENCY/ALERT/CRITICAL/ERROR
+            if severity <= 3 and (now_sec - timestamp) <= 30.0:
+                critical_errors.append(msg_entry.get('text', ''))
+        
+        # 4. 检查传感器健康状态
+        sensor_healthy, unhealthy_sensors = self._check_sensor_health(usv_id)
+        
+        # 5. 综合判断 Ready 状态
+        # 必须同时满足: 无 PreArm 警告 + 无严重错误 + 传感器健康
+        all_warnings = prearm_warnings.copy()
+        
+        # 将严重错误添加到警告列表
+        if critical_errors:
+            for err in critical_errors[:3]:  # 最多显示 3 条严重错误
+                all_warnings.append(f"[CRITICAL] {err}")
+        
+        # 将传感器问题添加到警告列表
+        if not sensor_healthy:
+            for sensor in unhealthy_sensors:
+                all_warnings.append(f"[传感器] {sensor} 异常")
+        
+        # Ready 状态: 所有检查都通过
+        ready = (len(prearm_warnings) == 0 and 
+                 len(critical_errors) == 0 and 
+                 sensor_healthy)
+        
+        # 缓存结果
         self._prearm_ready[usv_id] = ready
         self._sensor_status_cache[usv_id] = self._build_sensor_status(usv_id, state_data)
 
+        # 更新状态数据
         state_data['vehicle_messages'] = messages
         state_data['prearm_ready'] = ready
-        state_data['prearm_warnings'] = warnings
+        state_data['prearm_warnings'] = all_warnings  # 包含所有警告来源
         state_data['sensor_status'] = self._sensor_status_cache[usv_id]
+        # 附加导航目标缓存（用于导航面板显示）
+        state_data['nav_target_cache'] = self._usv_nav_target_cache.get(usv_id)
 
         return state_data
 
@@ -1362,6 +1613,109 @@ class GroundStationNode(Node):
 
         return statuses
 
+    def _check_sensor_health(self, usv_id):
+        """
+        检查关键传感器是否健康 (基于 SYS_STATUS 位掩码)
+        
+        根据 QGC 实现方式，检查所有已启用且需要的传感器是否健康。
+        MAV_SYS_STATUS_SENSOR 位定义:
+            0x01: 3D gyro
+            0x02: 3D accelerometer
+            0x04: 3D magnetometer (可选，ArduPilot可在无磁罗盘时飞行)
+            0x08: absolute pressure (气压计)
+            0x20: GPS
+        
+        Returns:
+            (bool, list): (是否健康, 不健康传感器列表)
+        """
+        sensor_data = self._sensor_health_cache.get(usv_id)
+        if not sensor_data:
+            # 如果还没有收到 SYS_STATUS 消息，暂时认为传感器健康
+            # 这样 Ready 检查只依赖于 PreArm 警告和严重错误
+            # 注意：这是临时方案，理想情况下应该确保收到 SYS_STATUS 消息
+            return True, []
+        
+        present = sensor_data['onboard_control_sensors_present']
+        enabled = sensor_data['onboard_control_sensors_enabled']
+        health = sensor_data['onboard_control_sensors_health']
+        
+        # 定义关键传感器位掩码
+        SENSOR_GYRO = 0x01
+        SENSOR_ACCEL = 0x02
+        SENSOR_MAG = 0x04
+        SENSOR_BARO = 0x08
+        SENSOR_GPS = 0x20
+        
+        # 定义必需传感器（陀螺仪、加速度计、气压计必需，磁罗盘可选）
+        # GPS 根据飞行模式可能是必需的，但在 PreArm 阶段检查
+        required_sensors = SENSOR_GYRO | SENSOR_ACCEL | SENSOR_BARO
+        
+        unhealthy_sensors = []
+        sensor_names = {
+            SENSOR_GYRO: "陀螺仪",
+            SENSOR_ACCEL: "加速度计",
+            SENSOR_MAG: "磁罗盘",
+            SENSOR_BARO: "气压计",
+            SENSOR_GPS: "GPS"
+        }
+        
+        # 检查每个传感器
+        for bit, name in sensor_names.items():
+            # 如果传感器存在且已启用
+            if (present & bit) and (enabled & bit):
+                # 检查是否健康
+                if not (health & bit):
+                    unhealthy_sensors.append(name)
+        
+        # 如果有不健康的传感器，返回 False
+        if unhealthy_sensors:
+            return False, unhealthy_sensors
+        
+        # 检查必需传感器是否都已启用
+        required_enabled = (enabled & required_sensors)
+        if required_enabled != (present & required_sensors):
+            missing = []
+            for bit, name in sensor_names.items():
+                if (bit & required_sensors) and (present & bit) and not (enabled & bit):
+                    missing.append(f"{name}(未启用)")
+            if missing:
+                return False, missing
+        
+        return True, []
+
+    def _should_update_augmented_state(self, usv_id, now_sec):
+        """
+        检查是否需要重新计算 augmented state
+        避免无变化时的重复计算
+        """
+        # 检查是否有新的 statustext 消息
+        last_msg_time = getattr(self, '_last_statustext_time', {}).get(usv_id, 0)
+        if now_sec - last_msg_time < 0.3:  # 300ms 内有新消息
+            return True
+        
+        # 检查是否有 PreArm 警告即将过期
+        warnings = self._prearm_warnings.get(usv_id, {})
+        if warnings:
+            for ts in warnings.values():
+                if now_sec - ts > self.PREARM_WARNING_EXPIRY - 1.0:  # 即将过期
+                    return True
+        
+        # 检查是否有传感器状态更新
+        sensor_cache = self._sensor_health_cache.get(usv_id)
+        if sensor_cache:
+            if now_sec - sensor_cache.get('timestamp', 0) < 0.5:  # 500ms 内有更新
+                return True
+        
+        # 默认每 2 秒强制更新一次
+        last_update = getattr(self, '_last_augment_time', {}).get(usv_id, 0)
+        if now_sec - last_update > 2.0:
+            if not hasattr(self, '_last_augment_time'):
+                self._last_augment_time = {}
+            self._last_augment_time[usv_id] = now_sec
+            return True
+        
+        return False
+    
     def _cleanup_prearm_warnings(self, usv_id, now_sec):
         warnings = self._prearm_warnings.get(usv_id)
         if not warnings:

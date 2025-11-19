@@ -58,13 +58,15 @@ class UsvSoundNode(Node):
         
         self.get_logger().info('声音播放节点已启动')
         
-        # 声明参数
-        self.declare_parameter('sound_types', ['gaga101', 'gaga102', 'gaga103', 'gaga104'])
-        self.declare_parameter('moon_type', 'moon101')
-        self.declare_parameter('min_play_interval', 2)
-        self.declare_parameter('max_play_interval', 10)
-        self.declare_parameter('min_play_count', 1)
-        self.declare_parameter('max_play_count', 3)
+        # 使用ParamLoader统一加载参数
+        from common_utils import ParamLoader
+        loader = ParamLoader(self)
+        self.sound_types = loader.load_param('sound_types', ['gaga101', 'gaga102', 'gaga103', 'gaga104'])
+        self.moon_type = loader.load_param('moon_type', 'moon101')
+        self.min_play_interval = loader.load_param('min_play_interval', 2)
+        self.max_play_interval = loader.load_param('max_play_interval', 10)
+        self.min_play_count = loader.load_param('min_play_count', 1)
+        self.max_play_count = loader.load_param('max_play_count', 3)
         
         # 初始化音频相关变量
         try:
@@ -79,10 +81,6 @@ class UsvSoundNode(Node):
         
         # 用户意图标志：记录用户是否主动停止声音
         self.user_stopped_sound = False
-        
-        # 从参数读取配置
-        self.sound_types = self.get_parameter('sound_types').get_parameter_value().string_array_value
-        self.moon_type = self.get_parameter('moon_type').get_parameter_value().string_value
 
     def low_voltage_mode_callback(self, msg):
         """
@@ -297,7 +295,7 @@ def main(args=None):
         node = UsvSoundNode()
         rclpy.spin(node)
     except Exception as e:
-        print(f'节点运行时发生错误: {e}')
+        rclpy.logging.get_logger('usv_sound_node').error(f'节点运行时发生错误: {e}')
     finally:
         if 'node' in locals():
             node.destroy_node()

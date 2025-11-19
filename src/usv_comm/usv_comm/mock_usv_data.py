@@ -21,6 +21,9 @@ from mavros_msgs.msg import State, HomePosition
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 import math
 
+# 导入common_utils工具
+from common_utils import ParamLoader
+
 
 class MockUSVData(Node):
     """虚拟USV数据发布节点"""
@@ -28,22 +31,29 @@ class MockUSVData(Node):
     def __init__(self):
         super().__init__('mock_usv_data')
         
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
         # 参数
         self.declare_parameter('namespace', 'usv_01')
         self.declare_parameter('publish_rate', 10.0)  # Hz
-        self.declare_parameter('gps_origin_lat', 22.5180977)
-        self.declare_parameter('gps_origin_lon', 113.9007239)
-        self.declare_parameter('gps_origin_alt', -5.17)
         self.declare_parameter('initial_x', 0.0)
         self.declare_parameter('initial_y', 0.0)
         self.declare_parameter('move_speed', 1.0)  # m/s
         
+        # GPS 原点配置 - 使用统一加载方法
+        gps_origin = param_loader.load_gps_origin(
+            lat_param='gps_origin_lat',
+            lon_param='gps_origin_lon',
+            alt_param='gps_origin_alt'
+        )
+        self.origin_lat = gps_origin['lat']
+        self.origin_lon = gps_origin['lon']
+        self.origin_alt = gps_origin['alt']
+        
         # 获取参数
         self.namespace = self.get_parameter('namespace').value
         publish_rate = self.get_parameter('publish_rate').value
-        self.origin_lat = self.get_parameter('gps_origin_lat').value
-        self.origin_lon = self.get_parameter('gps_origin_lon').value
-        self.origin_alt = self.get_parameter('gps_origin_alt').value
         self.move_speed = self.get_parameter('move_speed').value
         
         # 当前状态
@@ -275,6 +285,12 @@ class MockUSVData(Node):
         alt = z + self.origin_alt
         
         return lat, lon, alt
+
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if hasattr(self, 'timer'):
+            self.timer.cancel()
+        super().destroy_node()
 
 
 def main(args=None):

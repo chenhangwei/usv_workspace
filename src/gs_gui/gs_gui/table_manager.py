@@ -85,6 +85,12 @@ class TableManager:
         try:
             model = self.cluster_table_model
 
+            # 过滤掉离线的 USV（只显示 connected=True 的）
+            online_state_list = [
+                s for s in state_list
+                if isinstance(s, dict) and s.get('connected', False)
+            ]
+
             # 构建当前表中 namespace -> row 的映射
             current_ns_to_row = {}
             for row in range(model.rowCount()):
@@ -93,7 +99,7 @@ class TableManager:
                 current_ns_to_row[ns] = row
 
             # 新状态的 namespace 列表与集合
-            new_ns_list = [s.get('namespace') for s in state_list if isinstance(s, dict) and s.get('namespace')]
+            new_ns_list = [s.get('namespace') for s in online_state_list if isinstance(s, dict) and s.get('namespace')]
             new_ns_set = set(new_ns_list)
 
             # 删除在当前表中但不在新状态集合的行（从后往前删除以保持索引正确）
@@ -109,7 +115,7 @@ class TableManager:
                 current_ns_to_row[ns] = row
 
             # 更新已有行或追加新行
-            for state in state_list:
+            for state in online_state_list:
                 if not isinstance(state, dict):
                     continue
                 ns = state.get('namespace', 'Unknown')
@@ -146,6 +152,12 @@ class TableManager:
         try:
             model = self.departed_table_model
 
+            # 过滤掉离线的 USV（只显示 connected=True 的）
+            online_state_list = [
+                s for s in state_list
+                if isinstance(s, dict) and s.get('connected', False)
+            ]
+
             # 当前表中 namespace -> row 映射
             current_ns_to_row = {}
             for row in range(model.rowCount()):
@@ -154,7 +166,7 @@ class TableManager:
                 current_ns_to_row[ns] = row
 
             # 新状态 ns 列表与集合
-            new_ns_list = [s.get('namespace') for s in state_list if isinstance(s, dict) and s.get('namespace')]
+            new_ns_list = [s.get('namespace') for s in online_state_list if isinstance(s, dict) and s.get('namespace')]
             new_ns_set = set(new_ns_list)
 
             # 删除在表中但不在新数据中的行（倒序删除）
@@ -170,7 +182,7 @@ class TableManager:
                 current_ns_to_row[ns] = row
 
             # 更新或追加
-            for state in state_list:
+            for state in online_state_list:
                 if not isinstance(state, dict):
                     continue
                 ns = state.get('namespace', 'Unknown')

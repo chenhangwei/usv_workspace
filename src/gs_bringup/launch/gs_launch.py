@@ -1,6 +1,7 @@
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import LaunchConfiguration
@@ -23,7 +24,16 @@ def generate_launch_description():
         description='Ground station parameters file'
     )
 
+    # USV fleet 配置文件（用于Domain隔离架构）
+    default_fleet_config = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'gs_bringup', 'config', 'usv_fleet.yaml'))
+    fleet_config_arg = DeclareLaunchArgument(
+        'fleet_config_file',
+        default_value=default_fleet_config,
+        description='USV fleet configuration file (for Domain isolation architecture)'
+    )
+
     gs_param_file = LaunchConfiguration('gs_param_file')
+    fleet_config_file = LaunchConfiguration('fleet_config_file')
 
     def _resolve_gs_param_file(context, *args, **kwargs):
         """Resolve gs_params.yaml path at runtime: prefer package share, fallback to workspace src."""
@@ -53,13 +63,26 @@ def generate_launch_description():
         name='main_gui_app',
         output='screen',
         parameters=[
-            {'use_sim_time': False},
-            gs_param_file
+            gs_param_file,  # 从文件加载参数
+            {
+                'use_sim_time': False,
+                'fleet_config_file': default_fleet_config,  # 直接使用字符串路径
+            }
         ]
     )
 
+    # ⚠️ Domain Bridge 已移除 - 请使用独立脚本管理
+    # Domain Bridge 应该独立启动，避免与手动启动冲突:
+    #   启动: ./src/gs_bringup/scripts/domain_bridge.sh start
+    #   停止: ./src/gs_bringup/scripts/domain_bridge.sh stop
+    #   状态: ./src/gs_bringup/scripts/domain_bridge.sh status
+    #
+    # 原因: Domain Bridge 需要在地面站启动前先运行，且不应该随地面站重启而重启
+    # 配置文件: ~/domain_bridge/domain_bridge.yaml
 
     return LaunchDescription([
         gs_param_arg,
+        fleet_config_arg,  # 添加fleet配置参数
         main_gui_app,
+        # domain_bridge_launch,  # 已注释 - 请独立启动
     ])

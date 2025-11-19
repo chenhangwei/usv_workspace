@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
 from mavros_msgs.srv import CommandBool, SetMode
+from mavros_msgs.msg import State
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 
@@ -39,6 +40,23 @@ class UsvCommandNode(Node):
         self.supported_modes = self.get_parameter('supported_modes').get_parameter_value().string_array_value
         self.service_timeout_sec = self.get_parameter('service_timeout_sec').get_parameter_value().double_value
         self.arming_command_timeout_sec = self.get_parameter('arming_command_timeout_sec').get_parameter_value().double_value
+
+        # 防抖机制: 记录最后一次模式切换的时间和模式
+        self.last_mode_command = None
+        self.last_mode_time = 0.0
+        self.mode_debounce_sec = 0.5  # 0.5秒防抖时间
+        
+        # 模式切换中标志,防止并发切换
+        self.mode_switching = False
+        
+        # 订阅MAVROS状态,记录当前实际模式
+        self.current_mavros_mode = None
+        self.state_sub = self.create_subscription(
+            State,
+            'state',
+            self.mavros_state_callback,
+            qos_reliable
+        )
 
         self.get_logger().info(f'支持的模式: {", ".join(self.supported_modes)}')
         self.get_logger().info(f'服务超时时间: {self.service_timeout_sec}秒')
@@ -73,6 +91,15 @@ class UsvCommandNode(Node):
 
         self.get_logger().info('USV 命令控制节点已启动')
 
+    def mavros_state_callback(self, msg):
+        """
+        MAVROS状态回调,更新当前实际模式
+        
+        Args:
+            msg (State): MAVROS状态消息
+        """
+        self.current_mavros_mode = msg.mode
+
     def set_mode_callback(self, msg):
         """
         处理模式切换命令回调函数
@@ -80,8 +107,6 @@ class UsvCommandNode(Node):
         Args:
             msg (String): 包含目标模式的字符串消息
         """
-        self.get_logger().info(f'收到模式消息: {msg.data}')
-        
         if not isinstance(msg, String):
             self.get_logger().error('收到无效的模式消息类型')
             return
@@ -90,6 +115,29 @@ class UsvCommandNode(Node):
         if msg.data not in self.supported_modes:
             self.get_logger().error(f'不支持的模式: {msg.data}，支持的模式: {", ".join(self.supported_modes)}')
             return
+
+        # 防抖: 0.5秒内相同模式只处理一次(优先检查,避免日志刷屏)
+        current_time = self.get_clock().now().nanoseconds / 1e9
+        if (self.last_mode_command == msg.data and 
+            current_time - self.last_mode_time < self.mode_debounce_sec):
+            # 静默忽略重复命令,不打印日志避免刷屏
+            return
+
+        # 如果当前模式已经是目标模式,静默忽略
+        if self.current_mavros_mode == msg.data:
+            # 更新防抖时间,避免频繁检查
+            self.last_mode_command = msg.data
+            self.last_mode_time = current_time
+            return
+
+        # 如果已经在切换中,静默拒绝新请求
+        if self.mode_switching:
+            return
+        
+        self.get_logger().info(f'收到模式消息: {msg.data}')
+        self.last_mode_command = msg.data
+        self.last_mode_time = current_time
+        self.mode_switching = True  # 标记切换中
 
         # 等待服务可用
         try:
@@ -114,6 +162,7 @@ class UsvCommandNode(Node):
             future: 异步调用的future对象
             mode (str): 目标模式名称
         """
+        self.mode_switching = False  # 清除切换标志
         try:
             response = future.result()
             if response and response.mode_sent:
@@ -174,6 +223,11 @@ class UsvCommandNode(Node):
                 self.get_logger().warn(f'[!] 设置 {state} 失败')
         except Exception as e:
             self.get_logger().error(f'[X] 设置 {state} 时发生异常: {e}')
+
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        # 该节点没有 timer,只需调用父类方法
+        super().destroy_node()
 
 
 def main(args=None):

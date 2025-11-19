@@ -15,6 +15,9 @@ import random
 import math
 import json
 
+# 导入common_utils工具
+from common_utils import SerialResourceManager, ParamLoader, ParamValidator
+
 
 class UsvLedNode(Node):
     """
@@ -34,11 +37,36 @@ class UsvLedNode(Node):
             reliability=QoSReliabilityPolicy.BEST_EFFORT
         )
 
-        # 声明并获取串口参数 
-        self.declare_parameter('port', '/dev/ttyUSB0')  # 默认串口
-        self.declare_parameter('baudrate', 115200)      # 默认波特率 
-        port = self.get_parameter('port').get_parameter_value().string_value
-        baud = self.get_parameter('baudrate').get_parameter_value().integer_value
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
+        # 加载串口参数
+        port = param_loader.load_param(
+            'port',
+            '/dev/ttyUSB0',
+            ParamValidator.non_empty_string,
+            'LED串口路径'
+        )
+        baud = param_loader.load_param(
+            'baudrate',
+            115200,
+            lambda x: x in [9600, 19200, 38400, 57600, 115200],
+            'LED波特率'
+        )
+        timeout = param_loader.load_param(
+            'timeout',
+            1.0,
+            ParamValidator.positive,
+            '串口超时(秒)'
+        )
+        
+        # 创建串口资源管理器
+        self.serial_manager = SerialResourceManager(self.get_logger())
+        
+        # 打开串口
+        if not self.serial_manager.open(port, baud, timeout):
+            self.get_logger().error('初始化LED串口失败，节点退出')
+            raise RuntimeError(f'Failed to open serial port {port}')
         
         # 声明并获取LED效果参数
         self.declare_parameter('color_list', [255, 0, 0, 255, 127, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 139, 0, 255])
@@ -48,15 +76,7 @@ class UsvLedNode(Node):
         self.declare_parameter('hold_duration', 10.0)       # 颜色停留时间（秒）
         
         self.declare_parameter('breath_step', 6)  # 呼吸灯步进值
-        self.declare_parameter('color_select_transition_duration', 3.0)  # 单个颜色命令的渐变时间
-        
-        try:
-            self.ser = serial.Serial(port, baud, timeout=1)
-            self.get_logger().info(f'串口 {port} 打开成功')
-        except serial.SerialException as e:
-            self.get_logger().error(f'打开串口失败: {e}')
-            self.ser = None
-            return        
+        self.declare_parameter('color_select_transition_duration', 3.0)  # 单个颜色命令的渐变时间        
         
         # 订阅地面站的 LED 控制命令
         self.gs_led_sub = self.create_subscription(
@@ -517,11 +537,11 @@ class UsvLedNode(Node):
                         rbg_to_send.extend([r, g, b])
                         
                 command = self.build_command(rbg_to_send, 60)
-                if command and self.ser and self.ser.is_open:
-                    self.ser.write(command)
+                if command and self.serial_manager.is_open:
+                    self.serial_manager.write(command)
                     self.last_sent_rgb = rgb_to_send[:]  # 及时缓存，防止重复发送
                     # self.get_logger().info(f'发送LED命令：{command.hex()}')
-                elif not self.ser or not self.ser.is_open:
+                elif not self.serial_manager.is_open:
                     self.get_logger().warn('串口未打开，无法发送LED命令')
 
                 self._publish_led_state(rgb_to_send)
@@ -529,14 +549,10 @@ class UsvLedNode(Node):
         except Exception as e:
             self.get_logger().error(f'定时器回调处理时发生错误: {e}')
 
-    def __del__(self):
-        """清理资源"""
-        try:
-            if hasattr(self, 'ser') and self.ser and self.ser.is_open:
-                self.ser.close()
-                self.get_logger().info('串口已关闭')
-        except Exception as e:
-            self.get_logger().warn(f'关闭串口时发生错误: {e}')
+    def destroy_node(self):
+        """节点销毁时关闭串口"""
+        self.serial_manager.close()
+        super().destroy_node()
 
 
 def main(args=None):

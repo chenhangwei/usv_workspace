@@ -12,6 +12,9 @@ from rclpy.node import Node
 import serial
 from sensor_msgs.msg import Range
 
+# 导入common_utils工具
+from common_utils import SerialResourceManager, ParamLoader, ParamValidator
+
 
 class UltrasonicRadarNode(Node):
     """
@@ -26,25 +29,43 @@ class UltrasonicRadarNode(Node):
         super().__init__('usv_ultrasonic_radar_node')
 
         namespace = self.get_namespace()
-
-        # 创建发布者，发布 话题
-        self.publisher_ = self.create_publisher(Range, 'ultrasonic_radar_range', 10)
-        # 设置定时器，每 0.3秒读取一次数据
-        self.timer = self.create_timer(0.3, self.timer_callback)
         
-        # 初始化串口
-        self.serial_port = None
-        try:
-            self.serial_port = serial.Serial(
-                port='/dev/ttyUSB0',
-                baudrate=9600,
-                timeout=1
-            )
-            self.get_logger().info('超声波雷达串口打开成功')
-
-        except serial.SerialException as e:
-            self.get_logger().error(f"打开串口 /dev/ttyUSB0 失败: {str(e)}")
-            return  # 避免继续初始化
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
+        # 加载串口参数
+        port = param_loader.load_param(
+            'serial_port',
+            '/dev/ttyUSB0',
+            ParamValidator.non_empty_string,
+            '超声波雷达串口路径'
+        )
+        baudrate = param_loader.load_param(
+            'baud_rate',
+            9600,
+            lambda x: x in [9600, 19200, 38400, 57600, 115200],
+            '超声波雷达波特率'
+        )
+        timeout = param_loader.load_param(
+            'timeout',
+            1.0,
+            ParamValidator.positive,
+            '串口超时(秒)'
+        )
+        
+        # 创建串口资源管理器
+        self.serial_manager = SerialResourceManager(self.get_logger())
+        
+        # 打开串口
+        if not self.serial_manager.open(port, baudrate, timeout):
+            self.get_logger().error('初始化超声波雷达串口失败，节点退出')
+            raise RuntimeError(f'Failed to open serial port {port}')
+        
+        # 创建发布者
+        self.publisher_ = self.create_publisher(Range, 'ultrasonic_radar_range', 10)
+        
+        # 设置定时器
+        self.timer = self.create_timer(0.3, self.timer_callback)
             
         # 初始化 Range 消息
         self.range_msg = Range()
@@ -62,14 +83,17 @@ class UltrasonicRadarNode(Node):
         
         定期从串口读取超声波雷达数据并发布。
         """
-        if not self.serial_port or not self.serial_port.is_open:
+        if not self.serial_manager.is_open:
             self.get_logger().error('串口未初始化或已关闭')
             return
 
-        # self.get_logger().info('正在读取串口数据...')
         try:
             # 读取所有可用数据（至少 3 字节为一帧）
-            data = self.serial_port.read(self.serial_port.in_waiting or 3)
+            if self.serial_manager.serial_port:
+                in_waiting = self.serial_manager.serial_port.in_waiting or 3
+                data = self.serial_manager.read(in_waiting)
+            else:
+                return
             if data:
                 # self.get_logger().info(f'原始数据: {data.hex()} (hex)')
                 # 按帧解析（每帧 3 字节）
@@ -100,16 +124,13 @@ class UltrasonicRadarNode(Node):
                         # self.get_logger().warn(f'帧长度不足: {frame.hex()} (hex), 长度: {len(frame)}')
             else:
                 self.get_logger().debug('串口无数据返回')
-        except serial.SerialException as e:
-            self.get_logger().error(f'读取串口失败: {str(e)}')
         except Exception as e:
             self.get_logger().error(f'处理数据时发生错误: {str(e)}')
-
-    def __del__(self):
-        """关闭串口"""
-        if hasattr(self, 'serial_port') and self.serial_port and self.serial_port.is_open:
-            self.serial_port.close()
-            self.get_logger().info('串口已关闭')
+    
+    def destroy_node(self):
+        """节点销毁时关闭串口"""
+        self.serial_manager.close()
+        super().destroy_node()
 
 
 def main(args=None):

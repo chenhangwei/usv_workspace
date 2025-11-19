@@ -15,6 +15,9 @@ from geometry_msgs.msg import PoseStamped
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
 
+# 导入common_utils工具
+from common_utils import ParamLoader
+
 
 class GpsToLocalNode(Node):
     """GPS 到本地坐标转换节点"""
@@ -27,14 +30,22 @@ class GpsToLocalNode(Node):
     def __init__(self):
         super().__init__('gps_to_local_node')
         
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
         # =============================================================================
         # 参数声明
         # =============================================================================
         
-        # GPS 原点配置（A0基站坐标）
-        self.declare_parameter('gps_origin_lat', 22.5180977)  # 北纬（度）
-        self.declare_parameter('gps_origin_lon', 113.9007239) # 东经（度）
-        self.declare_parameter('gps_origin_alt', -5.17)       # 海拔（米，实测值）
+        # GPS 原点配置（A0基站坐标）- 使用统一加载方法
+        gps_origin = param_loader.load_gps_origin(
+            default_lat=22.5180977,
+            default_lon=113.9007239,
+            default_alt=-5.17
+        )
+        self.origin_lat = gps_origin['lat']
+        self.origin_lon = gps_origin['lon']
+        self.origin_alt = gps_origin['alt']
         
         # 发布频率
         self.declare_parameter('publish_rate', 10.0)  # Hz
@@ -42,10 +53,7 @@ class GpsToLocalNode(Node):
         # 是否启用此功能
         self.declare_parameter('enable_gps_to_local', True)
         
-        # 获取参数
-        self.origin_lat = float(self.get_parameter('gps_origin_lat').value)
-        self.origin_lon = float(self.get_parameter('gps_origin_lon').value)
-        self.origin_alt = float(self.get_parameter('gps_origin_alt').value)
+        # 获取其他参数
         self.publish_rate = float(self.get_parameter('publish_rate').value)
         self.enabled = bool(self.get_parameter('enable_gps_to_local').value)
         
@@ -247,6 +255,12 @@ class GpsToLocalNode(Node):
         z = alt - self.origin_alt
         
         return {'x': x, 'y': y, 'z': z}
+
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if hasattr(self, 'publish_timer'):
+            self.publish_timer.cancel()
+        super().destroy_node()
 
 
 def main(args=None):

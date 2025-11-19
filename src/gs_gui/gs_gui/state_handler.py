@@ -15,7 +15,7 @@ class StateHandler:
     NAV_STATUS_SUCCEEDED = "成功"
     NAV_STATUS_FAILED = "失败"
     
-    def __init__(self, table_manager, list_manager, warning_callback, info_panel_update_callback=None):
+    def __init__(self, table_manager, list_manager, warning_callback, info_panel_update_callback=None, navigation_panel_update_callback=None):
         """
         初始化状态处理器
         
@@ -24,11 +24,13 @@ class StateHandler:
             list_manager: 列表管理器
             warning_callback: 警告输出回调
             info_panel_update_callback: USV信息面板更新回调（可选）
+            navigation_panel_update_callback: USV导航面板更新回调（可选）
         """
         self.table_manager = table_manager
         self.list_manager = list_manager
         self.append_warning = warning_callback
         self.info_panel_update_callback = info_panel_update_callback
+        self.navigation_panel_update_callback = navigation_panel_update_callback
         
         # USV状态缓存
         self._usv_state_cache = {}
@@ -37,9 +39,14 @@ class StateHandler:
         # 存储USV导航状态
         self.usv_nav_status = {}
         
+        # 存储USV导航反馈数据
+        self._usv_navigation_feedback_cache = {}
+        
         # 使用 QTimer 在 GUI 线程周期性刷新 UI
         self._ui_refresh_timer = QTimer()
-        self._ui_refresh_timer.setInterval(200)  # 每200毫秒检查一次更新
+        # 设置为 200ms (5Hz) 以平衡响应速度和性能
+        # 注意：50ms 刷新率在窗口调整大小时会导致卡顿，200ms 足够响应用户操作
+        self._ui_refresh_timer.setInterval(200)  # 200ms = 5Hz 刷新率
         self._ui_refresh_timer.timeout.connect(self._flush_state_cache_to_ui)
         self._ui_refresh_timer.start()
     
@@ -74,7 +81,8 @@ class StateHandler:
             return
         
         try:
-            # 用缓存构建在线列表
+            # 用缓存构建在线列表（包含所有 USV，无论在线还是离线）
+            # 在 list_manager 和 table_manager 中会根据 connected 状态进行显示控制
             online_list = list(self._usv_state_cache.values())
             
             # 更新列表管理器的在线列表
@@ -96,6 +104,13 @@ class StateHandler:
                     self.info_panel_update_callback()
                 except Exception as e:
                     self.append_warning(f"更新USV信息面板时出错: {e}")
+            
+            # 🔥 新增：刷新选中的 USV 导航面板
+            if self.navigation_panel_update_callback:
+                try:
+                    self.navigation_panel_update_callback()
+                except Exception as e:
+                    self.append_warning(f"更新USV导航面板时出错: {e}")
         
         except Exception as e:
             try:
@@ -131,6 +146,32 @@ class StateHandler:
             dict: USV状态字典，如果不存在则返回None
         """
         return self._usv_state_cache.get(usv_id)
+    
+    def update_navigation_feedback(self, usv_id, feedback):
+        """
+        更新USV的导航反馈数据
+        
+        Args:
+            usv_id (str): USV标识符
+            feedback: 导航反馈数据对象
+        """
+        # 更新导航反馈缓存
+        self._usv_navigation_feedback_cache[usv_id] = feedback
+        
+        # 标记需要更新
+        self._usv_state_dirty = True
+    
+    def get_usv_navigation_feedback(self, usv_id):
+        """
+        获取指定USV的导航反馈数据
+        
+        Args:
+            usv_id: USV ID
+            
+        Returns:
+            导航反馈数据对象，如果不存在则返回None
+        """
+        return self._usv_navigation_feedback_cache.get(usv_id)
     
     def stop_refresh_timer(self):
         """停止刷新定时器"""

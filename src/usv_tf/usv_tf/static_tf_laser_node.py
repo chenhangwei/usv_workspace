@@ -4,13 +4,15 @@ from tf2_ros import StaticTransformBroadcaster # 静态坐标发布器
 from geometry_msgs.msg import TransformStamped # 消息接口
 from tf_transformations import quaternion_from_euler # 欧拉角转四元数函数
 import math # 角度转弧度函数
+from common_utils import ParamLoader
 
 class StaticTfLaserNode(Node):
     def __init__(self):
         super().__init__('static_tf_laser_node')
         self.static_laser_=StaticTransformBroadcaster(self)
-        self.declare_parameter('namespace', 'usv_01')
-        self.ns = self.get_parameter('namespace').get_parameter_value().string_value
+        # 使用ParamLoader统一加载参数
+        loader = ParamLoader(self)
+        self.ns = loader.load_param('namespace', 'usv_01')
 
         self.publish_static_tf()
 
@@ -36,6 +38,11 @@ class StaticTfLaserNode(Node):
 
         self.static_laser_.sendTransform(transform)
         self.get_logger().info(f'发布静态TF:{transform}')
+
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        # 该节点使用 StaticTransformBroadcaster，不需要手动清理
+        super().destroy_node()
 
 
 def main(args=None):

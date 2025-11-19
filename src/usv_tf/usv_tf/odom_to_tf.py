@@ -4,6 +4,7 @@ from nav_msgs.msg import Odometry
 from geometry_msgs.msg import TransformStamped
 from tf2_ros import TransformBroadcaster
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from common_utils import ParamLoader
 
 class OdomToTF(Node):
     def __init__(self):
@@ -15,9 +16,9 @@ class OdomToTF(Node):
         )
         self.tf_broadcaster=TransformBroadcaster(self)
         
-        # 声明命名空间参数（用于 TF frame 命名）
-        self.declare_parameter('namespace', 'usv_01')
-        ns = self.get_parameter('namespace').get_parameter_value().string_value
+        # 使用ParamLoader统一加载参数
+        loader = ParamLoader(self)
+        ns = loader.load_param('namespace', 'usv_01')
         self.base_link_frame = f'base_link_{ns}'
         
         # [OK] 使用相对路径订阅（节点已在命名空间中启动）

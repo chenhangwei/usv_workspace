@@ -135,6 +135,12 @@ class AutoSetHomeNode(Node):
         except Exception as e:
             self.get_logger().error(f'❌ Failed to set Home Position: {e}')
 
+    def destroy_node(self):
+        """节点销毁时的资源清理"""
+        if self.delay_timer:
+            self.delay_timer.cancel()
+        super().destroy_node()
+
 
 def main(args=None):
     """

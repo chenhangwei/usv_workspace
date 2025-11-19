@@ -8,7 +8,6 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QListWidget, QListWidgetItem, QAbstractItemView)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
-from .compass_widget import CompassWidget
 
 # 兼容性定义
 try:
@@ -110,10 +109,6 @@ class UsvInfoPanel(QWidget):
         # ==================== GPS 信息组 ====================
         gps_group = self._create_gps_info_group()
         content_layout.addWidget(gps_group)
-        
-        # ==================== 速度信息组 ====================
-        velocity_group = self._create_velocity_info_group()
-        content_layout.addWidget(velocity_group)
         
         # ==================== Ready 状态组 ====================
         readiness_group = self._create_readiness_group()
@@ -417,46 +412,6 @@ class UsvInfoPanel(QWidget):
         layout.setColumnStretch(1, 1)
         group.setLayout(layout)
         return group
-    
-    def _create_velocity_info_group(self):
-        """创建速度信息组（带罗盘显示）"""
-        group = QGroupBox("📋 速度 & 航向")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#e74c3c"))
-        
-        main_layout = QVBoxLayout()
-        main_layout.setSpacing(10)
-        main_layout.setContentsMargins(10, 12, 10, 10)
-        
-        # 上半部分：文字信息
-        info_layout = QGridLayout()
-        info_layout.setSpacing(5)
-        
-        # 地速
-        self.ground_speed_label = self._create_value_label("--")
-        info_layout.addWidget(self._create_key_label("地速:"), 0, 0)
-        info_layout.addWidget(self.ground_speed_label, 0, 1)
-        info_layout.addWidget(QLabel("m/s"), 0, 2)
-        
-        # 航向数字
-        self.heading_speed_label = self._create_value_label("--")
-        info_layout.addWidget(self._create_key_label("航向:"), 1, 0)
-        info_layout.addWidget(self.heading_speed_label, 1, 1)
-        info_layout.addWidget(QLabel("°"), 1, 2)
-        
-        info_layout.setColumnStretch(1, 1)
-        main_layout.addLayout(info_layout)
-        
-        # 下半部分：罗盘图形显示
-        compass_container = QHBoxLayout()
-        compass_container.addStretch()
-        self.compass_widget = CompassWidget()
-        self.compass_widget.setFixedSize(140, 140)  # 固定尺寸，避免拉伸
-        compass_container.addWidget(self.compass_widget)
-        compass_container.addStretch()
-        main_layout.addLayout(compass_container)
-        
-        group.setLayout(main_layout)
-        return group
 
     def _create_vehicle_message_group(self):
         """创建飞控消息展示组"""
@@ -690,29 +645,6 @@ class UsvInfoPanel(QWidget):
 
             self.gps_accuracy_label.setText(self._format_float(state.get('gps_eph'), precision=1))
             
-            # 更新速度信息（从 velocity 计算）
-            vel = state.get('velocity', {}) or {}
-            linear = vel.get('linear', {}) or {}
-            
-            # 计算地速（水平速度的模）
-            try:
-                vx = float(linear.get('x', 0.0))
-                vy = float(linear.get('y', 0.0))
-                ground_speed = (vx ** 2 + vy ** 2) ** 0.5
-                self.ground_speed_label.setText(self._format_float(ground_speed, precision=2))
-            except (ValueError, TypeError):
-                self.ground_speed_label.setText("--")
-            
-            # 航向（直接从 heading 字段获取，单位为度）
-            try:
-                heading_deg = float(state.get('heading', 0.0))
-                self.heading_speed_label.setText(self._format_float(heading_deg, precision=1))
-                # 更新罗盘显示
-                self.compass_widget.set_heading(heading_deg)
-            except (ValueError, TypeError):
-                self.heading_speed_label.setText("--")
-                self.compass_widget.set_heading(0.0)
-            
         except Exception as e:
             print(f"更新 USV 信息面板失败: {e}")
     
@@ -735,10 +667,6 @@ class UsvInfoPanel(QWidget):
         
         self.satellite_label.setText("--")
         self.gps_accuracy_label.setText("--")
-        
-        self.ground_speed_label.setText("--")
-        self.heading_speed_label.setText("--")
-        self.compass_widget.set_heading(0.0)  # 重置罗盘显示
         
         # 重置温度状态标志
         self._is_high_temperature = False
