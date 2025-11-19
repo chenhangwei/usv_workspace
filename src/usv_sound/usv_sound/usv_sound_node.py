@@ -101,13 +101,18 @@ class UsvSoundNode(Node):
                 self.low_voltage = True
                 self.get_logger().error('[!][!][!] 低电压模式触发！')
                 
-                # 🔥 修复：仅在用户未主动停止时自动启动声音
-                if not self.user_stopped_sound:
-                    if not (self.loop_thread and self.loop_thread.is_alive()):
-                        self.get_logger().error('[!] 自动启动低电量警告声音播放')
-                        self.start_sound_loop()
+                # 🚨 低电量警告是安全关键功能，必须无条件触发！
+                # 清除用户停止标志，强制播放低电量警告声音
+                if self.user_stopped_sound:
+                    self.get_logger().warn('[!] 低电量触发，覆盖用户停止指令，强制播放警告声音')
+                    self.user_stopped_sound = False
+                
+                # 启动或重启声音循环
+                if not (self.loop_thread and self.loop_thread.is_alive()):
+                    self.get_logger().error('[!] 自动启动低电量警告声音播放')
+                    self.start_sound_loop()
                 else:
-                    self.get_logger().warn('[!] 低电量触发但用户已停止声音，保持静音')
+                    self.get_logger().info('[!] 声音循环已在运行，将切换到低电量音效')
                 
             elif not msg.data and self.low_voltage:
                 # 退出低电量模式

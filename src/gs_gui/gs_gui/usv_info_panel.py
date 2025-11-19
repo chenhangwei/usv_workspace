@@ -571,7 +571,8 @@ class UsvInfoPanel(QWidget):
             
             # Ready 指示与连接状态
             connected = state.get('connected', False)
-            self._update_ready_view(prearm_ready, prearm_warnings, connected)
+            armed = state.get('armed', False)
+            self._update_ready_view(prearm_ready, prearm_warnings, connected, armed)
             self._update_sensor_list(sensor_status)
             self._update_vehicle_messages(vehicle_messages)
 
@@ -580,7 +581,7 @@ class UsvInfoPanel(QWidget):
             self.status_label.setText(str(status))
             self._update_status_style(status)
             
-            armed = state.get('armed', False)
+            # Armed 标签更新（armed 已在上面获取）
             self.armed_label.setText(str(armed))
             self._update_armed_style(armed)
             
@@ -760,8 +761,15 @@ class UsvInfoPanel(QWidget):
             }}
         """)
 
-    def _update_ready_view(self, ready, warnings, connected):
-        """根据预检结果更新 Ready 按钮和警告列表"""
+    def _update_ready_view(self, ready, warnings, connected, armed=False):
+        """根据预检结果和解锁状态更新 Ready 按钮和警告列表
+        
+        Args:
+            ready: 预检是否通过
+            warnings: 预检警告列表
+            connected: 是否连接
+            armed: 是否已解锁（USV Arm 成功后为 True）
+        """
         if not hasattr(self, 'ready_button'):
             return
 
@@ -769,6 +777,11 @@ class UsvInfoPanel(QWidget):
             button_text = "USV 离线"
             summary = "车辆离线，等待连接..."
             button_bg, button_fg = "#95a5a6", "#ffffff"
+        elif armed:
+            # 已解锁状态优先显示（USV Arm 成功后）
+            button_text = "Armed"
+            summary = "无人船已解锁，准备航行"
+            button_bg, button_fg = "#27ae60", "#ffffff"
         elif ready:
             button_text = "Ready to Sail"
             summary = "所有预检检查通过"

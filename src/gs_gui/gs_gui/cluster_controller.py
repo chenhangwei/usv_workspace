@@ -126,10 +126,13 @@ class ClusterController:
 
     def _reset_cluster_task(self, target_state: ClusterTaskState, reason: str, cancel_active: bool = True) -> None:
         """统一重置集群任务状态。"""
+        usv_ids_to_manual = []
+        
         if cancel_active:
             # 清理所有 USV 的导航目标缓存
             for usv_id in list(self.node._usv_nav_target_cache.keys()):
                 self._cancel_active_goal(usv_id)
+                usv_ids_to_manual.append(usv_id)
 
         self.node.current_targets = []
         self.node.run_step = 0
@@ -139,6 +142,14 @@ class ClusterController:
         self._cluster_start_time = None
         self._set_state(target_state, reason)
         self._emit_current_progress([])
+        
+        # 任务停止或完成后，将所有参与的USV设置为MANUAL模式
+        if usv_ids_to_manual and target_state in (ClusterTaskState.IDLE, ClusterTaskState.COMPLETED):
+            self.node.get_logger().info(f"集群任务{target_state.value}，将 {len(usv_ids_to_manual)} 个USV设置为MANUAL模式")
+            self.node.ros_signal.manual_command.emit(usv_ids_to_manual)
+            # 更新导航状态显示为"待命"
+            for usv_id in usv_ids_to_manual:
+                self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
 
     def stop_cluster_task(self, reason: str = "手动停止") -> None:
         """外部请求停止集群任务。"""
@@ -217,8 +228,9 @@ class ClusterController:
         if not getattr(self.node, 'current_targets', None):
             return
             
-        # 检查任务是否已暂停
-        if self._state == ClusterTaskState.PAUSED:
+        # 检查任务是否已暂停或已完成
+        # ⚠️ 修复：防止任务完成后继续发送目标点（run_step已重置为0）
+        if self._state in (ClusterTaskState.PAUSED, ClusterTaskState.COMPLETED, ClusterTaskState.IDLE):
             return
 
         try:
@@ -249,6 +261,12 @@ class ClusterController:
             # 确保 ack_map 已为当前 step 的艇初始化
             # 调用方法确保当前步骤的所有USV都在确认映射表中正确初始化
             self._initialize_ack_map_for_step(cluster_usv_list)
+            
+            # 调试日志：输出当前步骤的USV列表和确认状态
+            self.node.get_logger().debug(
+                f"步骤 {self.node.run_step}: USV列表={[u.get('usv_id') for u in cluster_usv_list if isinstance(u, dict)]}, "
+                f"确认状态={[(k, v.acked, v.retry) for k, v in self._ack_states.items()]}"
+            )
 
             # 更新每艇 ack 状态并处理超时/重试
             # 处理每艘USV的确认状态、超时和重试逻辑，确保指令可靠传递
@@ -256,7 +274,18 @@ class ClusterController:
 
             # 判断是否所有艇已 ack
             # 检查是否所有USV都已确认接收到目标点，用于判断是否可以进入下一步
-            all_acked = all(state.acked for state in self._ack_states.values()) if self._ack_states else False
+            # ⚠️ 注意：必须确保_ack_states不为空且所有状态都已确认
+            # 原bug：当_ack_states为空时，all()返回True导致错误进入下一步
+            all_acked = bool(self._ack_states) and all(state.acked for state in self._ack_states.values())
+            
+            # 调试日志：输出all_acked判断结果
+            if all_acked:
+                self.node.get_logger().info(
+                    f"步骤 {self.node.run_step} 所有USV已确认 "
+                    f"({len([s for s in self._ack_states.values() if s.acked])}/{len(self._ack_states)})，"
+                    f"准备进入下一步"
+                )
+            
             # 如果所有USV都已确认，则准备进入下一步
             if all_acked:
                 # 调用方法进入下一步操作，更新步骤状态和相关变量
@@ -390,11 +419,12 @@ class ClusterController:
                 self._action_timeout,
             )
         else:
-            # 达到最大重试次数，标记为已确认并记录日志，不再重试
-            state.acked = True
-            state.ack_time = now
+            # 达到最大重试次数，但不应标记为"已确认"
+            # ⚠️ 修复：超时失败不等于成功确认，不应设置 acked=True
+            # 只记录失败状态，让 _check_and_proceed_on_ack_rate 根据确认率判断是否进入下一步
+            state.acked = False  # 明确标记为未确认
             # 记录错误日志，说明该USV已超时且达到最大重试次数
-            self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，跳过并继续下一步")
+            self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
 
     def _area_to_global(self, p_area):
         """

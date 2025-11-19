@@ -20,6 +20,19 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到手动模式命令")
+        
+        # 手动切换到MANUAL模式时，应该停止所有导航任务
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            # 提取USV ID
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            # 如果该USV有正在执行的导航任务，取消它
+            if usv_id in self.node._usv_nav_target_cache:
+                self.node.get_logger().info(f"🛑 手动切换MANUAL模式，取消 {usv_id} 的导航任务")
+                del self.node._usv_nav_target_cache[usv_id]
+                # 更新导航状态显示为"已停止"
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
+        
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "MANUAL")
 

@@ -80,8 +80,8 @@ class TestUsvInfoPanel:
         assert panel.ground_speed_label.text() != '--'
         assert panel.heading_speed_label.text() != '--'
 
-        # 验证 Ready 按钮
-        assert panel.ready_button.text() == 'Ready to Sail'
+        # 验证 Ready 按钮（armed=True 时应显示 'Armed'）
+        assert panel.ready_button.text() == 'Armed'
         assert '预检' not in panel.ready_summary_label.text()
         assert panel.sensor_list.count() == 1
     
