@@ -122,3 +122,5 @@
 2025-11-20 10:43:50,183 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
 2025-11-20 10:45:25,981 INFO common_utils.process_tracker: 清理 1 个子进程...
 2025-11-20 10:45:25,982 INFO common_utils.process_tracker: 所有子进程已清理
+2025-11-20 16:54:43,992 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2025-11-20 19:05:21,536 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log

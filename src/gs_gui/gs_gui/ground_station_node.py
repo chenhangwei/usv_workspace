@@ -40,8 +40,8 @@ class GroundStationNode(Node):
 
     # 常量定义
     INFECTION_DISTANCE_SQUARED = 4.0  # 2米距离的平方
-    DEFAULT_STEP_TIMEOUT = 20.0  # 默认步骤超时时间(秒)
-    DEFAULT_MAX_RETRIES = 1      # 默认最大重试次数
+    DEFAULT_STEP_TIMEOUT = 25.0  # 默认步骤超时时间(秒) - 等待USV响应的时间，增加到25秒避免误判
+    DEFAULT_MAX_RETRIES = 3      # 默认最大重试次数 - 增加到3次，给USV更多机会
     INFECTION_CHECK_PERIOD = 2.0 # 传染检查周期(秒)，增加周期减少CPU占用
     NAMESPACE_UPDATE_PERIOD = 2.0 # 命名空间更新周期(秒)，从 5.0 减少到 2.0，加快离线检测
     CLUSTER_TARGET_PUBLISH_PERIOD = 5 # 集群目标发布周期(秒)，增加周期减少CPU占用
@@ -782,6 +782,10 @@ class GroundStationNode(Node):
         if msg.success:
             self.ros_signal.nav_status_update.emit(usv_id, "成功")
             self.cluster_controller.mark_usv_goal_result(usv_id, True, goal_step)
+            
+            # ✅ 修复：不在每个目标点完成时切换HOLD，让USV保持GUIDED模式继续执行后续步骤
+            # 集群任务完成后会统一切换到HOLD（在_reset_cluster_task中处理）
+            self.get_logger().info(f"✅ {usv_id} 导航成功，保持GUIDED模式等待下一步任务")
         else:
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             self.cluster_controller.mark_usv_goal_result(usv_id, False, goal_step)
@@ -855,6 +859,9 @@ class GroundStationNode(Node):
     # 委托给子模块的方法
     def set_manual_callback(self, msg):
         self.command_processor.set_manual_callback(msg)
+
+    def set_hold_callback(self, msg):
+        self.command_processor.set_hold_callback(msg)
 
     def set_guided_callback(self, msg):
         self.command_processor.set_guided_callback(msg)

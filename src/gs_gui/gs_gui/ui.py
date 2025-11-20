@@ -370,7 +370,7 @@ class Ui_MainWindow(object):
         self.arming_pushButton.setText(_translate("MainWindow", "Arming"))
         self.disarming_pushButton.setText(_translate("MainWindow", "Disarming"))
         self.set_guided_pushButton.setText(_translate("MainWindow", "Guided"))
-        self.set_manual_pushButton.setText(_translate("MainWindow", "Manual"))
+        self.set_manual_pushButton.setText(_translate("MainWindow", "HOLD"))
         self.send_cluster_point_pushButton.setText(_translate("MainWindow", "cluster start"))
         self.stop_cluster_task_pushButton.setText(_translate("MainWindow", "cluster stop"))
         self.sound_start_pushButton.setText(_translate("MainWindow", "sound_start"))

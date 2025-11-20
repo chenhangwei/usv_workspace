@@ -20,7 +20,8 @@ class ROSSignal(QObject):
     disarm_command = pyqtSignal(list)   # 解除武装命令，参数：USV命名空间列表
 
     # 模式切换命令信号
-    manual_command = pyqtSignal(list)   # 手动模式命令，参数：USV命名空间列表
+    hold_command = pyqtSignal(list)     # HOLD模式命令，参数：USV命名空间列表（集群使用）
+    manual_command = pyqtSignal(list)   # 手动模式命令，参数：USV命名空间列表（离群使用）
     guided_command = pyqtSignal(list)   # 制导模式命令，参数：USV命名空间列表
     arco_command = pyqtSignal(list)     # ARCO模式命令，参数：USV命名空间列表
     steering_command = pyqtSignal(list) # 转向模式命令，参数：USV命名空间列表

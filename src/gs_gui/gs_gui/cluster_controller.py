@@ -143,10 +143,10 @@ class ClusterController:
         self._set_state(target_state, reason)
         self._emit_current_progress([])
         
-        # 任务停止或完成后，将所有参与的USV设置为MANUAL模式
+        # 任务停止或完成后，将所有参与的USV设置为HOLD模式
         if usv_ids_to_manual and target_state in (ClusterTaskState.IDLE, ClusterTaskState.COMPLETED):
-            self.node.get_logger().info(f"集群任务{target_state.value}，将 {len(usv_ids_to_manual)} 个USV设置为MANUAL模式")
-            self.node.ros_signal.manual_command.emit(usv_ids_to_manual)
+            self.node.get_logger().info(f"集群任务{target_state.value}，将 {len(usv_ids_to_manual)} 个USV设置为HOLD模式")
+            self.node.ros_signal.hold_command.emit(usv_ids_to_manual)
             # 更新导航状态显示为"待命"
             for usv_id in usv_ids_to_manual:
                 self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
@@ -270,7 +270,9 @@ class ClusterController:
 
             # 更新每艇 ack 状态并处理超时/重试
             # 处理每艘USV的确认状态、超时和重试逻辑，确保指令可靠传递
-            self._process_usv_ack_and_timeouts(cluster_usv_list)
+            # 如果返回True表示已进入下一步,需要立即终止当前流程
+            if self._process_usv_ack_and_timeouts(cluster_usv_list):
+                return
 
             # 判断是否所有艇已 ack
             # 检查是否所有USV都已确认接收到目标点，用于判断是否可以进入下一步
@@ -290,6 +292,11 @@ class ClusterController:
             if all_acked:
                 # 调用方法进入下一步操作，更新步骤状态和相关变量
                 self._proceed_to_next_step()
+                # ✅ 修复：进入下一步后立即返回，避免使用旧的 cluster_usv_list
+                # _proceed_to_next_step 会更新 run_step 并重新获取下一步的列表
+                # 如果继续执行，会错误地使用上一步的 cluster_usv_list 发送目标点
+                # 这会导致发送错误的坐标，USV 因距离近而立即判定到达
+                return
 
             # 继续下发尚未 ack 的艇的目标点
             # 向尚未确认的USV重新发布目标点，确保所有艇都能接收到指令
@@ -342,6 +349,9 @@ class ClusterController:
         
         Args:
             cluster_usv_list (list): 当前步骤的USV列表
+            
+        Returns:
+            bool: True表示已进入下一步,False表示继续当前步骤
         """
         # 获取当前时间戳，用于确认时间和超时计算
         now = self._now()
@@ -365,7 +375,11 @@ class ClusterController:
             if not state.acked:
                 last_send_time = state.last_send_time
 
-                #  核心超时逻辑修改 ---
+                # ⚠️ 超时机制说明：
+                # - step_timeout：发送目标后等待USV响应的时间（默认25秒）
+                # - 这个超时用于检测USV是否在线/是否收到目标
+                # - 如果超时，会重试发送（最多max_retries次，默认3次）
+                # - 注意：这不是导航完成的超时！导航可以用300秒（cluster_action_timeout）
                 # 只有在发送目标后才进行超时检查
                 if last_send_time is not None:
                     elapsed = now - last_send_time
@@ -373,7 +387,8 @@ class ClusterController:
                         self._handle_usv_timeout(usv_id, ns)
 
         # 检查是否达到最小确认率阈值，如果是则可以进入下一步
-        self._check_and_proceed_on_ack_rate(cluster_usv_list)
+        # 返回True表示已进入下一步,需要终止当前流程
+        return self._check_and_proceed_on_ack_rate(cluster_usv_list)
 
     def _handle_usv_timeout(self, usv_id, ns):
         """
@@ -524,21 +539,23 @@ class ClusterController:
             self._reset_cluster_task(ClusterTaskState.COMPLETED, "全部步骤完成", cancel_active=False)
             # 记录日志信息
             self.node.get_logger().info("全部步骤完成")
-        else:
-            # 获取下一步的USV列表
-            next_list = self._get_usvs_by_step(self.node.current_targets, self.node.run_step)
-            # 获取当前时间
-            now = self._now()
-            # 重置并初始化确认映射表
-            self._ack_states.clear()
-            # 为下一步的USV初始化确认映射表
-            for ns in next_list:
-                uid = ns.get('usv_id')
-                if uid:
-                    self._ack_states[uid] = AckState(step=self.node.run_step)
-            # 更新集群开始时间为当前时间
-            self._cluster_start_time = now
-            self._emit_current_progress(next_list)
+            # ✅ 修复：任务完成后立即返回，不再执行后续逻辑
+            return
+        
+        # 获取下一步的USV列表
+        next_list = self._get_usvs_by_step(self.node.current_targets, self.node.run_step)
+        # 获取当前时间
+        now = self._now()
+        # 重置并初始化确认映射表
+        self._ack_states.clear()
+        # 为下一步的USV初始化确认映射表
+        for ns in next_list:
+            uid = ns.get('usv_id')
+            if uid:
+                self._ack_states[uid] = AckState(step=self.node.run_step)
+        # 更新集群开始时间为当前时间
+        self._cluster_start_time = now
+        self._emit_current_progress(next_list)
 
     def pause_cluster_task(self):
         """
@@ -577,48 +594,66 @@ class ClusterController:
 
     def _check_and_proceed_on_ack_rate(self, cluster_usv_list):
         """
-        检查确认率是否达到阈值，如果达到则进入下一步
+        检查确认率是否达到阈值，如果达到则推进到下一步
         
         Args:
             cluster_usv_list (list): 当前步骤的USV列表
+            
+        Returns:
+            bool: True表示已进入下一步,False表示继续当前步骤
         """
         # 只有当当前步骤有USV时才进行检查
         if not cluster_usv_list:
             self._emit_current_progress(cluster_usv_list)
-            return
+            return False
 
         total_usvs, acked_usvs, ack_rate = self._calculate_progress_metrics(cluster_usv_list)
 
         # 避免除零错误
         if total_usvs == 0:
             self._emit_progress_update(total_usvs, acked_usvs, ack_rate)
-            return
+            return False
 
         self._emit_progress_update(total_usvs, acked_usvs, ack_rate)
         
         # 如果确认率超过阈值且当前步骤尚未完成，则进入下一步
         if ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
-            # 检查是否所有USV都已处理（确认或超时）
-            all_processed = True
+            # 检查是否所有USV都已成功确认（超时失败不算已处理）
+            all_confirmed = True
+            pending_usvs = []
             for usv in cluster_usv_list:
                 if not isinstance(usv, dict):
                     continue
                 usv_id = usv.get('usv_id')
                 state = self._ack_states.get(usv_id) if usv_id else None
                 if not state or state.step != self.node.run_step:
-                    all_processed = False
+                    all_confirmed = False
+                    pending_usvs.append(f"{usv_id}(未初始化)")
                     break
-                if not state.acked and state.retry < self.node._max_retries:
-                    all_processed = False
-                    break
+                # ✅ 修复：只有成功确认才算完成，超时失败也视为未完成
+                if not state.acked:
+                    all_confirmed = False
+                    if state.retry >= self.node._max_retries:
+                        pending_usvs.append(f"{usv_id}(超时失败)")
+                    else:
+                        pending_usvs.append(f"{usv_id}(等待中)")
             
-            # 只有当所有USV都已处理时才进入下一步
-            if all_processed and ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
+            # 只有当所有USV都成功确认时才进入下一步
+            if all_confirmed and ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
                 self.node.get_logger().info(
                     f"确认率达到 {ack_rate*100:.1f}% (阈值: {self.node.MIN_ACK_RATE_FOR_PROCEED*100:.1f}%)，"
                     f"其中 {acked_usvs}/{total_usvs} 个USV已确认，进入下一步"
                 )
                 self._proceed_to_next_step()
+                # ✅ 修复：进入下一步后返回True，通知调用者已进入下一步
+                return True
+            elif pending_usvs:
+                self.node.get_logger().debug(
+                    f"等待USV完成: {', '.join(pending_usvs)}"
+                )
+        
+        # 返回False表示未进入下一步,继续当前步骤
+        return False
 
     def _publish_targets_for_unacked_usvs(self, cluster_usv_list):
         """
@@ -627,6 +662,11 @@ class ClusterController:
         Args:
             cluster_usv_list (list): 当前步骤的USV列表
         """
+        # 🔍 调试：检查传入的参数
+        self.node.get_logger().info(
+            f"🔍 [DEBUG] _publish_targets 接收到 {len(cluster_usv_list)} 个USV: "
+            f"{[(u.get('usv_id'), u.get('position', {})) for u in cluster_usv_list if isinstance(u, dict)]}"
+        )
         now = self._now()
         # 遍历USV列表
         for ns in cluster_usv_list:
@@ -700,7 +740,18 @@ class ClusterController:
             list: 指定步骤的USV目标列表
         """
         # 使用列表推导式筛选出指定步骤的USV目标
-        return [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
+        result = [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
+        
+        # 🔍 调试日志：输出筛选结果
+        if result:
+            self.node.get_logger().info(
+                f"🔍 [DEBUG] _get_usvs_by_step(step={step}): 找到 {len(result)} 个USV, "
+                f"坐标={[(u.get('usv_id'), u.get('position', {}).get('x'), u.get('position', {}).get('y')) for u in result]}"
+            )
+        else:
+            self.node.get_logger().warning(f"⚠️  _get_usvs_by_step(step={step}): 未找到任何USV")
+        
+        return result
 
     def _cancel_active_goal(self, usv_id):
         """
