@@ -117,3 +117,8 @@
 2025-11-19 16:34:53,530 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
 2025-11-19 16:58:21,434 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
 2025-11-19 17:05:24,569 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2025-11-20 08:39:39,017 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2025-11-20 09:23:03,706 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2025-11-20 10:43:50,183 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2025-11-20 10:45:25,981 INFO common_utils.process_tracker: 清理 1 个子进程...
+2025-11-20 10:45:25,982 INFO common_utils.process_tracker: 所有子进程已清理

@@ -153,10 +153,11 @@ class UsvFleetLauncher(QDialog):
         self.usv_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.Stretch)
         
         # 设置初始列宽度
-        self.usv_table.setColumnWidth(1, 100)
-        self.usv_table.setColumnWidth(2, 150)
-        self.usv_table.setColumnWidth(3, 100)
-        self.usv_table.setColumnWidth(4, 240)
+        self.usv_table.setColumnWidth(1, 100)   # 设备 ID
+        self.usv_table.setColumnWidth(2, 150)   # 主机地址
+        self.usv_table.setColumnWidth(3, 100)   # 状态
+        self.usv_table.setColumnWidth(4, 300)   # 操作（3个按钮需要更宽）
+        # 详情列(5)使用 Stretch 模式自动填充剩余空间
         
         # 行为设置
         self.usv_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -183,6 +184,23 @@ class UsvFleetLauncher(QDialog):
         batch_layout.addWidget(self.deselect_all_btn)
         
         batch_layout.addStretch()
+        
+        self.stop_selected_btn = QPushButton("⏹️ 停止选中")
+        self.stop_selected_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-weight: bold;
+                padding: 8px 16px;
+                border-radius: 5px;
+                border: 1px solid #d32f2f;
+            }
+            QPushButton:hover {
+                background-color: #e57373;
+            }
+        """)
+        self.stop_selected_btn.clicked.connect(self._stop_selected)
+        batch_layout.addWidget(self.stop_selected_btn)
         
         self.launch_selected_btn = QPushButton("▶️️ 启动选中")
         self.launch_selected_btn.setStyleSheet("""
@@ -519,6 +537,32 @@ class UsvFleetLauncher(QDialog):
         """)
         reboot_btn.clicked.connect(lambda: self._reboot_single(usv_id))
         layout.addWidget(reboot_btn)
+        
+        # 停止按钮
+        stop_btn = QPushButton("⏹️ 停止")
+        stop_btn.setFixedHeight(38)
+        stop_btn.setMinimumWidth(70)
+        stop_btn.setMaximumWidth(85)
+        stop_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                padding: 4px 8px;
+                border-radius: 4px;
+                border: 1px solid #d32f2f;
+                font-size: 14px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #e57373;
+                border-color: #f44336;
+            }
+            QPushButton:pressed {
+                background-color: #d32f2f;
+            }
+        """)
+        stop_btn.clicked.connect(lambda: self._stop_single(usv_id))
+        layout.addWidget(stop_btn)
         
         layout.addStretch()
         
@@ -924,6 +968,70 @@ class UsvFleetLauncher(QDialog):
                     self._log(f"❌ {usv_id} 重启失败: {e}")
                 
                 time.sleep(2)  # 延迟 2 秒避免同时发送
+    
+    def _stop_single(self, usv_id):
+        """停止单个 USV 的所有 ROS 节点"""
+        reply = QMessageBox.question(
+            self,
+            "确认停止",
+            f"确定要停止 {usv_id} 的所有 ROS 节点吗？\n\n"
+            f"⚠️ 所有运行中的节点将被优雅关闭\n"
+            f"⚠️ 可通过【启动】按钮重新启动",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self._log(f"⏹️ 正在停止 {usv_id} 的所有节点...")
+            
+            try:
+                parent = self.parent()
+                if parent and hasattr(parent, 'ros_signal'):
+                    parent.ros_signal.shutdown_usv.emit(usv_id)
+                    self._log(f"✅ {usv_id} 停止命令已发送")
+                else:
+                    self._log(f"❌ 无法获取 ROS 信号对象，停止失败")
+                    QMessageBox.warning(
+                        self,
+                        "停止失败",
+                        f"无法访问 ROS 通信接口\n请确保地面站已正常启动"
+                    )
+            except Exception as e:
+                self._log(f"❌ {usv_id} 停止失败: {e}")
+    
+    def _stop_selected(self):
+        """批量停止选中的 USV 节点"""
+        selected = self._get_selected_usvs()
+        
+        if not selected:
+            QMessageBox.information(self, "提示", "请先选择要停止的 USV")
+            return
+        
+        reply = QMessageBox.question(
+            self,
+            "确认批量停止",
+            f"确定要停止以下 {len(selected)} 艘 USV 的所有节点吗？\n\n" + 
+            "\n".join(selected) + "\n\n" +
+            "⚠️ 所有运行中的节点将被优雅关闭\n"
+            "⚠️ 可通过【启动选中】按钮重新启动",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            self._log(f"⏹️ 批量停止: {', '.join(selected)}")
+            for usv_id in selected:
+                try:
+                    parent = self.parent()
+                    if parent and hasattr(parent, 'ros_signal'):
+                        parent.ros_signal.shutdown_usv.emit(usv_id)
+                        self._log(f"✅ {usv_id} 停止命令已发送")
+                    else:
+                        self._log(f"❌ {usv_id}: 无法获取 ROS 信号对象")
+                except Exception as e:
+                    self._log(f"❌ {usv_id} 停止失败: {e}")
+                
+                time.sleep(1)  # 延迟 1 秒避免同时发送
     
     def closeEvent(self, event):
         """窗口关闭事件"""

@@ -52,6 +52,28 @@ def generate_launch_description():
     # 参数声明
     # =============================================================================
     
+    # =============================================================================
+    # 智能路径解析：自动选择源码目录或安装目录
+    # =============================================================================
+    def get_config_path(filename):
+        """
+        智能查找配置文件路径，优先级：
+        1. 安装目录（install/share/gs_bringup/config/）
+        2. 源码目录（src/gs_bringup/config/）
+        """
+        # 尝试从安装的包中获取
+        try:
+            pkg_share = get_package_share_directory('gs_bringup')
+            installed_path = os.path.join(pkg_share, 'config', filename)
+            if os.path.exists(installed_path):
+                return installed_path
+        except Exception:
+            pass
+        
+        # 回退到源码目录（相对于当前 launch 文件）
+        source_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'config', filename))
+        return source_path
+    
     # 地面站 Domain ID
     gs_domain_id_arg = DeclareLaunchArgument(
         'gs_domain_id',
@@ -59,10 +81,11 @@ def generate_launch_description():
         description='地面站的 ROS Domain ID'
     )
     
-    # Domain Bridge 配置文件路径
+    # Domain Bridge 配置文件路径（智能路径）
+    default_config = get_config_path('domain_bridge.yaml')
     config_file_arg = DeclareLaunchArgument(
         'config_file',
-        default_value=os.path.expanduser('~/domain_bridge/domain_bridge.yaml'),
+        default_value=default_config,
         description='Domain Bridge YAML 配置文件路径'
     )
     

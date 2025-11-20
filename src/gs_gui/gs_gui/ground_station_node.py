@@ -1287,6 +1287,79 @@ class GroundStationNode(Node):
             except Exception:
                 pass
 
+    def shutdown_usv_callback(self, usv_namespace):
+        """
+        优雅关闭USV节点回调（通过ROS服务）
+        
+        调用USV端的shutdown_service来优雅关闭所有节点
+        
+        Args:
+            usv_namespace: USV 命名空间（如 'usv_01'）
+        """
+        try:
+            # 导入Trigger服务
+            from std_srvs.srv import Trigger
+            
+            # 创建服务客户端
+            service_name = f'/{usv_namespace}/shutdown_all'
+            client = self.create_client(Trigger, service_name)
+            
+            # 等待服务可用（3秒超时）
+            if not client.wait_for_service(timeout_sec=3.0):
+                self.get_logger().error(f'[X] 关闭服务不可用: {service_name}')
+                try:
+                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 关闭失败：服务不可用（USV可能已离线）')
+                except Exception:
+                    pass
+                return
+            
+            # 构建请求
+            request = Trigger.Request()
+            
+            self.get_logger().info(f'[->] 正在关闭 {usv_namespace} 的所有节点...')
+            try:
+                self.ros_signal.node_info.emit(f'[->] 正在关闭 {usv_namespace} 的所有节点...')
+            except Exception:
+                pass
+            
+            # 异步调用服务
+            future = client.call_async(request)
+            future.add_done_callback(
+                lambda f: self._handle_shutdown_response(f, usv_namespace)
+            )
+            
+        except Exception as e:
+            self.get_logger().error(f'[X] 发送关闭命令失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'[X] {usv_namespace} 发送关闭命令失败: {e}')
+            except Exception:
+                pass
+    
+    def _handle_shutdown_response(self, future, usv_namespace):
+        """处理USV关闭服务响应"""
+        try:
+            response = future.result()
+            if response.success:
+                msg = f'[OK] {usv_namespace} 节点关闭成功: {response.message}'
+                self.get_logger().info(msg)
+                try:
+                    self.ros_signal.node_info.emit(msg)
+                except Exception:
+                    pass
+            else:
+                msg = f'[!] {usv_namespace} 节点关闭失败: {response.message}'
+                self.get_logger().warn(msg)
+                try:
+                    self.ros_signal.node_warning.emit(msg)
+                except Exception:
+                    pass
+        except Exception as e:
+            self.get_logger().error(f'[X] 处理关闭命令响应失败: {e}')
+            try:
+                self.ros_signal.node_info.emit(f'[X] {usv_namespace} 关闭命令响应处理失败: {e}')
+            except Exception:
+                pass
+
     def handle_status_text(self, usv_id, msg):
         """处理飞控 status_text 消息，收集预检提示与车辆消息."""
         if msg is None:

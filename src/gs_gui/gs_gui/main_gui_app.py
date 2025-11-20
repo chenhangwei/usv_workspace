@@ -977,6 +977,9 @@ def main(argv=None):
     # 连接机载计算机重启信号
     ros_signal.reboot_companion.connect(node.reboot_companion_callback)
     
+    # 连接USV节点关闭信号
+    ros_signal.shutdown_usv.connect(node.shutdown_usv_callback)
+    
     # 连接 Home Position 设置信号
     ros_signal.set_home_position.connect(node.set_home_position_callback)
     

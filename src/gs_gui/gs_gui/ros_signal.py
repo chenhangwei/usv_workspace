@@ -59,5 +59,13 @@ class ROSSignal(QObject):
     
     # 机载计算机重启命令信号
     reboot_companion = pyqtSignal(str)  # 机载计算机重启命令，参数：USV命名空间
+    
+    # USV节点优雅关闭命令信号
+    shutdown_usv = pyqtSignal(str)  # USV节点关闭命令，参数：USV命名空间
+    
+    # GUI警告信号（用于显示错误和警告消息）
+    node_warning = pyqtSignal(str)  # 参数：警告字符串
+
+
 
 

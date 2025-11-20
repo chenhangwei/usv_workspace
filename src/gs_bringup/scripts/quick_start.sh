@@ -44,10 +44,9 @@ fi
 # 询问启动模式
 echo "请选择启动模式："
 echo "  1. 分布式启动（通过 SSH 启动远程 USV）"
-echo "  2. 本地测试（在本机启动多个 USV）"
-echo "  3. 仅启动地面站"
+echo "  2. 仅启动地面站"
 echo ""
-read -p "请输入选项 [1-3]: " choice
+read -p "请输入选项 [1-2]: " choice
 
 case $choice in
     1)
@@ -74,26 +73,6 @@ case $choice in
         ;;
         
     2)
-        echo ""
-        echo "========================================="
-        echo "启动模式：本地测试"
-        echo "========================================="
-        echo ""
-        echo "ℹ️  将在本机启动 3 个 USV（无需硬件）"
-        echo ""
-        read -p "确认继续？(y/n): " confirm
-        if [ "$confirm" != "y" ]; then
-            echo "已取消"
-            exit 0
-        fi
-        
-        echo ""
-        echo "🚀 正在启动本地测试系统..."
-        echo ""
-        ros2 launch gs_bringup gs_local_multi_usv.py
-        ;;
-        
-    3)
         echo ""
         echo "========================================="
         echo "启动模式：仅地面站"

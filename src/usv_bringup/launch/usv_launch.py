@@ -304,6 +304,17 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
+    # 优雅关闭服务节点（新增）
+    # 提供ROS 2服务接口，允许地面站远程优雅关闭USV节点
+    shutdown_service_node = Node(
+        package='usv_comm',
+        executable='shutdown_service_node',
+        name='shutdown_service',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
     # =============================================================================
     # 飞控通信节点
     # =============================================================================
@@ -511,8 +522,9 @@ def generate_launch_description():
         gcs_url_arg,
         #lidar_port_arg,
         
-        # 阶段 1：立即启动 MAVROS
-        mavros_node,           # 飞控通信（优先启动）
+        # 阶段 1：立即启动 MAVROS 和关键服务
+        mavros_node,               # 飞控通信（优先启动）
+        shutdown_service_node,     # 优雅关闭服务（立即启动，确保随时可用）
        
         
         # 阶段 2：延迟 0.5 秒启动 EKF Origin 设置（关键优化）

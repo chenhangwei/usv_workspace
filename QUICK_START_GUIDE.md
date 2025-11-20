@@ -236,5 +236,5 @@ pkill -f "mavros|domain_bridge|main_gui"
 **准备就绪!开始使用 USV 系统!** 🚀
 
 如有问题,参考:
-- 详细文档: `~/usv_workspace/DOMAIN_BRIDGE_SUCCESS.md`
-- 部署指南: `~/usv_workspace/src/DOMAIN_BRIDGE_DEPLOYMENT.md`
+- Copilot指南: `.github/copilot-instructions.md`
+- USV优雅关机: `src/USV_GRACEFUL_SHUTDOWN_GUIDE.md`
