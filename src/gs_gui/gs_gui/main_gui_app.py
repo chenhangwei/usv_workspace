@@ -551,6 +551,52 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.ui_utils.append_info(f"设置坐标偏移量时发生错误: {e}")
     
+    def get_selected_usv_position(self):
+        """
+        获取当前选中USV的位置信息
+        供AreaOffsetDialog调用以实现一键获取当前USV位置
+        
+        Returns:
+            dict: 包含位置信息的字典 {'x': float, 'y': float, 'z': float, 'usv_id': str}
+                  如果没有选中USV或无法获取位置，返回None
+        """
+        try:
+            # 先尝试从集群表格获取选中USV
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
+            
+            # 如果集群表格没有选中，再尝试从离群表格获取
+            if usv_info is None:
+                usv_info = self.table_manager.get_selected_usv_info(is_cluster=False)
+            
+            # 如果两个表格都没有选中，返回None
+            if usv_info is None:
+                return None
+            
+            usv_id = usv_info.get('namespace')
+            if not usv_id:
+                return None
+            
+            # 从state_handler的缓存中获取USV完整状态信息
+            usv_state = self.state_handler._usv_state_cache.get(usv_id)
+            if usv_state is None:
+                return None
+            
+            # 提取位置信息
+            position = usv_state.get('position', {})
+            if not isinstance(position, dict):
+                return None
+            
+            return {
+                'x': position.get('x', 0.0),
+                'y': position.get('y', 0.0),
+                'z': position.get('z', 0.0),
+                'usv_id': usv_id
+            }
+            
+        except Exception as e:
+            self.ui_utils.append_warning(f"获取USV位置失败: {e}")
+            return None
+    
     # ============== LED传染模式开关 ==============
     def toggle_led_infection_mode(self):
         """切换LED传染模式开关"""

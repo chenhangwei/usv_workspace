@@ -20,9 +20,10 @@ class AreaOffsetDialog(QDialog):
             current_offset: 当前偏移量 {'x': float, 'y': float, 'z': float}
         """
         super().__init__(parent)
+        self.parent_window = parent  # 保存父窗口引用，用于获取USV位置
         self.setWindowTitle("设置任务坐标系原点偏移量")
         self.setModal(True)
-        self.resize(400, 250)
+        self.resize(400, 280)
         
         # 初始化偏移量
         if current_offset is None:
@@ -102,6 +103,12 @@ class AreaOffsetDialog(QDialog):
         # 按钮组
         button_layout = QHBoxLayout()
         
+        # 获取当前USV位置按钮
+        get_position_button = QPushButton("获取选中USV位置")
+        get_position_button.setToolTip("将当前选中USV的位置自动填充到偏移量坐标栏")
+        get_position_button.clicked.connect(self._get_usv_position)
+        button_layout.addWidget(get_position_button)
+        
         # 重置按钮
         reset_button = QPushButton("重置为0")
         reset_button.clicked.connect(self._reset_values)
@@ -127,6 +134,40 @@ class AreaOffsetDialog(QDialog):
         self.x_spinbox.setValue(0.0)
         self.y_spinbox.setValue(0.0)
         self.z_spinbox.setValue(0.0)
+    
+    def _get_usv_position(self):
+        """从父窗口获取当前选中USV的位置并填充到坐标栏"""
+        if self.parent_window is None:
+            QMessageBox.warning(self, "警告", "无法访问主窗口")
+            return
+        
+        # 检查父窗口是否有获取USV位置的方法
+        if not hasattr(self.parent_window, 'get_selected_usv_position'):
+            QMessageBox.warning(self, "警告", "主窗口不支持获取USV位置")
+            return
+        
+        # 调用父窗口的方法获取选中USV的位置
+        position = self.parent_window.get_selected_usv_position()
+        
+        if position is None:
+            QMessageBox.warning(self, "警告", "未选中任何USV或无法获取位置信息\n请先选择一个USV")
+            return
+        
+        # 将位置填充到坐标输入框
+        self.x_spinbox.setValue(position.get('x', 0.0))
+        self.y_spinbox.setValue(position.get('y', 0.0))
+        self.z_spinbox.setValue(position.get('z', 0.0))
+        
+        # 显示成功提示
+        usv_id = position.get('usv_id', 'Unknown')
+        QMessageBox.information(
+            self, 
+            "成功", 
+            f"已获取 {usv_id} 的位置:\n"
+            f"X: {position.get('x', 0.0):.2f} m\n"
+            f"Y: {position.get('y', 0.0):.2f} m\n"
+            f"Z: {position.get('z', 0.0):.2f} m"
+        )
         
     def get_offset(self):
         """
