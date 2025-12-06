@@ -51,6 +51,13 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
+        # 更新按钮文本为 OFFBOARD
+        try:
+            self.ui.set_guided_pushButton.setText("OFFBOARD")
+            self.ui.set_departed_guided_pushButton.setText("OFFBOARD")
+        except Exception:
+            pass
+        
         self.ros_signal = ros_signal
         
         # 优雅关闭标志：避免重复发送关闭命令
@@ -155,7 +162,7 @@ class MainWindow(QMainWindow):
         # ============== 集群控制按钮 ==============
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)
-        self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)
+        self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_offboard_command)
         self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_hold_command)
         self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task)
         self.ui.stop_cluster_task_pushButton.clicked.connect(self.stop_cluster_task)
@@ -163,7 +170,7 @@ class MainWindow(QMainWindow):
         # ============== 离群控制按钮 ==============
         self.ui.departed_arming_pushButton.clicked.connect(self.departed_arming_command)
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command)
-        self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command)
+        self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_offboard_command)
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command)
         self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command)
         self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command)
@@ -328,18 +335,18 @@ class MainWindow(QMainWindow):
         self._last_disarm_time = now
         self.command_handler.cluster_disarming(self.list_manager.usv_cluster_list)
     
-    def set_cluster_guided_command(self):
-        """集群设置guided模式（带防抖）"""
-        # 防抖：1秒内只允许一次 guided 命令
+    def set_cluster_offboard_command(self):
+        """集群设置OFFBOARD模式（带防抖）"""
+        # 防抖：1秒内只允许一次 offboard 命令
         import time
         now = time.time()
-        if not hasattr(self, '_last_guided_time'):
-            self._last_guided_time = 0
-        if now - self._last_guided_time < 1.0:
+        if not hasattr(self, '_last_offboard_time'):
+            self._last_offboard_time = 0
+        if now - self._last_offboard_time < 1.0:
             self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
             return
-        self._last_guided_time = now
-        self.command_handler.set_cluster_guided(self.list_manager.usv_cluster_list)
+        self._last_offboard_time = now
+        self.command_handler.set_cluster_offboard(self.list_manager.usv_cluster_list)
     
     def set_cluster_hold_command(self):
         """集群设置HOLD模式（带防抖）"""
@@ -381,18 +388,18 @@ class MainWindow(QMainWindow):
         self._last_departed_disarm_time = now
         self.command_handler.departed_disarming(self.list_manager.usv_departed_list)
     
-    def set_departed_guided_command(self):
-        """离群设置guided模式（带防抖）"""
-        # 防抖：1秒内只允许一次 guided 命令
+    def set_departed_offboard_command(self):
+        """离群设置OFFBOARD模式（带防抖）"""
+        # 防抖：1秒内只允许一次 offboard 命令
         import time
         now = time.time()
-        if not hasattr(self, '_last_departed_guided_time'):
-            self._last_departed_guided_time = 0
-        if now - self._last_departed_guided_time < 1.0:
+        if not hasattr(self, '_last_departed_offboard_time'):
+            self._last_departed_offboard_time = 0
+        if now - self._last_departed_offboard_time < 1.0:
             self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
             return
-        self._last_departed_guided_time = now
-        self.command_handler.set_departed_guided(self.list_manager.usv_departed_list)
+        self._last_departed_offboard_time = now
+        self.command_handler.set_departed_offboard(self.list_manager.usv_departed_list)
     
     def set_departed_manual_command(self):
         """离群设置manual模式（带防抖）"""
@@ -1004,13 +1011,13 @@ def main(argv=None):
         node.get_logger().error(f"加载 gs_params.yaml 时出错: {e}")
     
     # 连接ROS信号到节点
-    ros_signal.hold_command.connect(node.set_hold_callback)
-    ros_signal.guided_command.connect(node.set_guided_callback)
-    ros_signal.manual_command.connect(node.set_manual_callback)  # ✅ 修复：添加manual信号连接
+    ros_signal.hold_command.connect(node.command_processor.set_hold_callback)
+    ros_signal.offboard_command.connect(node.command_processor.set_offboard_callback)
+    ros_signal.manual_command.connect(node.command_processor.set_manual_callback)  # ✅ 修复：添加manual信号连接
     ros_signal.arm_command.connect(node.set_arming_callback)
     ros_signal.disarm_command.connect(node.set_disarming_callback)
-    ros_signal.arco_command.connect(node.set_arco_callback)
-    ros_signal.steering_command.connect(node.set_steering_callback)  # ✅ 修复：callback不是command
+    ros_signal.arco_command.connect(node.command_processor.set_arco_callback)
+    ros_signal.steering_command.connect(node.command_processor.set_steering_callback)  # ✅ 修复：callback不是command
     ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
     ros_signal.cluster_pause_request.connect(node.pause_cluster_task_callback)

@@ -79,11 +79,11 @@ class NavigateToPointNode(Node):
             'set_usv_target_position',
             qos_reliable)
         
-        # 订阅当前位置 (使用 GPS 转换的统一坐标系)
+        # 订阅当前位置 (MAVROS 本地位置)
         self.current_pose = None
         self.pose_sub = self.create_subscription(
             PoseStamped,
-            'local_position/pose_from_gps',
+            'mavros/local_position/pose',
             self.pose_callback,
             qos_best_effort,
             callback_group=self.callback_group)

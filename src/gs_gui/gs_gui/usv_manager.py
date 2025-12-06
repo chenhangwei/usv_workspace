@@ -52,7 +52,7 @@ class UsvManager:
         topic_sound = f"{ns}/gs_sound_command"  # 声音控制主题
         topic_action = f"{ns}/gs_action_command"  # 动作控制主题
         action_server_name = f"{ns}/navigate_to_point"  # 导航动作服务器名称
-        topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本 (MAVROS直接发布到ns下)
+        topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本
 
         # 为USV创建各种订阅者和发布者
         # 创建USV状态订阅者
@@ -83,7 +83,7 @@ class UsvManager:
         )
         self.node.get_logger().info(f"为 {usv_id} 创建 StatusText 订阅: {topic_status_text}")
         # 创建飞控系统状态订阅者 (SYS_STATUS)
-        topic_sys_status = f"{ns}/mavros/sys_status"
+        topic_sys_status = f"{ns}/sys_status"
         self.sys_status_subs[usv_id] = self.node.create_subscription(
             SysStatus,
             topic_sys_status,

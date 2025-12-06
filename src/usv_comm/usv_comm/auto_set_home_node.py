@@ -34,9 +34,16 @@ class AutoSetHomeNode(Node):
         # 声明并获取参数
         self.declare_parameter('set_delay_sec', 3.0)  # 设置延迟时间
         self.declare_parameter('use_current_gps', True)  # 使用当前GPS位置作为Home点
+        # 固定坐标参数 (默认值为 A0 基站坐标)
+        self.declare_parameter('fixed_lat', 22.5180977)
+        self.declare_parameter('fixed_lon', 113.9007239)
+        self.declare_parameter('fixed_alt', -5.17)
         
         self.set_delay_sec = self.get_parameter('set_delay_sec').get_parameter_value().double_value
         self.use_current_gps = self.get_parameter('use_current_gps').get_parameter_value().bool_value
+        self.fixed_lat = self.get_parameter('fixed_lat').get_parameter_value().double_value
+        self.fixed_lon = self.get_parameter('fixed_lon').get_parameter_value().double_value
+        self.fixed_alt = self.get_parameter('fixed_alt').get_parameter_value().double_value
         
         self.home_set_sent = False
         self.first_pose_received = False
@@ -121,13 +128,25 @@ class AutoSetHomeNode(Node):
     def _set_home_position(self):
         """设置 Home Position"""
         try:
+            msg = GeoPointStamped()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'base_link'
+
             if self.use_current_gps:
                 # 使用当前GPS位置作为Home点
-                self.get_logger().info('Setting Home Position at current GPS location')
-                self.get_logger().info('Home Position set request sent (using current location)')
+                # 注意: 如果使用当前GPS，通常不需要手动设置 EKF 原点，除非需要重置
+                # 这里我们假设如果配置为 use_current_gps，则不发送 set_gp_origin 消息
+                # 或者需要订阅 global_position/global 来获取当前位置并发送
+                self.get_logger().info('Configured to use current GPS. Skipping manual origin set.')
             else:
                 # 使用固定坐标作为Home点
-                self.get_logger().info('Setting Home Position at fixed coordinates')
+                msg.position.latitude = self.fixed_lat
+                msg.position.longitude = self.fixed_lon
+                msg.position.altitude = self.fixed_alt
+                
+                self.set_home_pub.publish(msg)
+                
+                self.get_logger().info(f'Setting Home Position at fixed coordinates: Lat={self.fixed_lat}, Lon={self.fixed_lon}, Alt={self.fixed_alt}')
                 self.get_logger().info('Home Position set request sent (using fixed coordinates)')
             
             self.get_logger().info('✅ Home Position setting completed')

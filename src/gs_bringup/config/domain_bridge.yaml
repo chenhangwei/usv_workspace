@@ -9,6 +9,15 @@ from_domain: 11
 to_domain: 99
 
 topics:
+  # ==================== 日志转发 ====================
+  # 从 USV Domain 11 的 /rosout 转发到地面站的 /usv_01/rosout
+  # 语法: remap 指定目标话题名称
+  rosout:
+    type: rcl_interfaces/msg/Log
+    from_domain: 11
+    to_domain: 99
+    remap: usv_01/rosout
+
   # ==================== USV_01 话题 (Domain 11) ====================
   usv_01/usv_state:
     type: common_interfaces/msg/UsvStatus
@@ -19,10 +28,10 @@ topics:
   usv_01/low_voltage_mode:
     type: std_msgs/msg/Bool
 
-  usv_01/mavros/state:
+  usv_01/state:
     type: mavros_msgs/msg/State
     
-  usv_01/mavros/extended_state:
+  usv_01/extended_state:
     type: mavros_msgs/msg/ExtendedState
     
   usv_01/battery:
@@ -72,7 +81,7 @@ topics:
     qos:
       reliability: best_effort
       
-  usv_01/mavros/sys_status:
+  usv_01/sys_status:
     type: mavros_msgs/msg/SysStatus
     qos:
       reliability: best_effort
@@ -124,39 +133,39 @@ topics:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 12
     
-  usv_02/battery:
+  usv_02/mavros/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 12
 
-  usv_02/local_position/pose:
+  usv_02/mavros/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 12
     
-  usv_02/local_position/velocity_local:
+  usv_02/mavros/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 12
     
-  usv_02/global_position/global:
+  usv_02/mavros/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 12
     
-  usv_02/local_position/pose_from_gps:
+  usv_02/mavros/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 12
     
-  usv_02/global_position/compass_hdg:
+  usv_02/mavros/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 12
 
-  usv_02/global_position/raw/fix:
+  usv_02/mavros/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 12
     
-  usv_02/global_position/raw/gps_vel:
+  usv_02/mavros/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 12
 
-  usv_02/home_position/home:
+  usv_02/mavros/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 12
 
@@ -179,7 +188,7 @@ topics:
     from_domain: 12
     
   # 飞控状态消息
-  usv_02/statustext/recv:
+  usv_02/mavros/statustext/recv:
     type: mavros_msgs/msg/StatusText
     from_domain: 12
     qos:
@@ -244,39 +253,39 @@ topics:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 13
     
-  usv_03/battery:
+  usv_03/mavros/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 13
 
-  usv_03/local_position/pose:
+  usv_03/mavros/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 13
     
-  usv_03/local_position/velocity_local:
+  usv_03/mavros/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 13
     
-  usv_03/global_position/global:
+  usv_03/mavros/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 13
     
-  usv_03/local_position/pose_from_gps:
+  usv_03/mavros/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 13
     
-  usv_03/global_position/compass_hdg:
+  usv_03/mavros/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 13
 
-  usv_03/global_position/raw/fix:
+  usv_03/mavros/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 13
     
-  usv_03/global_position/raw/gps_vel:
+  usv_03/mavros/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 13
 
-  usv_03/home_position/home:
+  usv_03/mavros/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 13
 
@@ -299,7 +308,7 @@ topics:
     from_domain: 13
     
   # 飞控状态消息
-  usv_03/statustext/recv:
+  usv_03/mavros/statustext/recv:
     type: mavros_msgs/msg/StatusText
     from_domain: 13
     qos:

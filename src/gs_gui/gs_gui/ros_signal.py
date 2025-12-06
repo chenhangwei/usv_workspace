@@ -11,7 +11,7 @@ class ROSSignal(QObject):
 
     # 模式常量定义
     MODE_MANUAL = "manual"          # 手动模式
-    MODE_GUIDED = "guided"          # 制导模式
+    MODE_OFFBOARD = "offboard"      # OFFBOARD模式 (原GUIDED)
     MODE_ARCO = "arco"              # ARCO模式
     MODE_STEERING = "steering"      # 转向模式
 
@@ -22,7 +22,7 @@ class ROSSignal(QObject):
     # 模式切换命令信号
     hold_command = pyqtSignal(list)     # HOLD模式命令，参数：USV命名空间列表（集群使用）
     manual_command = pyqtSignal(list)   # 手动模式命令，参数：USV命名空间列表（离群使用）
-    guided_command = pyqtSignal(list)   # 制导模式命令，参数：USV命名空间列表
+    offboard_command = pyqtSignal(list) # OFFBOARD模式命令，参数：USV命名空间列表
     arco_command = pyqtSignal(list)     # ARCO模式命令，参数：USV命名空间列表
     steering_command = pyqtSignal(list) # 转向模式命令，参数：USV命名空间列表
 

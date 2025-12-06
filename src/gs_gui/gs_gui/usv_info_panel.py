@@ -5,7 +5,8 @@ USV 信息面板模块
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                               QGroupBox, QGridLayout, QFrame, QProgressBar,
                               QScrollArea, QSizePolicy, QPushButton,
-                              QListWidget, QListWidgetItem, QAbstractItemView)
+                              QListWidget, QListWidgetItem, QAbstractItemView,
+                              QMenu, QApplication)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
 
@@ -105,10 +106,6 @@ class UsvInfoPanel(QWidget):
         # ==================== 电池信息组 ====================
         battery_group = self._create_battery_info_group()
         content_layout.addWidget(battery_group)
-        
-        # ==================== GPS 信息组 ====================
-        gps_group = self._create_gps_info_group()
-        content_layout.addWidget(gps_group)
         
         # ==================== Ready 状态组 ====================
         readiness_group = self._create_readiness_group()
@@ -388,30 +385,6 @@ class UsvInfoPanel(QWidget):
         
         group.setLayout(layout)
         return group
-    
-    def _create_gps_info_group(self):
-        """创建GPS信息组"""
-        group = QGroupBox("📋 GPS 信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#9b59b6"))
-        
-        layout = QGridLayout()
-        layout.setSpacing(5)
-        layout.setContentsMargins(10, 12, 10, 10)
-        
-        # 卫星数量
-        self.satellite_label = self._create_value_label("--")
-        layout.addWidget(self._create_key_label("卫星数:"), 0, 0)
-        layout.addWidget(self.satellite_label, 0, 1)
-        
-        # GPS精度
-        self.gps_accuracy_label = self._create_value_label("--")
-        layout.addWidget(self._create_key_label("精度:"), 1, 0)
-        layout.addWidget(self.gps_accuracy_label, 1, 1)
-        layout.addWidget(QLabel("m"), 1, 2)
-        
-        layout.setColumnStretch(1, 1)
-        group.setLayout(layout)
-        return group
 
     def _create_vehicle_message_group(self):
         """创建飞控消息展示组"""
@@ -423,13 +396,38 @@ class UsvInfoPanel(QWidget):
         layout.setContentsMargins(10, 12, 10, 10)
 
         self.message_list = QListWidget()
-        self._configure_list_widget(self.message_list)
+        self._configure_list_widget(self.message_list, allow_selection=True)
         self.message_list.setMinimumHeight(160)
+        # 启用右键菜单
+        try:
+            self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        except AttributeError:
+            self.message_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.message_list.customContextMenuRequested.connect(self._show_message_context_menu)
         layout.addWidget(self.message_list)
         self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
 
         group.setLayout(layout)
         return group
+    
+    def _show_message_context_menu(self, pos):
+        """显示飞控消息右键菜单"""
+        item = self.message_list.itemAt(pos)
+        if item is None:
+            return
+        
+        menu = QMenu(self.message_list)
+        copy_action = menu.addAction("📋 复制消息")
+        copy_all_action = menu.addAction("📄 复制全部消息")
+        
+        action = menu.exec_(self.message_list.mapToGlobal(pos))
+        if action == copy_action:
+            QApplication.clipboard().setText(item.text())
+        elif action == copy_all_action:
+            all_text = []
+            for i in range(self.message_list.count()):
+                all_text.append(self.message_list.item(i).text())
+            QApplication.clipboard().setText('\n'.join(all_text))
     
     def _create_key_label(self, text):
         """创建键标签（紧凑版）"""
@@ -486,16 +484,30 @@ class UsvInfoPanel(QWidget):
         label.setStyleSheet("color: #2c3e50; font-size: 16px; font-weight: bold; margin-top: 4px;")
         return label
 
-    def _configure_list_widget(self, widget):
-        """统一配置列表控件样式"""
+    def _configure_list_widget(self, widget, allow_selection=False):
+        """统一配置列表控件样式
+        
+        Args:
+            widget: QListWidget 控件
+            allow_selection: 是否允许选择（用于复制文本）
+        """
         try:
-            widget.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            widget.setFocusPolicy(Qt.FocusPolicy.ClickFocus if allow_selection else Qt.FocusPolicy.NoFocus)
         except AttributeError:
-            widget.setFocusPolicy(Qt.NoFocus)  # type: ignore[attr-defined]
-        try:
-            widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
-        except AttributeError:
-            widget.setSelectionMode(QListWidget.NoSelection)
+            widget.setFocusPolicy(Qt.ClickFocus if allow_selection else Qt.NoFocus)  # type: ignore[attr-defined]
+        
+        if allow_selection:
+            # 允许单选（可复制）
+            try:
+                widget.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+            except AttributeError:
+                widget.setSelectionMode(QListWidget.SingleSelection)
+        else:
+            try:
+                widget.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+            except AttributeError:
+                widget.setSelectionMode(QListWidget.NoSelection)
+        
         widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         try:
             widget.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -511,6 +523,10 @@ class UsvInfoPanel(QWidget):
             }
             QListWidget::item {
                 padding: 6px 8px;
+            }
+            QListWidget::item:selected {
+                background-color: #3498db;
+                color: white;
             }
         """)
 
@@ -634,18 +650,6 @@ class UsvInfoPanel(QWidget):
                 self.temperature_label.setStyleSheet("")
                 self._is_high_temperature = False
             
-            sat_count = state.get('gps_satellites_visible')
-            if sat_count is None:
-                self.satellite_label.setText("--")
-            else:
-                try:
-                    self.satellite_label.setText(str(int(sat_count)))
-                except (ValueError, TypeError):
-                    self.satellite_label.setText(self._format_float(sat_count, precision=0))
-            self._update_satellite_style(sat_count)
-
-            self.gps_accuracy_label.setText(self._format_float(state.get('gps_eph'), precision=1))
-            
         except Exception as e:
             print(f"更新 USV 信息面板失败: {e}")
     
@@ -665,9 +669,6 @@ class UsvInfoPanel(QWidget):
         self.voltage_label.setText("--")
         self.current_label.setText("--")
         self.temperature_label.setText("--")
-        
-        self.satellite_label.setText("--")
-        self.gps_accuracy_label.setText("--")
         
         # 重置温度状态标志
         self._is_high_temperature = False
@@ -857,6 +858,11 @@ class UsvInfoPanel(QWidget):
             text = entry.get('text', '')
             combined = f"[{time_str}] {label}: {text}"
             item = QListWidgetItem(combined)
+            # 设置可选择标志，允许复制
+            try:
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            except AttributeError:
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)  # type: ignore[attr-defined]
             item.setToolTip(text)
             bg_color, fg_color = self._severity_palette(severity)
             item.setBackground(QColor(bg_color))
@@ -930,34 +936,6 @@ class UsvInfoPanel(QWidget):
         except (ValueError, TypeError):
             self.temperature_label.setStyleSheet("")
     
-    def _update_satellite_style(self, satellite_count):
-        """根据卫星数量更新样式"""
-        try:
-            count = int(satellite_count)
-            if count >= 4:
-                color = "#27ae60"  # 绿色 - 正常（4颗及以上可定位）
-            else:
-                color = "#e74c3c"  # 红色 - 信号弱（少于4颗无法定位）
-            
-            self.satellite_label.setStyleSheet(f"""
-                QLabel {{
-                    color: white;
-                    background-color: {color};
-                    font-weight: bold;
-                    padding: 3px 8px;
-                    border-radius: 3px;
-                    font-size: 16px;
-                }}
-            """)
-        except (ValueError, TypeError):
-            self.satellite_label.setStyleSheet("""
-                QLabel {
-                    color: #34495e;
-                    font-size: 16px;
-                    font-weight: 600;
-                }
-            """)
-
     def _level_to_palette(self, level):
         """根据 level 返回背景/前景颜色"""
         key = str(level).lower() if level is not None else ''

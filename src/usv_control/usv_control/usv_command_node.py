@@ -32,7 +32,7 @@ class UsvCommandNode(Node):
         )
 
         # 声明参数
-        self.declare_parameter('supported_modes', ['GUIDED', 'MANUAL', 'AUTO', 'HOLD','ARCO','STEERING'])
+        self.declare_parameter('supported_modes', ['OFFBOARD', 'GUIDED', 'MANUAL', 'AUTO', 'HOLD','ARCO','STEERING'])
         self.declare_parameter('service_timeout_sec', 5.0)
         self.declare_parameter('arming_command_timeout_sec', 10.0)
 

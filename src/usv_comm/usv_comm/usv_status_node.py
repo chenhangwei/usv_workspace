@@ -1,11 +1,11 @@
 from math import sqrt, degrees, atan2
 import rclpy
 from rclpy.node import Node
-from mavros_msgs.msg import State, PositionTarget, WaypointReached, Altitude, ExtendedState, GPSRAW
-from sensor_msgs.msg import BatteryState, NavSatFix
-from std_msgs.msg import String, Bool, Float32, Int32, Float64
+from mavros_msgs.msg import State, PositionTarget, ExtendedState
+from sensor_msgs.msg import BatteryState
+from std_msgs.msg import Bool, Float32, Float64
 from common_interfaces.msg import UsvStatus
-from geometry_msgs.msg import TwistStamped, PoseStamped, Vector3, Point
+from geometry_msgs.msg import TwistStamped, PoseStamped, Point
 from tf_transformations import euler_from_quaternion
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import psutil
@@ -125,9 +125,6 @@ class UsvStatusNode(Node):
         self.usv_battery = BatteryState()
         self.usv_velocity = TwistStamped()
         self.usv_pose = PoseStamped()
-        self.usv_gps = NavSatFix()
-        self.usv_gps_raw = GPSRAW()  # 添加 GPS RAW 数据
-        self.usv_altitude = Altitude()
         self.usv_extended_state = ExtendedState()
         self.usv_compass_hdg = 0.0  # 罗盘航向（度数）
         
@@ -142,9 +139,6 @@ class UsvStatusNode(Node):
         self.last_battery_time = 0.0
         self.last_velocity_time = 0.0
         self.last_pose_time = 0.0
-        self.last_gps_time = 0.0
-        self.last_gps_raw_time = 0.0  # 添加 GPS RAW 时间戳
-        self.last_altitude_time = 0.0
         self.last_compass_time = 0.0  # 罗盘航向时间戳
         
         # 消息计数器
@@ -163,7 +157,7 @@ class UsvStatusNode(Node):
 
         self.get_logger().info(f'状态报告节点已启动 (usv_id: {self.usv_id}, 发布频率: {publish_rate} Hz)')
 
-        # 订阅 MAVROS 主题（注意：MAVROS 在相同命名空间下，topic 不需要 mavros/ 前缀）
+        # 订阅 MAVROS 主题（已移除 mavros/ 前缀）
         self.state_sub = self.create_subscription(
             State, 'state', self.usv_state_callback, qos_best_effort)
         
@@ -176,9 +170,8 @@ class UsvStatusNode(Node):
         
         # 选择使用哪个坐标源：
         # - 'local_position/pose': MAVROS 原生（飞控 EKF Origin）
-        # - 'local_position/pose_from_gps': GPS 转换（A0 基站原点，推荐）
         self.pos_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose_from_gps',  # 使用 GPS 转换坐标
+            PoseStamped, 'local_position/pose',  # 使用 MAVROS 原生坐标
             self.usv_pose_callback, qos_best_effort)
         
         self.target_sub = self.create_subscription(
@@ -188,40 +181,6 @@ class UsvStatusNode(Node):
         self.extended_state_sub = self.create_subscription(
             ExtendedState, 'extended_state',
             self.extended_state_callback, qos_best_effort)
-        
-        # GPS 相关订阅（需要 MAVROS global_position 插件）
-        # 如果 launch 文件中未加载该插件，这些订阅会失败但不影响节点运行
-        self.has_gps = False
-        self.has_gps_raw = False
-        self.has_altitude = False
-        
-        try:
-            self.gps_sub = self.create_subscription(
-                NavSatFix, 'global_position/global',
-                self.gps_callback, qos_best_effort)
-            self.has_gps = True
-            self.get_logger().info('GPS topic 订阅成功')
-        except Exception as e:
-            self.get_logger().info('GPS topic 不可用（需要 MAVROS global_position 插件）')
-        
-        # 订阅 GPS RAW 消息（包含卫星数）
-        try:
-            self.gps_raw_sub = self.create_subscription(
-                GPSRAW, 'gpsstatus/gps1/raw',
-                self.gps_raw_callback, qos_best_effort)
-            self.has_gps_raw = True
-            self.get_logger().info('GPS RAW topic 订阅成功（用于获取卫星数）')
-        except Exception as e:
-            self.get_logger().info(f'GPS RAW topic 不可用: {e}')
-        
-        try:
-            self.altitude_sub = self.create_subscription(
-                Altitude, 'altitude',
-                self.altitude_callback, qos_best_effort)
-            self.has_altitude = True
-            self.get_logger().info('Altitude topic 订阅成功')
-        except Exception as e:
-            self.get_logger().info('Altitude topic 不可用（已包含在 global_position 中）')
         
         # 订阅罗盘航向（来自飞控的磁力计）
         self.has_compass = False
@@ -284,24 +243,6 @@ class UsvStatusNode(Node):
         if isinstance(msg, PoseStamped):
             self.usv_pose = msg
             self.last_pose_time = time.time()
-    
-    def gps_callback(self, msg):
-        """GPS 回调函数"""
-        if isinstance(msg, NavSatFix):
-            self.usv_gps = msg
-            self.last_gps_time = time.time()
-    
-    def gps_raw_callback(self, msg):
-        """GPS RAW 回调函数（包含卫星数）"""
-        if isinstance(msg, GPSRAW):
-            self.usv_gps_raw = msg
-            self.last_gps_raw_time = time.time()
-    
-    def altitude_callback(self, msg):
-        """高度回调函数"""
-        if isinstance(msg, Altitude):
-            self.usv_altitude = msg
-            self.last_altitude_time = time.time()
     
     def compass_callback(self, msg):
         """罗盘航向回调函数"""
@@ -547,13 +488,9 @@ class UsvStatusNode(Node):
                     msg.pitch = 0.0
                     msg.yaw = 0.0
             
-            # 高度信息
-            try:
-                msg.altitude_relative = getattr(self.usv_altitude, 'relative', 0.0)
-                msg.altitude_amsl = getattr(self.usv_altitude, 'amsl', 0.0)
-            except Exception:
-                msg.altitude_relative = 0.0
-                msg.altitude_amsl = 0.0
+            # 高度信息 (已移除 GPS/Altitude 订阅，设为 0)
+            msg.altitude_relative = 0.0
+            msg.altitude_amsl = 0.0
 
             # ==================== 速度信息 ====================
             try:
@@ -592,73 +529,11 @@ class UsvStatusNode(Node):
                 msg.climb_rate = 0.0
                 msg.heading = 0.0
 
-            # ==================== GPS 信息 ====================
-            try:
-                # 优先使用 GPS RAW 的 fix_type（更准确，包含 3D Fix 等详细状态）
-                # GPS RAW fix_type 定义：
-                # 0: NO_FIX, 1: NO_FIX, 2: 2D_FIX, 3: 3D_FIX, 
-                # 4: DGPS, 5: RTK_FLOAT, 6: RTK_FIXED
-                if self.has_gps_raw and (time.time() - self.last_gps_raw_time) < self.data_timeout:
-                    msg.gps_fix_type = int(self.usv_gps_raw.fix_type)
-                else:
-                    # 降级使用 NavSatFix 的 status.status（值域不同，需要映射）
-                    # NavSatFix status: -1=NO_FIX, 0=FIX, 1=SBAS_FIX, 2=GBAS_FIX
-                    # 映射到 GPS RAW 格式：-1→0, 0→3, 1→4, 2→6
-                    gps_status = getattr(self.usv_gps, 'status', None)
-                    if gps_status:
-                        nav_status = getattr(gps_status, 'status', -1)
-                        if nav_status < 0:
-                            msg.gps_fix_type = 0  # NO_FIX
-                        elif nav_status == 0:
-                            msg.gps_fix_type = 3  # 假定为 3D_FIX
-                        elif nav_status == 1:
-                            msg.gps_fix_type = 4  # SBAS → DGPS
-                        else:
-                            msg.gps_fix_type = 6  # GBAS → RTK_FIXED
-                    else:
-                        msg.gps_fix_type = 0
-                
-                # 从 GPS RAW 获取 HDOP/VDOP（优先）和卫星数
-                if self.has_gps_raw and (time.time() - self.last_gps_raw_time) < self.data_timeout:
-                    # GPS RAW 的 eph/epv 是 uint16，单位通常是 cm (即 0.01)
-                    # 如果值为 UINT16_MAX (65535)，表示未知
-                    raw_eph = self.usv_gps_raw.eph
-                    raw_epv = self.usv_gps_raw.epv
-                    
-                    if raw_eph < 65535:
-                        msg.gps_eph = float(raw_eph) / 100.0  # 转换为米
-                    else:
-                        msg.gps_eph = 99.0  # 未知值
-                    
-                    if raw_epv < 65535:
-                        msg.gps_epv = float(raw_epv) / 100.0  # 转换为米
-                    else:
-                        msg.gps_epv = 99.0  # 未知值
-                    
-                    # 卫星数
-                    msg.gps_satellites_visible = int(self.usv_gps_raw.satellites_visible)
-                else:
-                    # 如果没有 GPS RAW，尝试从 NavSatFix 的 position_covariance 计算
-                    cov = getattr(self.usv_gps, 'position_covariance', [])
-                    if len(cov) >= 9 and (cov[0] + cov[4]) > 0:
-                        # HDOP ≈ sqrt(cov[0] + cov[4])
-                        msg.gps_eph = float(sqrt(cov[0] + cov[4]))
-                        msg.gps_epv = float(sqrt(cov[8]) if cov[8] > 0 else 99.0)
-                    else:
-                        msg.gps_eph = 99.0
-                        msg.gps_epv = 99.0
-                    
-                    msg.gps_satellites_visible = 0
-                
-            except Exception as e:
-                self.get_logger().error(f'GPS信息处理错误: {e}', throttle_duration_sec=10.0)
-                msg.gps_fix_type = 0
-                msg.gps_satellites_visible = 0
-                msg.gps_eph = 99.0
-                msg.gps_epv = 99.0
-                msg.gps_satellites_visible = 0
-                msg.gps_eph = 99.0
-                msg.gps_epv = 99.0
+            # ==================== GPS 信息 (已移除) ====================
+            msg.gps_fix_type = 0
+            msg.gps_satellites_visible = 0
+            msg.gps_eph = 99.0
+            msg.gps_epv = 99.0
 
             # ==================== 系统健康 ====================
             # 温度（使用缓存）
@@ -685,7 +560,7 @@ class UsvStatusNode(Node):
             # ==================== 发布消息前验证 ====================
             # 验证关键字段类型
             if not isinstance(msg.gps_satellites_visible, int):
-                self.get_logger().error(f'gps_satellites_visible类型错误: {type(msg.gps_satellites_visible)}')
+                # self.get_logger().error(f'gps_satellites_visible类型错误: {type(msg.gps_satellites_visible)}')
                 msg.gps_satellites_visible = int(msg.gps_satellites_visible) if msg.gps_satellites_visible is not None else 0
 
             # ==================== 发布消息 ====================
@@ -726,7 +601,7 @@ class UsvStatusNode(Node):
             except Exception:
                 continue
         # 如果所有路径均失败，记录并返回0.0
-        self.get_logger().warn('无法读取系统温度，返回0.0')
+        self.get_logger().debug('无法读取系统温度，返回0.0')
         return 0.0
 
     def destroy_node(self):

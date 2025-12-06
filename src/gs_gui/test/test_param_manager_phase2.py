@@ -25,7 +25,7 @@ class ParamTestPublisher(Node):
         # 创建参数发布器
         self.param_pub = self.create_publisher(
             Param,
-            '/usv_01/mavros/param/param_value',
+            '/usv_01/param/param_value',
             10
         )
         

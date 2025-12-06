@@ -64,17 +64,17 @@ class CommandProcessor:
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "HOLD")
 
-    def set_guided_callback(self, msg):
+    def set_offboard_callback(self, msg):
         """
-        设置USV为导航模式
+        设置USV为OFFBOARD模式
         
         Args:
             msg: 包含USV列表的消息
         """
         # 记录日志信息
-        self.node.get_logger().info("接收到导航模式命令")
+        self.node.get_logger().info("接收到OFFBOARD模式命令")
         # 调用通用设置模式方法
-        self._set_mode_for_usvs(msg, "GUIDED")
+        self._set_mode_for_usvs(msg, "OFFBOARD")
 
     def set_arco_callback(self, msg):
         """

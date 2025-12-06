@@ -69,11 +69,11 @@ class ParamDiagnostic(Node):
             return
         
         # 3. 订阅参数 topic
-        print(f"\n3. 订阅参数 topic: /{namespace}/mavros/param/param_value")
+        print(f"\n3. 订阅参数 topic: /{namespace}/param/param_value")
         self.param_count = 0
         self.param_sub = self.create_subscription(
             Param,
-            f'/{namespace}/mavros/param/param_value',
+            f'/{namespace}/param/param_value',
             self.param_callback,
             10
         )

@@ -72,14 +72,14 @@ class USVCommandHandler:
         except Exception as e:
             self.append_info(f"发送集群加锁命令失败: {e}")
     
-    def set_cluster_guided(self, usv_cluster_list):
-        """发送集群设置guided模式命令"""
+    def set_cluster_offboard(self, usv_cluster_list):
+        """发送集群设置OFFBOARD模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_cluster_list)
-            self.ros_signal.guided_command.emit(namespace_list)
-            self.append_info(f"集群设置guided模式命令已发送: {namespace_list}")
+            self.ros_signal.offboard_command.emit(namespace_list)
+            self.append_info(f"集群设置OFFBOARD模式命令已发送: {namespace_list}")
         except Exception as e:
-            self.append_info(f"发送集群guided模式命令失败: {e}")
+            self.append_info(f"发送集群OFFBOARD模式命令失败: {e}")
     
     def set_cluster_hold(self, usv_cluster_list):
         """发送集群设置HOLD模式命令"""
@@ -109,14 +109,14 @@ class USVCommandHandler:
         except Exception as e:
             self.append_info(f"发送离群加锁命令失败: {e}")
     
-    def set_departed_guided(self, usv_departed_list):
-        """发送离群设置guided模式命令"""
+    def set_departed_offboard(self, usv_departed_list):
+        """发送离群设置OFFBOARD模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
-            self.ros_signal.guided_command.emit(namespace_list)
-            self.append_info(f"离群设置guided模式命令已发送: {namespace_list}")
+            self.ros_signal.offboard_command.emit(namespace_list)
+            self.append_info(f"离群设置OFFBOARD模式命令已发送: {namespace_list}")
         except Exception as e:
-            self.append_info(f"发送离群guided模式命令失败: {e}")
+            self.append_info(f"发送离群OFFBOARD模式命令失败: {e}")
     
     def set_departed_manual(self, usv_departed_list):
         """发送离群设置manual模式命令"""

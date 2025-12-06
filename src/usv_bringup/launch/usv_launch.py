@@ -60,8 +60,9 @@ def generate_launch_description():
     # 飞控串口参数
     fcu_url_arg = DeclareLaunchArgument(
         'fcu_url',
-        default_value='udp://192.168.10.1:14550@192.168.10.2:14550',
+        #default_value='udp://192.168.10.1:14550@192.168.10.2:14550',
         #default_value='serial:///dev/ttyACM0:921600',
+        default_value='serial:///dev/serial/by-id/usb-Auterion_PX4_FMU_v6X.x_0-if00:921600',
         description='飞控通信串口和波特率'
     )
     
@@ -87,7 +88,7 @@ def generate_launch_description():
     # ⚠️ 重要: 启动前必须确保本机IP已正确配置为 192.168.68.52
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        default_value='udp://192.168.68.55:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
+        default_value='udp://192.168.68.50:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
         #default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
@@ -117,20 +118,6 @@ def generate_launch_description():
 
   
 
-    # GPS 到本地坐标转换节点（新增）
-    gps_to_local_node = Node(
-        package='usv_comm',
-        executable='gps_to_local_node',
-        name='gps_to_local_node',
-        namespace=namespace,
-        output='screen',
-        parameters=[param_file]
-        # ⚠️ 移除重映射，避免与 MAVROS 的 local_position/pose 冲突
-        # 其他节点可以选择订阅：
-        # - local_position/pose (MAVROS 原生，飞控 EKF Origin)
-        # - local_position/pose_from_gps (GPS 转换，A0 基站原点)
-    )
-
     # 状态处理节点
     usv_status_node = Node(
         package='usv_comm',
@@ -141,15 +128,7 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
-    # 自动设置home点节点
-    auto_set_home_node = Node(
-        package='usv_comm',
-        executable='auto_set_home_node',
-        name='auto_set_home_node',
-        namespace=namespace,
-        output='screen',
-        parameters=[param_file]
-    )
+
 
     # =============================================================================
     # 控制相关节点
@@ -180,16 +159,6 @@ def generate_launch_description():
         package='usv_control',
         executable='usv_control_node',
         name='usv_control_node',
-        namespace=namespace,
-        output='screen',
-        parameters=[param_file]
-    )
-
-    # 坐标转换节点（XYZ → GPS）（新增）
-    coord_transform_node = Node(
-        package='usv_control',
-        executable='coord_transform_node',
-        name='coord_transform_node',
         namespace=namespace,
         output='screen',
         parameters=[param_file]
@@ -323,14 +292,16 @@ def generate_launch_description():
     mavros_node = Node(
         package='mavros',
         executable='mavros_node',
+        #name='mavros',
         namespace=namespace,
         output='screen',
+       
         parameters=[
             param_file,  # 加载YAML文件的其他参数
             {
                 # 核心连接参数
                 'fcu_url': fcu_url,
-                'gcs_url': gcs_url,
+                'gcs_url':'',#gcs_url,
                 
                 # MAVLink 身份配置 (直接在启动文件设置,优先级最高)
                 'system_id': 101,           # MAVROS 自身系统 ID
@@ -373,7 +344,7 @@ def generate_launch_description():
                     'onboard_computer_status',  # 机载计算机（已用 ROS）
                     'open_drone_id',         # 无人机远程识别（水面船不需要）
                     'optical_flow',          # 光流（无光流传感器）
-                    'param',                 # ⚠️ 参数同步（加速启动，需修改参数请用 QGC）
+                    # 'param',                 # ⚠️ 参数同步（加速启动，需修改参数请用 QGC）
                     'play_tune',             # 播放音调（无蜂鸣器）
                     'px4flow',               # PX4 光流（无光流）
                     'rangefinder',           # 测距仪（已有 GPS 高度）
@@ -387,31 +358,31 @@ def generate_launch_description():
                     'trajectory',            # 轨迹规划（用 setpoint_raw）
                     'tunnel',                # MAVLink 隧道（不需要）
                     'vibration',             # 振动监测（生产环境不需要）
-                    'vision_pose',           # 视觉定位（无视觉系统）
-                    'vision_speed',          # 视觉速度（无视觉系统）
+                    # 'vision_pose',           # 视觉定位（无视觉系统）
+                    # 'vision_speed',          # 视觉速度（无视觉系统）
                     'vfr_hud',               # HUD 数据（不需要显示 HUD）
-                    'waypoint',              # 航点任务（只用 GUIDED 模式，不需要航点）
+                    'waypoint',              # 航点任务（只用 OFFBOARD 模式，不需要航点）
                     'wheel_odometry',        # 轮式里程计（无编码器）
                     'wind_estimation',       # 风速估计（水面船不需要）
                     'rallypoint',            # 集结点（不需要任务功能）
                     'geofence',              # 地理围栏（不需要任务功能）
+                    'global_position',       # GPS 位置（不需要）
+                    'home_position',         # Home 点（不需要）
+                    'gps_status',            # GPS 状态（不需要）
                 ],
                 
-                # ==================== 保留的核心插件（11个）====================
+                # ==================== 保留的核心插件（8个）====================
                 # ✅ sys_status      - 系统状态（连接、解锁、模式）
                 # ✅ sys_time        - 时间同步
                 # ✅ command         - 命令发送（解锁、模式切换）
                 # ✅ local_position  - 本地位置（EKF 输出的 XYZ 坐标）
-                # ✅ global_position - GPS 位置（经纬度、高度）
-                # ✅ home_position   - Home 点（返航位置）
-                # ✅ gps_status      - GPS 状态（卫星数、精度）
                 # ✅ battery         - 电池状态（电压、电流、电量）
                 # ✅ imu             - IMU 数据（姿态、角速度、加速度）
                 # ✅ rc_io           - 遥控器通道（遥控输入/输出）
-                # ✅ setpoint_raw    - 原始目标点（GUIDED 模式主要控制方式）
+                # ✅ setpoint_raw    - 原始目标点（OFFBOARD 模式主要控制方式）
                 
                 # ==================== 性能优化参数 ====================
-                'sys.disable_diag': True,           # 禁用版本查询（节省 10-15 秒）
+                'sys.disable_diag': False,           # 启用诊断以排查版本超时问题
                 # 注意: 由于已禁用 waypoint/rallypoint/geofence 插件，
                 # 以下参数不再需要（插件都不加载了）
                 # 'mission.pull_after_gcs': False,
@@ -420,7 +391,7 @@ def generate_launch_description():
                 # 'geofence.pull_after_gcs': False,
                 
                 # 连接参数
-                'conn.timeout': 10.0,               # 连接超时 10 秒
+                'conn.timeout': 30.0,               # 连接超时 30 秒
                 'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
                 'conn.heartbeat_rate': 1.0,         # 心跳频率 1 Hz
             },
@@ -479,23 +450,12 @@ def generate_launch_description():
     # 启动顺序控制：等待 MAVROS 连接后再启动依赖节点
     # =============================================================================
     
-    # 第一批：延迟 2 秒启动 auto_set_home_node（确保 GPS 完全就绪）
-    # ⚠️ 关键修复：延长启动时间，避免 GPS 高度未收敛导致 z 坐标偏移 -17m
-    delayed_home_node = TimerAction(
-        period=2.0,  # 等待 MAVROS + GPS 就绪（2秒确保 GPS 数据开始输出）
-        actions=[
-           auto_set_home_node,    # 自动设置 EKF Origin（必须在 GPS 高度稳定后）
-        ]
-    )
+
     
-    # 第二批：延迟 13 秒启动其他节点（确保 EKF 原点已正确设置）
-    # 计算：2s (auto_set_home启动) + 10s (GPS高度收敛) + 1s (EKF应用原点) = 13s
-    # ⚠️ 关键：必须等待 GPS 高度充分收敛后再启动依赖 EKF 的节点
+    # 第二批：延迟 5 秒启动其他节点（等待 MAVROS 连接）
     delayed_control_nodes = TimerAction(
-        period=13.0,
+        period=5.0,
         actions=[
-            gps_to_local_node,        # GPS→本地坐标转换（新增，优先启动）
-            coord_transform_node,     # XYZ→GPS坐标转换（新增）
             navigate_to_point_node,   # NavigateToPoint 导航节点（话题版本）
             usv_status_node,          # 状态管理（依赖 MAVROS）
             usv_control_node,         # 核心控制器（依赖 MAVROS 和 EKF 原点）
@@ -523,25 +483,23 @@ def generate_launch_description():
         #lidar_port_arg,
         
         # 阶段 1：立即启动 MAVROS 和关键服务
+        usv_uwb_node,             # UWB定位
         mavros_node,               # 飞控通信（优先启动）
         shutdown_service_node,     # 优雅关闭服务（立即启动，确保随时可用）
        
-        
-        # 阶段 2：延迟 0.5 秒启动 EKF Origin 设置（关键优化）
-        delayed_home_node,
         
         # 阶段 3：延迟 3 秒启动控制节点
         delayed_control_nodes,
         
         # 第三阶段：辅助功能节点（不依赖 MAVROS，可并行启动）
-        usv_led_node,          # LED控制
-        usv_sound_node,        # 声音控制
-        usv_fan_node,          # 风扇控制
+        #usv_led_node,          # LED控制
+        #usv_sound_node,        # 声音控制
+        #usv_fan_node,          # 风扇控制
         #usv_ultrasonic_radar_node,  # 超声波雷达
-        usv_head_action_node,       # 鸭头动作控制
+        #usv_head_action_node,       # 鸭头动作控制
         
         # 可选节点（根据硬件配置启用）
-        # usv_uwb_node,             # UWB定位
+       
         # usv_laserscan_node,       # 激光雷达
         # usv_ultrasonic_node,      # 超声波传感器
         # usv_su04_node,            # SU04超声波传感器

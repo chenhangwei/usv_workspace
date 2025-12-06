@@ -22,6 +22,7 @@ rosidl_generate_interfaces(
   "msg/NavigationGoal.msg"
   "msg/NavigationFeedback.msg"
   "msg/NavigationResult.msg"
+  "srv/ShutdownControl.srv"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
 

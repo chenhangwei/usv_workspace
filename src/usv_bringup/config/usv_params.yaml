@@ -55,7 +55,7 @@ mavros:
       
     # 视觉定位配置
     vision_pose:
-      enable: false                         # 禁用视觉定位
+      enable: true                          # 启用视觉定位 (UWB)
 
 # =============================================================================
 # 通信与状态管理模块参数
@@ -67,45 +67,15 @@ usv_status_node:
     battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
 
 # NavigateToPoint Action Server 参数（统一的导航到达阈值配置）
-navigate_to_point_server:
+navigate_to_point_node:
   ros__parameters:
     nav_arrival_threshold: 1.0              # 到达目标点的距离阈值（米）- 统一使用此参数
     nav_timeout_check_period: 1.0           # 超时检查周期（秒）
     nav_feedback_period: 0.5                # 反馈发布周期（秒）
-    distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
+    distance_mode: '3d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
 
-# Auto Set Home 参数（关键：延长 GPS 初始化时间，避免 z 坐标误差）
-auto_set_home_node:
-  ros__parameters:
-    set_delay_sec: 10.0                     # GPS 高度收敛等待时间（秒），建议 8-15 秒
-    use_current_gps: true                   # 使用当前 GPS 位置作为 Home 点
 
-# =============================================================================
-# GPS 坐标转换模块参数（统一的 GPS 原点配置）
-# 
-# ⚠️ 重要说明：
-# 所有 USV 使用统一的 GPS 原点（A0 基站）进行坐标转换
-# - gps_to_local_node: 将飞控的 GPS 位置转换为本地 XYZ 坐标
-# - coord_transform_node: 将地面站的 XYZ 目标点转换为 GPS 坐标
-# 
-# GPS 原点（A0 基站）：22.5180977°N, 113.9007239°E, -5.17m
-# =============================================================================
 
-gps_to_local_node:
-  ros__parameters:
-    gps_origin_lat: 22.5180977              # 北纬（度）
-    gps_origin_lon: 113.9007239             # 东经（度）
-    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
-    publish_rate: 10.0                      # 发布频率（Hz），推荐 10-20 Hz
-    enable_gps_to_local: true               # 启用 GPS→本地坐标转换
-
-coord_transform_node:
-  ros__parameters:
-    gps_origin_lat: 22.5180977              # 北纬（度）
-    gps_origin_lon: 113.9007239             # 东经（度）
-    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
-    enable_coord_transform: true            # 启用 XYZ→GPS 坐标转换（接收地面站+避障目标点）
-    use_global_position_target: true        # true=GlobalPositionTarget (推荐), false=GeoPoseStamped
 
 # =============================================================================
 # 控制模块参数
@@ -129,7 +99,6 @@ usv_control_node:
     publish_rate: 20.0                      # 目标点发布频率（Hz）
     frame_id: 'map'                         # 坐标系ID
     coordinate_frame: 8                     # FRAME_LOCAL_NED = 8
-    enable_local_control: false             # 是否启用局部控制（false=使用coord_transform_node的全局GPS模式）
 
 # =============================================================================
 # 传感器驱动模块参数

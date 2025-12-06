@@ -9,7 +9,7 @@ import serial
 import rclpy 
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped 
-import re
+import struct
 
 # 导入common_utils工具
 from common_utils import SerialResourceManager, ParamLoader, ParamValidator
@@ -33,7 +33,7 @@ class UsvUwbNode(Node):
         # 加载串口参数
         port = param_loader.load_param(
             'uwb_port',
-            '/dev/ttyUSB0',
+            '/dev/serial/by-id/usb-1a86_USB_Single_Serial_5787006321-if00',
             ParamValidator.non_empty_string,
             'UWB串口路径'
         )
@@ -59,63 +59,112 @@ class UsvUwbNode(Node):
             raise RuntimeError(f'Failed to open serial port {port}')
         
         # 创建发布器
+        # MAVROS vision_pose 插件默认订阅 vision_pose/pose
+        # 注意：MAVROS 话题已扁平化，直接发布到 vision_pose/pose
         self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10)
          
-        # 100 Hz 定时器
-        self.timer = self.create_timer(0.01, self.read_and_publish)
+        # 20 Hz 定时器
+        self.timer = self.create_timer(0.05, self.read_and_publish)
         
         self.uwb_msg = PoseStamped()
+        self.buffer = bytearray()
 
     def read_and_publish(self):
         """
         读取串口数据并发布 PoseStamped 消息
         
-        从串口读取UWB定位数据，转换为PoseStamped消息格式并发布。
+        解析 NLink_LinkTrack_Tag_Frame0 协议 (128 bytes)
         """
         # 检查串口是否打开
         if not self.serial_manager.is_open:
             return
         
-        try:  
-            # 读取一行数据
-            line = self.serial_manager.readline()
-            if not line:
-                self.get_logger().debug("没有接收到数据")
-                return
-            data = line.decode('ASCII').strip()
-            # self.get_logger().info(f"Raw data: {data}")
-
-            # 查找 LO=[...]
-            ma = re.search(r'LO=\[([^]]+)\]', data)
-
-            if ma:
-                coords_str = ma.group(1)  # 提取括号内的内容，例如 "1.41,4.13,0.26" 或 "no solution"
-                # 检查是否为 "no solution"
-                if coords_str == 'no solution':
-                    self.get_logger().debug("No valid position solution from $KT0")
-                    return
-                try:
-                    values = list(map(float, ma.group(1).split(',')))
-                    if len(values) == 3:
-                        x, y, z = values
-                        # self.get_logger().info(f'x:{x},y:{y},z:{z}')
-                        self.uwb_msg.header.stamp = self.get_clock().now().to_msg()
-                        self.uwb_msg.header.frame_id = 'map'
-                        self.uwb_msg.pose.position.x = x
-                        self.uwb_msg.pose.position.y = y
-                        self.uwb_msg.pose.position.z = 0.0  # 保持在水面高度
-                        self.uwb_pub.publish(self.uwb_msg)
-                        self.get_logger().debug(f'发布UWB位置: x={x:.2f}, y={y:.2f}')
-                    else:
-                        pass
-                        # self.get_logger().warning(f'括号内数据不符合三个数值的要求')  
-                except ValueError as e:
-                    self.get_logger().warning(f'数据转换错误: {e}')
-            else:
-                pass
-                # self.get_logger().warning(f'括号内数据不符合三个数值的要求')  
+        try:
+            # 读取所有可用数据
+            if self.serial_manager.serial_port.in_waiting > 0:
+                data = self.serial_manager.serial_port.read(self.serial_manager.serial_port.in_waiting)
+                self.buffer.extend(data)
+            
+            # 处理缓冲区
+            while len(self.buffer) >= 128:
+                # 查找帧头 0x55
+                header_idx = self.buffer.find(b'\x55')
+                
+                if header_idx == -1:
+                    # 没有找到帧头，清空缓冲区
+                    self.buffer.clear()
+                    break
+                
+                # 丢弃帧头之前的数据
+                if header_idx > 0:
+                    del self.buffer[:header_idx]
+                
+                # 检查是否有足够的数据
+                if len(self.buffer) < 128:
+                    break
+                
+                # 检查功能字 (0x01)
+                if self.buffer[1] != 0x01:
+                    # 帧头错误，丢弃第一个字节继续查找
+                    del self.buffer[0]
+                    continue
+                
+                # 校验和检查 (Sum of bytes 0-126)
+                frame = self.buffer[:128]
+                checksum = sum(frame[:-1]) & 0xFF
+                if checksum != frame[127]:
+                    self.get_logger().warn(f"校验和错误: calc {checksum} != recv {frame[127]}")
+                    del self.buffer[0]
+                    continue
+                
+                # 解析并发布
+                self.parse_and_publish_frame(frame)
+                
+                # 移除已处理的帧
+                del self.buffer[:128]
+                
         except Exception as e:
             self.get_logger().error(f'读取UWB数据出错: {e}')
+
+    def parse_and_publish_frame(self, frame):
+        """解析一帧数据并发布"""
+        try:
+            # 解析位置 (int24 * 1000) -> meters
+            # x: bytes 4-6, y: bytes 7-9, z: bytes 10-12
+            pos_x = self.parse_int24(frame[4:7]) / 1000.0
+            pos_y = self.parse_int24(frame[7:10]) / 1000.0
+            pos_z = self.parse_int24(frame[10:13]) / 1000.0
+            
+            # 解析四元数 (float * 4)
+            # q0-q3: bytes 88-103
+            q0, q1, q2, q3 = struct.unpack('<ffff', frame[88:104])
+            
+            # 填充消息
+            self.uwb_msg.header.stamp = self.get_clock().now().to_msg()
+            self.uwb_msg.header.frame_id = 'map'
+            
+            self.uwb_msg.pose.position.x = pos_x
+            self.uwb_msg.pose.position.y = pos_y
+            self.uwb_msg.pose.position.z = pos_z
+            
+            self.uwb_msg.pose.orientation.w = 1.0
+            self.uwb_msg.pose.orientation.x = 0.0
+            self.uwb_msg.pose.orientation.y = 0.0
+            self.uwb_msg.pose.orientation.z = 0.0
+            
+            self.uwb_pub.publish(self.uwb_msg)
+            # self.get_logger().info(f'发布UWB位置: x={pos_x:.3f}, y={pos_y:.3f}, z={pos_z:.3f}')
+            
+        except Exception as e:
+            self.get_logger().error(f"解析帧错误: {e}")
+
+    def parse_int24(self, data):
+        """解析3字节整数 (Little-endian)"""
+        val = data[0] | (data[1] << 8) | (data[2] << 16)
+        # 符号扩展
+        if val & 0x800000:
+            val -= 0x1000000
+        return val
     
     def destroy_node(self):
         """节点销毁时关闭串口"""

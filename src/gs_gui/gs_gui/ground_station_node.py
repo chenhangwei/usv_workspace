@@ -20,13 +20,14 @@ import threading  # 导入threading模块，用于多线程处理
 from std_msgs.msg import String # 导入 String 消息类型
 import weakref  # 导入weakref模块，用于弱引用
 import tf2_ros
-from geometry_msgs.msg import TransformStamped
+from rcl_interfaces.msg import Log  # 导入 ROS 日志消息类型
 
 # 导入分解后的模块
 from .usv_manager import UsvManager
 from .cluster_controller import ClusterController
 from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
+from .event_decoder import EventDecoder  # 导入事件解码器
 
 # 导入线程安全工具
 from common_utils import ThreadSafeDict
@@ -81,6 +82,27 @@ class GroundStationNode(Node):
         self.cluster_controller = ClusterController(self)
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
+        
+        # 初始化事件解码器
+        self.event_decoder = EventDecoder(self.get_logger())
+        
+        # 订阅 /rosout 以捕获 MAVROS 未解码的事件日志
+        # 使用与 rosout 兼容的 QoS 设置
+        from rclpy.qos import qos_profile_system_default
+        rosout_qos = QoSProfile(
+            depth=100,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+        self.rosout_sub = self.create_subscription(
+            Log,
+            '/rosout',
+            self.rosout_callback,
+            rosout_qos
+        )
+        self.get_logger().info("已订阅 /rosout 用于事件解码")
+        
+        # USV rosout 订阅列表（将在 initialize_usv_from_config 中初始化）
+        self.usv_rosout_subs = []
 
         # 预检与状态文本缓存 (线程安全)
         self._vehicle_messages = defaultdict(lambda: deque(maxlen=50))
@@ -390,6 +412,19 @@ class GroundStationNode(Node):
         
         # 更新last_ns_list
         self.last_ns_list = self._static_usv_list.copy()
+        
+        # 订阅每个 USV 的 rosout (用于 Domain Bridge 转发的情况)
+        for usv_id in self._static_usv_list:
+            ns_prefix = f"/{usv_id}" if not usv_id.startswith('/') else usv_id
+            topic = f"{ns_prefix}/rosout"
+            self.get_logger().info(f"订阅远程日志: {topic}")
+            sub = self.create_subscription(
+                Log,
+                topic,
+                self.rosout_callback,
+                10
+            )
+            self.usv_rosout_subs.append(sub)
         
         self.get_logger().info("=" * 60)
         self.get_logger().info(f"✓ 完成初始化 {len(self._static_usv_list)} 艘USV")
@@ -1412,7 +1447,8 @@ class GroundStationNode(Node):
 
         upper_text = text.upper()
         warnings = self._prearm_warnings[usv_id]
-        if 'PREARM' in upper_text:
+        # 支持 ArduPilot (PREARM) 和 PX4 (PREFLIGHT) 的预检消息
+        if 'PREARM' in upper_text or 'PREFLIGHT' in upper_text:
             if severity <= 4 and 'PASS' not in upper_text and 'OK' not in upper_text:
                 warnings[text] = now_sec
             else:
@@ -1458,9 +1494,9 @@ class GroundStationNode(Node):
         
         # 缓存原始传感器状态位掩码
         self._sensor_health_cache[usv_id] = {
-            'onboard_control_sensors_present': msg.onboard_control_sensors_present,
-            'onboard_control_sensors_enabled': msg.onboard_control_sensors_enabled,
-            'onboard_control_sensors_health': msg.onboard_control_sensors_health,
+            'onboard_control_sensors_present': msg.sensors_present,
+            'onboard_control_sensors_enabled': msg.sensors_enabled,
+            'onboard_control_sensors_health': msg.sensors_health,
             'timestamp': self._now_seconds()
         }
         
@@ -1469,15 +1505,128 @@ class GroundStationNode(Node):
             self._last_sensor_health_log = {}
         
         prev = self._last_sensor_health_log.get(usv_id)
-        curr_health = msg.onboard_control_sensors_health
+        curr_health = msg.sensors_health
         if prev != curr_health:
             self.get_logger().info(
                 f"[SYS_STATUS] {usv_id} 传感器健康更新: "
-                f"present=0x{msg.onboard_control_sensors_present:08X}, "
-                f"enabled=0x{msg.onboard_control_sensors_enabled:08X}, "
+                f"present=0x{msg.sensors_present:08X}, "
+                f"enabled=0x{msg.sensors_enabled:08X}, "
                 f"health=0x{curr_health:08X}"
             )
             self._last_sensor_health_log[usv_id] = curr_health
+
+    def _extract_usv_id_from_log(self, node_name):
+        """
+        从日志节点名中提取 USV ID
+        
+        Args:
+            node_name: 日志源节点名 (例如 "usv_01.sys", "usv_01.mavros", "mavros_node-2")
+            
+        Returns:
+            str: USV ID (例如 "usv_01") 或 "unknown"
+        """
+        import re
+        
+        # 尝试从 "usv_xx.xxx" 格式提取
+        if '.' in node_name:
+            parts = node_name.split('.')
+            if parts[0].startswith('usv_'):
+                return parts[0]
+        
+        # 尝试正则匹配 usv_xx 模式
+        match = re.search(r'(usv_\d+)', node_name)
+        if match:
+            return match.group(1)
+        
+        # 如果无法从节点名提取，检查是否只有一个活跃 USV
+        active_usvs = list(self.usv_manager.usv_state_subs.keys())
+        if len(active_usvs) == 1:
+            return active_usvs[0]
+        
+        return "unknown"
+
+    def _parse_event_message(self, content):
+        """
+        解析 FCU EVENT 消息，提取事件 ID 和参数
+        
+        Args:
+            content: 消息内容 (例如 "FCU: EVENT 12345 with args -4-0-0...")
+            
+        Returns:
+            tuple: (event_id: int, args_str: str or None)
+        """
+        # 提取 "EVENT " 后面的数字
+        start_idx = content.find('EVENT ') + 6
+        space_idx = content.find(' ', start_idx)
+        
+        if space_idx == -1:
+            # 没有参数，只有 ID
+            event_id_str = content[start_idx:]
+            return int(event_id_str.strip()), None
+        else:
+            event_id_str = content[start_idx:space_idx]
+            # 提取参数部分 (在 "with args " 之后)
+            args_marker = 'with args '
+            args_idx = content.find(args_marker)
+            if args_idx != -1:
+                args_str = content[args_idx + len(args_marker):]
+                return int(event_id_str), args_str
+            return int(event_id_str), None
+
+    def rosout_callback(self, msg):
+        """
+        处理 ROS 日志消息，用于捕获 MAVROS 的 FCU: EVENT 消息
+        """
+        # 过滤出 MAVROS 的日志
+        # MAVROS 的日志节点名可能是:
+        # - "usv_01.sys" (PX4 sys_status 插件)
+        # - "usv_01.mavros"
+        # - 包含 "mavros" 的其他名称
+        # 我们放宽过滤条件，检查是否包含 usv_ 或 mavros
+        if 'usv_' not in msg.name and 'mavros' not in msg.name:
+            return
+            
+        # 检查是否是 FCU 事件消息
+        # 格式通常为: "FCU: EVENT <id> with args <args>"
+        if 'FCU: EVENT' in msg.msg:
+            try:
+                # 提取 USV ID (从节点名中提取，例如 usv_01.mavros)
+                usv_id = self._extract_usv_id_from_log(msg.name)
+
+                # 解析事件 ID 和参数
+                # 格式: "FCU: EVENT <id>" 或 "FCU: EVENT <id> with args <args>"
+                content = msg.msg
+                event_id, args_str = self._parse_event_message(content)
+                
+                # 尝试解码
+                decoded_msg = self.event_decoder.decode(event_id, args_str)
+                
+                if decoded_msg:
+                    # 构造类似于 StatusText 的消息条目
+                    log_text = f"[Event] {decoded_msg}"
+                    self.get_logger().info(f"解码事件 {usv_id}: {log_text}")
+                    
+                    now_sec = self._now_seconds()
+                    entry = {
+                        'text': log_text,
+                        'severity': msg.level,  # 使用原始日志级别
+                        'severity_label': self._severity_to_label(msg.level),
+                        'time': self._format_time(now_sec),
+                        'timestamp': now_sec,
+                    }
+                    
+                    # 如果是已知 USV，添加到消息列表
+                    if usv_id != "unknown":
+                        self._vehicle_messages[usv_id].appendleft(entry)
+                        # 触发 GUI 更新
+                        self.ros_signal.status_text_received.emit(usv_id, log_text)
+                    else:
+                        # 如果 USV ID 未知，尝试广播给所有活跃的 USV
+                        self.get_logger().warn(f"收到未关联 USV 的事件: {log_text}")
+                        
+            except Exception as e:
+                # 解析失败则忽略
+                self.get_logger().debug(f"事件解析失败: {e}")
 
     def push_state_updates(self):
         """
@@ -1579,70 +1728,60 @@ class GroundStationNode(Node):
         """根据当前状态评估关键传感器的健康状况."""
         statuses = []
 
-        fix_type = state.get('gps_fix_type')
-        sat = state.get('gps_satellites_visible')
-        eph = state.get('gps_eph')
+        # 1. 传感器健康状态 (IMU, Baro, Mag)
+        sensor_data = self._sensor_health_cache.get(usv_id)
+        
+        # 定义要显示的传感器
+        # (位掩码, 显示名称, 详细描述)
+        sensors_def = [
+            (0x01, 'Gyro', '陀螺仪'),
+            (0x02, 'Accel', '加速度计'),
+            (0x04, 'Mag', '磁罗盘'),
+            (0x08, 'Baro', '气压计'),
+            # GPS 状态已在上方移除，这里也不再显示，除非需要调试
+        ]
 
-        gps_label = self._describe_gps_fix(fix_type)
-        detail_parts = []
-        try:
-            sat_int = int(sat) if sat is not None else None
-        except (TypeError, ValueError):
-            sat_int = None
-        if sat_int is not None:
-            detail_parts.append(f"{sat_int} sats")
-        try:
-            eph_val = float(eph) if eph is not None else None
-        except (TypeError, ValueError):
-            eph_val = None
-        if eph_val is not None and eph_val > 0:
-            detail_parts.append(f"HDOP {eph_val:.1f}")
-
-        if fix_type is None:
-            gps_level = 'warn'
-        else:
-            try:
-                fix_int = int(fix_type)
-            except (TypeError, ValueError):
-                fix_int = -1
+        if sensor_data:
+            present = sensor_data.get('onboard_control_sensors_present', 0)
+            enabled = sensor_data.get('onboard_control_sensors_enabled', 0)
+            health = sensor_data.get('onboard_control_sensors_health', 0)
             
-            # 综合判断：fix_type + 卫星数 + HDOP
-            # 优先级：卫星数 > HDOP > fix_type
-            if sat_int is not None and sat_int < 4:
-                # 卫星数少于4颗，无法可靠定位 → 错误
-                gps_level = 'error'
-            elif eph_val is not None and eph_val > 10.0:
-                # HDOP > 10（精度极差）→ 错误
-                gps_level = 'error'
-            elif fix_int <= 1:
-                # No GPS 或 No Fix → 错误
-                gps_level = 'error'
-            elif fix_int == 2 or (eph_val is not None and eph_val > 5.0):
-                # 2D Fix 或 HDOP > 5（精度较差）→ 警告
-                gps_level = 'warn'
-            else:
-                # 3D Fix 及以上，且卫星数≥4，且 HDOP ≤ 5 → 正常
-                gps_level = 'ok'
+            for bit, name_en, name_cn in sensors_def:
+                # 只显示存在的传感器
+                if present & bit:
+                    if not (enabled & bit):
+                        # 存在但未启用
+                        status = 'Disabled'
+                        level = 'warn' # 或者 'info'，视情况而定
+                        detail = f"{name_cn} (未启用)"
+                    elif health & bit:
+                        # 健康 (位为1表示健康)
+                        status = 'OK'
+                        level = 'ok'
+                        detail = name_cn
+                    else:
+                        # 不健康
+                        status = 'Error'
+                        level = 'error'
+                        detail = f"{name_cn} 故障"
+                    
+                    statuses.append({
+                        'name': name_en,
+                        'status': status,
+                        'detail': detail,
+                        'level': level
+                    })
+        else:
+            # 如果没有传感器数据，显示未知状态，避免界面空白
+            for _, name_en, name_cn in sensors_def:
+                statuses.append({
+                    'name': name_en,
+                    'status': 'Unknown',
+                    'detail': f"{name_cn} (未知)",
+                    'level': 'warn'
+                })
 
-        statuses.append({
-            'name': 'GPS Fix',
-            'status': gps_label,
-            'detail': ', '.join(detail_parts),
-            'level': gps_level,
-        })
-
-        if sat_int is not None:
-            if sat_int >= 4:
-                sat_level = 'ok'      # 4颗及以上可定位，显示绿色
-            else:
-                sat_level = 'error'   # 少于4颗无法定位，显示红色
-            statuses.append({
-                'name': 'Satellites',
-                'status': f'{sat_int}',
-                'detail': '',
-                'level': sat_level,
-            })
-
+        # 2. 电池信息
         battery_pct = state.get('battery_percentage')
         battery_voltage = state.get('battery_voltage')
         try:
@@ -1698,10 +1837,11 @@ class GroundStationNode(Node):
         检查关键传感器是否健康 (基于 SYS_STATUS 位掩码)
         
         根据 QGC 实现方式，检查所有已启用且需要的传感器是否健康。
+        适用于 ArduPilot 和 PX4。
         MAV_SYS_STATUS_SENSOR 位定义:
             0x01: 3D gyro
             0x02: 3D accelerometer
-            0x04: 3D magnetometer (可选，ArduPilot可在无磁罗盘时飞行)
+            0x04: 3D magnetometer
             0x08: absolute pressure (气压计)
             0x20: GPS
         
@@ -1818,7 +1958,8 @@ class GroundStationNode(Node):
 
     @staticmethod
     def _severity_to_label(severity):
-        mapping = {
+        # MAVLink/PX4 日志级别 (0-7)
+        mavlink_mapping = {
             0: 'EMERGENCY',
             1: 'ALERT',
             2: 'CRITICAL',
@@ -1828,26 +1969,20 @@ class GroundStationNode(Node):
             6: 'INFO',
             7: 'DEBUG',
         }
-        return mapping.get(severity, f'LEVEL {severity}')
-
-    @staticmethod
-    def _describe_gps_fix(fix_type):
-        mapping = {
-            0: 'No GPS',
-            1: 'No Fix',
-            2: '2D Fix',
-            3: '3D Fix',
-            4: 'DGPS',
-            5: 'RTK Float',
-            6: 'RTK Fixed',
+        # ROS 2 日志级别 (10/20/30/40/50)
+        ros2_mapping = {
+            10: 'DEBUG',
+            20: 'INFO',
+            30: 'WARNING',
+            40: 'ERROR',
+            50: 'FATAL',
         }
-        try:
-            fix_int = int(fix_type)
-        except (TypeError, ValueError):
-            fix_int = None
-        if fix_int is None:
-            return 'Unknown'
-        return mapping.get(fix_int, 'Unknown')
+        # 先尝试 MAVLink 映射，再尝试 ROS 2 映射
+        if severity in mavlink_mapping:
+            return mavlink_mapping[severity]
+        if severity in ros2_mapping:
+            return ros2_mapping[severity]
+        return f'LEVEL {severity}'
 
     def handle_led_state_feedback(self, usv_id, msg):
         """处理来自USV的LED状态反馈。"""

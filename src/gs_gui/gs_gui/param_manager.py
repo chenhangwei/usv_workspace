@@ -176,7 +176,7 @@ class ParamManager:
     
     def _create_param_subscriber(self):
         """创建参数值 topic 订阅器"""
-        param_topic = f'/{self.usv_namespace}/mavros/param/param_value'
+        param_topic = f'/{self.usv_namespace}/param/param_value'
         
         self.param_sub = self.node.create_subscription(
             Param,
@@ -259,7 +259,7 @@ class ParamManager:
         
         工作流程：
         1. 清空当前参数缓存
-        2. 开始监听 /mavros/param/param_value topic
+        2. 开始监听 /param/param_value topic
         3. 调用 ParamPull 服务（不等待完成）
         4. MAVROS 会逐个发布参数到 topic
         5. 通过回调接收参数并更新进度
@@ -447,7 +447,7 @@ class ParamManager:
         # 我们需要使用其他方式获取参数列表
         
         # 临时方案：使用常见参数名称列表进行测试
-        # TODO: 实现参数列表获取（可能需要订阅 /mavros/param/param_value topic）
+        # TODO: 实现参数列表获取（可能需要订阅 /param/param_value topic）
         
         self.logger.warn("直接参数读取功能待实现，当前返回空列表")
         return False
