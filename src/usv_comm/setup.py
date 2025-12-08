@@ -51,6 +51,6 @@ including status processing, data exchange, and command transmission functionali
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Communication'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )

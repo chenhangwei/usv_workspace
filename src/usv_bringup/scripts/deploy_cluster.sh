@@ -24,6 +24,9 @@ SSH_USER="root"
 # 远程工作空间路径
 REMOTE_WORKSPACE="/home/usv/usv_workspace"
 
+# ROS 2 发行版（jazzy, kilted, humble）
+ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+
 # =============================================================================
 # 函数定义
 # =============================================================================
@@ -64,8 +67,16 @@ deploy_usv() {
     
     # 远程执行启动命令
     ssh -o ConnectTimeout=5 ${SSH_USER}@${usv_ip} << EOF
-        # 加载 ROS 环境
-        source /opt/ros/humble/setup.bash
+        # 加载 ROS 环境（支持 jazzy, kilted, humble）
+        if [ -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then
+            source /opt/ros/${ROS_DISTRO}/setup.bash
+        elif [ -f /opt/ros/jazzy/setup.bash ]; then
+            source /opt/ros/jazzy/setup.bash
+        elif [ -f /opt/ros/kilted/setup.bash ]; then
+            source /opt/ros/kilted/setup.bash
+        else
+            source /opt/ros/humble/setup.bash
+        fi
         source ${REMOTE_WORKSPACE}/install/setup.bash
         
         # 停止已有进程

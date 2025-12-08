@@ -45,6 +45,6 @@ and reference frames in the vehicle.""",
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'TF', 'Transform'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )

@@ -43,6 +43,6 @@ enabling temperature regulation and environmental control for onboard electronic
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Fan Control'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )

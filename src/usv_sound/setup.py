@@ -64,6 +64,6 @@ for various operational states and events.""",
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Sound Control'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )

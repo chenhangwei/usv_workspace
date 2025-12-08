@@ -43,6 +43,6 @@ supporting task scheduling and control based on ROS 2.""",
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Action'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )

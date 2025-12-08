@@ -62,6 +62,6 @@ and convenient operation and management.""",
         'Topic :: Scientific/Engineering :: Visualization',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'GUI', 'PyQt5'],
-    python_requires='>=3.6',
+    python_requires='>=3.10',
     url='https://github.com/chenhangwei/usv_workspace',
 )
