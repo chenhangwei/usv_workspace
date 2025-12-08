@@ -13,7 +13,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 
 # PX4 消息类型
-from px4_msgs.msg import VehicleCommand, VehicleCommandAck
+from px4_msgs.msg import VehicleCommand, VehicleCommandAck, HomePosition
 
 
 class Px4CommandInterface:
@@ -203,17 +203,17 @@ class Px4CommandInterface:
     def set_home_position(
         self,
         use_current: bool = True,
-        lat: float = 0.0,
-        lon: float = 0.0,
-        alt: float = 0.0,
+        x: float = 0.0,
+        y: float = 0.0,
+        z: float = 0.0,
         callback: Optional[Callable[[bool, int], None]] = None
     ) -> bool:
         """
-        设置 Home 位置
+        设置 Home 位置（局部坐标系）
         
         Args:
             use_current: 是否使用当前位置
-            lat, lon, alt: 指定坐标（use_current=False 时使用）
+            x, y, z: 局部坐标（use_current=False 时使用，ENU坐标系，单位：米）
             callback: 完成回调
             
         Returns:
@@ -227,15 +227,41 @@ class Px4CommandInterface:
                 callback=callback
             )
         else:
-            self.logger.info(f'📍 设置 Home 为指定坐标: ({lat:.7f}, {lon:.7f}, {alt:.2f})')
-            return self.send_command(
-                command=self.MAV_CMD_DO_SET_HOME,
-                param1=0.0,  # 使用指定坐标
-                param5=lat,
-                param6=lon,
-                param7=alt,
-                callback=callback
-            )
+            self.logger.info(f'📍 设置 Home 为局部坐标: X={x:.2f}m, Y={y:.2f}m, Z={z:.2f}m')
+            
+            # 发布 HomePosition 消息来设置局部坐标系的 Home
+            try:
+                # 创建发布器
+                topic_name = f'/{self.usv_namespace}/fmu/in/home_position' if self.usv_namespace else '/fmu/in/home_position'
+                home_pub = self.node.create_publisher(HomePosition, topic_name, 10)
+                
+                # 创建消息
+                home_msg = HomePosition()
+                home_msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)  # 微秒
+                home_msg.x = float(x)
+                home_msg.y = float(y)
+                home_msg.z = float(z)
+                home_msg.yaw = 0.0
+                home_msg.valid_lpos = True
+                home_msg.valid_hpos = False  # 不使用 GPS 坐标
+                home_msg.valid_alt = True
+                home_msg.manual_home = True
+                
+                # 发布消息
+                home_pub.publish(home_msg)
+                self.logger.info(f'✅ 已发布 HomePosition 消息到 {topic_name}')
+                
+                # 销毁发布器
+                self.node.destroy_publisher(home_pub)
+                
+                if callback:
+                    callback(True, 0)
+                return True
+            except Exception as e:
+                self.logger.error(f'❌ 发布 HomePosition 失败: {e}')
+                if callback:
+                    callback(False, -1)
+                return False
 
     def arm(self, callback: Optional[Callable[[bool, int], None]] = None) -> bool:
         """

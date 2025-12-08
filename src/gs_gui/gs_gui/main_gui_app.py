@@ -817,7 +817,7 @@ class MainWindow(QMainWindow):
                     else:
                         self.ui_utils.append_info(
                             f"📍 已向 {usv_namespace} 发送设置 Home Position 命令\n"
-                            f"    坐标: {coords.get('lat'):.7f}, {coords.get('lon'):.7f}, {coords.get('alt'):.2f}m"
+                            f"    局部坐标: X={coords.get('x'):.2f}m, Y={coords.get('y'):.2f}m, Z={coords.get('z'):.2f}m"
                         )
         
         except Exception as e:

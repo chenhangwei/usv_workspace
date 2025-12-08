@@ -1159,30 +1159,28 @@ class GroundStationNode(Node):
         """
         设置 Home Position 回调
         
-        通过 PX4 VehicleCommand 发送 MAV_CMD_DO_SET_HOME 命令设置 Home Position
+        通过 PX4 HomePosition 消息设置 Home Position（局部坐标系）
         
         Args:
             usv_namespace: USV 命名空间（如 'usv_01'）
             use_current: 是否使用当前位置（True=使用当前位置, False=使用指定坐标）
-            coords: 坐标字典 {'lat': float, 'lon': float, 'alt': float}（仅当 use_current=False 时使用）
+            coords: 坐标字典 {'x': float, 'y': float, 'z': float}（仅当 use_current=False 时使用）
         """
         try:
             # 使用 PX4 命令接口发送设置 Home 命令
             px4_cmd = Px4CommandInterface(self, usv_namespace)
-            client = self.create_client(CommandLong, service_name)
             
-            # 等待服务可用
             if use_current:
                 success = px4_cmd.set_home_position(use_current=True)
                 self.get_logger().info(f'[OK] 设置 {usv_namespace} Home Position 为当前位置')
             else:
-                lat = float(coords.get('lat', 0.0))
-                lon = float(coords.get('lon', 0.0))
-                alt = float(coords.get('alt', 0.0))
-                success = px4_cmd.set_home_position(use_current=False, lat=lat, lon=lon, alt=alt)
+                x = float(coords.get('x', 0.0))
+                y = float(coords.get('y', 0.0))
+                z = float(coords.get('z', 0.0))
+                success = px4_cmd.set_home_position(use_current=False, x=x, y=y, z=z)
                 self.get_logger().info(
-                    f'[OK] 设置 {usv_namespace} Home Position 为指定坐标: '
-                    f'lat={lat:.7f}, lon={lon:.7f}, alt={alt:.2f}m'
+                    f'[OK] 设置 {usv_namespace} Home Position 为局部坐标: '
+                    f'X={x:.2f}m, Y={y:.2f}m, Z={z:.2f}m'
                 )
             
             if success:
@@ -1192,7 +1190,7 @@ class GroundStationNode(Node):
                     else:
                         self.ros_signal.node_info.emit(
                             f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令\n'
-                            f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
+                            f'    局部坐标: X={coords.get("x"):.2f}m, Y={coords.get("y"):.2f}m, Z={coords.get("z"):.2f}m'
                         )
                 except Exception:
                     pass
