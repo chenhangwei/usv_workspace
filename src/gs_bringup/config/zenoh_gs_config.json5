@@ -1,62 +1,43 @@
 {
   // =========================================================================
-  // 地面站 Zenoh Bridge 配置
-  // 用于接收所有 USV 分组的状态数据
+  // 地面站 Zenoh Bridge 配置 (v1.7.0+)
+  // 模式：Router - 地面站作为中心节点，USV 连接到此
   // =========================================================================
   
-  // 模式：客户端模式，连接到中心 Router
-  "mode": "client",
+  "mode": "router",
   
-  // 连接配置
-  "connect": {
+  // 监听配置（USV 连接到此端口）
+  "listen": {
     "endpoints": [
-      // Router 地址（地面站作为 Router）
-      "tcp/192.168.68.50:7447"
+      "tcp/0.0.0.0:7447"
     ]
   },
   
-  // 插件配置
   "plugins": {
-    // ROS 2 DDS 桥接插件
     "ros2dds": {
-      // 话题过滤
-      "allowance": {
-        // 订阅所有 USV 的状态
-        "subscriptions": [
-          // USV 状态（usv_01 ~ usv_50）
+      "allow": {
+        "subscribers": [
           "usv_.*/usv_state",
-          // PX4 原生状态（用于调试）
           "usv_.*/fmu/out/vehicle_status",
           "usv_.*/fmu/out/vehicle_local_position",
           "usv_.*/fmu/out/battery_status"
         ],
-        // 发布命令到所有 USV
-        "publications": [
-          // 控制命令
+        "publishers": [
           "usv_.*/set_usv_mode",
           "usv_.*/set_usv_arming",
           "usv_.*/set_arm",
           "usv_.*/set_usv_target_position",
           "usv_.*/clear_target",
-          // 分组命令（发布到集群管理节点）
           "group_arm_command",
           "group_mode_command",
           "all_arm",
           "all_disarm"
         ]
-      },
-      
-      // 地面站 DDS Domain ID（通常使用 99）
-      // "domain": 99,
-      
-      // 接收频率不限制
-      "pub_max_frequency": 0.0
+      }
     }
   },
   
-  // 日志配置
   "plugins_loading": {
-    "enabled": true,
-    "search_dirs": []
+    "enabled": true
   }
 }

@@ -107,15 +107,15 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # Zenoh Bridge（接收所有分组数据）
+    # Zenoh Bridge（Router 模式 - 地面站作为中心节点）
     # =========================================================================
     zenoh_bridge = ExecuteProcess(
         condition=IfCondition(use_zenoh),
         cmd=[
             'zenoh-bridge-ros2dds',
             '-c', zenoh_config,
-            '-e', ['tcp/', router_ip, ':7447'],
             '-d', domain_id,
+            # Router 模式：监听 0.0.0.0:7447，USV 连接到此
         ],
         output='screen',
         name='zenoh_bridge'

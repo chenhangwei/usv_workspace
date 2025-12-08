@@ -1,61 +1,40 @@
 {
   // =========================================================================
-  // USV 端 Zenoh Bridge 配置
-  // 用于 PX4 uXRCE-DDS 集群通信
+  // USV 端 Zenoh Bridge 配置 (v1.7.0+)
   // =========================================================================
   
-  // 模式：客户端模式，连接到中心 Router
   "mode": "client",
   
-  // 连接配置
   "connect": {
     "endpoints": [
-      // 连接到地面站 Router
       "tcp/192.168.68.50:7447"
     ]
   },
   
-  // 插件配置
   "plugins": {
-    // ROS 2 DDS 桥接插件
     "ros2dds": {
-      // 话题过滤：只转发必要的话题（减少带宽）
-      "allowance": {
-        // 上行话题：USV -> 地面站
-        "publications": [
-          // USV 状态（聚合后的状态）
+      "allow": {
+        "publishers": [
           ".*/usv_state",
-          // PX4 原生状态（可选，用于调试）
           ".*/fmu/out/vehicle_status",
           ".*/fmu/out/vehicle_local_position",
           ".*/fmu/out/battery_status"
         ],
-        // 下行话题：地面站 -> USV
-        "subscriptions": [
-          // 控制命令
+        "subscribers": [
           ".*/set_usv_mode",
           ".*/set_usv_arming",
           ".*/set_arm",
           ".*/set_usv_target_position",
           ".*/clear_target",
-          // PX4 命令（可选）
           ".*/fmu/in/vehicle_command",
           ".*/fmu/in/trajectory_setpoint",
           ".*/fmu/in/offboard_control_mode"
         ]
-      },
-      
-      // DDS Domain ID（在 launch 文件中动态指定）
-      // "domain": 10,
-      
-      // 降低发布频率（减少带宽，尤其是跨网络时）
-      "pub_max_frequency": 10.0
+      }
     }
   },
   
-  // 日志配置
   "plugins_loading": {
-    "enabled": true,
-    "search_dirs": []
+    "enabled": true
   }
 }
