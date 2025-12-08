@@ -19,12 +19,12 @@ setup(
         ('share/' + package_name + '/launch', [
             'launch/gs_launch.py',
             'launch/gs_distributed_launch.py',  # ROS 2 分布式启动
-            'launch/domain_bridge.launch.py',   # Domain Bridge 启动
         ]),
         ('share/' + package_name + '/config', [
             'config/gs_params.yaml',
             'config/usv_fleet.yaml',            # USV 集群配置
-            'config/domain_bridge.yaml',        # Domain Bridge 配置
+            'config/zenoh_gs_config.json5',     # Zenoh 地面站配置
+            'config/zenoh_router_config.json5', # Zenoh Router 配置
         ]),
     ],
     install_requires=[
