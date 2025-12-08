@@ -5,22 +5,17 @@
 """
 
 import json
-from collections import defaultdict, deque
 from datetime import datetime
-import yaml
-import os
 import rclpy 
-from rclpy.node import Node  # 从rclpy.node模块导入Node类，用于创建ROS2节点
-from rclpy.parameter import Parameter  # 导入Parameter类，用于参数设置
-from geometry_msgs.msg import PoseStamped  # 从geometry_msgs.msg模块导入PoseStamped消息类型，用于位姿信息
-from common_interfaces.msg import UsvStatus  # 从common_interfaces.msg模块导入UsvStatus消息类型
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy  # 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
-import queue  # 导入queue模块，用于创建消息队列
-import threading  # 导入threading模块，用于多线程处理
-from std_msgs.msg import String # 导入 String 消息类型
-import weakref  # 导入weakref模块，用于弱引用
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from common_interfaces.msg import UsvStatus
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+import queue
+import threading
+from std_msgs.msg import String
 import tf2_ros
-from rcl_interfaces.msg import Log  # 导入 ROS 日志消息类型
+from rcl_interfaces.msg import Log
 
 # 导入分解后的模块
 from .usv_manager import UsvManager
