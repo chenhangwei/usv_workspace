@@ -241,15 +241,68 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # 避障节点（可选）
+    # 避障节点 - PX4 版本
     # =========================================================================
     usv_avoidance_node = Node(
         package='usv_control',
-        executable='usv_avoidance_node',
+        executable='usv_avoidance_px4_node',
         name='usv_avoidance_node',
         namespace=namespace,
         output='screen',
         parameters=[param_file],
+        remappings=[
+            ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
+            ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
+            ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
+            ('/fmu/in/offboard_control_mode', 'fmu/in/offboard_control_mode'),
+        ],
+    )
+    
+    # =========================================================================
+    # 坐标转换节点 - PX4 版本
+    # =========================================================================
+    coord_transform_node = Node(
+        package='usv_control',
+        executable='coord_transform_px4_node',
+        name='coord_transform_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[
+            param_file,
+            {'mode': 'local'},  # 使用本地坐标直传模式
+            {'coordinate_system': 'ENU'},
+        ],
+        remappings=[
+            ('/fmu/out/vehicle_global_position', 'fmu/out/vehicle_global_position'),
+            ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
+            ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
+            ('/fmu/in/offboard_control_mode', 'fmu/in/offboard_control_mode'),
+            ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
+        ],
+    )
+    
+    # =========================================================================
+    # 自动设置 Home 点节点 - PX4 版本
+    # =========================================================================
+    auto_set_home_node = Node(
+        package='usv_comm',
+        executable='auto_set_home_px4_node',
+        name='auto_set_home_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[
+            param_file,
+            {'set_delay_sec': 5.0},
+            {'use_current_gps': False},  # 使用固定坐标作为原点
+            {'wait_for_gps': False},     # 不等待 GPS（室内/UWB 场景）
+        ],
+        remappings=[
+            ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
+            ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
+            ('/fmu/out/vehicle_global_position', 'fmu/out/vehicle_global_position'),
+            ('/fmu/out/vehicle_gps_position', 'fmu/out/vehicle_gps_position'),
+            ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
+        ],
     )
     
     # =========================================================================
@@ -262,6 +315,8 @@ def generate_launch_description():
             usv_command_node,
             usv_status_node,
             usv_avoidance_node,
+            coord_transform_node,
+            auto_set_home_node,
         ]
     )
     

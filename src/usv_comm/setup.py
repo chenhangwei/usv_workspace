@@ -39,6 +39,7 @@ including status processing, data exchange, and command transmission functionali
             'shutdown_service_node = usv_comm.shutdown_service_node:main',
             # PX4 uXRCE-DDS 版本节点
             'usv_status_px4_node = usv_comm.usv_status_px4_node:main',
+            'auto_set_home_px4_node = usv_comm.auto_set_home_px4_node:main',
         ],
     },
     classifiers=[
