@@ -113,14 +113,6 @@ class GroundStationNode(Node):
         # USV rosout 订阅列表（将在 _register_new_usv 中动态初始化）
         self.usv_rosout_subs = []
 
-        # 预检与状态文本缓存 (线程安全)
-        self._vehicle_messages = defaultdict(lambda: deque(maxlen=50))
-        self._prearm_warnings = defaultdict(dict)
-        self._prearm_ready = ThreadSafeDict()
-        self._sensor_status_cache = ThreadSafeDict()
-        # 传感器健康缓存 (SYS_STATUS)
-        self._sensor_health_cache = ThreadSafeDict()
-        self._heartbeat_status_cache = ThreadSafeDict()
         # 导航目标信息缓存（用于导航面板显示）
         self._usv_nav_target_cache = ThreadSafeDict()
         
@@ -1010,69 +1002,17 @@ class GroundStationNode(Node):
                 pass
 
     def handle_status_text(self, usv_id, msg):
-        """处理飞控 status_text 消息，收集预检提示与车辆消息."""
-        if msg is None:
-            return
-
-        text_raw = getattr(msg, 'text', '') or ''
-        text = text_raw.strip()
-        if not text:
-            return
+        """处理飞控 status_text 消息，委托给 sensor_handler."""
+        # 委托给 sensor_handler
+        self.sensor_handler.handle_status_text(usv_id, msg)
         
-        try:
-            severity = int(getattr(msg, 'severity', 6))
-        except (TypeError, ValueError):
-            severity = 6
-        
-        # 根据 severity 输出到不同窗口
-        # 飞控状态文本消息（STATUSTEXT）不发送到 warning 窗口，也不发送到 info 窗口
-        # 只以日志形式记录，避免干扰用户操作
-        # 其他模块的错误和警告仍会正常显示在 warning 窗口
-        
-        # 所有飞控消息仅记录到 ROS 日志，不显示在 GUI 窗口
-        # 用户可以通过日志文件或 rqt_console 查看这些消息
-        
-        # 根据严重性级别记录到不同的日志等级
-        if severity <= 2:  # EMERGENCY/ALERT/CRITICAL
-            self.get_logger().error(f"[FCU-CRITICAL] {usv_id}: {text}")
-        elif severity == 3:  # ERROR
-            self.get_logger().error(f"[FCU-ERROR] {usv_id}: {text}")
-        elif severity == 4:  # WARNING
-            self.get_logger().warn(f"[FCU-WARNING] {usv_id}: {text}")
-        else:  # NOTICE/INFO/DEBUG
-            self.get_logger().info(f"[FCU-INFO] {usv_id}: {text}")
-
-        now_sec = self._now_seconds()
-        entry = {
-            'text': text,
-            'severity': severity,
-            'severity_label': self._severity_to_label(severity),
-            'time': self._format_time(now_sec),
-            'timestamp': now_sec,
-        }
-        self._vehicle_messages[usv_id].appendleft(entry)
-
-        upper_text = text.upper()
-        warnings = self._prearm_warnings[usv_id]
-        # 支持 ArduPilot (PREARM) 和 PX4 (PREFLIGHT) 的预检消息
-        if 'PREARM' in upper_text or 'PREFLIGHT' in upper_text:
-            if severity <= 4 and 'PASS' not in upper_text and 'OK' not in upper_text:
-                warnings[text] = now_sec
-            else:
-                warnings.clear()
-
-        self._cleanup_prearm_warnings(usv_id, now_sec)
-
+        # 确保状态字典存在
         state = self.usv_states.get(usv_id)
         if state is None:
             state = {'namespace': usv_id}
             self.usv_states[usv_id] = state
-
-        # 记录消息到达时间（用于变化检测）
-        if not hasattr(self, '_last_statustext_time'):
-            self._last_statustext_time = {}
-        self._last_statustext_time[usv_id] = now_sec
         
+        # 更新增强状态并推送到 GUI
         self.augment_state_payload(usv_id, state)
 
         try:
@@ -1081,46 +1021,8 @@ class GroundStationNode(Node):
             self.get_logger().warn(f"推送 {usv_id} 状态文本更新失败: {exc}")
 
     def handle_sys_status(self, usv_id, msg):
-        """
-        处理飞控 SYS_STATUS 消息，缓存传感器健康状态
-        
-        根据 QGC 实现，使用 onboard_control_sensors_health 位掩码来判断传感器健康状态。
-        关键传感器位定义 (MAV_SYS_STATUS_SENSOR):
-            0x01 (bit 0): 3D gyro
-            0x02 (bit 1): 3D accelerometer  
-            0x04 (bit 2): 3D magnetometer
-            0x08 (bit 3): absolute pressure
-            0x20 (bit 5): GPS
-        
-        Args:
-            usv_id: USV标识符
-            msg: SysStatus 消息
-        """
-        if msg is None:
-            return
-        
-        # 缓存原始传感器状态位掩码
-        self._sensor_health_cache[usv_id] = {
-            'onboard_control_sensors_present': msg.sensors_present,
-            'onboard_control_sensors_enabled': msg.sensors_enabled,
-            'onboard_control_sensors_health': msg.sensors_health,
-            'timestamp': self._now_seconds()
-        }
-        
-        # 记录日志以便调试（仅首次或状态变化时）
-        if not hasattr(self, '_last_sensor_health_log'):
-            self._last_sensor_health_log = {}
-        
-        prev = self._last_sensor_health_log.get(usv_id)
-        curr_health = msg.sensors_health
-        if prev != curr_health:
-            self.get_logger().info(
-                f"[SYS_STATUS] {usv_id} 传感器健康更新: "
-                f"present=0x{msg.sensors_present:08X}, "
-                f"enabled=0x{msg.sensors_enabled:08X}, "
-                f"health=0x{curr_health:08X}"
-            )
-            self._last_sensor_health_log[usv_id] = curr_health
+        """处理飞控 SYS_STATUS 消息，委托给 sensor_handler."""
+        self.sensor_handler.handle_sys_status(usv_id, msg)
 
     def _extract_usv_id_from_log(self, node_name):
         """
@@ -1221,9 +1123,9 @@ class GroundStationNode(Node):
                         'timestamp': now_sec,
                     }
                     
-                    # 如果是已知 USV，添加到消息列表
+                    # 如果是已知 USV，添加到消息列表 (通过 sensor_handler)
                     if usv_id != "unknown":
-                        self._vehicle_messages[usv_id].appendleft(entry)
+                        self.sensor_handler._vehicle_messages[usv_id].appendleft(entry)
                         # 触发 GUI 更新
                         self.ros_signal.status_text_received.emit(usv_id, log_text)
                     else:
@@ -1265,11 +1167,7 @@ class GroundStationNode(Node):
         """
         为状态字典附加车辆消息、预检标记与传感器状态
         
-        实现 QGC 风格的综合 Ready 检查:
-        1. PreArm 警告检查 (来自 STATUSTEXT)
-        2. CRITICAL/ERROR 消息检查 (来自 STATUSTEXT)
-        3. 传感器健康检查 (来自 SYS_STATUS)
-        4. 系统状态检查 (来自 HEARTBEAT, 暂未实现)
+        委托给 sensor_handler 实现 QGC 风格的综合 Ready 检查
         """
         if state_data is None:
             state_data = self.usv_states.get(usv_id)
@@ -1277,33 +1175,28 @@ class GroundStationNode(Node):
                 return None
 
         now_sec = self._now_seconds()
-        self._cleanup_prearm_warnings(usv_id, now_sec)
+        
+        # 使用 sensor_handler 进行状态处理
+        self.sensor_handler.cleanup_prearm_warnings(usv_id, now_sec)
 
-        # 1. 收集所有消息
-        messages = [dict(item) for item in self._vehicle_messages.get(usv_id, [])]
+        # 1. 收集所有消息 (从 sensor_handler)
+        messages = self.sensor_handler.get_vehicle_messages(usv_id)
         
-        # 2. 收集 PreArm 警告
-        prearm_warnings = list(self._prearm_warnings.get(usv_id, {}).keys())
+        # 2. 收集 PreArm 警告 (从 sensor_handler)
+        prearm_warnings = self.sensor_handler.get_prearm_warnings(usv_id)
         
-        # 3. 收集最近的 CRITICAL/ERROR 消息 (30秒内)
-        critical_errors = []
-        for msg_entry in self._vehicle_messages.get(usv_id, []):
-            severity = msg_entry.get('severity', 6)
-            timestamp = msg_entry.get('timestamp', 0)
-            # severity <= 3 表示 EMERGENCY/ALERT/CRITICAL/ERROR
-            if severity <= 3 and (now_sec - timestamp) <= 30.0:
-                critical_errors.append(msg_entry.get('text', ''))
+        # 3. 收集最近的 CRITICAL/ERROR 消息 (从 sensor_handler)
+        critical_errors = self.sensor_handler.get_critical_errors(usv_id, within_seconds=30.0)
         
-        # 4. 检查传感器健康状态
-        sensor_healthy, unhealthy_sensors = self._check_sensor_health(usv_id)
+        # 4. 检查传感器健康状态 (从 sensor_handler)
+        sensor_healthy, unhealthy_sensors = self.sensor_handler.check_sensor_health(usv_id)
         
         # 5. 综合判断 Ready 状态
-        # 必须同时满足: 无 PreArm 警告 + 无严重错误 + 传感器健康
         all_warnings = prearm_warnings.copy()
         
         # 将严重错误添加到警告列表
         if critical_errors:
-            for err in critical_errors[:3]:  # 最多显示 3 条严重错误
+            for err in critical_errors[:3]:
                 all_warnings.append(f"[CRITICAL] {err}")
         
         # 将传感器问题添加到警告列表
@@ -1316,218 +1209,32 @@ class GroundStationNode(Node):
                  len(critical_errors) == 0 and 
                  sensor_healthy)
         
-        # 缓存结果
-        self._prearm_ready[usv_id] = ready
-        self._sensor_status_cache[usv_id] = self._build_sensor_status(usv_id, state_data)
+        # 缓存结果到 sensor_handler
+        self.sensor_handler.set_prearm_ready(usv_id, ready)
+        sensor_status = self.sensor_handler.build_sensor_status(usv_id, state_data)
+        self.sensor_handler.cache_sensor_status(usv_id, sensor_status)
 
         # 更新状态数据
         state_data['vehicle_messages'] = messages
         state_data['prearm_ready'] = ready
-        state_data['prearm_warnings'] = all_warnings  # 包含所有警告来源
-        state_data['sensor_status'] = self._sensor_status_cache[usv_id]
-        # 附加导航目标缓存（用于导航面板显示）
+        state_data['prearm_warnings'] = all_warnings
+        state_data['sensor_status'] = sensor_status
         state_data['nav_target_cache'] = self._usv_nav_target_cache.get(usv_id)
 
         return state_data
-
-    def _build_sensor_status(self, usv_id, state):
-        """根据当前状态评估关键传感器的健康状况."""
-        statuses = []
-
-        # 1. 传感器健康状态 (IMU, Baro, Mag)
-        sensor_data = self._sensor_health_cache.get(usv_id)
-        
-        # 定义要显示的传感器
-        # (位掩码, 显示名称, 详细描述)
-        sensors_def = [
-            (0x01, 'Gyro', '陀螺仪'),
-            (0x02, 'Accel', '加速度计'),
-            (0x04, 'Mag', '磁罗盘'),
-            (0x08, 'Baro', '气压计'),
-            # GPS 状态已在上方移除，这里也不再显示，除非需要调试
-        ]
-
-        if sensor_data:
-            present = sensor_data.get('onboard_control_sensors_present', 0)
-            enabled = sensor_data.get('onboard_control_sensors_enabled', 0)
-            health = sensor_data.get('onboard_control_sensors_health', 0)
-            
-            for bit, name_en, name_cn in sensors_def:
-                # 只显示存在的传感器
-                if present & bit:
-                    if not (enabled & bit):
-                        # 存在但未启用
-                        status = 'Disabled'
-                        level = 'warn' # 或者 'info'，视情况而定
-                        detail = f"{name_cn} (未启用)"
-                    elif health & bit:
-                        # 健康 (位为1表示健康)
-                        status = 'OK'
-                        level = 'ok'
-                        detail = name_cn
-                    else:
-                        # 不健康
-                        status = 'Error'
-                        level = 'error'
-                        detail = f"{name_cn} 故障"
-                    
-                    statuses.append({
-                        'name': name_en,
-                        'status': status,
-                        'detail': detail,
-                        'level': level
-                    })
-        else:
-            # 如果没有传感器数据，显示未知状态，避免界面空白
-            for _, name_en, name_cn in sensors_def:
-                statuses.append({
-                    'name': name_en,
-                    'status': 'Unknown',
-                    'detail': f"{name_cn} (未知)",
-                    'level': 'warn'
-                })
-
-        # 2. 电池信息
-        battery_pct = state.get('battery_percentage')
-        battery_voltage = state.get('battery_voltage')
-        try:
-            battery_pct_val = float(battery_pct) if battery_pct is not None else None
-        except (TypeError, ValueError):
-            battery_pct_val = None
-
-        if battery_pct_val is not None:
-            if battery_pct_val >= 30.0:
-                battery_level = 'ok'
-            elif battery_pct_val >= 15.0:
-                battery_level = 'warn'
-            else:
-                battery_level = 'error'
-            detail = f"{battery_pct_val:.0f}%"
-            if battery_voltage is not None:
-                try:
-                    detail += f" @ {float(battery_voltage):.1f}V"
-                except (TypeError, ValueError):
-                    pass
-            statuses.append({
-                'name': 'Battery',
-                'status': 'OK' if battery_level == 'ok' else 'Low',
-                'detail': detail,
-                'level': battery_level,
-            })
-
-        # 温度检查（从毫摄氏度转换为摄氏度）
-        temperature = state.get('temperature')
-        try:
-            temp_raw = float(temperature) if temperature is not None else None
-            temp_val = temp_raw / 1000.0 if temp_raw is not None else None  # 毫度 → 度
-        except (TypeError, ValueError):
-            temp_val = None
-        if temp_val is not None and temp_val > 0:
-            if temp_val >= 75.0:
-                temp_level = 'error'
-            elif temp_val >= 60.0:
-                temp_level = 'warn'
-            else:
-                temp_level = 'ok'
-            statuses.append({
-                'name': 'CPU Temp',
-                'status': f"{temp_val:.1f}°C",
-                'detail': '',
-                'level': temp_level,
-            })
-
-        return statuses
-
-    def _check_sensor_health(self, usv_id):
-        """
-        检查关键传感器是否健康 (基于 SYS_STATUS 位掩码)
-        
-        根据 QGC 实现方式，检查所有已启用且需要的传感器是否健康。
-        适用于 ArduPilot 和 PX4。
-        MAV_SYS_STATUS_SENSOR 位定义:
-            0x01: 3D gyro
-            0x02: 3D accelerometer
-            0x04: 3D magnetometer
-            0x08: absolute pressure (气压计)
-            0x20: GPS
-        
-        Returns:
-            (bool, list): (是否健康, 不健康传感器列表)
-        """
-        sensor_data = self._sensor_health_cache.get(usv_id)
-        if not sensor_data:
-            # 如果还没有收到 SYS_STATUS 消息，暂时认为传感器健康
-            # 这样 Ready 检查只依赖于 PreArm 警告和严重错误
-            # 注意：这是临时方案，理想情况下应该确保收到 SYS_STATUS 消息
-            return True, []
-        
-        present = sensor_data['onboard_control_sensors_present']
-        enabled = sensor_data['onboard_control_sensors_enabled']
-        health = sensor_data['onboard_control_sensors_health']
-        
-        # 定义关键传感器位掩码
-        SENSOR_GYRO = 0x01
-        SENSOR_ACCEL = 0x02
-        SENSOR_MAG = 0x04
-        SENSOR_BARO = 0x08
-        SENSOR_GPS = 0x20
-        
-        # 定义必需传感器（陀螺仪、加速度计、气压计必需，磁罗盘可选）
-        # GPS 根据飞行模式可能是必需的，但在 PreArm 阶段检查
-        required_sensors = SENSOR_GYRO | SENSOR_ACCEL | SENSOR_BARO
-        
-        unhealthy_sensors = []
-        sensor_names = {
-            SENSOR_GYRO: "陀螺仪",
-            SENSOR_ACCEL: "加速度计",
-            SENSOR_MAG: "磁罗盘",
-            SENSOR_BARO: "气压计",
-            SENSOR_GPS: "GPS"
-        }
-        
-        # 检查每个传感器
-        for bit, name in sensor_names.items():
-            # 如果传感器存在且已启用
-            if (present & bit) and (enabled & bit):
-                # 检查是否健康
-                if not (health & bit):
-                    unhealthy_sensors.append(name)
-        
-        # 如果有不健康的传感器，返回 False
-        if unhealthy_sensors:
-            return False, unhealthy_sensors
-        
-        # 检查必需传感器是否都已启用
-        required_enabled = (enabled & required_sensors)
-        if required_enabled != (present & required_sensors):
-            missing = []
-            for bit, name in sensor_names.items():
-                if (bit & required_sensors) and (present & bit) and not (enabled & bit):
-                    missing.append(f"{name}(未启用)")
-            if missing:
-                return False, missing
-        
-        return True, []
 
     def _should_update_augmented_state(self, usv_id, now_sec):
         """
         检查是否需要重新计算 augmented state
         避免无变化时的重复计算
         """
-        # 检查是否有新的 statustext 消息
-        last_msg_time = getattr(self, '_last_statustext_time', {}).get(usv_id, 0)
+        # 检查是否有新的 statustext 消息 (从 sensor_handler)
+        last_msg_time = self.sensor_handler.get_last_statustext_time(usv_id)
         if now_sec - last_msg_time < 0.3:  # 300ms 内有新消息
             return True
         
-        # 检查是否有 PreArm 警告即将过期
-        warnings = self._prearm_warnings.get(usv_id, {})
-        if warnings:
-            for ts in warnings.values():
-                if now_sec - ts > self.PREARM_WARNING_EXPIRY - 1.0:  # 即将过期
-                    return True
-        
-        # 检查是否有传感器状态更新
-        sensor_cache = self._sensor_health_cache.get(usv_id)
+        # 检查是否有传感器状态更新 (从 sensor_handler)
+        sensor_cache = self.sensor_handler.get_sensor_health_cache(usv_id)
         if sensor_cache:
             if now_sec - sensor_cache.get('timestamp', 0) < 0.5:  # 500ms 内有更新
                 return True
@@ -1541,14 +1248,6 @@ class GroundStationNode(Node):
             return True
         
         return False
-    
-    def _cleanup_prearm_warnings(self, usv_id, now_sec):
-        warnings = self._prearm_warnings.get(usv_id)
-        if not warnings:
-            return
-        for key, ts in list(warnings.items()):
-            if now_sec - ts > self.PREARM_WARNING_EXPIRY:
-                warnings.pop(key, None)
 
     def _now_seconds(self):
         try:
