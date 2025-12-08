@@ -10,8 +10,8 @@
   // 连接配置
   "connect": {
     "endpoints": [
-      // Router 地址（在 launch 文件中动态指定）
-      // "tcp/192.168.1.100:7447"
+      // Router 地址（地面站作为 Router）
+      "tcp/192.168.68.50:7447"
     ]
   },
   
