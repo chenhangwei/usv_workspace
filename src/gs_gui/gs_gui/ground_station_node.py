@@ -66,9 +66,7 @@ class GroundStationNode(Node):
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)  # 创建QoS配置对象，深度为10，可靠性策略为可靠传输
 
         # 声明参数（必须在使用前声明）
-        self.declare_parameter('fleet_config_file', '')
-        self.declare_parameter('use_dynamic_discovery', True)  # 新增：是否启用动态发现
-        self.declare_parameter('discovery_interval', 3.0)  # 新增：发现间隔（秒）
+        self.declare_parameter('discovery_interval', 3.0)  # 动态发现间隔（秒）
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
@@ -166,11 +164,6 @@ class GroundStationNode(Node):
             action_timeout=self._cluster_action_timeout,
         )
 
-        # ========== 从配置文件加载USV列表（Domain隔离架构）==========
-        # 注意：必须在参数声明之后调用
-        self._fleet_config = self._load_fleet_config()
-        self._static_usv_list = self._extract_usv_list_from_config()
-
         # 读取 area_center 参数
         try:
             ax = float(self.get_parameter('area_center_x').get_parameter_value().double_value)
@@ -214,7 +207,6 @@ class GroundStationNode(Node):
         self._discovered_usv_list = []
 
         # 获取动态发现配置
-        self._use_dynamic_discovery = self.get_parameter('use_dynamic_discovery').value
         self._discovery_interval = self.get_parameter('discovery_interval').value
 
         # 创建定时器
@@ -224,13 +216,9 @@ class GroundStationNode(Node):
         # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI
         self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz
         
-        # 动态发现定时器（如果启用）
-        if self._use_dynamic_discovery:
-            self.discovery_timer = self.create_timer(self._discovery_interval, self.discover_new_usvs)
-            self.get_logger().info("🔍 动态发现模式已启用")
-        
-        # 初始化 USV（静态配置 + 动态发现）
-        self.initialize_usv_from_config()
+        # 动态发现定时器
+        self.discovery_timer = self.create_timer(self._discovery_interval, self.discover_new_usvs)
+        self.get_logger().info("🔍 动态发现模式已启用")
 
         # TF2: Buffer/Listener for coordinate transforms
         # 注意：使用 BEST_EFFORT QoS 以匹配 USV 发布的 /tf 话题
@@ -326,125 +314,6 @@ class GroundStationNode(Node):
                 self.publish_thread.join(timeout=2.0)
         except Exception as e:
             self.get_logger().warn(f'关闭后台线程时发生异常: {e}')
-
-    def _load_fleet_config(self):
-        """
-        从配置文件加载USV集群配置（用于Domain隔离架构）
-        
-        Returns:
-            dict: 配置字典，如果加载失败则返回None
-        """
-        try:
-            # 1. 优先从ROS参数获取配置文件路径
-            fleet_config_file = self.get_parameter('fleet_config_file').get_parameter_value().string_value
-            
-            # 2. 如果参数为空，使用默认路径
-            if not fleet_config_file:
-                # 尝试从install目录读取
-                try:
-                    from ament_index_python.packages import get_package_share_directory
-                    share_dir = get_package_share_directory('gs_bringup')
-                    fleet_config_file = os.path.join(share_dir, 'config', 'usv_fleet.yaml')
-                except Exception:
-                    # 如果失败，使用相对路径
-                    fleet_config_file = os.path.expanduser('~/usv_workspace/src/gs_bringup/config/usv_fleet.yaml')
-            
-            # 3. 加载YAML文件
-            if os.path.exists(fleet_config_file):
-                with open(fleet_config_file, 'r', encoding='utf-8') as f:
-                    config = yaml.safe_load(f)
-                    self.get_logger().info(f"✓ 已加载fleet配置文件: {fleet_config_file}")
-                    return config
-            else:
-                self.get_logger().warn(f"配置文件不存在: {fleet_config_file}")
-                return None
-                
-        except Exception as e:
-            self.get_logger().error(f"加载fleet配置文件失败: {e}")
-            return None
-    
-    def _extract_usv_list_from_config(self):
-        """
-        从配置中提取已启用的USV列表
-        
-        Returns:
-            list: USV命名空间列表，例如 ['usv_01', 'usv_02', 'usv_03']
-        """
-        usv_list = []
-        
-        if not self._fleet_config:
-            self.get_logger().warn("⚠️  未加载fleet配置，将使用空USV列表")
-            return usv_list
-        
-        try:
-            fleet = self._fleet_config.get('usv_fleet', {})
-            for usv_id, config in fleet.items():
-                # 只添加启用的USV
-                if config.get('enabled', False):
-                    namespace = config.get('namespace', usv_id)
-                    usv_list.append(namespace)
-                    self.get_logger().info(f"  ├─ {namespace} (已启用)")
-                else:
-                    self.get_logger().info(f"  ├─ {usv_id} (已禁用)")
-            
-            self.get_logger().info(f"✓ 从配置文件读取到 {len(usv_list)} 艘USV: {usv_list}")
-            
-        except Exception as e:
-            self.get_logger().error(f"解析USV列表失败: {e}")
-        
-        return usv_list
-    
-    def initialize_usv_from_config(self):
-        """
-        基于配置文件静态初始化所有USV的订阅者和发布者
-        （适用于Domain隔离架构，不依赖DDS节点发现）
-        """
-        self.get_logger().info("=" * 60)
-        self.get_logger().info("🚀 初始化USV订阅者和发布者（静态配置模式）")
-        self.get_logger().info("=" * 60)
-        
-        if not self._static_usv_list:
-            self.get_logger().warn("⚠️  USV列表为空，请检查配置文件")
-            return
-        
-        # 为每个配置的USV创建订阅和发布
-        for usv_id in self._static_usv_list:
-            try:
-                # 添加命名空间（需要/前缀）
-                ns = f"/{usv_id}" if not usv_id.startswith('/') else usv_id
-                self.usv_manager.add_usv_namespace(ns)
-                
-                # 记录当前时间
-                try:
-                    now_sec = self.get_clock().now().nanoseconds / 1e9
-                except Exception:
-                    now_sec = 0.0
-                self._ns_last_seen[usv_id] = now_sec
-                
-                self.get_logger().info(f"✓ {usv_id} 初始化完成")
-                
-            except Exception as e:
-                self.get_logger().error(f"✗ {usv_id} 初始化失败: {e}")
-        
-        # 更新last_ns_list
-        self.last_ns_list = self._static_usv_list.copy()
-        
-        # 订阅每个 USV 的 rosout (用于 Domain Bridge 转发的情况)
-        for usv_id in self._static_usv_list:
-            ns_prefix = f"/{usv_id}" if not usv_id.startswith('/') else usv_id
-            topic = f"{ns_prefix}/rosout"
-            self.get_logger().info(f"订阅远程日志: {topic}")
-            sub = self.create_subscription(
-                Log,
-                topic,
-                self.rosout_callback,
-                10
-            )
-            self.usv_rosout_subs.append(sub)
-        
-        self.get_logger().info("=" * 60)
-        self.get_logger().info(f"✓ 完成初始化 {len(self._static_usv_list)} 艘USV")
-        self.get_logger().info("=" * 60)
     
     def check_usv_topics_availability(self):
         """
@@ -454,12 +323,8 @@ class GroundStationNode(Node):
         而是通过检查topic上是否有数据来判断USV是否在线。
         
         注意：这个方法不会添加或删除USV，只会标记离线状态。
-        支持：静态配置 + 动态发现两种模式
         """
-        # 合并静态配置和动态发现的 USV 列表
-        all_usvs = list(set(self._static_usv_list) | set(self._discovered_usv_list))
-        
-        if not all_usvs:
+        if not self._discovered_usv_list:
             return
         
         try:
@@ -471,7 +336,7 @@ class GroundStationNode(Node):
         offline_threshold = 10.0  # 10秒未收到数据认为离线
         state_changed = False  # 标记是否有状态变化
         
-        for usv_id in all_usvs:
+        for usv_id in self._discovered_usv_list:
             last_seen = self._ns_last_seen.get(usv_id, 0.0)
             elapsed = now_sec - last_seen
             
@@ -521,9 +386,6 @@ class GroundStationNode(Node):
         - 不想维护静态 fleet.yaml 配置
         - USV 动态上下线场景
         """
-        if not self._use_dynamic_discovery:
-            return
-        
         try:
             # 获取当前所有话题
             topic_names_and_types = self.get_topic_names_and_types()
