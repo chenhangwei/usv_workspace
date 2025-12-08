@@ -87,8 +87,8 @@ class GroundStationNode(Node):
         # 初始化事件解码器
         self.event_decoder = EventDecoder(self.get_logger())
         
-        # 订阅 /rosout 以捕获 MAVROS 未解码的事件日志
-        # 使用与 rosout 兼容的 QoS 设置
+        # 订阅 /rosout 以捕获 PX4 事件日志
+        # 用于解码 FCU 事件消息
         from rclpy.qos import qos_profile_system_default
         rosout_qos = QoSProfile(
             depth=100,
@@ -102,7 +102,7 @@ class GroundStationNode(Node):
         )
         self.get_logger().info("已订阅 /rosout 用于事件解码")
         
-        # USV rosout 订阅列表（将在 initialize_usv_from_config 中初始化）
+        # USV rosout 订阅列表（将在 _register_new_usv 中动态初始化）
         self.usv_rosout_subs = []
 
         # 预检与状态文本缓存 (线程安全)
@@ -504,139 +504,6 @@ class GroundStationNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f"移除 USV {usv_id} 失败: {e}")
-    
-    # =====================================================
-    # 以下是原有的动态节点发现方法（保留用于兼容性）
-    # 在Domain隔离架构下不再使用
-    # =====================================================
-    
-    def update_subscribers_and_publishers(self):
-        """
-        [已废弃 - 仅用于兼容性] 动态发现USV节点
-        
-        ⚠️  注意：在Domain隔离架构下，此方法不再使用！
-        
-        原理：通过DDS节点发现机制动态检测USV上下线
-        限制：在每个USV使用独立Domain ID的架构下，地面站无法通过DDS发现USV节点
-        
-        新方案：使用 initialize_usv_from_config() 从配置文件静态加载USV列表
-        
-        该方法定期检查系统中的节点命名空间，
-        为新连接的USV创建订阅者和发布者，
-        为断开的USV销毁订阅者和发布者
-        """
-        # 在Domain隔离架构下，直接返回不执行
-        if self._static_usv_list:
-            return
-        # 获取当前系统中的节点名称和命名空间
-        node_names_and_namespaces = self.get_node_names_and_namespaces()
-
-        # 筛选出命名空间以 '/usv_' 开头的节点（忽略进一步的子命名空间），这些命名空间代表在线 USV
-        current_nodes_info = []
-        for name, ns in node_names_and_namespaces:
-            if not ns.startswith('/usv_'):
-                continue
-            # 仅保留一级命名空间（例如 /usv_01），避免嵌套命名空间干扰
-            if ns.count('/') > 1:
-                continue
-            current_nodes_info.append((name, ns))
-        # 提取唯一的 USV 命名空间列表
-        current_ns_list = list({ns for _, ns in current_nodes_info})
-        
-        # 添加稳定性检测机制：多次检测相同结果才确认变化
-        # 记录当前检测结果到历史记录中
-        self._ns_detection_history.append(set(current_ns_list))
-        # 限制历史记录长度，避免列表无限增长
-        if len(self._ns_detection_history) > 5:
-            self._ns_detection_history.pop(0)
-
-        # 需要连续多次检测得到一致结果才进行变更处理
-        required_samples = 2  # 从 3 减少到 2，加快检测确认速度
-        if len(self._ns_detection_history) < required_samples:
-            return
-
-        recent_ns_sets = self._ns_detection_history[-required_samples:]
-        reference_set = recent_ns_sets[0]
-        if not all(ns_set == reference_set for ns_set in recent_ns_sets[1:]):
-            return
-
-        # 使用稳定的结果进行后续处理
-        stable_ns_set = set(reference_set)
-        ns_map = {ns.lstrip('/'): ns for ns in stable_ns_set}
-        normalized_ns_list = list(ns_map.keys())
-
-        previous_last_ns = list(self.last_ns_list)
-
-        # 如果命名空间列表没有变化，直接返回
-        if set(normalized_ns_list) == set(self.last_ns_list):
-            return
-        
-        # 获取已存在的命名空间集合
-        existing_ns = set(self.usv_manager.usv_state_subs.keys())
-        # 计算新增的命名空间集合
-        new_ns = set(normalized_ns_list) - existing_ns
-        # 计算移除的命名空间集合
-        removed_ns = existing_ns - set(normalized_ns_list)
-
-        # 处理新增的USV命名空间 - 只显示汇总日志
-        if new_ns:
-            # 统计该 USV 下有多少个节点
-            node_counts = {}
-            for node_name, ns in current_nodes_info:
-                norm_ns = ns.lstrip('/')
-                if norm_ns in new_ns:
-                    node_counts[norm_ns] = node_counts.get(norm_ns, 0) + 1
-            
-            # 为每个新 USV 输出一条汇总日志
-            for usv_id in new_ns:
-                ns = ns_map.get(usv_id, f"/{usv_id}")
-                node_count = node_counts.get(usv_id, 0)
-                self.usv_manager.add_usv_namespace(ns)
-                # 记录当前时间，避免刚加入后立刻因为没有状态消息被误判离线
-                try:
-                    now_sec = self.get_clock().now().nanoseconds / 1e9
-                except Exception:
-                    now_sec = 0.0
-                self._ns_last_seen[usv_id] = now_sec
-                # 输出简洁的汇总日志
-                self.get_logger().info(f"[OK] USV上线: {ns} (检测到 {node_count} 个节点)")
-
-        # 处理移除的USV命名空间
-        safe_removed_ns = []
-        for usv_id in removed_ns:
-            last_seen = self._ns_last_seen.get(usv_id)
-            allow_remove = False
-            if last_seen is None:
-                # 从未收到过状态消息，说明订阅尚未建立成功，可以直接移除
-                allow_remove = True
-            else:
-                try:
-                    now_sec = self.get_clock().now().nanoseconds / 1e9
-                except Exception:
-                    now_sec = last_seen
-                elapsed = now_sec - last_seen
-                if elapsed >= self._ns_offline_grace_period:
-                    allow_remove = True
-                else:
-                    # 在宽限期内仍有状态消息，暂不移除，等待后续检测
-                    self.get_logger().debug(
-                        f"命名空间 {usv_id} 暂未从 ROS 图中检测到，但在 {elapsed:.1f}s 前仍有状态更新，延迟移除")
-            if allow_remove:
-                ns = ns_map.get(usv_id, f"/{usv_id}")
-                self.usv_manager.remove_usv_namespace(ns)
-                self._ns_last_seen.pop(usv_id, None)
-                safe_removed_ns.append(ns)
-                self.get_logger().info(f"USV节点断开连接，已移除命名空间: {ns}")
-
-        # 计算最终的逻辑在线列表：稳定检测结果 + 当前仍在宽限期内的命名空间
-        removed_now = {ns.lstrip('/') for ns in safe_removed_ns}
-        postponed_ns = removed_ns - removed_now
-        effective_ns = list(normalized_ns_list)
-        if postponed_ns:
-            for ns in previous_last_ns:
-                if ns in postponed_ns and ns not in effective_ns:
-                    effective_ns.append(ns)
-        self.last_ns_list = effective_ns
 
     # 通过Action方式发送导航目标点
     def _validate_target_position(self, x, y, z):
@@ -1422,7 +1289,7 @@ class GroundStationNode(Node):
         从日志节点名中提取 USV ID
         
         Args:
-            node_name: 日志源节点名 (例如 "usv_01.sys", "usv_01.mavros", "mavros_node-2")
+            node_name: 日志源节点名 (例如 "usv_01.sys", "usv_01.fmu")
             
         Returns:
             str: USV ID (例如 "usv_01") 或 "unknown"
@@ -1477,15 +1344,14 @@ class GroundStationNode(Node):
 
     def rosout_callback(self, msg):
         """
-        处理 ROS 日志消息，用于捕获 MAVROS 的 FCU: EVENT 消息
+        处理 ROS 日志消息，用于捕获 PX4 的 FCU: EVENT 消息
         """
-        # 过滤出 MAVROS 的日志
-        # MAVROS 的日志节点名可能是:
-        # - "usv_01.sys" (PX4 sys_status 插件)
-        # - "usv_01.mavros"
-        # - 包含 "mavros" 的其他名称
-        # 我们放宽过滤条件，检查是否包含 usv_ 或 mavros
-        if 'usv_' not in msg.name and 'mavros' not in msg.name:
+        # 过滤出 USV 相关的日志
+        # PX4 的日志节点名可能是:
+        # - "usv_01.sys" (PX4 sys_status)
+        # - "usv_01.fmu" (PX4 fmu)
+        # - 包含 "usv_" 的其他名称
+        if 'usv_' not in msg.name:
             return
             
         # 检查是否是 FCU 事件消息

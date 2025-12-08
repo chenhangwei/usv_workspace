@@ -59,8 +59,8 @@ class UsvUwbNode(Node):
             raise RuntimeError(f'Failed to open serial port {port}')
         
         # 创建发布器
-        # MAVROS vision_pose 插件默认订阅 vision_pose/pose
-        # 注意：MAVROS 话题已扁平化，直接发布到 vision_pose/pose
+        # PX4 uXRCE-DDS 原生话题：/fmu/in/vehicle_visual_odometry
+        # 此处发布到 vision_pose/pose 作为中间话题，由 EKF2 融合
         self.uwb_pub = self.create_publisher(PoseStamped, 'vision_pose/pose', 10)
          
         # 20 Hz 定时器
