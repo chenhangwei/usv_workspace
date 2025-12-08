@@ -35,6 +35,9 @@ including path planning, obstacle avoidance, and autonomous navigation functiona
             'usv_command_node = usv_control.usv_command_node:main',
             'usv_control_node = usv_control.usv_control_node:main',
             'coord_transform_node = usv_control.coord_transform_node:main',
+            # PX4 uXRCE-DDS 版本节点
+            'usv_command_px4_node = usv_control.usv_command_px4_node:main',
+            'usv_control_px4_node = usv_control.usv_control_px4_node:main',
         ],
     },
     classifiers=[

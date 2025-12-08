@@ -48,6 +48,8 @@ and convenient operation and management.""",
     entry_points={
         'console_scripts': [
             'main_gui_app = gs_gui.main_gui_app:main',
+            # PX4 uXRCE-DDS 集群管理节点
+            'cluster_manager_node = gs_gui.cluster_manager_node:main',
         ],
     },
     classifiers=[

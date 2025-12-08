@@ -37,6 +37,8 @@ including status processing, data exchange, and command transmission functionali
             'mock_usv_data = usv_comm.mock_usv_data:main',
             'navigate_to_point_node = usv_comm.navigate_to_point_node:main',
             'shutdown_service_node = usv_comm.shutdown_service_node:main',
+            # PX4 uXRCE-DDS 版本节点
+            'usv_status_px4_node = usv_comm.usv_status_px4_node:main',
         ],
     },
     classifiers=[
