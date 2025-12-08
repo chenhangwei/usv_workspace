@@ -28,6 +28,7 @@ from .cluster_controller import ClusterController
 from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
 from .event_decoder import EventDecoder  # 导入事件解码器
+from .px4_command_interface import Px4CommandInterface  # PX4 命令接口
 
 # 导入线程安全工具
 from common_utils import ThreadSafeDict
@@ -1001,52 +1002,29 @@ class GroundStationNode(Node):
         """
         飞控重启回调
         
-        发送 MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 命令重启飞控
+        通过 PX4 VehicleCommand 发送 MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN 命令重启飞控
         
         Args:
             usv_namespace: USV 命名空间（如 'usv_01'）
         """
         try:
-            # 导入 MAVROS 命令服务
-            from mavros_msgs.srv import CommandLong
+            # 使用 PX4 命令接口发送重启命令
+            px4_cmd = Px4CommandInterface(self, usv_namespace)
             
-            # 创建服务客户端（MAVROS 命令服务在节点命名空间下，不需要 mavros 子命名空间）
-            service_name = f'/{usv_namespace}/cmd/command'
-            client = self.create_client(CommandLong, service_name)
+            success = px4_cmd.reboot_autopilot()
             
-            # 等待服务可用
-            if not client.wait_for_service(timeout_sec=3.0):
-                self.get_logger().error(f'[X] 服务不可用: {service_name}')
+            if success:
+                self.get_logger().info(f'[OK] 已向 {usv_namespace} 发送飞控重启命令 (VehicleCommand)')
                 try:
-                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 飞控重启失败：服务不可用')
+                    self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送飞控重启命令，请等待 10-20 秒')
                 except Exception:
                     pass
-                return
-            
-            # 构建重启命令
-            request = CommandLong.Request()
-            request.broadcast = False
-            request.command = 246  # MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
-            request.confirmation = 0
-            request.param1 = 1.0   # 重启飞控 (1=reboot autopilot)
-            request.param2 = 0.0   # 不重启机载计算机
-            request.param3 = 0.0
-            request.param4 = 0.0
-            request.param5 = 0.0
-            request.param6 = 0.0
-            request.param7 = 0.0
-            
-            # 异步发送命令
-            future = client.call_async(request)
-            future.add_done_callback(
-                lambda f: self._handle_reboot_response(f, usv_namespace)
-            )
-            
-            self.get_logger().info(f'[OK] 已向 {usv_namespace} 发送飞控重启命令 (MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN)')
-            try:
-                self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送飞控重启命令')
-            except Exception:
-                pass
+            else:
+                self.get_logger().error(f'[X] {usv_namespace} 飞控重启命令发送失败')
+                try:
+                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 飞控重启命令发送失败')
+                except Exception:
+                    pass
             
         except Exception as e:
             self.get_logger().error(f'[X] 发送重启命令失败: {e}')
@@ -1056,7 +1034,7 @@ class GroundStationNode(Node):
                 pass
     
     def _handle_reboot_response(self, future, usv_namespace):
-        """处理重启命令响应"""
+        """处理重启命令响应（PX4 模式下不使用，保留兼容性）"""
         try:
             response = future.result()
             if response.success:
@@ -1151,73 +1129,37 @@ class GroundStationNode(Node):
     
     def _reboot_companion_via_mavlink(self, usv_namespace):
         """
-        通过 MAVLink 命令重启机载计算机（备选方案）
+        通过 PX4 VehicleCommand 重启机载计算机（备选方案）
         
         注意：某些飞控固件可能不支持此命令
         """
         try:
-            from mavros_msgs.srv import CommandLong
+            # 使用 PX4 命令接口发送重启命令
+            px4_cmd = Px4CommandInterface(self, usv_namespace)
             
-            service_name = f'/{usv_namespace}/cmd/command'
-            client = self.create_client(CommandLong, service_name)
+            success = px4_cmd.reboot_companion()
             
-            if not client.wait_for_service(timeout_sec=3.0):
-                self.get_logger().error(f'[X] MAVROS 服务不可用: {service_name}')
-                return
-            
-            # 构建 MAVLink 重启命令
-            request = CommandLong.Request()
-            request.broadcast = False
-            request.command = 246  # MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
-            request.confirmation = 0
-            request.param1 = 0.0   # 不重启飞控
-            request.param2 = 3.0   # 重启机载计算机
-            request.param3 = 0.0
-            request.param4 = 0.0
-            request.param5 = 0.0
-            request.param6 = 0.0
-            request.param7 = 0.0
-            
-            future = client.call_async(request)
-            future.add_done_callback(
-                lambda f: self._handle_companion_reboot_response(f, usv_namespace)
-            )
-            
-            self.get_logger().info(f'[OK] 已发送 MAVLink 重启命令到 {usv_namespace}')
-            
-        except Exception as e:
-            self.get_logger().error(f'[X] MAVLink 重启命令失败: {e}')
-    
-    def _handle_companion_reboot_response(self, future, usv_namespace):
-        """处理机载计算机重启命令响应"""
-        try:
-            response = future.result()
-            if response.success:
-                self.get_logger().info(f'[OK] {usv_namespace} 机载计算机重启命令已确认')
+            if success:
+                self.get_logger().info(f'[OK] 已发送机载计算机重启命令到 {usv_namespace}')
                 try:
-                    self.ros_signal.node_info.emit(f'[OK] {usv_namespace} 机载计算机重启命令已确认，系统将在 30-60 秒后重新上线')
+                    self.ros_signal.node_info.emit(f'[OK] {usv_namespace} 机载计算机重启命令已发送，系统将在 30-60 秒后重新上线')
                 except Exception:
                     pass
             else:
-                self.get_logger().warn(
-                    f'[!] {usv_namespace} 机载计算机重启命令失败: result={response.result}'
-                )
-                try:
-                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 机载计算机重启命令失败')
-                except Exception:
-                    pass
+                self.get_logger().warn(f'[!] {usv_namespace} 机载计算机重启命令发送失败')
+            
         except Exception as e:
-            self.get_logger().error(f'[X] 重启命令响应处理失败: {e}')
-            try:
-                self.ros_signal.node_info.emit(f'[X] 重启命令响应处理失败: {e}')
-            except Exception:
-                pass
+            self.get_logger().error(f'[X] 机载计算机重启命令失败: {e}')
+    
+    def _handle_companion_reboot_response(self, future, usv_namespace):
+        """处理机载计算机重启命令响应（PX4 模式下不使用，保留兼容性）"""
+        pass
 
     def set_home_position_callback(self, usv_namespace, use_current, coords):
         """
         设置 Home Position 回调
         
-        发送 MAV_CMD_DO_SET_HOME 命令设置 Home Position
+        通过 PX4 VehicleCommand 发送 MAV_CMD_DO_SET_HOME 命令设置 Home Position
         
         Args:
             usv_namespace: USV 命名空间（如 'usv_01'）
@@ -1225,70 +1167,41 @@ class GroundStationNode(Node):
             coords: 坐标字典 {'lat': float, 'lon': float, 'alt': float}（仅当 use_current=False 时使用）
         """
         try:
-            # 导入 MAVROS 命令服务
-            from mavros_msgs.srv import CommandLong
-            
-            # 创建服务客户端
-            service_name = f'/{usv_namespace}/cmd/command'
+            # 使用 PX4 命令接口发送设置 Home 命令
+            px4_cmd = Px4CommandInterface(self, usv_namespace)
             client = self.create_client(CommandLong, service_name)
             
             # 等待服务可用
-            if not client.wait_for_service(timeout_sec=3.0):
-                self.get_logger().error(f'[X] 服务不可用: {service_name}')
-                try:
-                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home Position 失败：服务不可用')
-                except Exception:
-                    pass
-                return
-            
-            # 构建 MAV_CMD_DO_SET_HOME 命令
-            request = CommandLong.Request()
-            request.broadcast = False
-            request.command = 179  # MAV_CMD_DO_SET_HOME
-            request.confirmation = 0
-            
             if use_current:
-                # 使用当前位置作为 Home Position
-                request.param1 = 1.0  # 1=使用当前位置
-                request.param2 = 0.0
-                request.param3 = 0.0
-                request.param4 = 0.0
-                request.param5 = 0.0  # 纬度（使用当前位置时忽略）
-                request.param6 = 0.0  # 经度（使用当前位置时忽略）
-                request.param7 = 0.0  # 高度（使用当前位置时忽略）
-                
+                success = px4_cmd.set_home_position(use_current=True)
                 self.get_logger().info(f'[OK] 设置 {usv_namespace} Home Position 为当前位置')
             else:
-                # 使用指定坐标作为 Home Position
-                request.param1 = 0.0  # 0=使用指定坐标
-                request.param2 = 0.0
-                request.param3 = 0.0
-                request.param4 = 0.0
-                request.param5 = float(coords.get('lat', 0.0))  # 纬度
-                request.param6 = float(coords.get('lon', 0.0))  # 经度
-                request.param7 = float(coords.get('alt', 0.0))  # 高度
-                
+                lat = float(coords.get('lat', 0.0))
+                lon = float(coords.get('lon', 0.0))
+                alt = float(coords.get('alt', 0.0))
+                success = px4_cmd.set_home_position(use_current=False, lat=lat, lon=lon, alt=alt)
                 self.get_logger().info(
                     f'[OK] 设置 {usv_namespace} Home Position 为指定坐标: '
-                    f'lat={request.param5:.7f}, lon={request.param6:.7f}, alt={request.param7:.2f}m'
+                    f'lat={lat:.7f}, lon={lon:.7f}, alt={alt:.2f}m'
                 )
             
-            # 异步发送命令
-            future = client.call_async(request)
-            future.add_done_callback(
-                lambda f: self._handle_set_home_response(f, usv_namespace, use_current, coords)
-            )
-            
-            try:
-                if use_current:
-                    self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令（使用当前位置）')
-                else:
-                    self.ros_signal.node_info.emit(
-                        f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令\n'
-                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
-                    )
-            except Exception:
-                pass
+            if success:
+                try:
+                    if use_current:
+                        self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令（使用当前位置）')
+                    else:
+                        self.ros_signal.node_info.emit(
+                            f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令\n'
+                            f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
+                        )
+                except Exception:
+                    pass
+            else:
+                self.get_logger().error(f'[X] {usv_namespace} 设置 Home Position 命令发送失败')
+                try:
+                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home Position 命令发送失败')
+                except Exception:
+                    pass
             
         except Exception as e:
             self.get_logger().error(f'[X] 发送设置 Home Position 命令失败: {e}')
@@ -1298,36 +1211,8 @@ class GroundStationNode(Node):
                 pass
     
     def _handle_set_home_response(self, future, usv_namespace, use_current, coords):
-        """处理设置 Home Position 命令响应"""
-        try:
-            response = future.result()
-            if response.success:
-                if use_current:
-                    msg = f'[OK] {usv_namespace} Home Position 已设置为当前位置'
-                else:
-                    msg = (
-                        f'[OK] {usv_namespace} Home Position 已设置为指定坐标\n'
-                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
-                    )
-                self.get_logger().info(msg)
-                try:
-                    self.ros_signal.node_info.emit(msg)
-                except Exception:
-                    pass
-            else:
-                self.get_logger().warn(
-                    f'[!] {usv_namespace} 设置 Home Position 命令失败: result={response.result}'
-                )
-                try:
-                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 设置 Home Position 命令失败')
-                except Exception:
-                    pass
-        except Exception as e:
-            self.get_logger().error(f'[X] 处理设置 Home Position 命令响应失败: {e}')
-            try:
-                self.ros_signal.node_info.emit(f'[X] 处理设置 Home Position 命令响应失败: {e}')
-            except Exception:
-                pass
+        """处理设置 Home Position 命令响应（PX4 模式下不使用，保留兼容性）"""
+        pass
 
     def shutdown_usv_callback(self, usv_namespace):
         """
@@ -1487,7 +1372,7 @@ class GroundStationNode(Node):
         
         Args:
             usv_id: USV标识符
-            msg: mavros_msgs/SysStatus 消息
+            msg: SysStatus 消息
         """
         if msg is None:
             return

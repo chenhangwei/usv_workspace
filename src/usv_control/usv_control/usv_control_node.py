@@ -1,38 +1,52 @@
 """
-无人球控制节点
+无人球控制节点 - PX4 uXRCE-DDS 版本
 
-该节点负责处理无人球的目标点控制逻辑。它订阅常规目标点和避障目标点，
-根据避障标志决定使用哪个目标点，并将选定的目标点发布给飞控系统。
+该节点负责处理无人球的目标点控制逻辑。
+使用 TrajectorySetpoint 消息发送目标点，替代 MAVROS 的 PositionTarget。
+
+话题映射：
+- MAVROS /mavros/setpoint_raw/local -> /fmu/in/trajectory_setpoint
+- MAVROS /mavros/local_position/pose -> /fmu/out/vehicle_local_position
 """
 
+import math
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from geometry_msgs.msg import PoseStamped
-from mavros_msgs.msg import State, PositionTarget
 from std_msgs.msg import Bool
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
-# 导入common_utils工具
+# PX4 消息类型
+from px4_msgs.msg import (
+    TrajectorySetpoint,
+    VehicleLocalPosition,
+    VehicleStatus,
+    OffboardControlMode,
+    VehicleOdometry
+)
+
+# 导入 common_utils 工具
 from common_utils import ParamLoader, ParamValidator
 
 
-class UsvControlNode(Node):
+class UsvControlPx4Node(Node):
     """
-    无人球控制节点类
+    无人球控制节点类 - PX4 uXRCE-DDS 版本
     
     该节点实现目标点控制逻辑，处理常规目标点和避障目标点，
-    根据避障标志决定使用哪个目标点，并将选定的目标点发布给飞控系统。
+    根据避障标志决定使用哪个目标点，并将选定的目标点发布给 PX4 飞控。
     """
 
     def __init__(self):
         """初始化无人球控制节点"""
         super().__init__('usv_control_node')
         
-        # 创建参数加载器
+        # =====================================================================
+        # 参数加载
+        # =====================================================================
         param_loader = ParamLoader(self)
         
-        # 加载参数
-        publish_rate = param_loader.load_param(
+        self.publish_rate = param_loader.load_param(
             'publish_rate',
             20.0,
             ParamValidator.frequency,
@@ -44,323 +58,338 @@ class UsvControlNode(Node):
             ParamValidator.non_empty_string,
             '坐标系ID'
         )
-        self.coordinate_frame = param_loader.load_param(
-            'coordinate_frame',
-            PositionTarget.FRAME_LOCAL_NED,
-            lambda x: x in [1, 8],  # FRAME_BODY_NED=1, FRAME_LOCAL_NED=8
-            '坐标框架类型'
+        
+        # 声明额外参数
+        self.declare_parameter('target_reach_threshold', 1.0)
+        self.declare_parameter('max_velocity', 5.0)
+        self.declare_parameter('coordinate_system', 'NED')  # NED 或 ENU
+        
+        self.target_reach_threshold = self.get_parameter('target_reach_threshold').value
+        self.max_velocity = self.get_parameter('max_velocity').value
+        self.coordinate_system = self.get_parameter('coordinate_system').value
+
+        # =====================================================================
+        # QoS 配置 - PX4 uXRCE-DDS 使用 BEST_EFFORT
+        # =====================================================================
+        qos_px4 = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
         )
         
-        # 创建 QoS 配置
-        qos_best_effort = QoSProfile(
-            depth=10,
-            reliability=QoSReliabilityPolicy.BEST_EFFORT
-        )
-
         qos_reliable = QoSProfile(
             depth=10,
             reliability=QoSReliabilityPolicy.RELIABLE
         )
-    
-        # 局部坐标模式: 发布 PositionTarget 到 setpoint_raw/local
-        self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)
 
-        # 订阅当前状态
-        self.state_sub = self.create_subscription(
-            State, 'state', self.state_callback, qos_best_effort)
+        # =====================================================================
+        # 发布器 - 发送目标点到 PX4
+        # =====================================================================
+        self.setpoint_pub = self.create_publisher(
+            TrajectorySetpoint,
+            'fmu/in/trajectory_setpoint',
+            qos_px4
+        )
         
-        # 订阅需要运行的目标点 (来自地面站)
-        self.target_point_sub = self.create_subscription(
-            PoseStamped, 'set_usv_target_position', self.set_target_point_callback, qos_best_effort)
+        self.offboard_mode_pub = self.create_publisher(
+            OffboardControlMode,
+            'fmu/in/offboard_control_mode',
+            qos_px4
+        )
+
+        # =====================================================================
+        # 订阅器 - PX4 状态和位置
+        # =====================================================================
+        self.local_pos_sub = self.create_subscription(
+            VehicleLocalPosition,
+            'fmu/out/vehicle_local_position',
+            self.local_position_callback,
+            qos_px4
+        )
         
-        # 订阅避障目标点
-        self.avoidance_target_point_sub = self.create_subscription(
-            PositionTarget, 'avoidance_position', self.set_avoidance_target_position_callback, qos_best_effort)
+        self.status_sub = self.create_subscription(
+            VehicleStatus,
+            'fmu/out/vehicle_status',
+            self.status_callback,
+            qos_px4
+        )
+
+        # =====================================================================
+        # 订阅器 - 地面站命令（保持原有接口兼容）
+        # =====================================================================
+        self.target_sub = self.create_subscription(
+            PoseStamped,
+            'set_usv_target_position',
+            self.target_callback,
+            qos_reliable
+        )
         
-        # 订阅避障标记
+        self.avoidance_sub = self.create_subscription(
+            PoseStamped,
+            'avoidance_position',
+            self.avoidance_target_callback,
+            qos_reliable
+        )
+        
         self.avoidance_flag_sub = self.create_subscription(
-            Bool, 'avoidance_flag', self.set_avoidance_flag_callback, qos_reliable)
+            Bool,
+            'avoidance_flag',
+            self.avoidance_flag_callback,
+            qos_reliable
+        )
         
-        # 订阅清除目标点命令（任务停止时调用）
         self.clear_target_sub = self.create_subscription(
-            Bool, 'clear_target', self.clear_target_callback, qos_reliable)
-        
-        # 局部控制模式：直接订阅 MAVROS 本地位置
-        self.local_position_sub = self.create_subscription(
-            PoseStamped, 'local_position/pose', self.local_position_callback, qos_best_effort)
-        
-        # 发送目标位置循环     
-        self.publish_target_timer = self.create_timer(1.0/publish_rate, self.publish_target)
-    
-        # 初始化状态变量
-        self.current_state = State()              # 当前状态
-        self.current_target_position = PoseStamped()  # 常规目标点
-        self.avoidance_position = PositionTarget()    # 避障目标点
-        self.avoidance_flag = Bool(data=False)        # 避障标记，默认为False
-        self.target_active = False                    # 目标点是否激活（任务运行中）
-        self.local_position_valid = False             # 本地位置是否有效（验证 EKF Origin）
-        self.ekf_origin_ready = False                 # EKF 原点就绪标志（LocalPos 有效）
-        
-        # 初始化消息对象和状态跟踪
-        self.point_msg = PositionTarget()         # 目标点消息
-        self.last_published_position = None       # 跟踪最后发布的坐标，避免重复发布
-        
+            Bool,
+            'clear_target',
+            self.clear_target_callback,
+            qos_reliable
+        )
+
+        # =====================================================================
+        # 状态变量
+        # =====================================================================
+        self.current_position = None           # 当前位置 (VehicleLocalPosition)
+        self.target_position = None            # 常规目标点 (PoseStamped)
+        self.avoidance_position = None         # 避障目标点 (PoseStamped)
+        self.avoidance_active = False          # 避障模式是否激活
+        self.vehicle_status = None             # 飞控状态
+        self.target_active = False             # 目标点是否激活
+        self.local_position_valid = False      # 本地位置是否有效
+        self.offboard_mode_active = False      # OFFBOARD 模式是否激活
+
+        # =====================================================================
+        # 定时器
+        # =====================================================================
+        self.timer = self.create_timer(1.0 / self.publish_rate, self.publish_setpoint)
+
+        # =====================================================================
         # 日志记录
-        self.get_logger().info(f'USV 控制节点已启动')
-        self.get_logger().info(f'发布频率: {publish_rate} Hz')
-        self.get_logger().info(f'坐标系: {self.frame_id}')
-        
-        self.get_logger().info('✅ 局部坐标控制已启用')
-        self.get_logger().info('📤 发布话题: setpoint_raw/local (PositionTarget)')
-        self.get_logger().info('📍 坐标系: FRAME_LOCAL_NED (相对EKF原点)')
+        # =====================================================================
+        self.get_logger().info('=' * 60)
+        self.get_logger().info('PX4 uXRCE-DDS 控制节点已启动')
+        self.get_logger().info(f'发布频率: {self.publish_rate} Hz')
+        self.get_logger().info(f'坐标系: {self.coordinate_system}')
+        self.get_logger().info(f'目标到达阈值: {self.target_reach_threshold} m')
+        self.get_logger().info('📤 发布话题: fmu/in/trajectory_setpoint')
+        self.get_logger().info('📥 订阅话题: fmu/out/vehicle_local_position')
+        self.get_logger().info('=' * 60)
 
-    def state_callback(self, msg):
+    def local_position_callback(self, msg: VehicleLocalPosition):
         """
-        状态回调函数
+        本地位置回调
         
         Args:
-            msg (State): 包含飞控状态信息的消息
+            msg (VehicleLocalPosition): PX4 本地位置消息
         """
-        if isinstance(msg, State):
-            self.current_state = msg
+        self.current_position = msg
+        
+        # 检查位置是否有效
+        if msg.xy_valid and msg.z_valid:
+            if not self.local_position_valid:
+                self.local_position_valid = True
+                self.get_logger().info(
+                    f'✅ 本地位置有效: ({msg.x:.2f}, {msg.y:.2f}, {msg.z:.2f})'
+                )
 
-
-    
-    def local_position_callback(self, msg):
+    def status_callback(self, msg: VehicleStatus):
         """
-        本地位置回调函数（验证 EKF 原点是否生效）
+        飞控状态回调
         
         Args:
-            msg (PoseStamped): 包含本地位置信息的消息
+            msg (VehicleStatus): PX4 飞控状态消息
         """
-        if isinstance(msg, PoseStamped):
-            # 检查本地位置是否有效（不是全0或NaN）
-            pos = msg.pose.position
-            if not (pos.x == 0.0 and pos.y == 0.0 and pos.z == 0.0):
-                if not self.local_position_valid:
-                    self.local_position_valid = True
-                    self.get_logger().info(
-                        f'✅ Local Position 有效: ({pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f})'
-                    )
-                    self._check_ekf_origin_ready()
-    
-    def _check_ekf_origin_ready(self):
-        """检查 EKF 原点是否完全就绪（LocalPos 有效）"""
-        if self.local_position_valid and not self.ekf_origin_ready:
-            self.ekf_origin_ready = True
-            self.get_logger().info('🎯 EKF Origin 完全就绪，可以安全发布目标点！')
+        self.vehicle_status = msg
+        # nav_state == 14 表示 OFFBOARD 模式
+        self.offboard_mode_active = (msg.nav_state == 14)
 
-    def set_target_point_callback(self, msg):
+    def target_callback(self, msg: PoseStamped):
         """
-        设置目标点回调函数
+        目标点回调
         
         Args:
-            msg (PoseStamped): 包含目标点信息的消息
+            msg (PoseStamped): 目标位置消息
         """
-        if not isinstance(msg, PoseStamped):
-            self.get_logger().warn('收到无效的目标点消息类型')
-            return      
+        self.target_position = msg
+        self.target_active = True
         
-        # 检查目标点坐标有效性
-        if (msg.pose.position.x is None or msg.pose.position.y is None or 
-            msg.pose.position.z is None):
-            self.get_logger().warn('收到的目标点坐标无效')
-            return
-            
-        old_position = self.current_target_position.pose.position
-        new_position = msg.pose.position
-        
-        # 只有当目标点发生变化时才更新
-        if (old_position.x != new_position.x or 
-            old_position.y != new_position.y or 
-            old_position.z != new_position.z):
-            
-            self.current_target_position = msg
-            self.target_active = True  # 激活目标点，开始发送 setpoint
-            self.get_logger().info(f'更新常规目标点: ({new_position.x:.2f}, {new_position.y:.2f}, {new_position.z:.2f})')
+        self.get_logger().info(
+            f'📍 收到目标点: ({msg.pose.position.x:.2f}, '
+            f'{msg.pose.position.y:.2f}, {msg.pose.position.z:.2f})'
+        )
 
-    def set_avoidance_target_position_callback(self, msg):
+    def avoidance_target_callback(self, msg: PoseStamped):
         """
-        设置避障目标点回调函数
+        避障目标点回调
         
         Args:
-            msg (PositionTarget): 包含避障目标点信息的消息
+            msg (PoseStamped): 避障目标位置消息
         """
-        if not isinstance(msg, PositionTarget):
-            self.get_logger().warn('收到无效的避障目标点消息类型')
-            return
-            
-        # 检查避障目标点坐标有效性
-        if (msg.position.x is None or msg.position.y is None or 
-            msg.position.z is None):
-            self.get_logger().warn('收到的避障目标点坐标无效')
-            return
-            
-        old_position = self.avoidance_position.position
-        new_position = msg.position
-        
-        # 只有当避障目标点发生变化时才更新
-        if (old_position.x != new_position.x or 
-            old_position.y != new_position.y or 
-            old_position.z != new_position.z):
-            
-            self.avoidance_position = msg
-            self.get_logger().info(f'更新避障目标点: ({new_position.x:.2f}, {new_position.y:.2f}, {new_position.z:.2f})')
+        self.avoidance_position = msg
 
-    def set_avoidance_flag_callback(self, msg):
+    def avoidance_flag_callback(self, msg: Bool):
         """
-        设置避障标志回调函数
+        避障标志回调
         
         Args:
-            msg (Bool): 包含避障标志信息的消息
+            msg (Bool): 避障模式标志
         """
-        if not isinstance(msg, Bool):
-            self.get_logger().warn('收到无效的避障标志消息类型')
-            return
-            
-        # 只有当避障标志状态发生变化时才处理
-        if self.avoidance_flag.data != msg.data:
-            self.avoidance_flag = msg
-            mode = "避障模式" if msg.data else "常规模式"
-            self.get_logger().info(f'切换到: {mode}')
+        if msg.data != self.avoidance_active:
+            self.avoidance_active = msg.data
+            status = "激活" if msg.data else "停用"
+            self.get_logger().info(f'🚧 避障模式 {status}')
 
-    def clear_target_callback(self, msg):
+    def clear_target_callback(self, msg: Bool):
         """
-        清除目标点回调函数（任务停止时调用）
+        清除目标点回调
         
         Args:
-            msg (Bool): True 表示清除目标点，停止发送 setpoint
+            msg (Bool): 清除标志
         """
-        if not isinstance(msg, Bool):
-            self.get_logger().warn('收到无效的清除目标点消息类型')
-            return
-        
         if msg.data:
-            # 清除目标点，停止发送 setpoint
+            self.target_position = None
+            self.avoidance_position = None
             self.target_active = False
-            self.current_target_position = PoseStamped()
-            self.last_published_position = None
-            self.get_logger().info('🛑 目标点已清除，停止发送 setpoint')
-        else:
-            self.get_logger().debug('收到清除目标点命令: False，忽略')
+            self.get_logger().info('🗑️ 目标点已清除')
 
-    def publish_target(self):
+    def publish_setpoint(self):
         """
-        发布目标点函数
+        发布目标点到 PX4
         
-        发布 PositionTarget 到 setpoint_raw/local (局部坐标)
-        注意：PX4 OFFBOARD 模式需要在解锁前就持续收到 setpoint (>2Hz)
+        将选定的目标点（常规或避障）转换为 PX4 TrajectorySetpoint 格式并发布。
+        同时发布 OffboardControlMode 以保持 OFFBOARD 模式。
         """
-        try:
-            # 检查飞控连接状态
-            if not self.current_state.connected:
-                self.get_logger().debug('飞控未连接，等待连接...')
-                return
+        # 如果没有目标点，不发布
+        if not self.target_active:
+            return
             
-            # 检查目标点是否激活（任务运行中）
-            if not self.target_active:
-                self.get_logger().debug('目标点未激活，等待任务启动...')
-                return
-            
-            # 注意：不再检查 armed 状态，因为 OFFBOARD 模式需要先有 setpoint 才能解锁
-            # PX4 要求：进入 OFFBOARD 模式并解锁前，必须持续发送 setpoint
-            
-            if self.current_state.mode != "OFFBOARD":
-                self.get_logger().debug(f'当前模式: {self.current_state.mode}，持续发布设定点以准备 OFFBOARD')
-                # PX4 要求在切换 OFFBOARD 前必须有设定点流，因此这里不返回，继续发布
+        # 选择目标点（避障优先）
+        target = self.avoidance_position if self.avoidance_active and self.avoidance_position else self.target_position
+        
+        if target is None:
+            return
 
-            
-            # 局部控制模式需要 EKF 原点就绪
-            if not self.ekf_origin_ready:
-                if not self.local_position_valid:
-                    self.get_logger().debug('⏳ 等待 Local Position 生效...')
-                else:
-                    self.get_logger().debug('⏳ EKF Origin 未完全就绪...')
-                return
-            
-            # 根据避障标志选择目标点
-            if not self.avoidance_flag.data:    
-                # 使用常规目标点
-                px = self.current_target_position.pose.position.x
-                py = self.current_target_position.pose.position.y
-                pz = self.current_target_position.pose.position.z
-                source = "常规"
-            else:
-                # 使用避障目标点
-                px = self.avoidance_position.position.x
-                py = self.avoidance_position.position.y
-                pz = self.avoidance_position.position.z  
-                source = "避障"
-            
-            # 检查目标点坐标是否有效
-            if any(coord is None for coord in [px, py, pz]):
-                self.get_logger().warn(f'{source}目标点坐标无效，忽略')
-                return
-            
-            # 检查目标点是否有效（不是默认的 0,0,0）
-            if px == 0.0 and py == 0.0 and pz == 0.0:
-                self.get_logger().debug('目标点为默认值(0,0,0)，等待有效目标点...')
-                return
-                
-            # 检查是否需要记录日志（目标点变化时）
-            current_position = (round(px, 3), round(py, 3), round(pz, 3))
-            if self.last_published_position != current_position:
-                # 目标点变化，记录日志并更新
-                self.last_published_position = current_position
-                self.get_logger().info(f'📍 新目标点: ({px:.2f}, {py:.2f}, {pz:.2f})')
-            
-            # 注意：即使目标点相同也要持续发布，PX4 OFFBOARD 需要持续的 setpoint 流
-            
-            # ============================================================
-            # 发布局部坐标模式: PositionTarget
-            # ============================================================
-            
-            self.point_msg.header.stamp = self.get_clock().now().to_msg()
-            self.point_msg.header.frame_id = self.frame_id
-            self.point_msg.coordinate_frame = self.coordinate_frame
-            self.point_msg.type_mask = (
-                PositionTarget.IGNORE_VX |
-                PositionTarget.IGNORE_VY |
-                PositionTarget.IGNORE_VZ |
-                PositionTarget.IGNORE_AFX |
-                PositionTarget.IGNORE_AFY |
-                PositionTarget.IGNORE_AFZ |
-                PositionTarget.FORCE |
-                PositionTarget.IGNORE_YAW |
-                PositionTarget.IGNORE_YAW_RATE
-            )
-            self.point_msg.position.x = px
-            self.point_msg.position.y = py
-            self.point_msg.position.z = pz  
+        # =====================================================================
+        # 发布 OffboardControlMode（必须持续发送以保持 OFFBOARD 模式）
+        # =====================================================================
+        offboard_msg = OffboardControlMode()
+        offboard_msg.position = True
+        offboard_msg.velocity = False
+        offboard_msg.acceleration = False
+        offboard_msg.attitude = False
+        offboard_msg.body_rate = False
+        offboard_msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        self.offboard_mode_pub.publish(offboard_msg)
 
-            self.target_point_pub.publish(self.point_msg)
-            self.get_logger().debug(f'发布{source}目标点(局部): ({px:.2f}, {py:.2f}, {pz:.2f})')
+        # =====================================================================
+        # 发布 TrajectorySetpoint
+        # =====================================================================
+        setpoint = TrajectorySetpoint()
+        
+        # 坐标转换：ROS 使用 ENU，PX4 使用 NED
+        # ENU -> NED: x_ned = y_enu, y_ned = x_enu, z_ned = -z_enu
+        if self.coordinate_system == 'NED':
+            # 如果输入已经是 NED，直接使用
+            setpoint.position[0] = target.pose.position.x  # North
+            setpoint.position[1] = target.pose.position.y  # East
+            setpoint.position[2] = target.pose.position.z  # Down
+        else:
+            # ENU 到 NED 转换
+            setpoint.position[0] = target.pose.position.y   # North = East_enu
+            setpoint.position[1] = target.pose.position.x   # East = North_enu
+            setpoint.position[2] = -target.pose.position.z  # Down = -Up_enu
+        
+        # 速度设为 NaN（使用位置控制）
+        setpoint.velocity[0] = float('nan')
+        setpoint.velocity[1] = float('nan')
+        setpoint.velocity[2] = float('nan')
+        
+        # 加速度设为 NaN
+        setpoint.acceleration[0] = float('nan')
+        setpoint.acceleration[1] = float('nan')
+        setpoint.acceleration[2] = float('nan')
+        
+        # 从四元数计算偏航角
+        yaw = self._quaternion_to_yaw(target.pose.orientation)
+        
+        # ENU 到 NED 偏航角转换
+        if self.coordinate_system != 'NED':
+            # ENU yaw: 0 = East, 增加逆时针
+            # NED yaw: 0 = North, 增加顺时针
+            yaw = math.pi / 2.0 - yaw
+        
+        setpoint.yaw = yaw
+        setpoint.yawspeed = float('nan')  # 使用偏航角控制
+        
+        setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+        
+        self.setpoint_pub.publish(setpoint)
 
-        except Exception as e:
-            self.get_logger().error(f'发布目标点时发生异常: {str(e)}')
+    def _quaternion_to_yaw(self, q) -> float:
+        """
+        从四元数提取偏航角
+        
+        Args:
+            q: 四元数 (geometry_msgs/Quaternion)
+            
+        Returns:
+            float: 偏航角（弧度）
+        """
+        # 使用 atan2 计算偏航角
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+        return yaw
 
-    def destroy_node(self):
-        """节点销毁时的资源清理"""
-        if hasattr(self, 'publish_target_timer'):
-            self.publish_target_timer.cancel()
-        super().destroy_node()
+    def get_distance_to_target(self) -> float:
+        """
+        计算当前位置到目标点的距离
+        
+        Returns:
+            float: 距离（米），如果数据无效返回 -1
+        """
+        if self.current_position is None or self.target_position is None:
+            return -1.0
+            
+        target = self.avoidance_position if self.avoidance_active else self.target_position
+        if target is None:
+            return -1.0
+        
+        # 转换坐标系
+        if self.coordinate_system == 'NED':
+            dx = target.pose.position.x - self.current_position.x
+            dy = target.pose.position.y - self.current_position.y
+            dz = target.pose.position.z - self.current_position.z
+        else:
+            # ENU 输入，当前位置是 NED
+            dx = target.pose.position.y - self.current_position.x
+            dy = target.pose.position.x - self.current_position.y
+            dz = -target.pose.position.z - self.current_position.z
+        
+        return math.sqrt(dx*dx + dy*dy + dz*dz)
+
+    def is_target_reached(self) -> bool:
+        """
+        检查是否到达目标点
+        
+        Returns:
+            bool: 是否到达目标点
+        """
+        distance = self.get_distance_to_target()
+        if distance < 0:
+            return False
+        return distance < self.target_reach_threshold
 
 
 def main(args=None):
-    """
-    主函数
-    
-    初始化ROS 2节点并开始处理消息。
-    
-    Args:
-        args: 命令行参数
-    """
+    """节点主函数"""
     rclpy.init(args=args)
-    node = UsvControlNode()
+    node = UsvControlPx4Node()
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
-        pass
+        node.get_logger().info('节点被用户中断')
     finally:
         node.destroy_node()
         rclpy.shutdown()

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-虚拟数据发布节点 - 模拟实际USV运行数据
+虚拟数据发布节点 - 模拟实际USV运行数据（PX4 uXRCE-DDS 版本）
 
 功能：
 1. 模拟 GPS 位置数据 (global_position/global)
 2. 模拟本地位置数据 (local_position/pose)
-3. 模拟 MAVROS 状态 (state)
-4. 模拟 Home Position (home_position/home)
-5. 接收导航目标点并模拟移动
+3. 模拟 USV 状态 (usv_status)
+4. 接收导航目标点并模拟移动
 
 使用方法：
     ros2 run usv_comm mock_usv_data --ros-args -p namespace:=usv_01
@@ -17,7 +16,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import NavSatFix
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from mavros_msgs.msg import State, HomePosition
+from common_interfaces.msg import UsvStatus
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 import math
 
@@ -66,12 +65,15 @@ class MockUSVData(Node):
         self.target_y = self.current_y
         self.target_z = self.current_z
         
-        # MAVROS 状态
-        self.mavros_state = State()
-        self.mavros_state.connected = True
-        self.mavros_state.armed = True
-        self.mavros_state.guided = True
-        self.mavros_state.mode = "GUIDED"
+        # USV 状态
+        self.usv_status = UsvStatus()
+        self.usv_status.usv_id = self.namespace
+        self.usv_status.connected = True
+        self.usv_status.armed = True
+        self.usv_status.guided = True
+        self.usv_status.mode = "OFFBOARD"  # PX4 模式名称
+        self.usv_status.battery_voltage = 22.4
+        self.usv_status.battery_percentage = 85.0
         
         # QoS 配置
         qos_sensor = QoSProfile(
@@ -105,14 +107,8 @@ class MockUSVData(Node):
         )
         
         self.state_pub = self.create_publisher(
-            State,
-            f'/{self.namespace}/state',
-            qos_state
-        )
-        
-        self.home_pub = self.create_publisher(
-            HomePosition,
-            f'/{self.namespace}/home_position/home',
+            UsvStatus,
+            f'/{self.namespace}/usv_status',
             qos_state
         )
         
@@ -126,10 +122,6 @@ class MockUSVData(Node):
         
         # 定时器
         self.timer = self.create_timer(1.0 / publish_rate, self.publish_data)
-        
-        # 发布 Home Position（只发一次）
-        self.create_timer(1.0, self.publish_home_once)
-        self.home_published = False
         
         self.get_logger().info(
             f"🎮 [虚拟USV数据] 已启动\n"
@@ -158,28 +150,6 @@ class MockUSVData(Node):
             f"  └─ 距离: {distance:.2f} m"
         )
     
-    def publish_home_once(self):
-        """发布 Home Position（只发一次）"""
-        if not self.home_published:
-            home_msg = HomePosition()
-            home_msg.header.stamp = self.get_clock().now().to_msg()
-            home_msg.header.frame_id = 'map'
-            home_msg.geo.latitude = self.origin_lat
-            home_msg.geo.longitude = self.origin_lon
-            home_msg.geo.altitude = self.origin_alt
-            home_msg.position.x = 0.0
-            home_msg.position.y = 0.0
-            home_msg.position.z = 0.0
-            
-            self.home_pub.publish(home_msg)
-            self.home_published = True
-            
-            self.get_logger().info(
-                f"🏠 [虚拟USV] 发布 Home Position\n"
-                f"  ├─ GPS: ({self.origin_lat:.7f}°, {self.origin_lon:.7f}°)\n"
-                f"  └─ Local: (0.0, 0.0, 0.0) m"
-            )
-    
     def publish_data(self):
         """发布虚拟数据"""
         # 更新位置（模拟移动）
@@ -195,7 +165,7 @@ class MockUSVData(Node):
         self._publish_velocity()
         
         # 发布状态
-        self._publish_state()
+        self._publish_status()
     
     def _update_position(self):
         """更新位置（模拟移动到目标点）"""
@@ -269,10 +239,15 @@ class MockUSVData(Node):
         
         self.velocity_pub.publish(vel_msg)
     
-    def _publish_state(self):
-        """发布 MAVROS 状态"""
-        self.mavros_state.header.stamp = self.get_clock().now().to_msg()
-        self.state_pub.publish(self.mavros_state)
+    def _publish_status(self):
+        """发布 USV 状态"""
+        self.usv_status.header.stamp = self.get_clock().now().to_msg()
+        self.usv_status.header.frame_id = 'map'
+        # 更新位置信息
+        self.usv_status.position.x = self.current_x
+        self.usv_status.position.y = self.current_y
+        self.usv_status.position.z = self.current_z
+        self.state_pub.publish(self.usv_status)
     
     def _xyz_to_gps(self, x, y, z):
         """XYZ → GPS 转换"""

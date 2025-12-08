@@ -217,7 +217,7 @@ class ClusterManagerNode(Node):
         为单个 USV 创建订阅
         
         支持两种模式：
-        1. 订阅 UsvStatus（usv_status_px4_node 发布的聚合状态）
+        1. 订阅 UsvStatus（usv_status_node 发布的聚合状态）
         2. 直接订阅 PX4 话题
         """
         # 方式 1：订阅聚合的 UsvStatus

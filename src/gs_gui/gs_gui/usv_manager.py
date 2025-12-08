@@ -1,285 +1,358 @@
 """
-USV管理模块
-处理USV的发现、状态管理和通信
+USV 管理器 PX4 适配层 - PX4 uXRCE-DDS 版本
+
+该模块提供与原 usv_manager 兼容的接口，
+但使用 PX4 原生消息类型替代 MAVROS 消息。
+
+用于替代 usv_manager.py 中的 MAVROS 依赖。
 """
 
+from typing import Dict, Optional, Callable, Any
 import rclpy
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
-from common_interfaces.msg import UsvStatus, NavigationGoal, NavigationFeedback, NavigationResult
-from mavros_msgs.msg import StatusText, SysStatus
-from std_msgs.msg import String, Bool
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
+from std_msgs.msg import String
+
+# PX4 消息类型
+from px4_msgs.msg import (
+    VehicleStatus,
+    BatteryStatus,
+    VehicleLocalPosition,
+    VehicleAttitude,
+    LogMessage,  # 替代 StatusText
+)
+
+# 自定义消息
+from common_interfaces.msg import UsvStatus
 
 
-class UsvManager:
-    def __init__(self, node):
-        self.node = node
-        # USV通信相关的发布者和订阅者
-        self.usv_state_subs = {}
-        self.set_usv_mode_pubs = {}
-        self.set_usv_arming_pubs = {}
-        self.led_pubs = {}
-        self.sound_pubs = {}
-        self.action_pubs = {}
-        self.led_state_subs = {}
-        self.status_text_subs = {}
-        self.sys_status_subs = {}
+class UsvStatusInfo:
+    """单个 USV 状态信息"""
+    
+    # 导航状态名称映射
+    NAV_STATE_NAMES = {
+        0: 'MANUAL',
+        1: 'ALTCTL',
+        2: 'POSCTL',
+        3: 'AUTO.MISSION',
+        4: 'AUTO.LOITER',
+        5: 'AUTO.RTL',
+        6: 'ACRO',
+        14: 'OFFBOARD',
+        15: 'STABILIZED',
+        17: 'AUTO.TAKEOFF',
+        18: 'AUTO.LAND',
+    }
+    
+    def __init__(self, usv_id: str):
+        self.usv_id = usv_id
+        self.connected = False
+        self.armed = False
+        self.mode = ""
+        self.nav_state = 0
+        self.battery_voltage = 0.0
+        self.battery_percent = 0.0
+        self.battery_remaining = 0.0
+        self.position_x = 0.0
+        self.position_y = 0.0
+        self.position_z = 0.0
+        self.velocity_x = 0.0
+        self.velocity_y = 0.0
+        self.velocity_z = 0.0
+        self.heading = 0.0
+        self.last_update_time = 0.0
         
-        # 基于话题的导航通信
-        self.navigation_goal_pubs = {}      # 导航目标发布者
-        self.navigation_feedback_subs = {}  # 导航反馈订阅者
-        self.navigation_result_subs = {}    # 导航结果订阅者
-        self.clear_target_pubs = {}         # 清除目标点发布者
-        
-        self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
-        # MAVROS 的 statustext 和 sys_status 使用 BEST_EFFORT QoS
-        self.qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
-
-    # 添加USV命名空间
-    def add_usv_namespace(self, ns):
-        """
-        为指定的USV命名空间添加订阅者和发布者
-        
-        Args:
-            ns (str): USV的命名空间
-        """
-        # 从命名空间中提取USV ID（去掉开头的'/')
-        usv_id = ns.lstrip('/')
-        # 构造各种主题名称
-        topic_state = f"{ns}/usv_state"  # USV状态主题
-        topic_mode = f"{ns}/set_usv_mode"  # 设置USV模式主题
-        topic_arming = f"{ns}/set_usv_arming"  # 设置USV武装状态主题
-        topic_led = f"{ns}/gs_led_command"  # LED控制主题
-        topic_led_state = f"{ns}/led_state"  # LED状态回传主题
-        topic_sound = f"{ns}/gs_sound_command"  # 声音控制主题
-        topic_action = f"{ns}/gs_action_command"  # 动作控制主题
-        action_server_name = f"{ns}/navigate_to_point"  # 导航动作服务器名称
-        topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本
-
-        # 为USV创建各种订阅者和发布者
-        # 创建USV状态订阅者
-        self.usv_state_subs[usv_id] = self.node.create_subscription(
-            UsvStatus, topic_state, lambda msg, id=usv_id: self.usv_state_callback(msg, id), self.qos_a)
-        # 创建设置USV模式发布者
-        self.set_usv_mode_pubs[usv_id] = self.node.create_publisher(
-            String, topic_mode, self.qos_a)
-        # 创建设置USV武装状态发布者
-        self.set_usv_arming_pubs[usv_id] = self.node.create_publisher(
-            String, topic_arming, self.qos_a)
-        # 创建LED控制发布者
-        self.led_pubs[usv_id] = self.node.create_publisher(
-            String, topic_led, self.qos_a)
-        # 创建LED状态订阅者
-        self.led_state_subs[usv_id] = self.node.create_subscription(
-            String,
-            topic_led_state,
-            lambda msg, id=usv_id: self.node.handle_led_state_feedback(id, msg),
-            self.qos_a
-        )
-        # 创建飞控状态文本订阅者
-        self.status_text_subs[usv_id] = self.node.create_subscription(
-            StatusText,
-            topic_status_text,
-            lambda msg, id=usv_id: self.node.handle_status_text(id, msg),
-            self.qos_best_effort  # 使用 BEST_EFFORT 匹配 MAVROS
-        )
-        self.node.get_logger().info(f"为 {usv_id} 创建 StatusText 订阅: {topic_status_text}")
-        # 创建飞控系统状态订阅者 (SYS_STATUS)
-        topic_sys_status = f"{ns}/sys_status"
-        self.sys_status_subs[usv_id] = self.node.create_subscription(
-            SysStatus,
-            topic_sys_status,
-            lambda msg, id=usv_id: self.node.handle_sys_status(id, msg),
-            self.qos_best_effort  # 使用 BEST_EFFORT 匹配 MAVROS
-        )
-        self.node.get_logger().info(f"为 {usv_id} 创建 SysStatus 订阅: {topic_sys_status}")
-        # 创建声音控制发布者
-        self.sound_pubs[usv_id] = self.node.create_publisher(
-            String, topic_sound, self.qos_a)
-        # 创建动作控制发布者
-        self.action_pubs[usv_id] = self.node.create_publisher(
-            String, topic_action, self.qos_a)
-        
-        # ==================== 基于话题的导航通信 ====================
-        # 创建导航目标发布者
-        navigation_goal_topic = f"{ns}/navigation_goal"
-        self.navigation_goal_pubs[usv_id] = self.node.create_publisher(
-            NavigationGoal,
-            navigation_goal_topic,
-            self.qos_a)
-        
-        # 创建导航反馈订阅者
-        navigation_feedback_topic = f"{ns}/navigation_feedback"
-        self.navigation_feedback_subs[usv_id] = self.node.create_subscription(
-            NavigationFeedback,
-            navigation_feedback_topic,
-            lambda msg, uid=usv_id: self.node.navigation_feedback_callback(msg, uid),
-            self.qos_a)
-        
-        # 创建导航结果订阅者
-        navigation_result_topic = f"{ns}/navigation_result"
-        self.navigation_result_subs[usv_id] = self.node.create_subscription(
-            NavigationResult,
-            navigation_result_topic,
-            lambda msg, uid=usv_id: self.node.navigation_result_callback(msg, uid),
-            self.qos_a)
-        
-        # 创建清除目标点发布者（用于停止 USV 发送 setpoint）
-        clear_target_topic = f"{ns}/clear_target"
-        self.clear_target_pubs[usv_id] = self.node.create_publisher(
-            Bool,
-            clear_target_topic,
-            self.qos_a)
-        
-        # 记录日志信息
-        self.node.get_logger().info(f"为USV {usv_id} 添加订阅者和发布者")
-        self.node.get_logger().info(f"  ✓ 导航话题已注册: {navigation_goal_topic}, {navigation_feedback_topic}, {navigation_result_topic}")
-
-    # 移除USV命名空间
-    def remove_usv_namespace(self, ns):
-        """
-        移除指定的USV命名空间的订阅者和发布者
-        
-        Args:
-            ns (str): USV的命名空间
-        """
-        # 从命名空间中提取USV ID
-        usv_id = ns.lstrip('/')
-        # 销毁并删除USV状态订阅者
-        if usv_id in self.usv_state_subs:
-            self.node.destroy_subscription(self.usv_state_subs[usv_id])
-            del self.usv_state_subs[usv_id]
-        # 销毁并删除设置USV模式发布者
-        if usv_id in self.set_usv_mode_pubs:
-            self.node.destroy_publisher(self.set_usv_mode_pubs[usv_id])
-            del self.set_usv_mode_pubs[usv_id]
-        # 销毁并删除设置USV武装状态发布者
-        if usv_id in self.set_usv_arming_pubs:
-            self.node.destroy_publisher(self.set_usv_arming_pubs[usv_id])
-            del self.set_usv_arming_pubs[usv_id]
-        # 销毁并删除LED控制发布者
-        if usv_id in self.led_pubs:
-            self.node.destroy_publisher(self.led_pubs[usv_id])
-            del self.led_pubs[usv_id]
-        if usv_id in self.led_state_subs:
-            self.node.destroy_subscription(self.led_state_subs[usv_id])
-            del self.led_state_subs[usv_id]
-        if usv_id in self.status_text_subs:
-            self.node.destroy_subscription(self.status_text_subs[usv_id])
-            del self.status_text_subs[usv_id]
-        if usv_id in self.sys_status_subs:
-            self.node.destroy_subscription(self.sys_status_subs[usv_id])
-            del self.sys_status_subs[usv_id]
-        # 销毁并删除声音控制发布者
-        if usv_id in self.sound_pubs:
-            self.node.destroy_publisher(self.sound_pubs[usv_id])
-            del self.sound_pubs[usv_id]
-        # 销毁并删除动作控制发布者
-        if usv_id in self.action_pubs:
-            self.node.destroy_publisher(self.action_pubs[usv_id])
-            del self.action_pubs[usv_id]
-        
-        # 移除基于话题的导航通信
-        if usv_id in self.navigation_goal_pubs:
-            self.node.destroy_publisher(self.navigation_goal_pubs[usv_id])
-            del self.navigation_goal_pubs[usv_id]
-        if usv_id in self.navigation_feedback_subs:
-            self.node.destroy_subscription(self.navigation_feedback_subs[usv_id])
-            del self.navigation_feedback_subs[usv_id]
-        if usv_id in self.navigation_result_subs:
-            self.node.destroy_subscription(self.navigation_result_subs[usv_id])
-            del self.navigation_result_subs[usv_id]
-        if usv_id in self.clear_target_pubs:
-            self.node.destroy_publisher(self.clear_target_pubs[usv_id])
-            del self.clear_target_pubs[usv_id]
-        
-        # 记录日志信息
-        self.node.get_logger().info(f"移除USV {usv_id} 的订阅者和发布者")
-
-        # 额外：从节点的 usv_states 中移除该 USV，并通知 GUI 刷新列表
-        try:
-            # 清理状态记录
-            if usv_id in getattr(self.node, 'usv_states', {}):
-                del self.node.usv_states[usv_id]
-            # 清理LED状态缓存及传染映射
-            if hasattr(self.node, '_usv_current_led_state'):
-                self.node._usv_current_led_state.pop(usv_id, None)
-            if hasattr(self.node, '_usv_led_modes'):
-                self.node._usv_led_modes.pop(usv_id, None)
-            if hasattr(self.node, '_usv_infection_sources'):
-                for dst, src in list(self.node._usv_infection_sources.items()):
-                    if dst == usv_id or src == usv_id:
-                        self.node._usv_infection_sources.pop(dst, None)
-            if hasattr(self.node, '_usv_infecting'):
-                self.node._usv_infecting.discard(usv_id)
-            # 若 GUI 信号可用，发射最新状态列表，触发表格行删除
-            if hasattr(self.node, 'ros_signal') and getattr(self.node.ros_signal, 'receive_state_list', None) is not None:
-                self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))
-        except Exception as e:
-            self.node.get_logger().warn(f"清理 {usv_id} 状态或通知 GUI 失败: {e}")
-
-    # USV状态回调
-    def usv_state_callback(self, msg, usv_id):
-        """
-        处理USV状态更新回调
-        
-        Args:
-            msg (UsvStatus): USV状态消息
-            usv_id (str): USV标识符
-        """
-        # 检查消息类型是否正确
-        if isinstance(msg, UsvStatus):
-            # 更新最后一次收到状态的时间戳，供离线判定逻辑使用
-            try:
-                now_sec = self.node.get_clock().now().nanoseconds / 1e9
-            except Exception:
-                now_sec = 0.0
-            self.node._ns_last_seen[usv_id] = now_sec
-            # 构造状态数据字典
-            state_data = {
-                'namespace': usv_id,  # 命名空间
-                'mode': msg.mode,  # 当前模式
-                'connected': msg.connected,  # 连接状态
-                'armed': msg.armed,  # 武装状态
-                'guided': msg.guided,  # 引导模式状态
-                'system_status': msg.system_status,
-                'battery_voltage': msg.battery_voltage,  # 电池电压
-                'battery_percentage': msg.battery_percentage,  # 电池电量百分比
-                'battery_current': msg.battery_current,
-                'power_supply_status': msg.power_supply_status,  # 电源状态
-                'low_voltage_mode': msg.low_voltage_mode,  # 低电压模式
-                'position': {
-                    'x': round(msg.position.x, 2),  # 保留两位小数减少数据量
-                    'y': round(msg.position.y, 2),
-                    'z': round(msg.position.z, 2)
-                },  # 位置信息
-                'velocity': {
-                    'linear': {
-                        'x': round(msg.velocity.linear.x, 2),
-                        'y': round(msg.velocity.linear.y, 2),
-                        'z': round(msg.velocity.linear.z, 2)
-                    }
-                },  # 速度信息
-                'yaw': round(msg.yaw, 2),  # 偏航角（弧度）
-                'heading': round(msg.heading, 1),  # 航向角（度数，0-360）
-                'temperature': round(msg.temperature, 1),  # 温度
-                'gps_fix_type': msg.gps_fix_type,
-                'gps_satellites_visible': msg.gps_satellites_visible,
-                'gps_eph': msg.gps_eph,
-                'gps_epv': msg.gps_epv,
-            }
+        # 系统状态
+        self.cpu_load = 0.0
+        self.errors_count = 0
+        self.warnings = []
+    
+    def update_from_vehicle_status(self, msg: VehicleStatus):
+        """从 VehicleStatus 更新"""
+        self.connected = True
+        self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        self.nav_state = msg.nav_state
+        self.mode = self.NAV_STATE_NAMES.get(msg.nav_state, f'UNKNOWN({msg.nav_state})')
+    
+    def update_from_battery(self, msg: BatteryStatus):
+        """从 BatteryStatus 更新"""
+        self.battery_voltage = msg.voltage_v
+        self.battery_remaining = msg.remaining
+        # 计算百分比（如果 remaining 有效）
+        if msg.remaining >= 0:
+            self.battery_percent = msg.remaining * 100.0
+    
+    def update_from_local_position(self, msg: VehicleLocalPosition):
+        """从 VehicleLocalPosition 更新"""
+        if msg.xy_valid and msg.z_valid:
+            # PX4 使用 NED，转换为 ENU 显示
+            self.position_x = msg.y   # ENU_x = NED_y
+            self.position_y = msg.x   # ENU_y = NED_x
+            self.position_z = -msg.z  # ENU_z = -NED_z
             
-            # 补充附加状态信息（预检&传感器状态等）
-            if hasattr(self.node, 'augment_state_payload'):
-                try:
-                    state_data = self.node.augment_state_payload(usv_id, state_data)
-                except Exception as e:
-                    self.node.get_logger().warn(f"为 {usv_id} 附加状态信息时出错: {e}")
+            self.velocity_x = msg.vy
+            self.velocity_y = msg.vx
+            self.velocity_z = -msg.vz
+            
+            self.heading = msg.heading
 
-            # 只有当状态发生变化时才更新和发送信号
-            first_time = usv_id not in self.node.usv_states
-            if first_time or self.node.usv_states.get(usv_id) != state_data:
-                # 更新USV状态字典
-                self.node.usv_states[usv_id] = state_data
-                # 发射信号，将更新后的USV状态列表发送给GUI界面
-                # 限制信号发射频率，避免过于频繁的更新
-                self.node.ros_signal.receive_state_list.emit(list(self.node.usv_states.values()))
+
+class UsvManagerPx4:
+    """
+    USV 管理器 - PX4 uXRCE-DDS 版本
+    
+    管理多个 USV 的状态订阅和命令发布。
+    """
+
+    def __init__(self, node: Node):
+        """
+        初始化管理器
+        
+        Args:
+            node: ROS 2 节点实例
+        """
+        self.node = node
+        self.logger = node.get_logger()
+        
+        # QoS 配置
+        self.qos_px4 = QoSProfile(
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10
+        )
+        
+        self.qos_reliable = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        
+        # USV 状态缓存
+        self._usv_status: Dict[str, UsvStatusInfo] = {}
+        
+        # 订阅器字典
+        self._vehicle_status_subs: Dict[str, Any] = {}
+        self._battery_subs: Dict[str, Any] = {}
+        self._local_pos_subs: Dict[str, Any] = {}
+        self._log_message_subs: Dict[str, Any] = {}
+        
+        # 命令发布器字典
+        self._mode_pubs: Dict[str, Any] = {}
+        self._arming_pubs: Dict[str, Any] = {}
+        
+        # 回调函数
+        self._on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None
+        self._on_log_message: Optional[Callable[[str, str], None]] = None
+        
+        self.logger.info('✅ USV 管理器 (PX4 版本) 已初始化')
+
+    def set_callbacks(
+        self,
+        on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None,
+        on_log_message: Optional[Callable[[str, str], None]] = None
+    ):
+        """
+        设置回调函数
+        
+        Args:
+            on_status_update: 状态更新回调 (usv_id, status_info)
+            on_log_message: 日志消息回调 (usv_id, message)
+        """
+        self._on_status_update = on_status_update
+        self._on_log_message = on_log_message
+
+    def add_usv_namespace(self, namespace: str):
+        """
+        添加 USV 命名空间并创建订阅器
+        
+        Args:
+            namespace: USV 命名空间（如 'usv_01'）
+        """
+        usv_id = namespace.replace('/', '')
+        
+        if usv_id in self._usv_status:
+            self.logger.warning(f'USV {usv_id} 已存在')
+            return
+        
+        # 创建状态对象
+        self._usv_status[usv_id] = UsvStatusInfo(usv_id)
+        
+        # 创建 PX4 话题订阅器
+        prefix = f'/{namespace}' if namespace else ''
+        
+        # VehicleStatus 订阅
+        self._vehicle_status_subs[usv_id] = self.node.create_subscription(
+            VehicleStatus,
+            f'{prefix}/fmu/out/vehicle_status',
+            lambda msg, uid=usv_id: self._vehicle_status_callback(uid, msg),
+            self.qos_px4
+        )
+        
+        # BatteryStatus 订阅
+        self._battery_subs[usv_id] = self.node.create_subscription(
+            BatteryStatus,
+            f'{prefix}/fmu/out/battery_status',
+            lambda msg, uid=usv_id: self._battery_callback(uid, msg),
+            self.qos_px4
+        )
+        
+        # VehicleLocalPosition 订阅
+        self._local_pos_subs[usv_id] = self.node.create_subscription(
+            VehicleLocalPosition,
+            f'{prefix}/fmu/out/vehicle_local_position',
+            lambda msg, uid=usv_id: self._local_position_callback(uid, msg),
+            self.qos_px4
+        )
+        
+        # LogMessage 订阅（替代 StatusText）
+        try:
+            self._log_message_subs[usv_id] = self.node.create_subscription(
+                LogMessage,
+                f'{prefix}/fmu/out/log_message',
+                lambda msg, uid=usv_id: self._log_message_callback(uid, msg),
+                self.qos_px4
+            )
+        except Exception as e:
+            self.logger.debug(f'LogMessage 订阅失败: {e}')
+        
+        # 创建命令发布器（兼容原有话题）
+        self._mode_pubs[usv_id] = self.node.create_publisher(
+            String,
+            f'{prefix}/set_usv_mode',
+            self.qos_reliable
+        )
+        
+        self._arming_pubs[usv_id] = self.node.create_publisher(
+            String,
+            f'{prefix}/set_usv_arming',
+            self.qos_reliable
+        )
+        
+        self.logger.info(f'✅ 已添加 USV: {usv_id}')
+
+    def remove_usv_namespace(self, namespace: str):
+        """
+        移除 USV 命名空间
+        
+        Args:
+            namespace: USV 命名空间
+        """
+        usv_id = namespace.replace('/', '')
+        
+        if usv_id not in self._usv_status:
+            return
+        
+        # 销毁订阅器
+        if usv_id in self._vehicle_status_subs:
+            self.node.destroy_subscription(self._vehicle_status_subs.pop(usv_id))
+        if usv_id in self._battery_subs:
+            self.node.destroy_subscription(self._battery_subs.pop(usv_id))
+        if usv_id in self._local_pos_subs:
+            self.node.destroy_subscription(self._local_pos_subs.pop(usv_id))
+        if usv_id in self._log_message_subs:
+            self.node.destroy_subscription(self._log_message_subs.pop(usv_id))
+        
+        # 销毁发布器
+        if usv_id in self._mode_pubs:
+            self.node.destroy_publisher(self._mode_pubs.pop(usv_id))
+        if usv_id in self._arming_pubs:
+            self.node.destroy_publisher(self._arming_pubs.pop(usv_id))
+        
+        # 移除状态
+        del self._usv_status[usv_id]
+        
+        self.logger.info(f'已移除 USV: {usv_id}')
+
+    def _vehicle_status_callback(self, usv_id: str, msg: VehicleStatus):
+        """VehicleStatus 回调"""
+        if usv_id in self._usv_status:
+            self._usv_status[usv_id].update_from_vehicle_status(msg)
+            self._usv_status[usv_id].last_update_time = self.node.get_clock().now().nanoseconds / 1e9
+            
+            if self._on_status_update:
+                self._on_status_update(usv_id, self._usv_status[usv_id])
+
+    def _battery_callback(self, usv_id: str, msg: BatteryStatus):
+        """BatteryStatus 回调"""
+        if usv_id in self._usv_status:
+            self._usv_status[usv_id].update_from_battery(msg)
+
+    def _local_position_callback(self, usv_id: str, msg: VehicleLocalPosition):
+        """VehicleLocalPosition 回调"""
+        if usv_id in self._usv_status:
+            self._usv_status[usv_id].update_from_local_position(msg)
+
+    def _log_message_callback(self, usv_id: str, msg: LogMessage):
+        """LogMessage 回调"""
+        if self._on_log_message:
+            try:
+                # LogMessage 包含 text 字段
+                text = ''.join(chr(c) for c in msg.text if c != 0)
+                self._on_log_message(usv_id, text)
+            except Exception:
+                pass
+
+    def get_usv_status(self, usv_id: str) -> Optional[UsvStatusInfo]:
+        """
+        获取指定 USV 的状态
+        
+        Args:
+            usv_id: USV ID
+            
+        Returns:
+            状态信息，不存在返回 None
+        """
+        return self._usv_status.get(usv_id)
+
+    def get_all_usv_ids(self) -> list:
+        """获取所有 USV ID"""
+        return list(self._usv_status.keys())
+
+    def set_mode(self, usv_id: str, mode: str) -> bool:
+        """
+        设置 USV 模式
+        
+        Args:
+            usv_id: USV ID
+            mode: 目标模式
+            
+        Returns:
+            是否成功发送
+        """
+        if usv_id not in self._mode_pubs:
+            self.logger.warning(f'USV {usv_id} 不存在')
+            return False
+        
+        msg = String()
+        msg.data = mode
+        self._mode_pubs[usv_id].publish(msg)
+        self.logger.info(f'发送模式切换命令: {usv_id} -> {mode}')
+        return True
+
+    def set_arming(self, usv_id: str, arm: bool) -> bool:
+        """
+        设置 USV 解锁/上锁状态
+        
+        Args:
+            usv_id: USV ID
+            arm: True=解锁, False=上锁
+            
+        Returns:
+            是否成功发送
+        """
+        if usv_id not in self._arming_pubs:
+            self.logger.warning(f'USV {usv_id} 不存在')
+            return False
+        
+        msg = String()
+        msg.data = 'arm' if arm else 'disarm'
+        self._arming_pubs[usv_id].publish(msg)
+        self.logger.info(f'发送{"解锁" if arm else "上锁"}命令: {usv_id}')
+        return True
+
+    def cleanup(self):
+        """清理所有资源"""
+        for usv_id in list(self._usv_status.keys()):
+            self.remove_usv_namespace(usv_id)
+        
+        self.logger.info('USV 管理器已清理')
