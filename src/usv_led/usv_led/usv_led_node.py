@@ -1,7 +1,7 @@
 """
-无人船LED控制节点
+无人球LED控制节点
 
-该节点负责控制无人船的LED灯带，支持多种灯光效果。
+该节点负责控制无人球的LED灯带，支持多种灯光效果。
 包括颜色切换、随机颜色变化、低电量呼吸灯等模式。
 """
 
@@ -21,14 +21,14 @@ from common_utils import SerialResourceManager, ParamLoader, ParamValidator
 
 class UsvLedNode(Node):
     """
-    无人船LED控制节点类
+    无人球LED控制节点类
     
     该节点实现LED灯带的控制功能，支持多种灯光效果模式。
     通过订阅地面站命令和电池状态，自动调整LED显示效果。
     """
 
     def __init__(self):
-        """初始化无人船LED控制节点"""
+        """初始化无人球LED控制节点"""
         super().__init__('usv_led_node')
 
         # 初始化 QoS 策略

@@ -1,5 +1,5 @@
 """
-无人船(Ultra Short Wave Vehicle, USV)启动文件
+无人球(Unmanned Surface Vehicle, USV)启动文件
 该文件用于启动完整的USV系统，包括飞控通信、传感器驱动、控制逻辑等模块
 """
 
@@ -41,7 +41,7 @@ def generate_launch_description():
     namespace_arg = DeclareLaunchArgument(
         'namespace',
         default_value='usv_01',
-        description='无人船节点的命名空间'
+        description='无人球节点的命名空间'
     )
     
     # 参数文件路径参数
@@ -252,7 +252,7 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
-    # 鸭头动作控制节点
+    # 球头动作控制节点
     usv_head_action_node = Node(
         package='usv_action',
         executable='usv_head_action_node',
@@ -496,7 +496,7 @@ def generate_launch_description():
         #usv_sound_node,        # 声音控制
         #usv_fan_node,          # 风扇控制
         #usv_ultrasonic_radar_node,  # 超声波雷达
-        #usv_head_action_node,       # 鸭头动作控制
+        #usv_head_action_node,       # 球头动作控制
         
         # 可选节点（根据硬件配置启用）
        

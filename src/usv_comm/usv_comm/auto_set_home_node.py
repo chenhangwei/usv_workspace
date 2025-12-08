@@ -1,7 +1,7 @@
 """
 自动设置Home点节点
 
-该节点用于自动设置无人船的Home Position（返航点）。
+该节点用于自动设置无人球的Home Position（返航点）。
 """
 
 import rclpy
@@ -17,7 +17,7 @@ class AutoSetHomeNode(Node):
     """
     自动设置Home点节点类
     
-    该节点订阅无人船的本地位置信息，当接收到第一个位置消息后，
+    该节点订阅无人球的本地位置信息，当接收到第一个位置消息后，
     经过指定延迟时间后自动设置Home Position（返航点）。
     """
 

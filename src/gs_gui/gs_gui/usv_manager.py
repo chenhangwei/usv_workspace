@@ -7,7 +7,7 @@ import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from common_interfaces.msg import UsvStatus, NavigationGoal, NavigationFeedback, NavigationResult
 from mavros_msgs.msg import StatusText, SysStatus
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 
 
 class UsvManager:
@@ -28,6 +28,7 @@ class UsvManager:
         self.navigation_goal_pubs = {}      # 导航目标发布者
         self.navigation_feedback_subs = {}  # 导航反馈订阅者
         self.navigation_result_subs = {}    # 导航结果订阅者
+        self.clear_target_pubs = {}         # 清除目标点发布者
         
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
         # MAVROS 的 statustext 和 sys_status 使用 BEST_EFFORT QoS
@@ -122,6 +123,13 @@ class UsvManager:
             lambda msg, uid=usv_id: self.node.navigation_result_callback(msg, uid),
             self.qos_a)
         
+        # 创建清除目标点发布者（用于停止 USV 发送 setpoint）
+        clear_target_topic = f"{ns}/clear_target"
+        self.clear_target_pubs[usv_id] = self.node.create_publisher(
+            Bool,
+            clear_target_topic,
+            self.qos_a)
+        
         # 记录日志信息
         self.node.get_logger().info(f"为USV {usv_id} 添加订阅者和发布者")
         self.node.get_logger().info(f"  ✓ 导航话题已注册: {navigation_goal_topic}, {navigation_feedback_topic}, {navigation_result_topic}")
@@ -180,6 +188,9 @@ class UsvManager:
         if usv_id in self.navigation_result_subs:
             self.node.destroy_subscription(self.navigation_result_subs[usv_id])
             del self.navigation_result_subs[usv_id]
+        if usv_id in self.clear_target_pubs:
+            self.node.destroy_publisher(self.clear_target_pubs[usv_id])
+            del self.clear_target_pubs[usv_id]
         
         # 记录日志信息
         self.node.get_logger().info(f"移除USV {usv_id} 的订阅者和发布者")

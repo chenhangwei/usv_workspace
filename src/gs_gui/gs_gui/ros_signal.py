@@ -12,8 +12,9 @@ class ROSSignal(QObject):
     # 模式常量定义
     MODE_MANUAL = "manual"          # 手动模式
     MODE_OFFBOARD = "offboard"      # OFFBOARD模式 (原GUIDED)
-    MODE_ARCO = "arco"              # ARCO模式
-    MODE_STEERING = "steering"      # 转向模式
+    MODE_STABILIZED = "stabilized"  # 稳定模式
+    MODE_POSCTL = "posctl"          # 位置控制模式
+    MODE_ALTCTL = "altctl"          # 高度控制模式
 
     # 武装/解武装命令信号
     arm_command = pyqtSignal(list)      # 武装命令，参数：USV命名空间列表
@@ -21,10 +22,10 @@ class ROSSignal(QObject):
 
     # 模式切换命令信号
     hold_command = pyqtSignal(list)     # HOLD模式命令，参数：USV命名空间列表（集群使用）
-    manual_command = pyqtSignal(list)   # 手动模式命令，参数：USV命名空间列表（离群使用）
+    stabilized_command = pyqtSignal(list)  # STABILIZED模式命令，参数：USV命名空间列表
     offboard_command = pyqtSignal(list) # OFFBOARD模式命令，参数：USV命名空间列表
-    arco_command = pyqtSignal(list)     # ARCO模式命令，参数：USV命名空间列表
-    steering_command = pyqtSignal(list) # 转向模式命令，参数：USV命名空间列表
+    posctl_command = pyqtSignal(list)   # POSCTL位置控制模式命令，参数：USV命名空间列表
+    altctl_command = pyqtSignal(list)   # ALTCTL高度控制模式命令，参数：USV命名空间列表
 
     # 目标点命令信号
     cluster_target_point_command = pyqtSignal(list)     # 集群目标点命令，参数：目标点列表

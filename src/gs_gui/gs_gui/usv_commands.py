@@ -90,6 +90,15 @@ class USVCommandHandler:
         except Exception as e:
             self.append_info(f"发送集群HOLD模式命令失败: {e}")
     
+    def set_cluster_stabilized(self, usv_cluster_list):
+        """发送集群设置STABILIZED稳定模式命令"""
+        try:
+            namespace_list = self._extract_namespaces(usv_cluster_list)
+            self.ros_signal.stabilized_command.emit(namespace_list)
+            self.append_info(f"集群设置STABILIZED模式命令已发送: {namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送集群STABILIZED模式命令失败: {e}")
+    
     # ============== 离群命令 ==============
     def departed_arming(self, usv_departed_list):
         """发送离群解锁命令"""
@@ -118,32 +127,32 @@ class USVCommandHandler:
         except Exception as e:
             self.append_info(f"发送离群OFFBOARD模式命令失败: {e}")
     
-    def set_departed_manual(self, usv_departed_list):
-        """发送离群设置manual模式命令"""
+    def set_departed_stabilized(self, usv_departed_list):
+        """发送离群设置STABILIZED稳定模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
-            self.ros_signal.manual_command.emit(namespace_list)
-            self.append_info(f"离群设置manual模式命令已发送: {namespace_list}")
+            self.ros_signal.stabilized_command.emit(namespace_list)
+            self.append_info(f"离群设置STABILIZED模式命令已发送: {namespace_list}")
         except Exception as e:
-            self.append_info(f"发送离群manual模式命令失败: {e}")
+            self.append_info(f"发送离群STABILIZED模式命令失败: {e}")
     
-    def set_departed_arco(self, usv_departed_list):
-        """发送离群设置ARCO模式命令"""
+    def set_departed_posctl(self, usv_departed_list):
+        """发送离群设置POSCTL位置控制模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
-            self.ros_signal.arco_command.emit(namespace_list)
-            self.append_info(f"离群设置ARCO模式命令已发送: {namespace_list}")
+            self.ros_signal.posctl_command.emit(namespace_list)
+            self.append_info(f"离群设置POSCTL模式命令已发送: {namespace_list}")
         except Exception as e:
-            self.append_info(f"发送离群ARCO模式命令失败: {e}")
+            self.append_info(f"发送离群POSCTL模式命令失败: {e}")
     
-    def set_departed_steering(self, usv_departed_list):
-        """发送离群设置Steering模式命令"""
+    def set_departed_altctl(self, usv_departed_list):
+        """发送离群设置ALTCTL高度控制模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
-            self.ros_signal.steering_command.emit(namespace_list)
-            self.append_info(f"离群设置Steering模式命令已发送: {namespace_list}")
+            self.ros_signal.altctl_command.emit(namespace_list)
+            self.append_info(f"离群设置ALTCTL模式命令已发送: {namespace_list}")
         except Exception as e:
-            self.append_info(f"发送离群Steering模式命令失败: {e}")
+            self.append_info(f"发送离群ALTCTL模式命令失败: {e}")
     
     # ============== 声音命令 ==============
     def sound_start(self):

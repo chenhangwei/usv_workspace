@@ -1,5 +1,5 @@
 """
-无人船启动包(usv_bringup)的Python打包配置文件
+无人球启动包(usv_bringup)的Python打包配置文件
 该文件定义了ROS 2包的元数据和安装要求
 """
 
@@ -29,8 +29,8 @@ setup(
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
     description='ROS 2 package for USV onboard system launch management',
-    long_description="""该包用于USV（无人船）系统的启动与一键集成管理，
-包含多节点/多模块的统一启动脚本和配置，便于集群或单艇的快速部署和调试。
+    long_description="""该包用于USV（无人球）系统的启动与一键集成管理，
+包含多节点/多模块的统一启动脚本和配置，便于集群的快速部署和调试。
 This package provides bringup and integrated launch management for USV 
 (Unmanned Surface Vehicle) systems, including unified launch scripts and 
 configurations for multi-node/multi-module deployment, enabling fast 

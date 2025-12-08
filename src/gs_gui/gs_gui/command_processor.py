@@ -11,31 +11,6 @@ class CommandProcessor:
     def __init__(self, node):
         self.node = node
 
-    def set_manual_callback(self, msg):
-        """
-        设置USV为手动模式
-        
-        Args:
-            msg: 包含USV列表的消息
-        """
-        # 记录日志信息
-        self.node.get_logger().info("接收到手动模式命令")
-        
-        # 手动切换到MANUAL模式时，应该停止所有导航任务
-        usv_list = msg if isinstance(msg, list) else [msg]
-        for ns in usv_list:
-            # 提取USV ID
-            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
-            # 如果该USV有正在执行的导航任务，取消它
-            if usv_id in self.node._usv_nav_target_cache:
-                self.node.get_logger().info(f"🛑 手动切换MANUAL模式，取消 {usv_id} 的导航任务")
-                del self.node._usv_nav_target_cache[usv_id]
-                # 更新导航状态显示为"已停止"
-                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
-        
-        # 调用通用设置模式方法
-        self._set_mode_for_usvs(msg, "MANUAL")
-
     def set_hold_callback(self, msg):
         """
         设置USV为HOLD模式
@@ -43,6 +18,8 @@ class CommandProcessor:
         Args:
             msg: 包含USV列表的消息
         """
+        from std_msgs.msg import Bool
+        
         # 记录日志信息
         self.node.get_logger().info("接收到HOLD模式命令")
         
@@ -51,6 +28,14 @@ class CommandProcessor:
         for ns in usv_list:
             # 提取USV ID
             usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            
+            # 发送 clear_target 命令，停止 USV 端发送 setpoint
+            if usv_id in self.node.usv_manager.clear_target_pubs:
+                clear_msg = Bool()
+                clear_msg.data = True
+                self.node.usv_manager.clear_target_pubs[usv_id].publish(clear_msg)
+                self.node.get_logger().info(f"📤 发送清除目标点命令到 {usv_id}")
+            
             # 如果该USV有正在执行的导航任务，取消它
             if usv_id in self.node._usv_nav_target_cache:
                 self.node.get_logger().info(f"🛑 切换HOLD模式，取消 {usv_id} 的导航任务")
@@ -61,8 +46,8 @@ class CommandProcessor:
                 # 如果没有活动的导航任务，显示为"待命"
                 self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
         
-        # 调用通用设置模式方法
-        self._set_mode_for_usvs(msg, "HOLD")
+        # 调用通用设置模式方法，切换到 AUTO.LOITER（保持位置）
+        self._set_mode_for_usvs(msg, "AUTO.LOITER")
 
     def set_offboard_callback(self, msg):
         """
@@ -76,29 +61,54 @@ class CommandProcessor:
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "OFFBOARD")
 
-    def set_arco_callback(self, msg):
+    def set_stabilized_callback(self, msg):
         """
-        设置USV为ARCO模式
+        设置USV为STABILIZED稳定模式
         
         Args:
             msg: 包含USV列表的消息
         """
         # 记录日志信息
-        self.node.get_logger().info("接收到ARCO模式命令")
-        # 调用通用设置模式方法
-        self._set_mode_for_usvs(msg, "ARCO")
+        self.node.get_logger().info("接收到STABILIZED稳定模式命令")
+        
+        # 切换到STABILIZED模式时，应该停止所有导航任务
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            # 提取USV ID
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            # 如果该USV有正在执行的导航任务，取消它
+            if usv_id in self.node._usv_nav_target_cache:
+                self.node.get_logger().info(f"🛑 切换STABILIZED模式，取消 {usv_id} 的导航任务")
+                del self.node._usv_nav_target_cache[usv_id]
+                # 更新导航状态显示为"已停止"
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
+        
+        # 调用通用设置模式方法 - MAVROS 使用 STABILIZED
+        self._set_mode_for_usvs(msg, "STABILIZED")
 
-    def set_steering_callback(self, msg):
+    def set_posctl_callback(self, msg):
         """
-        设置USV为舵机模式
+        设置USV为POSCTL位置控制模式
         
         Args:
             msg: 包含USV列表的消息
         """
         # 记录日志信息
-        self.node.get_logger().info("接收到舵机模式命令")
+        self.node.get_logger().info("接收到POSCTL位置控制模式命令")
         # 调用通用设置模式方法
-        self._set_mode_for_usvs(msg, "STEERING")
+        self._set_mode_for_usvs(msg, "POSCTL")
+
+    def set_altctl_callback(self, msg):
+        """
+        设置USV为ALTCTL高度控制模式
+        
+        Args:
+            msg: 包含USV列表的消息
+        """
+        # 记录日志信息
+        self.node.get_logger().info("接收到ALTCTL高度控制模式命令")
+        # 调用通用设置模式方法
+        self._set_mode_for_usvs(msg, "ALTCTL")
 
     def _set_mode_for_usvs(self, msg, mode):
         """

@@ -1,5 +1,5 @@
 """
-无人船控制包(usv_control)的Python打包配置文件
+无人球控制包(usv_control)的Python打包配置文件
 该文件定义了ROS 2包的元数据和安装要求
 """
 

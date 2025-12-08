@@ -87,8 +87,8 @@ usv_avoidance_node:
 
 usv_command_node:
   ros__parameters:
-    # 支持的飞行模式列表
-    supported_modes: ['GUIDED', 'MANUAL', 'AUTO', 'HOLD', 'ARCO', 'STEERING']
+    # 支持的飞行模式列表 (PX4 模式名)
+    supported_modes: ['OFFBOARD', 'MANUAL', 'STABILIZED', 'AUTO.LOITER', 'AUTO.MISSION', 'AUTO.RTL', 'POSCTL']
     # 服务超时时间
     service_timeout_sec: 5.0                # 服务等待超时时间（秒）
     # 解锁命令超时时间

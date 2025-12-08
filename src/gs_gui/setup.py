@@ -1,5 +1,5 @@
 """
-无人船地面站GUI包(gs_gui)的Python打包配置文件
+无人球地面站GUI包(gs_gui)的Python打包配置文件
 该文件定义了ROS 2包的元数据和安装要求
 """
 
@@ -38,7 +38,7 @@ setup(
     maintainer='chenhangwei',
     maintainer_email='chenhangwei77777@hotmail.com',
     description='PyQt-based GUI ground station for USV systems',
-    long_description="""该包为USV（无人船）集群/单艇提供基于PyQt的图形化地面站界面，
+    long_description="""该包为USV（无人球）集群提供基于PyQt的图形化地面站界面，
 支持任务调度、状态监控、2D可视化等功能，便于操作与管理。
 This package provides a PyQt-based GUI ground station for USV (Unmanned Surface Vehicle)
 clusters or single units, supporting mission scheduling, status monitoring, 2D visualization,

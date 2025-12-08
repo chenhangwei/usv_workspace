@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-无人船SU04超声波传感器节点
+无人球SU04超声波传感器节点
 
 该节点负责读取SU04超声波传感器数据并通过ROS 2 Range消息发布。
 支持SU04超声波传感器，通过串口通信获取数据。
@@ -17,14 +17,14 @@ from common_utils import SerialResourceManager, ParamLoader, ParamValidator
 
 class SU04Node(Node):
     """
-    无人船SU04超声波传感器节点类
+    无人球SU04超声波传感器节点类
     
     该节点实现SU04超声波传感器数据读取和发布功能，通过串口与传感器通信，
     将读取到的数据转换为Range消息格式并发布。
     """
 
     def __init__(self):
-        """初始化无人船SU04超声波传感器节点"""
+        """初始化无人球SU04超声波传感器节点"""
         super().__init__('su04_node')
         
         # 创建参数加载器
@@ -117,10 +117,14 @@ def main(args=None):
         args: 命令行参数
     """
     rclpy.init(args=args)
-    su04_node = SU04Node()
-    rclpy.spin(su04_node)
-    su04_node.destroy_node()
-    rclpy.shutdown()
+    node = SU04Node()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

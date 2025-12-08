@@ -6,7 +6,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QGroupBox, QGridLayout, QFrame, QProgressBar,
                               QScrollArea, QSizePolicy, QPushButton,
                               QListWidget, QListWidgetItem, QAbstractItemView,
-                              QMenu, QApplication)
+                              QMenu, QApplication, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
 
@@ -387,17 +387,102 @@ class UsvInfoPanel(QWidget):
         return group
 
     def _create_vehicle_message_group(self):
-        """创建飞控消息展示组"""
+        """创建飞控消息展示组（支持筛选和清除）"""
         group = QGroupBox("📋 飞控消息")
         group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#34495e"))
 
         layout = QVBoxLayout()
         layout.setSpacing(6)
         layout.setContentsMargins(10, 12, 10, 10)
-
+        
+        # ==================== 控制栏 ====================
+        control_layout = QHBoxLayout()
+        control_layout.setSpacing(8)
+        
+        # 消息类型筛选复选框
+        filter_label = QLabel("显示:")
+        filter_label.setStyleSheet("color: #7f8c8d; font-size: 12px; font-weight: bold;")
+        control_layout.addWidget(filter_label)
+        
+        # 初始化消息类型筛选状态（默认只显示重要消息）
+        self._message_filters = {
+            'critical': True,   # EMERGENCY/ALERT/CRITICAL (0-2)
+            'error': True,      # ERROR (3)
+            'warning': True,    # WARNING (4)
+            'notice': False,    # NOTICE (5)
+            'info': False,      # INFO (6)
+            'debug': False,     # DEBUG (7)
+        }
+        
+        # 重要消息复选框（CRITICAL/ERROR/WARNING）- 默认勾选
+        self.filter_critical_cb = QCheckBox("❗严重")
+        self.filter_critical_cb.setChecked(True)
+        self.filter_critical_cb.setToolTip("显示 EMERGENCY/ALERT/CRITICAL 级别消息")
+        self.filter_critical_cb.stateChanged.connect(lambda s: self._on_filter_changed('critical', s))
+        self._style_filter_checkbox(self.filter_critical_cb, "#e74c3c")
+        control_layout.addWidget(self.filter_critical_cb)
+        
+        self.filter_error_cb = QCheckBox("⚠️错误")
+        self.filter_error_cb.setChecked(True)
+        self.filter_error_cb.setToolTip("显示 ERROR 级别消息")
+        self.filter_error_cb.stateChanged.connect(lambda s: self._on_filter_changed('error', s))
+        self._style_filter_checkbox(self.filter_error_cb, "#e67e22")
+        control_layout.addWidget(self.filter_error_cb)
+        
+        self.filter_warning_cb = QCheckBox("⚠警告")
+        self.filter_warning_cb.setChecked(True)
+        self.filter_warning_cb.setToolTip("显示 WARNING 级别消息")
+        self.filter_warning_cb.stateChanged.connect(lambda s: self._on_filter_changed('warning', s))
+        self._style_filter_checkbox(self.filter_warning_cb, "#f39c12")
+        control_layout.addWidget(self.filter_warning_cb)
+        
+        # 一般消息复选框（NOTICE/INFO/DEBUG）- 默认不勾选
+        self.filter_info_cb = QCheckBox("ℹ️信息")
+        self.filter_info_cb.setChecked(False)
+        self.filter_info_cb.setToolTip("显示 NOTICE/INFO 级别消息（不影响解锁）")
+        self.filter_info_cb.stateChanged.connect(lambda s: self._on_filter_changed('info', s))
+        self._style_filter_checkbox(self.filter_info_cb, "#3498db")
+        control_layout.addWidget(self.filter_info_cb)
+        
+        self.filter_debug_cb = QCheckBox("🔍调试")
+        self.filter_debug_cb.setChecked(False)
+        self.filter_debug_cb.setToolTip("显示 DEBUG 级别消息（不影响解锁）")
+        self.filter_debug_cb.stateChanged.connect(lambda s: self._on_filter_changed('debug', s))
+        self._style_filter_checkbox(self.filter_debug_cb, "#95a5a6")
+        control_layout.addWidget(self.filter_debug_cb)
+        
+        control_layout.addStretch()
+        
+        # 清除按钮
+        self.clear_messages_btn = QPushButton("🗑️ 清除")
+        self.clear_messages_btn.setToolTip("清除所有已显示的飞控消息")
+        self.clear_messages_btn.clicked.connect(self._on_clear_messages)
+        self.clear_messages_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #ecf0f1;
+                border: 1px solid #bdc3c7;
+                border-radius: 4px;
+                padding: 3px 8px;
+                font-size: 11px;
+                color: #7f8c8d;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+                border-color: #c0392b;
+                color: white;
+            }
+            QPushButton:pressed {
+                background-color: #c0392b;
+            }
+        """)
+        control_layout.addWidget(self.clear_messages_btn)
+        
+        layout.addLayout(control_layout)
+        
+        # ==================== 消息列表 ====================
         self.message_list = QListWidget()
         self._configure_list_widget(self.message_list, allow_selection=True)
-        self.message_list.setMinimumHeight(160)
+        self.message_list.setMinimumHeight(140)
         # 启用右键菜单
         try:
             self.message_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -406,28 +491,184 @@ class UsvInfoPanel(QWidget):
         self.message_list.customContextMenuRequested.connect(self._show_message_context_menu)
         layout.addWidget(self.message_list)
         self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
+        
+        # 保存原始消息列表（用于筛选）
+        self._all_vehicle_messages = []
 
         group.setLayout(layout)
         return group
     
-    def _show_message_context_menu(self, pos):
-        """显示飞控消息右键菜单"""
-        item = self.message_list.itemAt(pos)
-        if item is None:
+    def _style_filter_checkbox(self, checkbox, color):
+        """设置筛选复选框样式（带颜色标识）"""
+        checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                font-size: 12px;
+                font-weight: bold;
+                color: {color};
+                spacing: 4px;
+                padding: 2px 4px;
+                border-radius: 3px;
+            }}
+            QCheckBox:hover {{
+                background-color: rgba(0, 0, 0, 0.05);
+            }}
+            QCheckBox::indicator {{
+                width: 16px;
+                height: 16px;
+                border-radius: 3px;
+                border: 2px solid {color};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {color};
+                border-color: {color};
+                image: none;
+            }}
+            QCheckBox::indicator:unchecked {{
+                background-color: white;
+                border-color: {color};
+            }}
+        """)
+    
+    def _on_filter_changed(self, filter_type, state):
+        """处理筛选复选框状态变化"""
+        # 兼容 PyQt5 不同版本的 CheckState
+        try:
+            is_checked = state == Qt.CheckState.Checked.value
+        except AttributeError:
+            try:
+                is_checked = state == Qt.Checked
+            except AttributeError:
+                is_checked = state == 2  # Qt.Checked 的值
+        
+        if filter_type == 'info':
+            # info 复选框同时控制 NOTICE 和 INFO
+            self._message_filters['notice'] = is_checked
+            self._message_filters['info'] = is_checked
+        else:
+            self._message_filters[filter_type] = is_checked
+        
+        # 重新筛选并显示消息
+        self._refresh_filtered_messages()
+    
+    def _on_clear_messages(self):
+        """清除所有飞控消息"""
+        self._all_vehicle_messages = []
+        self.message_list.clear()
+        self._set_list_placeholder(self.message_list, "消息已清除")
+    
+    def _refresh_filtered_messages(self):
+        """根据当前筛选设置刷新消息列表"""
+        if not hasattr(self, 'message_list'):
             return
         
+        filtered = self._filter_messages(self._all_vehicle_messages)
+        self._display_messages(filtered)
+    
+    def _filter_messages(self, messages):
+        """根据当前筛选设置过滤消息
+        
+        支持两种级别系统：
+        - MAVLink (0-7): 0-2=CRITICAL, 3=ERROR, 4=WARNING, 5=NOTICE, 6=INFO, 7=DEBUG
+        - ROS 2 (10-50): 50=FATAL, 40=ERROR, 30=WARNING, 20=INFO, 10=DEBUG
+        """
+        if not messages:
+            return []
+        
+        filtered = []
+        for entry in messages:
+            severity = entry.get('severity', 6)
+            
+            # 判断级别类型并转换为统一的分类
+            if severity >= 10:
+                # ROS 2 日志级别 (10-50)
+                if severity >= 50:  # FATAL -> critical
+                    category = 'critical'
+                elif severity >= 40:  # ERROR
+                    category = 'error'
+                elif severity >= 30:  # WARNING
+                    category = 'warning'
+                elif severity >= 20:  # INFO
+                    category = 'info'
+                else:  # DEBUG (10)
+                    category = 'debug'
+            else:
+                # MAVLink 级别 (0-7)
+                if severity <= 2:  # EMERGENCY/ALERT/CRITICAL
+                    category = 'critical'
+                elif severity == 3:  # ERROR
+                    category = 'error'
+                elif severity == 4:  # WARNING
+                    category = 'warning'
+                elif severity == 5:  # NOTICE
+                    category = 'notice'
+                elif severity == 6:  # INFO
+                    category = 'info'
+                else:  # DEBUG (7+)
+                    category = 'debug'
+            
+            # 检查该分类是否被启用
+            # notice 和 info 共用 info 筛选器
+            if category == 'notice':
+                if self._message_filters.get('notice', False):
+                    filtered.append(entry)
+            elif self._message_filters.get(category, category in ['critical', 'error', 'warning']):
+                filtered.append(entry)
+        
+        return filtered
+    
+    def _display_messages(self, messages):
+        """显示过滤后的消息列表"""
+        self.message_list.clear()
+        
+        if not messages:
+            self._set_list_placeholder(self.message_list, "无匹配的消息（调整筛选条件）")
+            return
+        
+        max_items = 30
+        for entry in messages[:max_items]:
+            severity = entry.get('severity', 6)
+            label = entry.get('severity_label') or f"LEVEL {severity}"
+            time_str = entry.get('time') or "--:--:--"
+            text = entry.get('text', '')
+            combined = f"[{time_str}] {label}: {text}"
+            item = QListWidgetItem(combined)
+            # 设置可选择标志，允许复制
+            try:
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            except AttributeError:
+                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)  # type: ignore[attr-defined]
+            item.setToolTip(text)
+            bg_color, fg_color = self._severity_palette(severity)
+            item.setBackground(QColor(bg_color))
+            item.setForeground(QColor(fg_color))
+            self.message_list.addItem(item)
+    
+    def _show_message_context_menu(self, pos):
+        """显示飞控消息右键菜单"""
         menu = QMenu(self.message_list)
-        copy_action = menu.addAction("📋 复制消息")
+        
+        item = self.message_list.itemAt(pos)
+        
+        # 复制当前消息（仅当有选中项时）
+        if item is not None:
+            copy_action = menu.addAction("📋 复制消息")
+        else:
+            copy_action = None
+        
         copy_all_action = menu.addAction("📄 复制全部消息")
+        menu.addSeparator()
+        clear_action = menu.addAction("🗑️ 清除所有消息")
         
         action = menu.exec_(self.message_list.mapToGlobal(pos))
-        if action == copy_action:
+        if action == copy_action and item is not None:
             QApplication.clipboard().setText(item.text())
         elif action == copy_all_action:
             all_text = []
             for i in range(self.message_list.count()):
                 all_text.append(self.message_list.item(i).text())
             QApplication.clipboard().setText('\n'.join(all_text))
+        elif action == clear_action:
+            self._on_clear_messages()
     
     def _create_key_label(self, text):
         """创建键标签（紧凑版）"""
@@ -781,7 +1022,7 @@ class UsvInfoPanel(QWidget):
         elif armed:
             # 已解锁状态优先显示（USV Arm 成功后）
             button_text = "Armed"
-            summary = "无人船已解锁，准备航行"
+            summary = "无人球已解锁，准备运行"
             button_bg, button_fg = "#27ae60", "#ffffff"
         elif ready:
             button_text = "Ready to Sail"
@@ -841,33 +1082,20 @@ class UsvInfoPanel(QWidget):
             self.sensor_list.addItem(item)
 
     def _update_vehicle_messages(self, messages):
-        """更新飞控消息列表"""
+        """更新飞控消息列表（支持筛选）"""
         if not hasattr(self, 'message_list'):
             return
 
+        # 保存原始消息列表
+        self._all_vehicle_messages = list(messages) if messages else []
+        
         if not messages:
             self._set_list_placeholder(self.message_list, "尚未收到飞控消息")
             return
 
-        self.message_list.clear()
-        max_items = 30
-        for entry in messages[:max_items]:
-            severity = entry.get('severity', 6)
-            label = entry.get('severity_label') or f"LEVEL {severity}"
-            time_str = entry.get('time') or "--:--:--"
-            text = entry.get('text', '')
-            combined = f"[{time_str}] {label}: {text}"
-            item = QListWidgetItem(combined)
-            # 设置可选择标志，允许复制
-            try:
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
-            except AttributeError:
-                item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)  # type: ignore[attr-defined]
-            item.setToolTip(text)
-            bg_color, fg_color = self._severity_palette(severity)
-            item.setBackground(QColor(bg_color))
-            item.setForeground(QColor(fg_color))
-            self.message_list.addItem(item)
+        # 应用筛选并显示
+        filtered = self._filter_messages(messages)
+        self._display_messages(filtered)
     
     def _update_battery_style(self, percentage):
         """根据电池百分比更新进度条样式"""
@@ -949,20 +1177,62 @@ class UsvInfoPanel(QWidget):
         return mapping.get(key, ("#f4f6f7", "#2c3e50"))
 
     def _severity_palette(self, severity):
-        """根据 MAVROS severity 返回配色"""
+        """根据 severity 返回配色
+        
+        支持两种级别系统：
+        
+        MAVLink 消息级别 (0-7):
+        0: EMERGENCY - 系统无法使用
+        1: ALERT - 需要立即行动
+        2: CRITICAL - 临界状态
+        3: ERROR - 错误状态
+        4: WARNING - 警告状态
+        5: NOTICE - 正常但重要
+        6: INFO - 信息消息
+        7: DEBUG - 调试消息
+        
+        ROS 2 日志级别 (10-50):
+        10: DEBUG
+        20: INFO
+        30: WARNING
+        40: ERROR
+        50: FATAL
+        """
         try:
             sev = int(severity)
         except (ValueError, TypeError):
             sev = 6
 
-        if sev <= 2:
+        # ROS 2 日志级别 (10-50) - 先处理这个范围
+        if sev >= 10:
+            if sev >= 50:  # FATAL
+                return "#f5b7b1", "#922b21"  # 深红
+            if sev >= 40:  # ERROR
+                return "#fce4d6", "#d35400"  # 橙红
+            if sev >= 30:  # WARNING
+                return "#fef5e6", "#b9770e"  # 黄橙
+            if sev >= 20:  # INFO
+                return "#f4f6f7", "#2c3e50"  # 浅灰
+            # DEBUG (10)
+            return "#f8f9f9", "#7f8c8d"  # 更浅灰
+        
+        # MAVLink 级别 (0-7)
+        if sev == 0:  # EMERGENCY - 深红色
+            return "#f5b7b1", "#922b21"
+        if sev == 1:  # ALERT - 红色
+            return "#fadbd8", "#a93226"
+        if sev == 2:  # CRITICAL - 浅红色
             return "#fdecea", "#c0392b"
-        if sev in (3, 4):
+        if sev == 3:  # ERROR - 橙红色
+            return "#fce4d6", "#d35400"
+        if sev == 4:  # WARNING - 黄橙色
             return "#fef5e6", "#b9770e"
-        if sev == 5:
+        if sev == 5:  # NOTICE - 蓝色
             return "#ebf5fb", "#1f618d"
-        if sev == 6:
+        if sev == 6:  # INFO - 浅灰蓝
             return "#f4f6f7", "#2c3e50"
+        if sev >= 7:  # DEBUG - 浅灰色
+            return "#f8f9f9", "#7f8c8d"
         return "#f4f6f7", "#2c3e50"
     
     def _update_dynamic_styles(self):

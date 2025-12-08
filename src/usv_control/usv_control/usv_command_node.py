@@ -1,5 +1,5 @@
 """
-无人船命令控制节点
+无人球命令控制节点
 
 该节点负责处理来自地面站的命令，包括模式切换和解锁/上锁操作。
 通过MAVROS服务与飞控通信，执行相应的控制命令。
@@ -15,14 +15,19 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 class UsvCommandNode(Node):
     """
-    无人船命令控制节点类
+    无人球命令控制节点类
     
     该节点订阅地面站发送的模式切换和解锁/上锁命令，
     通过MAVROS服务与飞控通信，执行相应的控制操作。
     """
+    
+    # PX4 支持的模式名称说明：
+    # AUTO.LOITER - 悬停/保持位置  AUTO.MISSION - 自动任务模式
+    # AUTO.RTL - 返航模式  AUTO.LAND - 降落模式  AUTO.TAKEOFF - 起飞模式
+    # OFFBOARD - 外部控制模式  MANUAL - 手动模式  POSCTL - 位置控制模式
 
     def __init__(self):
-        """初始化无人船命令控制节点"""
+        """初始化无人球命令控制节点"""
         super().__init__('usv_command_node')
 
         # 创建 QoS 配置
@@ -32,7 +37,7 @@ class UsvCommandNode(Node):
         )
 
         # 声明参数
-        self.declare_parameter('supported_modes', ['OFFBOARD', 'GUIDED', 'MANUAL', 'AUTO', 'HOLD','ARCO','STEERING'])
+        self.declare_parameter('supported_modes', ['OFFBOARD', 'MANUAL', 'STABILIZED', 'AUTO.LOITER', 'AUTO.MISSION', 'AUTO.RTL', 'AUTO.LAND', 'POSCTL', 'ALTCTL'])
         self.declare_parameter('service_timeout_sec', 5.0)
         self.declare_parameter('arming_command_timeout_sec', 10.0)
 
@@ -148,7 +153,7 @@ class UsvCommandNode(Node):
             self.get_logger().error(f'等待模式服务时发生异常: {e}')
             return
 
-        # 切换模式
+        # 切换模式（直接使用 PX4 模式名）
         mode_req = SetMode.Request()
         mode_req.custom_mode = msg.data
         future = self.mode_client.call_async(mode_req)
@@ -241,9 +246,13 @@ def main(args=None):
     """
     rclpy.init(args=args)
     node = UsvCommandNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

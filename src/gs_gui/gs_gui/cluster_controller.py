@@ -126,6 +126,8 @@ class ClusterController:
 
     def _reset_cluster_task(self, target_state: ClusterTaskState, reason: str, cancel_active: bool = True) -> None:
         """统一重置集群任务状态。"""
+        from std_msgs.msg import Bool
+        
         usv_ids_to_manual = []
         
         if cancel_active:
@@ -133,6 +135,15 @@ class ClusterController:
             for usv_id in list(self.node._usv_nav_target_cache.keys()):
                 self._cancel_active_goal(usv_id)
                 usv_ids_to_manual.append(usv_id)
+            
+            # 向所有在线的 USV 发送清除目标点命令，停止发送 setpoint
+            for usv_id in self.node.usv_manager.clear_target_pubs.keys():
+                clear_msg = Bool()
+                clear_msg.data = True
+                self.node.usv_manager.clear_target_pubs[usv_id].publish(clear_msg)
+                self.node.get_logger().info(f"📤 发送清除目标点命令到 {usv_id}")
+                if usv_id not in usv_ids_to_manual:
+                    usv_ids_to_manual.append(usv_id)
 
         self.node.current_targets = []
         self.node.run_step = 0
@@ -234,9 +245,9 @@ class ClusterController:
             return
 
         try:
-            # 根据当前步骤获取相关的USV列表，确定本步骤需要操作的无人艇
+            # 根据当前步骤获取相关的USV列表，确定本步骤需要操作的无人球
             cluster_usv_list = self._get_usvs_by_step(self.node.current_targets, self.node.run_step)
-            # 检查当前步骤的USV列表是否为空，为空表示没有需要操作的无人艇
+            # 检查当前步骤的USV列表是否为空，为空表示没有需要操作的无人球
             if not cluster_usv_list:
                 # 记录警告日志，提示当前步骤无USV需要操作
                 self.node.get_logger().warn(f"步骤 {self.node.run_step} 的USV列表为空")

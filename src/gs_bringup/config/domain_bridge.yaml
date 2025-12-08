@@ -99,6 +99,10 @@ topics:
     type: std_msgs/msg/String
     reversed: True
   
+  usv_01/clear_target:
+    type: std_msgs/msg/Bool
+    reversed: True
+  
   # LED/声音/动作命令 (从地面站到USV)
   usv_01/gs_led_command:
     type: std_msgs/msg/String
@@ -213,6 +217,11 @@ topics:
     
   usv_02/set_usv_arming:
     type: std_msgs/msg/String
+    from_domain: 12
+    reversed: True
+  
+  usv_02/clear_target:
+    type: std_msgs/msg/Bool
     from_domain: 12
     reversed: True
   
@@ -333,6 +342,11 @@ topics:
     
   usv_03/set_usv_arming:
     type: std_msgs/msg/String
+    from_domain: 13
+    reversed: True
+  
+  usv_03/clear_target:
+    type: std_msgs/msg/Bool
     from_domain: 13
     reversed: True
   

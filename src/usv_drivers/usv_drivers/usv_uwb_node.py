@@ -1,5 +1,5 @@
 """
-无人船UWB定位节点
+无人球UWB定位节点
 
 该节点负责读取UWB定位数据并通过ROS 2 PoseStamped消息发布。
 支持多种UWB定位设备，通过串口通信获取数据。
@@ -17,14 +17,14 @@ from common_utils import SerialResourceManager, ParamLoader, ParamValidator
 
 class UsvUwbNode(Node):
     """
-    无人船UWB定位节点类
+    无人球UWB定位节点类
     
     该节点实现UWB定位数据读取和发布功能，通过串口与UWB定位设备通信，
     将读取到的数据转换为PoseStamped消息格式并发布。
     """
 
     def __init__(self):
-        """初始化无人船UWB定位节点"""
+        """初始化无人球UWB定位节点"""
         super().__init__('usv_uwb_node')
         
         # 创建参数加载器
@@ -135,9 +135,8 @@ class UsvUwbNode(Node):
             pos_y = self.parse_int24(frame[7:10]) / 1000.0
             pos_z = self.parse_int24(frame[10:13]) / 1000.0
             
-            # 解析四元数 (float * 4)
-            # q0-q3: bytes 88-103
-            q0, q1, q2, q3 = struct.unpack('<ffff', frame[88:104])
+            # 注意：不使用 UWB 的四元数数据，让飞控使用自己 IMU 的姿态
+            # UWB 仅提供位置信息，姿态由飞控 EKF 自行估计
             
             # 填充消息
             self.uwb_msg.header.stamp = self.get_clock().now().to_msg()
@@ -147,6 +146,7 @@ class UsvUwbNode(Node):
             self.uwb_msg.pose.position.y = pos_y
             self.uwb_msg.pose.position.z = pos_z
             
+            # 使用单位四元数（表示无旋转），飞控将使用 IMU 数据进行姿态估计
             self.uwb_msg.pose.orientation.w = 1.0
             self.uwb_msg.pose.orientation.x = 0.0
             self.uwb_msg.pose.orientation.y = 0.0
@@ -172,18 +172,25 @@ class UsvUwbNode(Node):
         super().destroy_node()
 
 
-def main():
+def main(args=None):
     """
     主函数
     
     初始化ROS 2节点并开始处理消息。
+    
+    Args:
+        args: 命令行参数
     """
-    rclpy.init() 
-    node = UsvUwbNode() 
-    rclpy.spin(node) 
-    node.destroy_node() 
-    rclpy.shutdown() 
+    rclpy.init(args=args)
+    node = UsvUwbNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
-if __name__ == '__main__': 
+if __name__ == '__main__':
     main()

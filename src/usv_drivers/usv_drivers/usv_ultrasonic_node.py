@@ -1,5 +1,5 @@
 """
-无人船超声波雷达节点
+无人球超声波雷达节点
 
 该节点负责读取定向超声波雷达数据并通过ROS 2 LaserScan消息发布。
 支持多种超声波雷达设备，通过串口通信获取数据。
@@ -18,14 +18,14 @@ from common_utils import SerialResourceManager, ParamLoader, ParamValidator
 
 class UsvUltrasonicNode(Node):
     """
-    无人船超声波雷达节点类
+    无人球超声波雷达节点类
     
     该节点实现超声波雷达数据读取和发布功能，通过串口与超声波雷达设备通信，
     将读取到的数据转换为LaserScan消息格式并发布。
     """
 
     def __init__(self):
-        """初始化无人船超声波雷达节点"""
+        """初始化无人球超声波雷达节点"""
         super().__init__('usv_ultrasonic_node')
         
         # 创建参数加载器

@@ -1,8 +1,8 @@
 """
-无人船避障节点
+无人球避障节点
 
-该节点负责处理无人船的避障逻辑。通过订阅雷达数据、飞控状态、当前位置和目标位置，
-当检测到障碍物时，自动调整目标点以避开障碍物，确保无人船安全航行。
+该节点负责处理无人球的避障逻辑。通过订阅雷达数据、飞控状态、当前位置和目标位置，
+当检测到障碍物时，自动调整目标点以避开障碍物，确保无人球安全运行。
 """
 
 import rclpy
@@ -14,17 +14,20 @@ from std_msgs.msg import Bool
 from mavros_msgs.msg import State, PositionTarget
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
+# 导入common_utils工具
+from common_utils import ParamLoader, ParamValidator
+
 
 class UsvAvoidanceNode(Node):
     """
-    无人船避障节点类
+    无人球避障节点类
     
     该节点实现基于超声波雷达的避障功能，当检测到障碍物时，
-    自动调整无人船的目标位置以避开障碍物。
+    自动调整无人球的目标位置以避开障碍物。
     """
 
     def __init__(self):
-        """初始化无人船避障节点"""
+        """初始化无人球避障节点"""
         super().__init__('usv_avoidance_node')
 
         # 创建 QoS 配置
@@ -38,9 +41,16 @@ class UsvAvoidanceNode(Node):
             reliability=QoSReliabilityPolicy.RELIABLE
         )
 
-        # 从参数服务器加载避障距离阈值，默认值为 1.2 米
-        self.declare_parameter('in_distance_value', 1.2)
-        self.in_distance_value = self.get_parameter('in_distance_value').get_parameter_value().double_value
+        # 创建参数加载器
+        param_loader = ParamLoader(self)
+        
+        # 加载避障距离阈值参数
+        self.in_distance_value = param_loader.load_param(
+            'in_distance_value',
+            1.2,
+            ParamValidator.positive,
+            '避障触发距离(米)'
+        )
 
         # 订阅飞控状态信息
         self.state_sub = self.create_subscription(
@@ -202,9 +212,13 @@ def main(args=None):
     """
     rclpy.init(args=args)
     node = UsvAvoidanceNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':

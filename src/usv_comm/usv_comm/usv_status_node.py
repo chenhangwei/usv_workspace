@@ -14,9 +14,9 @@ from collections import deque
 
 
 class UsvStatusNode(Node):
-    """无人船状态节点类
+    """无人球状态节点类
     
-    该节点负责收集无人船的各种状态信息并整合发布。
+    该节点负责收集无人球的各种状态信息并整合发布。
     主要功能包括：
     1. 订阅飞控状态、电池状态、位置和速度信息
     2. 整合所有状态信息并发布到统一的状态主题
@@ -24,7 +24,7 @@ class UsvStatusNode(Node):
     """
 
     def __init__(self):
-        """初始化无人船状态节点"""
+        """初始化无人球状态节点"""
         super().__init__('usv_status_node')
 
         # 创建 QoS 配置
@@ -611,13 +611,24 @@ class UsvStatusNode(Node):
         super().destroy_node()
 
 
-def main():
-    """主函数"""
-    rclpy.init()
+def main(args=None):
+    """
+    主函数
+    
+    初始化ROS 2节点并开始处理消息。
+    
+    Args:
+        args: 命令行参数
+    """
+    rclpy.init(args=args)
     node = UsvStatusNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == '__main__':
