@@ -29,6 +29,9 @@ from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
 from .event_decoder import EventDecoder  # 导入事件解码器
 from .px4_command_interface import Px4CommandInterface  # PX4 命令接口
+from .navigation_handler import NavigationHandler  # 导航处理器
+from .sensor_status_handler import SensorStatusHandler  # 传感器状态处理器
+from .discovery_handler import DiscoveryHandler  # USV 发现处理器
 
 # 导入线程安全工具
 from common_utils import ThreadSafeDict
@@ -83,6 +86,11 @@ class GroundStationNode(Node):
         self.cluster_controller = ClusterController(self)
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
+        
+        # 初始化模块化处理器
+        self.navigation_handler = NavigationHandler(self, self.usv_manager, signal)
+        self.sensor_handler = SensorStatusHandler(self, signal)
+        self.discovery_handler = DiscoveryHandler(self, self.usv_manager, signal)
         
         # 初始化事件解码器
         self.event_decoder = EventDecoder(self.get_logger())
@@ -203,21 +211,22 @@ class GroundStationNode(Node):
         # 已注册的 USV 集合（用于动态发现去重）
         self._registered_usvs = set()
         
-        # 动态发现的 USV 列表
+        # 动态发现的 USV 列表（使用 discovery_handler 管理）
         self._discovered_usv_list = []
 
         # 获取动态发现配置
         self._discovery_interval = self.get_parameter('discovery_interval').value
 
         # 创建定时器
-        self.ns_timer = self.create_timer(5.0, self.check_usv_topics_availability)  # USV话题可用性检查定时器
+        # USV 话题可用性检查（使用 discovery_handler）
+        self.ns_timer = self.create_timer(5.0, self._check_availability_wrapper)
         self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器
         self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器
         # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI
         self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz
         
-        # 动态发现定时器
-        self.discovery_timer = self.create_timer(self._discovery_interval, self.discover_new_usvs)
+        # 动态发现定时器（使用 discovery_handler）
+        self.discovery_timer = self.create_timer(self._discovery_interval, self._discover_wrapper)
         self.get_logger().info("🔍 动态发现模式已启用")
 
         # TF2: Buffer/Listener for coordinate transforms
@@ -314,6 +323,29 @@ class GroundStationNode(Node):
                 self.publish_thread.join(timeout=2.0)
         except Exception as e:
             self.get_logger().warn(f'关闭后台线程时发生异常: {e}')
+    
+    # =========================================================================
+    # 处理器包装方法（用于定时器回调）
+    # =========================================================================
+    
+    def _discover_wrapper(self):
+        """动态发现包装器 - 调用 discovery_handler"""
+        try:
+            self.discovery_handler.discover_usvs()
+            # 同步状态到本地变量（兼容现有代码）
+            self._discovered_usv_list = self.discovery_handler.get_discovered_usvs()
+            self.usv_states = self.discovery_handler._usv_states
+        except Exception as e:
+            self.get_logger().error(f"动态发现失败: {e}")
+    
+    def _check_availability_wrapper(self):
+        """可用性检查包装器 - 调用 discovery_handler"""
+        try:
+            self.discovery_handler.check_availability()
+            # 同步状态
+            self.usv_states = self.discovery_handler._usv_states
+        except Exception as e:
+            self.get_logger().error(f"可用性检查失败: {e}")
     
     def check_usv_topics_availability(self):
         """
@@ -505,39 +537,13 @@ class GroundStationNode(Node):
         except Exception as e:
             self.get_logger().error(f"移除 USV {usv_id} 失败: {e}")
 
-    # 通过Action方式发送导航目标点
+    # =========================================================================
+    # 导航相关方法（委托给 navigation_handler）
+    # =========================================================================
+    
     def _validate_target_position(self, x, y, z):
-        """
-        验证目标点是否在安全范围内
-        
-        Args:
-            x (float): 目标点X坐标
-            y (float): 目标点Y坐标
-            z (float): 目标点Z坐标
-            
-        Raises:
-            ValueError: 如果目标点超出安全范围
-        """
-        import math
-        
-        # 定义安全范围参数（可根据实际需求调整）
-        MAX_DISTANCE = 500.0  # 最大水平距离 500m
-        MAX_ALTITUDE = 10.0   # 最大高度 10m（USV 通常在水面）
-        
-        # 计算2D距离
-        distance_2d = math.sqrt(x**2 + y**2)
-        
-        # 检查水平距离
-        if distance_2d > MAX_DISTANCE:
-            raise ValueError(
-                f"目标点距离过远: {distance_2d:.2f}m > {MAX_DISTANCE}m"
-            )
-        
-        # 检查高度（通常 USV 不应该有太大的Z坐标）
-        if abs(z) > MAX_ALTITUDE:
-            raise ValueError(
-                f"目标点高度异常: {abs(z):.2f}m > {MAX_ALTITUDE}m"
-            )
+        """验证目标点是否在安全范围内 - 委托给 navigation_handler"""
+        self.navigation_handler.validate_target_position(x, y, z)
 
     # ==================== 基于话题的导航方法 ====================
     
