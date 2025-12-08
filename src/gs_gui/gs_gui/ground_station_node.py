@@ -2022,3 +2022,22 @@ class GroundStationNode(Node):
             del self.usv_manager.action_pubs[usv_id]
         # 调用父类的销毁方法
         super().destroy_node()
+
+
+def main(args=None):
+    """地面站节点入口函数"""
+    rclpy.init(args=args)
+    
+    node = GroundStationNode()
+    
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

@@ -48,7 +48,7 @@ and convenient operation and management.""",
     entry_points={
         'console_scripts': [
             'main_gui_app = gs_gui.main_gui_app:main',
-            # PX4 uXRCE-DDS 集群管理节点
+            'ground_station_node = gs_gui.ground_station_node:main',
             'cluster_manager_node = gs_gui.cluster_manager_node:main',
         ],
     },

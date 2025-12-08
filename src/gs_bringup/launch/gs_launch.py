@@ -39,7 +39,7 @@ def generate_launch_description():
     
     router_ip_arg = DeclareLaunchArgument(
         'router_ip',
-        default_value='192.168.1.100',
+        default_value='192.168.68.50',
         description='Zenoh Router IP 地址'
     )
     
@@ -142,19 +142,9 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # 地面站节点
+    # GUI 应用（内部创建 GroundStationNode）
     # =========================================================================
-    ground_station_node = Node(
-        package='gs_gui',
-        executable='ground_station_node',
-        name='ground_station_node',
-        output='screen',
-        parameters=[gs_param_file],
-    )
-    
-    # =========================================================================
-    # GUI 应用
-    # =========================================================================
+    # 注：main_gui_app 内部已创建 GroundStationNode，无需单独启动
     main_gui_node = Node(
         condition=IfCondition(start_gui),
         package='gs_gui',
@@ -171,7 +161,6 @@ def generate_launch_description():
         period=3.0,
         actions=[
             cluster_manager_node,
-            ground_station_node,
             main_gui_node,
         ]
     )

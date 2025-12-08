@@ -97,7 +97,7 @@ class UsvStatusInfo:
             self.heading = msg.heading
 
 
-class UsvManagerPx4:
+class UsvManager:
     """
     USV 管理器 - PX4 uXRCE-DDS 版本
     
@@ -140,6 +140,15 @@ class UsvManagerPx4:
         self._mode_pubs: Dict[str, Any] = {}
         self._arming_pubs: Dict[str, Any] = {}
         
+        # 兼容性别名（用于 ground_station_node.py）
+        self.usv_state_subs: Dict[str, Any] = self._vehicle_status_subs
+        self.set_usv_mode_pubs: Dict[str, Any] = self._mode_pubs
+        self.set_usv_arming_pubs: Dict[str, Any] = self._arming_pubs
+        self.led_pubs: Dict[str, Any] = {}
+        self.sound_pubs: Dict[str, Any] = {}
+        self.action_pubs: Dict[str, Any] = {}
+        self.navigation_goal_pubs: Dict[str, Any] = {}
+        
         # 回调函数
         self._on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None
         self._on_log_message: Optional[Callable[[str, str], None]] = None
@@ -168,7 +177,8 @@ class UsvManagerPx4:
         Args:
             namespace: USV 命名空间（如 'usv_01'）
         """
-        usv_id = namespace.replace('/', '')
+        # 移除前导斜杠
+        usv_id = namespace.lstrip('/').replace('/', '')
         
         if usv_id in self._usv_status:
             self.logger.warning(f'USV {usv_id} 已存在')
@@ -177,8 +187,8 @@ class UsvManagerPx4:
         # 创建状态对象
         self._usv_status[usv_id] = UsvStatusInfo(usv_id)
         
-        # 创建 PX4 话题订阅器
-        prefix = f'/{namespace}' if namespace else ''
+        # 创建 PX4 话题订阅器（确保只有一个前导斜杠）
+        prefix = f'/{usv_id}'
         
         # VehicleStatus 订阅
         self._vehicle_status_subs[usv_id] = self.node.create_subscription(

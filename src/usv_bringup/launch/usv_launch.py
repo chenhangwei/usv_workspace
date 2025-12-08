@@ -51,7 +51,7 @@ def generate_launch_description():
     
     serial_port_arg = DeclareLaunchArgument(
         'serial_port',
-        default_value='/dev/ttyUSB0',
+        default_value='/dev/ttyACM0',
         description='飞控串口设备'
     )
     
@@ -69,7 +69,7 @@ def generate_launch_description():
     
     router_ip_arg = DeclareLaunchArgument(
         'router_ip',
-        default_value='192.168.1.100',
+        default_value='192.168.68.50',
         description='Zenoh Router IP 地址'
     )
     

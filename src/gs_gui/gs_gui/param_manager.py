@@ -42,7 +42,20 @@ class ParamValue:
     timestamp: float = 0.0
 
 
-class ParamManagerPx4:
+@dataclass
+class ParamInfo:
+    """参数信息数据类（兼容旧接口）"""
+    name: str
+    value: Any = None
+    param_type: ParamType = ParamType.UNKNOWN
+    description: str = ""
+    default_value: Any = None
+    min_value: Any = None
+    max_value: Any = None
+    unit: str = ""
+
+
+class ParamManager:
     """
     PX4 参数管理器
     
