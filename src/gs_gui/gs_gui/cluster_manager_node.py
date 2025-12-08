@@ -265,7 +265,11 @@ class ClusterManagerNode(Node):
             usv.update_state()
 
     def discover_usvs(self):
-        """动态发现 USV"""
+        """
+        动态发现 USV
+        
+        通过检测 PX4 话题（/usv_xx/fmu/out/vehicle_status）自动发现新 USV
+        """
         if not self.discovery_enabled:
             return
             
@@ -273,8 +277,11 @@ class ClusterManagerNode(Node):
         topic_list = self.get_topic_names_and_types()
         
         for topic, types in topic_list:
-            # 查找 usv_state 话题
-            if '/usv_state' in topic and 'common_interfaces/msg/UsvStatus' in str(types):
+            # 查找 PX4 VehicleStatus 话题（优先）或 usv_state 话题（兼容）
+            is_px4_status = '/fmu/out/vehicle_status' in topic and 'px4_msgs/msg/VehicleStatus' in str(types)
+            is_usv_state = '/usv_state' in topic and 'common_interfaces/msg/UsvStatus' in str(types)
+            
+            if is_px4_status or is_usv_state:
                 # 提取命名空间
                 parts = topic.split('/')
                 if len(parts) >= 2:

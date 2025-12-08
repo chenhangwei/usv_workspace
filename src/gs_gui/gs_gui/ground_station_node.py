@@ -67,6 +67,8 @@ class GroundStationNode(Node):
 
         # 声明参数（必须在使用前声明）
         self.declare_parameter('fleet_config_file', '')
+        self.declare_parameter('use_dynamic_discovery', True)  # 新增：是否启用动态发现
+        self.declare_parameter('discovery_interval', 3.0)  # 新增：发现间隔（秒）
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
@@ -204,17 +206,30 @@ class GroundStationNode(Node):
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
         # 记录每个 USV 最后一次收到状态消息的时间戳（秒）(线程安全)
         self._ns_last_seen = ThreadSafeDict()
+        
+        # 已注册的 USV 集合（用于动态发现去重）
+        self._registered_usvs = set()
+        
+        # 动态发现的 USV 列表
+        self._discovered_usv_list = []
+
+        # 获取动态发现配置
+        self._use_dynamic_discovery = self.get_parameter('use_dynamic_discovery').value
+        self._discovery_interval = self.get_parameter('discovery_interval').value
 
         # 创建定时器
-        # 注意：在Domain隔离架构下，不再使用动态节点发现，而是从配置文件读取USV列表
-        # 定时器仅用于验证topic是否可用（检测USV离线状态）
         self.ns_timer = self.create_timer(5.0, self.check_usv_topics_availability)  # USV话题可用性检查定时器
-        self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器，定期发布集群目标
-        self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器，定期检查USV之间的传染逻辑
-        # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI（类似 QGC 的灵敏响应）
-        self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz，优化性能
+        self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器
+        self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器
+        # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI
+        self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz
         
-        # 使用静态配置初始化USV订阅和发布者（Domain隔离架构）
+        # 动态发现定时器（如果启用）
+        if self._use_dynamic_discovery:
+            self.discovery_timer = self.create_timer(self._discovery_interval, self.discover_new_usvs)
+            self.get_logger().info("🔍 动态发现模式已启用")
+        
+        # 初始化 USV（静态配置 + 动态发现）
         self.initialize_usv_from_config()
 
         # TF2: Buffer/Listener for coordinate transforms
@@ -439,8 +454,12 @@ class GroundStationNode(Node):
         而是通过检查topic上是否有数据来判断USV是否在线。
         
         注意：这个方法不会添加或删除USV，只会标记离线状态。
+        支持：静态配置 + 动态发现两种模式
         """
-        if not self._static_usv_list:
+        # 合并静态配置和动态发现的 USV 列表
+        all_usvs = list(set(self._static_usv_list) | set(self._discovered_usv_list))
+        
+        if not all_usvs:
             return
         
         try:
@@ -452,7 +471,7 @@ class GroundStationNode(Node):
         offline_threshold = 10.0  # 10秒未收到数据认为离线
         state_changed = False  # 标记是否有状态变化
         
-        for usv_id in self._static_usv_list:
+        for usv_id in all_usvs:
             last_seen = self._ns_last_seen.get(usv_id, 0.0)
             elapsed = now_sec - last_seen
             
@@ -485,6 +504,144 @@ class GroundStationNode(Node):
                 self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
             except Exception as e:
                 self.get_logger().debug(f"推送状态更新失败: {e}")
+    
+    # =====================================================
+    # 动态发现模式：通过检测 ROS Topic 自动发现 USV
+    # =====================================================
+    
+    def discover_new_usvs(self):
+        """
+        动态发现新的USV
+        
+        通过检测 `/usv_xx/fmu/out/vehicle_status` 话题来发现新上线的 USV，
+        自动注册到系统中。
+        
+        适用于：
+        - 大规模 USV 集群（40+ 艘）
+        - 不想维护静态 fleet.yaml 配置
+        - USV 动态上下线场景
+        """
+        if not self._use_dynamic_discovery:
+            return
+        
+        try:
+            # 获取当前所有话题
+            topic_names_and_types = self.get_topic_names_and_types()
+            
+            # 筛选出 USV 的 vehicle_status 话题
+            # 格式: /usv_xx/fmu/out/vehicle_status
+            discovered_usvs = set()
+            for topic_name, _ in topic_names_and_types:
+                if '/fmu/out/vehicle_status' in topic_name:
+                    # 提取命名空间，例如 /usv_01/fmu/out/vehicle_status -> usv_01
+                    parts = topic_name.split('/')
+                    if len(parts) >= 2 and parts[1].startswith('usv_'):
+                        usv_id = parts[1]  # 不带斜杠的命名空间
+                        discovered_usvs.add(usv_id)
+            
+            # 获取已注册的 USV 列表
+            registered_usvs = set(self._discovered_usv_list)
+            
+            # 发现新的 USV
+            new_usvs = discovered_usvs - registered_usvs
+            
+            for usv_id in new_usvs:
+                self.get_logger().info(f"🔍 发现新 USV: {usv_id}")
+                self._register_new_usv(usv_id)
+            
+            # 检查离线的 USV（可选：在动态模式下移除长时间离线的 USV）
+            # 这里暂时不移除，只标记离线状态，由 check_usv_topics_availability 处理
+            
+        except Exception as e:
+            self.get_logger().error(f"动态发现 USV 失败: {e}")
+    
+    def _register_new_usv(self, usv_id: str):
+        """
+        注册新发现的 USV
+        
+        Args:
+            usv_id: USV 标识符（不带斜杠），如 'usv_01'
+        """
+        try:
+            if usv_id in self._discovered_usv_list:
+                return  # 已注册
+            
+            # 添加到已发现列表
+            self._discovered_usv_list.append(usv_id)
+            
+            # 添加命名空间（需要/前缀）
+            ns = f"/{usv_id}"
+            self.usv_manager.add_usv_namespace(ns)
+            
+            # 记录发现时间
+            try:
+                now_sec = self.get_clock().now().nanoseconds / 1e9
+            except Exception:
+                now_sec = 0.0
+            self._ns_last_seen[usv_id] = now_sec
+            
+            # 初始化状态
+            self.usv_states[usv_id] = {
+                'namespace': usv_id,
+                'connected': True,  # 刚发现的默认在线
+                'mode': 'UNKNOWN',
+                'armed': False,
+            }
+            
+            # 订阅该 USV 的 rosout
+            topic = f"/{usv_id}/rosout"
+            self.get_logger().info(f"  ├─ 订阅远程日志: {topic}")
+            sub = self.create_subscription(
+                Log,
+                topic,
+                self.rosout_callback,
+                10
+            )
+            self.usv_rosout_subs.append(sub)
+            
+            self.get_logger().info(f"✓ {usv_id} 注册完成（动态发现）")
+            
+            # 通知 GUI 更新
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception as e:
+                self.get_logger().debug(f"推送状态更新失败: {e}")
+                
+        except Exception as e:
+            self.get_logger().error(f"✗ 注册 USV {usv_id} 失败: {e}")
+    
+    def _unregister_usv(self, usv_id: str):
+        """
+        移除离线的 USV（可选功能）
+        
+        Args:
+            usv_id: USV 标识符
+        """
+        try:
+            if usv_id not in self._discovered_usv_list:
+                return
+            
+            self._discovered_usv_list.remove(usv_id)
+            
+            # 从状态中移除
+            if usv_id in self.usv_states:
+                del self.usv_states[usv_id]
+            
+            # 从 usv_manager 移除
+            ns = f"/{usv_id}"
+            if hasattr(self.usv_manager, 'remove_usv_namespace'):
+                self.usv_manager.remove_usv_namespace(ns)
+            
+            self.get_logger().info(f"✗ {usv_id} 已移除（长时间离线）")
+            
+            # 通知 GUI 更新
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception as e:
+                self.get_logger().debug(f"推送状态更新失败: {e}")
+                
+        except Exception as e:
+            self.get_logger().error(f"移除 USV {usv_id} 失败: {e}")
     
     # =====================================================
     # 以下是原有的动态节点发现方法（保留用于兼容性）
