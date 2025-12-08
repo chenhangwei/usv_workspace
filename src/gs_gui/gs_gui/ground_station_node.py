@@ -348,194 +348,26 @@ class GroundStationNode(Node):
             self.get_logger().error(f"可用性检查失败: {e}")
     
     def check_usv_topics_availability(self):
-        """
-        定期检查USV topic是否可用（用于检测离线状态）
-        
-        在Domain隔离架构下，无法通过节点发现来检测USV上下线，
-        而是通过检查topic上是否有数据来判断USV是否在线。
-        
-        注意：这个方法不会添加或删除USV，只会标记离线状态。
-        """
-        if not self._discovered_usv_list:
-            return
-        
-        try:
-            now_sec = self.get_clock().now().nanoseconds / 1e9
-        except Exception:
-            now_sec = 0.0
-        
-        # 检查每个USV的最后接收时间
-        offline_threshold = 10.0  # 10秒未收到数据认为离线
-        state_changed = False  # 标记是否有状态变化
-        
-        for usv_id in self._discovered_usv_list:
-            last_seen = self._ns_last_seen.get(usv_id, 0.0)
-            elapsed = now_sec - last_seen
-            
-            # 如果USV还没有状态条目，创建初始状态
-            if usv_id not in self.usv_states:
-                self.usv_states[usv_id] = {
-                    'namespace': usv_id,
-                    'connected': False,  # 初始为离线，等待第一次数据
-                    'mode': 'UNKNOWN',
-                    'armed': False,
-                }
-            
-            # 更新状态字典中的连接状态
-            if elapsed > offline_threshold:
-                # 标记为离线
-                if self.usv_states[usv_id].get('connected', True):
-                    self.usv_states[usv_id]['connected'] = False
-                    state_changed = True
-                    self.get_logger().warn(f"⚠️  {usv_id} 已离线（{elapsed:.1f}s未收到数据）")
-            else:
-                # 标记为在线
-                if not self.usv_states[usv_id].get('connected', False):
-                    self.usv_states[usv_id]['connected'] = True
-                    state_changed = True
-                    self.get_logger().info(f"✓ {usv_id} 已上线")
-        
-        # 如果有状态变化，通知GUI更新
-        if state_changed:
-            try:
-                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
-            except Exception as e:
-                self.get_logger().debug(f"推送状态更新失败: {e}")
-    
-    # =====================================================
-    # 动态发现模式：通过检测 ROS Topic 自动发现 USV
-    # =====================================================
+        """[已迁移到 discovery_handler] 保留用于兼容性"""
+        self._check_availability_wrapper()
     
     def discover_new_usvs(self):
-        """
-        动态发现新的USV
-        
-        通过检测 `/usv_xx/fmu/out/vehicle_status` 话题来发现新上线的 USV，
-        自动注册到系统中。
-        
-        适用于：
-        - 大规模 USV 集群（40+ 艘）
-        - 不想维护静态 fleet.yaml 配置
-        - USV 动态上下线场景
-        """
-        try:
-            # 获取当前所有话题
-            topic_names_and_types = self.get_topic_names_and_types()
-            
-            # 筛选出 USV 的 vehicle_status 话题
-            # 格式: /usv_xx/fmu/out/vehicle_status
-            discovered_usvs = set()
-            for topic_name, _ in topic_names_and_types:
-                if '/fmu/out/vehicle_status' in topic_name:
-                    # 提取命名空间，例如 /usv_01/fmu/out/vehicle_status -> usv_01
-                    parts = topic_name.split('/')
-                    if len(parts) >= 2 and parts[1].startswith('usv_'):
-                        usv_id = parts[1]  # 不带斜杠的命名空间
-                        discovered_usvs.add(usv_id)
-            
-            # 获取已注册的 USV 列表
-            registered_usvs = set(self._discovered_usv_list)
-            
-            # 发现新的 USV
-            new_usvs = discovered_usvs - registered_usvs
-            
-            for usv_id in new_usvs:
-                self.get_logger().info(f"🔍 发现新 USV: {usv_id}")
-                self._register_new_usv(usv_id)
-            
-            # 检查离线的 USV（可选：在动态模式下移除长时间离线的 USV）
-            # 这里暂时不移除，只标记离线状态，由 check_usv_topics_availability 处理
-            
-        except Exception as e:
-            self.get_logger().error(f"动态发现 USV 失败: {e}")
+        """[已迁移到 discovery_handler] 保留用于兼容性"""
+        self._discover_wrapper()
     
     def _register_new_usv(self, usv_id: str):
-        """
-        注册新发现的 USV
-        
-        Args:
-            usv_id: USV 标识符（不带斜杠），如 'usv_01'
-        """
-        try:
-            if usv_id in self._discovered_usv_list:
-                return  # 已注册
-            
-            # 添加到已发现列表
-            self._discovered_usv_list.append(usv_id)
-            
-            # 添加命名空间（需要/前缀）
-            ns = f"/{usv_id}"
-            self.usv_manager.add_usv_namespace(ns)
-            
-            # 记录发现时间
-            try:
-                now_sec = self.get_clock().now().nanoseconds / 1e9
-            except Exception:
-                now_sec = 0.0
-            self._ns_last_seen[usv_id] = now_sec
-            
-            # 初始化状态
-            self.usv_states[usv_id] = {
-                'namespace': usv_id,
-                'connected': True,  # 刚发现的默认在线
-                'mode': 'UNKNOWN',
-                'armed': False,
-            }
-            
-            # 订阅该 USV 的 rosout
-            topic = f"/{usv_id}/rosout"
-            self.get_logger().info(f"  ├─ 订阅远程日志: {topic}")
-            sub = self.create_subscription(
-                Log,
-                topic,
-                self.rosout_callback,
-                10
-            )
-            self.usv_rosout_subs.append(sub)
-            
-            self.get_logger().info(f"✓ {usv_id} 注册完成（动态发现）")
-            
-            # 通知 GUI 更新
-            try:
-                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
-            except Exception as e:
-                self.get_logger().debug(f"推送状态更新失败: {e}")
-                
-        except Exception as e:
-            self.get_logger().error(f"✗ 注册 USV {usv_id} 失败: {e}")
+        """[已迁移到 discovery_handler] 保留用于兼容性"""
+        self.discovery_handler._register_usv(usv_id)
+        # 同步状态
+        self._discovered_usv_list = self.discovery_handler.get_discovered_usvs()
+        self.usv_states = self.discovery_handler._usv_states
     
     def _unregister_usv(self, usv_id: str):
-        """
-        移除离线的 USV（可选功能）
-        
-        Args:
-            usv_id: USV 标识符
-        """
-        try:
-            if usv_id not in self._discovered_usv_list:
-                return
-            
-            self._discovered_usv_list.remove(usv_id)
-            
-            # 从状态中移除
-            if usv_id in self.usv_states:
-                del self.usv_states[usv_id]
-            
-            # 从 usv_manager 移除
-            ns = f"/{usv_id}"
-            if hasattr(self.usv_manager, 'remove_usv_namespace'):
-                self.usv_manager.remove_usv_namespace(ns)
-            
-            self.get_logger().info(f"✗ {usv_id} 已移除（长时间离线）")
-            
-            # 通知 GUI 更新
-            try:
-                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
-            except Exception as e:
-                self.get_logger().debug(f"推送状态更新失败: {e}")
-                
-        except Exception as e:
-            self.get_logger().error(f"移除 USV {usv_id} 失败: {e}")
+        """[已迁移到 discovery_handler] 保留用于兼容性"""
+        self.discovery_handler.unregister_usv(usv_id)
+        # 同步状态
+        self._discovered_usv_list = self.discovery_handler.get_discovered_usvs()
+        self.usv_states = self.discovery_handler._usv_states
 
     # =========================================================================
     # 导航相关方法（委托给 navigation_handler）
