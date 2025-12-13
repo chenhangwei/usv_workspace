@@ -8,8 +8,6 @@ from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QGroupBox, QFormLayout, QMessageBox
 )
-from PyQt5.QtCore import Qt
-import glob
 import serial.tools.list_ports
 
 

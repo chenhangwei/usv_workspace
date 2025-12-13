@@ -22,8 +22,10 @@ from px4_msgs.msg import (
     VehicleLocalPosition,
     VehicleStatus,
     OffboardControlMode,
-    VehicleOdometry
 )
+
+# 自定义接口（地面站导航目标）
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
 
 # 导入 common_utils 工具
 from common_utils import ParamLoader, ParamValidator
@@ -108,9 +110,10 @@ class UsvControlPx4Node(Node):
             qos_px4
         )
         
+        # 注意：PX4 v1.15+ 发布的是 vehicle_status_v1 话题
         self.status_sub = self.create_subscription(
             VehicleStatus,
-            'fmu/out/vehicle_status',
+            'fmu/out/vehicle_status_v1',
             self.status_callback,
             qos_px4
         )
@@ -122,6 +125,27 @@ class UsvControlPx4Node(Node):
             PoseStamped,
             'set_usv_target_position',
             self.target_callback,
+            qos_reliable
+        )
+        
+        # 新版导航目标订阅（NavigationGoal 消息类型）
+        self.nav_goal_sub = self.create_subscription(
+            NavigationGoal,
+            'navigation/goal',
+            self.nav_goal_callback,
+            qos_reliable
+        )
+        
+        # 导航反馈和结果发布器
+        self.nav_feedback_pub = self.create_publisher(
+            NavigationFeedback,
+            'navigation/feedback',
+            qos_reliable
+        )
+        
+        self.nav_result_pub = self.create_publisher(
+            NavigationResult,
+            'navigation/result',
             qos_reliable
         )
         
@@ -145,6 +169,14 @@ class UsvControlPx4Node(Node):
             self.clear_target_callback,
             qos_reliable
         )
+        
+        # 清除目标订阅（新版导航接口）
+        self.nav_clear_sub = self.create_subscription(
+            Bool,
+            'navigation/clear_target',
+            self.clear_target_callback,
+            qos_reliable
+        )
 
         # =====================================================================
         # 状态变量
@@ -157,11 +189,19 @@ class UsvControlPx4Node(Node):
         self.target_active = False             # 目标点是否激活
         self.local_position_valid = False      # 本地位置是否有效
         self.offboard_mode_active = False      # OFFBOARD 模式是否激活
+        
+        # 导航目标跟踪
+        self.current_goal_id = None            # 当前导航目标 ID
+        self.goal_start_time = None            # 目标开始时间
+        self.goal_timeout = 300.0              # 默认超时时间
 
         # =====================================================================
         # 定时器
         # =====================================================================
         self.timer = self.create_timer(1.0 / self.publish_rate, self.publish_setpoint)
+        
+        # 导航反馈定时器（1Hz）
+        self.feedback_timer = self.create_timer(1.0, self.publish_nav_feedback)
 
         # =====================================================================
         # 日志记录
@@ -173,6 +213,7 @@ class UsvControlPx4Node(Node):
         self.get_logger().info(f'目标到达阈值: {self.target_reach_threshold} m')
         self.get_logger().info('📤 发布话题: fmu/in/trajectory_setpoint')
         self.get_logger().info('📥 订阅话题: fmu/out/vehicle_local_position')
+        self.get_logger().info('📥 订阅话题: navigation/goal (NavigationGoal)')
         self.get_logger().info('=' * 60)
 
     def local_position_callback(self, msg: VehicleLocalPosition):
@@ -217,6 +258,112 @@ class UsvControlPx4Node(Node):
             f'📍 收到目标点: ({msg.pose.position.x:.2f}, '
             f'{msg.pose.position.y:.2f}, {msg.pose.position.z:.2f})'
         )
+
+    def nav_goal_callback(self, msg: NavigationGoal):
+        """
+        导航目标回调（新版接口，来自地面站）
+        
+        Args:
+            msg (NavigationGoal): 导航目标消息
+        """
+        # 提取 PoseStamped
+        self.target_position = msg.target_pose
+        self.target_active = True
+        
+        # 记录目标信息
+        self.current_goal_id = msg.goal_id
+        self.goal_start_time = self.get_clock().now()
+        self.goal_timeout = msg.timeout if msg.timeout > 0 else 300.0
+        
+        pos = msg.target_pose.pose.position
+        self.get_logger().info(
+            f'🎯 收到导航目标 [ID={msg.goal_id}]: '
+            f'({pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f}), 超时={self.goal_timeout:.0f}s'
+        )
+        
+        # 发送初始反馈（距离待计算）
+        distance = self._calculate_distance_to_target()
+        self._send_nav_feedback(distance if distance else 0.0)
+
+    def publish_nav_feedback(self):
+        """
+        定时发布导航反馈
+        """
+        if not self.target_active or self.current_goal_id is None:
+            return
+        
+        # 计算到目标的距离
+        distance = self._calculate_distance_to_target()
+        
+        # 检查是否到达目标
+        if distance is not None and distance < self.target_reach_threshold:
+            self._send_nav_result(True, '到达目标')
+            self.target_active = False
+            self.current_goal_id = None
+            return
+        
+        # 检查超时
+        if self.goal_start_time is not None:
+            elapsed = (self.get_clock().now() - self.goal_start_time).nanoseconds / 1e9
+            if elapsed > self.goal_timeout:
+                self._send_nav_result(False, '超时')
+                self.target_active = False
+                self.current_goal_id = None
+                return
+        
+        # 发送执行中反馈
+        self._send_nav_feedback(distance if distance else 0.0)
+
+    def _send_nav_feedback(self, distance: float):
+        """发送导航反馈"""
+        if self.current_goal_id is None:
+            return
+        
+        feedback = NavigationFeedback()
+        feedback.goal_id = self.current_goal_id
+        feedback.distance_to_goal = distance
+        feedback.heading_error = 0.0  # TODO: 计算航向误差
+        feedback.estimated_time = 0.0  # TODO: 估算剩余时间
+        feedback.timestamp = self.get_clock().now().to_msg()
+        
+        self.nav_feedback_pub.publish(feedback)
+
+    def _send_nav_result(self, success: bool, message: str):
+        """发送导航结果"""
+        if self.current_goal_id is None:
+            return
+        
+        result = NavigationResult()
+        result.goal_id = self.current_goal_id
+        result.success = success
+        # error_code: 0=成功, 1=超时, 2=取消, 3=其他错误
+        if success:
+            result.error_code = 0
+        elif '超时' in message:
+            result.error_code = 1
+        elif '取消' in message:
+            result.error_code = 2
+        else:
+            result.error_code = 3
+        result.message = message
+        result.timestamp = self.get_clock().now().to_msg()
+        
+        self.nav_result_pub.publish(result)
+        
+        status_str = '✅ 成功' if success else '❌ 失败'
+        self.get_logger().info(f'{status_str} 导航目标 [ID={self.current_goal_id}]: {message}')
+
+    def _calculate_distance_to_target(self) -> float:
+        """计算到目标的距离"""
+        if self.current_position is None or self.target_position is None:
+            return None
+        
+        target = self.target_position.pose.position
+        dx = self.current_position.x - target.x
+        dy = self.current_position.y - target.y
+        dz = self.current_position.z - target.z
+        
+        return math.sqrt(dx * dx + dy * dy + dz * dz)
 
     def avoidance_target_callback(self, msg: PoseStamped):
         """

@@ -144,8 +144,8 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到武装命令")
-        # 调用通用设置武装状态方法
-        self._set_arming_for_usvs(msg, "ARMING")
+        # 调用通用设置武装状态方法 (USV端期望 "arm" 或 "disarm")
+        self._set_arming_for_usvs(msg, "arm")
 
     def set_disarming_callback(self, msg):
         """
@@ -156,8 +156,8 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到解除武装命令")
-        # 调用通用设置武装状态方法
-        self._set_arming_for_usvs(msg, "DISARMING")
+        # 调用通用设置武装状态方法 (USV端期望 "arm" 或 "disarm")
+        self._set_arming_for_usvs(msg, "disarm")
 
     def _set_arming_for_usvs(self, msg, arming_state):
         """

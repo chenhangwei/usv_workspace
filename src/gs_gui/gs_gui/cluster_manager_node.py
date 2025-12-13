@@ -14,8 +14,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 from std_msgs.msg import String, Bool
 from geometry_msgs.msg import PoseStamped
-from typing import Dict, List, Optional
-from dataclasses import dataclass, field
+from typing import Dict, List
+from dataclasses import dataclass
 from enum import Enum
 import time
 import threading
@@ -24,7 +24,7 @@ import threading
 from common_interfaces.msg import UsvStatus, ClusterStatus
 
 # PX4 消息（用于直接订阅 PX4 话题）
-from px4_msgs.msg import VehicleStatus, VehicleLocalPosition, BatteryStatus
+from px4_msgs.msg import VehicleStatus, BatteryStatus
 
 
 class UsvState(Enum):
@@ -255,11 +255,11 @@ class ClusterManagerNode(Node):
             usv.connected = msg.connected
             usv.armed = msg.armed
             usv.mode = msg.mode
-            usv.position_x = msg.position_x
-            usv.position_y = msg.position_y
-            usv.position_z = msg.position_z
+            usv.position_x = msg.pose.position.x
+            usv.position_y = msg.pose.position.y
+            usv.position_z = msg.pose.position.z
             usv.heading = msg.heading
-            usv.velocity = msg.velocity_horizontal
+            usv.velocity = msg.twist.linear.x  # 使用线速度 x 分量
             usv.battery_percent = msg.battery_percentage
             usv.battery_voltage = msg.battery_voltage
             usv.update_state()

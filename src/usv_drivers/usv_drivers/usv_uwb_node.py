@@ -8,12 +8,10 @@ PX4 话题：/fmu/in/vehicle_visual_odometry
 消息类型：px4_msgs/msg/VehicleOdometry
 """
 
-import serial 
 import rclpy 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from px4_msgs.msg import VehicleOdometry
-import struct
 import math
 
 # 导入common_utils工具
@@ -67,7 +65,8 @@ class UsvUwbNode(Node):
         # QoS 配置：与 PX4 uXRCE-DDS Agent 兼容
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # PX4 输入话题通常为 VOLATILE（避免 latched 行为导致兼容性问题）
+            durability=DurabilityPolicy.VOLATILE,
             history=HistoryPolicy.KEEP_LAST,
             depth=1
         )
@@ -77,6 +76,38 @@ class UsvUwbNode(Node):
             qos_profile
         )
         self.get_logger().info("发布到 PX4 原生话题: fmu/in/vehicle_visual_odometry")
+
+        # =====================================================================
+        # 坐标系/标定参数（默认假设：LinkTrack 输出为 ENU（x=East,y=North,z=Up））
+        # 最终发布给 PX4 的 VehicleOdometry.pose_frame=NED（x=North,y=East,z=Down）
+        # =====================================================================
+        self.declare_parameter('swap_xy', False)           # 交换 UWB x/y
+        self.declare_parameter('invert_x', False)          # UWB x 取反
+        self.declare_parameter('invert_y', False)          # UWB y 取反
+        self.declare_parameter('invert_z', False)          # UWB z 取反（z-up 场景一般不需要）
+        self.declare_parameter('yaw_offset_deg', 0.0)      # 围绕 +Z(up) 的平面旋转（度，右手系，逆时针为正）
+
+        # NED 偏移（米）：用于把 UWB 世界原点平移到 PX4 本地原点
+        self.declare_parameter('offset_n', 0.0)
+        self.declare_parameter('offset_e', 0.0)
+        self.declare_parameter('offset_d', 0.0)
+
+        def _param_bool(name: str, default: bool) -> bool:
+            v = self.get_parameter(name).value
+            return bool(v) if v is not None else default
+
+        def _param_float(name: str, default: float) -> float:
+            v = self.get_parameter(name).value
+            return float(v) if v is not None else default
+
+        self.swap_xy = _param_bool('swap_xy', False)
+        self.invert_x = _param_bool('invert_x', False)
+        self.invert_y = _param_bool('invert_y', False)
+        self.invert_z = _param_bool('invert_z', False)
+        self.yaw_offset_rad = math.radians(_param_float('yaw_offset_deg', 0.0))
+        self.offset_n = _param_float('offset_n', 0.0)
+        self.offset_e = _param_float('offset_e', 0.0)
+        self.offset_d = _param_float('offset_d', 0.0)
          
         # 20 Hz 定时器
         self.timer = self.create_timer(0.05, self.read_and_publish)
@@ -92,11 +123,15 @@ class UsvUwbNode(Node):
         # 检查串口是否打开
         if not self.serial_manager.is_open:
             return
+
+        sp = self.serial_manager.serial_port
+        if sp is None:
+            return
         
         try:
             # 读取所有可用数据
-            if self.serial_manager.serial_port.in_waiting > 0:
-                data = self.serial_manager.serial_port.read(self.serial_manager.serial_port.in_waiting)
+            if sp.in_waiting > 0:
+                data = sp.read(sp.in_waiting)
                 self.buffer.extend(data)
             
             # 处理缓冲区
@@ -148,6 +183,29 @@ class UsvUwbNode(Node):
             pos_x = self.parse_int24(frame[4:7]) / 1000.0
             pos_y = self.parse_int24(frame[7:10]) / 1000.0
             pos_z = self.parse_int24(frame[10:13]) / 1000.0
+
+            # 1) 按配置做基础修正（交换/取反）
+            x_u, y_u, z_u = pos_x, pos_y, pos_z
+            if self.swap_xy:
+                x_u, y_u = y_u, x_u
+            if self.invert_x:
+                x_u = -x_u
+            if self.invert_y:
+                y_u = -y_u
+            if self.invert_z:
+                z_u = -z_u
+
+            # 2) 平面旋转（绕 +Z/up）。默认把 LinkTrack 的水平轴对齐到 ENU。
+            #    旋转后仍视为 ENU：x=east, y=north, z=up
+            if self.yaw_offset_rad != 0.0:
+                c = math.cos(self.yaw_offset_rad)
+                s = math.sin(self.yaw_offset_rad)
+                x_e = c * x_u - s * y_u
+                y_n = s * x_u + c * y_u
+            else:
+                x_e = x_u
+                y_n = y_u
+            z_up = z_u
             
             # 创建 VehicleOdometry 消息
             msg = VehicleOdometry()
@@ -162,12 +220,21 @@ class UsvUwbNode(Node):
             msg.pose_frame = VehicleOdometry.POSE_FRAME_NED
             msg.velocity_frame = VehicleOdometry.VELOCITY_FRAME_UNKNOWN
             
-            # 位置 (NED 坐标系)
-            # 注意：UWB 输出可能是 ENU，需要根据实际情况转换
-            # ENU -> NED: x_ned = y_enu, y_ned = x_enu, z_ned = -z_enu
-            msg.position[0] = pos_y   # North = UWB Y
-            msg.position[1] = pos_x   # East = UWB X  
-            msg.position[2] = -pos_z  # Down = -UWB Z
+            # 3) ENU(z-up) -> PX4 NED(z-down)
+            # ENU: x=east, y=north, z=up
+            # NED: x=north, y=east,  z=down
+            n = y_n
+            e = x_e
+            d = -z_up
+
+            # 4) NED 偏移（用于对齐原点）
+            n += self.offset_n
+            e += self.offset_e
+            d += self.offset_d
+
+            msg.position[0] = float(n)
+            msg.position[1] = float(e)
+            msg.position[2] = float(d)
             
             # 四元数设置为 NaN（表示无效/未知，让 EKF 使用 IMU 姿态）
             msg.q[0] = float('nan')

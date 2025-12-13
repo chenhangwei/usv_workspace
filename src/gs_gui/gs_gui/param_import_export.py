@@ -9,12 +9,15 @@
 """
 
 import json
+import logging
 import os
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, asdict
-from .param_manager import ParamInfo, ParamType
+from dataclasses import dataclass
+from .param_manager import ParamInfo
 from .param_metadata import get_param_metadata
+
+_logger = logging.getLogger("gs_gui.param_io")
 from .param_validator import ParamValidator
 
 
@@ -84,7 +87,7 @@ class ParamImportExport:
             return True
             
         except Exception as e:
-            print(f"导出 .param 文件失败: {e}")
+            _logger.error(f"导出 .param 文件失败: {e}")
             return False
     
     @staticmethod
@@ -278,7 +281,7 @@ class ParamImportExport:
             return True
             
         except Exception as e:
-            print(f"导出 JSON 文件失败: {e}")
+            _logger.error(f"导出 JSON 文件失败: {e}")
             return False
     
     @staticmethod
@@ -412,7 +415,7 @@ class ParamImportExport:
                     elif line.startswith("# Total parameters:"):
                         try:
                             info["param_count"] = int(line.split(":", 1)[1].strip())
-                        except:
+                        except (ValueError, IndexError):
                             pass
                     elif not line.startswith('#'):
                         # 数据行，计数
@@ -441,5 +444,5 @@ class ParamImportExport:
                 return None
                 
         except Exception as e:
-            print(f"读取文件信息失败: {e}")
+            _logger.error(f"读取文件信息失败: {e}")
             return None

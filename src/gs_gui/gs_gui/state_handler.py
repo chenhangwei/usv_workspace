@@ -145,7 +145,8 @@ class StateHandler:
         Returns:
             dict: USV状态字典，如果不存在则返回None
         """
-        return self._usv_state_cache.get(usv_id)
+        state = self._usv_state_cache.get(usv_id)
+        return state
     
     def update_navigation_feedback(self, usv_id, feedback):
         """

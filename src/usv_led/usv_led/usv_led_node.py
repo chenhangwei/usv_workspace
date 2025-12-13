@@ -8,11 +8,9 @@
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String, Bool
-import serial
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import time
 import random
-import math
 import json
 
 # 导入common_utils工具
@@ -570,7 +568,11 @@ def main(args=None):
         node = UsvLedNode()
         rclpy.spin(node)
     except Exception as e:
-        print(f'节点运行时发生错误: {e}')
+        if node is not None:
+            node.get_logger().error(f'节点运行时发生错误: {e}')
+        else:
+            import logging
+            logging.getLogger('usv_led').error(f'节点运行时发生错误: {e}')
     finally:
         if node is not None:
             node.destroy_node()

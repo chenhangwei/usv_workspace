@@ -185,16 +185,19 @@ class UIUtils:
             except Exception:
                 z = None
             
+            # UsvStatus.yaw 单位为弧度；此处转换为度数便于人工读取
             yaw_val = state.get('yaw')
             try:
-                yaw_val = float(yaw_val) if yaw_val is not None else None
+                import math
+                yaw_rad = float(yaw_val) if yaw_val is not None else None
+                yaw_deg = math.degrees(yaw_rad) if yaw_rad is not None else None
             except Exception:
-                yaw_val = None
+                yaw_deg = None
             
             self.ui.usv_x_label.setText(f"{x:.2f}" if x is not None else "Unknown")
             self.ui.usv_y_label.setText(f"{y:.2f}" if y is not None else "Unknown")
             self.ui.usv_z_label.setText(f"{z:.2f}" if z is not None else "Unknown")
-            self.ui.usv_yaw_label.setText(f"{yaw_val:.2f}" if yaw_val is not None else "Unknown")
+            self.ui.usv_yaw_label.setText(f"{yaw_deg:.1f}°" if yaw_deg is not None else "Unknown")
         
         except Exception as e:
             try:

@@ -9,8 +9,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Header
-import serial
-import time
 
 # 导入common_utils工具
 from common_utils import SerialResourceManager, ParamLoader, ParamValidator

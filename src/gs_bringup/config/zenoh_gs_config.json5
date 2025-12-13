@@ -4,8 +4,6 @@
   // 模式：Router - 地面站作为中心节点，USV 连接到此
   // =========================================================================
   
-  "mode": "router",
-  
   // 监听配置（USV 连接到此端口）
   "listen": {
     "endpoints": [
@@ -13,21 +11,40 @@
     ]
   },
   
+  // 时间戳配置 - 增加容差以避免网络延迟导致的时间戳拒绝
+  "timestamping": {
+    "enabled": {
+      "router": true,
+      "peer": true,
+      "client": true
+    },
+    // 将时间戳容差从默认 500ms 增加到 2000ms
+    "drop_future_timestamp": false
+  },
+  
   "plugins": {
     "ros2dds": {
+      "domain": 99,
       "allow": {
         "subscribers": [
-          "usv_.*/usv_state",
-          "usv_.*/fmu/out/vehicle_status",
-          "usv_.*/fmu/out/vehicle_local_position",
-          "usv_.*/fmu/out/battery_status"
+          ".*/usv_state",
+          ".*/fmu/out/vehicle_status",
+          ".*/fmu/out/vehicle_status_v1",
+          ".*/fmu/out/vehicle_local_position",
+          ".*/fmu/out/battery_status",
+          ".*/fmu/out/vehicle_attitude",
+          ".*/fmu/out/failsafe_flags",
+          ".*/navigation/feedback",
+          ".*/navigation/result"
         ],
         "publishers": [
-          "usv_.*/set_usv_mode",
-          "usv_.*/set_usv_arming",
-          "usv_.*/set_arm",
-          "usv_.*/set_usv_target_position",
-          "usv_.*/clear_target",
+          ".*/set_usv_mode",
+          ".*/set_usv_arming",
+          ".*/set_arm",
+          ".*/set_usv_target_position",
+          ".*/clear_target",
+          ".*/navigation/goal",
+          ".*/navigation/clear_target",
           "group_arm_command",
           "group_mode_command",
           "all_arm",

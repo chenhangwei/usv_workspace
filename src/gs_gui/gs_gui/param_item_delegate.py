@@ -14,8 +14,8 @@ from PyQt5.QtWidgets import (
     QStyledItemDelegate, QSpinBox, QDoubleSpinBox, QComboBox,
     QWidget, QStyleOptionViewItem, QMessageBox
 )
-from PyQt5.QtCore import Qt, QModelIndex, QEvent
-from PyQt5.QtGui import QColor, QPalette, QPainter
+from PyQt5.QtCore import Qt, QModelIndex
+from PyQt5.QtGui import QColor, QPainter
 from typing import Optional
 from .param_manager import ParamInfo, ParamType
 from .param_validator import ParamValidator

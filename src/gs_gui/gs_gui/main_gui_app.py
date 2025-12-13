@@ -2,7 +2,6 @@
 Ground Station主窗口应用
 重构后的版本,使用模块化设计
 """
-from http.client import UNAVAILABLE_FOR_LEGAL_REASONS
 import sys
 import threading
 import os
@@ -11,9 +10,12 @@ import logging
 import subprocess
 from logging.handlers import RotatingFileHandler
 
+# 模块级 logger
+_logger = logging.getLogger("gs_gui.main")
+
 import rclpy
 from rclpy.parameter import Parameter
-from PyQt5.QtCore import QProcess, QTimer
+from PyQt5.QtCore import QProcess, QTimer, Qt
 from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
@@ -44,6 +46,19 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Ground Station GUI")
         self.resize(1024, 512)
         self.setGeometry(100, 100, 1124, 612)
+
+        # 允许通过鼠标拖拽调整左右区域宽度（QSplitter 分隔条）
+        # 说明：UI 使用 mainSplitter（横向）承载 3 个区域；这里加宽 handle 并设置伸缩因子，
+        # 让拖拽更容易、比例更符合预期。
+        try:
+            self.ui.mainSplitter.setOrientation(Qt.Horizontal)
+            self.ui.mainSplitter.setChildrenCollapsible(False)
+            self.ui.mainSplitter.setHandleWidth(10)
+            self.ui.mainSplitter.setStretchFactor(0, 6)  # 左侧列表/控制区
+            self.ui.mainSplitter.setStretchFactor(1, 3)  # USV details
+            self.ui.mainSplitter.setStretchFactor(2, 3)  # message
+        except Exception:
+            pass
 
         # 更新按钮文本以匹配新的彩虹循环行为
         try:
@@ -439,7 +454,10 @@ class MainWindow(QMainWindow):
     # ============== 集群任务控制 ==============
     def toggle_cluster_task(self):
         """切换集群任务运行状态"""
-        button_text = self.task_manager.toggle_task(self.list_manager.usv_departed_list)
+        button_text = self.task_manager.toggle_task(
+            self.list_manager.usv_departed_list,
+            self.list_manager.usv_cluster_list
+        )
         self.ui.send_cluster_point_pushButton.setText(button_text)
     
     def stop_cluster_task(self):
@@ -900,19 +918,19 @@ class MainWindow(QMainWindow):
                 try:
                     self.ros_signal.str_command.emit('led_off')
                 except Exception as e:
-                    print(f"发送LED关闭命令失败: {e}")
+                    _logger.warning(f"发送LED关闭命令失败: {e}")
                 
                 # 2. 停止声音
                 try:
                     self.ros_signal.str_command.emit('sound_stop')
                 except Exception as e:
-                    print(f"发送声音停止命令失败: {e}")
+                    _logger.warning(f"发送声音停止命令失败: {e}")
                 
                 # 3. 停止扭头动作
                 try:
                     self.ros_signal.str_command.emit('neck_stop')
                 except Exception as e:
-                    print(f"发送扭头停止命令失败: {e}")
+                    _logger.warning(f"发送扭头停止命令失败: {e}")
                 
                 self.ui_utils.append_info("已发送外设关闭命令")
                 
@@ -930,7 +948,7 @@ class MainWindow(QMainWindow):
                 
         except Exception as e:
             # 发生错误时也允许关闭
-            print(f"closeEvent处理出错: {e}")
+            _logger.error(f"closeEvent处理出错: {e}")
             try:
                 self.ui_utils.append_info(f"关闭前处理出错: {e}，将直接关闭")
             except Exception:
@@ -951,7 +969,7 @@ def main(argv=None):
             try:
                 main_window.ui_utils.append_info(msg)
             except Exception:
-                print(msg)
+                _logger.info(msg)
         finally:
             sys.__excepthook__(type_, value, traceback_)
     
@@ -971,7 +989,7 @@ def main(argv=None):
         root_logger.setLevel(logging.INFO)
         root_logger.info('gs_gui 启动，日志记录到 %s' % log_file)
     except Exception:
-        print('无法设置持久化日志')
+        _logger.warning('无法设置持久化日志')
     
     # 初始化ROS节点（传入 append_info 和 append_warning 回调以输出到 GUI）
     rclpy.init(args=None)
@@ -1100,15 +1118,15 @@ def main(argv=None):
         try:
             getattr(node, 'shutdown', lambda: None)()
         except Exception as e:
-            print(f"调用 node.shutdown() 时出错: {e}")
+            _logger.warning(f"调用 node.shutdown() 时出错: {e}")
         try:
             node.destroy_node()
         except Exception as e:
-            print(f"销毁节点时出错: {e}")
+            _logger.warning(f"销毁节点时出错: {e}")
         try:
             rclpy.shutdown()
         except Exception as e:
-            print(f"rclpy.shutdown() 时出错: {e}")
+            _logger.warning(f"rclpy.shutdown() 时出错: {e}")
         try:
             if ros_thread.is_alive():
                 ros_thread.join(timeout=2.0)

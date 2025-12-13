@@ -2,7 +2,12 @@
 表格管理模块
 负责集群和离群USV表格的显示和更新
 """
+
+import logging
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
+
+_logger = logging.getLogger("gs_gui.table")
+
 
 
 class TableManager:
@@ -139,7 +144,7 @@ class TableManager:
                         model.setItem(row, col, QStandardItem(str(text)))
 
         except Exception as e:
-            print(f"更新集群表格失败: {e}")
+            _logger.error(f"更新集群表格失败: {e}")
     
     def update_departed_table(self, state_list, usv_nav_status):
         """
@@ -204,7 +209,7 @@ class TableManager:
                         model.setItem(row, col, QStandardItem(str(text)))
 
         except Exception as e:
-            print(f"更新离群表格失败: {e}")
+            _logger.error(f"更新离群表格失败: {e}")
     
     def _format_table_cells(self, state, usv_nav_status):
         """
@@ -266,10 +271,10 @@ class TableManager:
         nav_text = usv_nav_status.get(ns, self.NAV_STATUS_IDLE)
 
         try:
-            # 温度值除以1000转换为摄氏度
-            temp_raw = float(state.get('temperature', 0.0))
-            temp_celsius = temp_raw / 1000.0
-            temp_text = f"{temp_celsius:.1f}"
+            import math
+            temp_raw = state.get('temperature', None)
+            temp_celsius = float(temp_raw) if temp_raw is not None else math.nan
+            temp_text = "Unknown" if math.isnan(temp_celsius) else f"{temp_celsius:.1f}"
         except Exception:
             temp_text = "Unknown"
 
@@ -277,10 +282,13 @@ class TableManager:
         power_status = state.get('power_supply_status', 0)
         power_status_text = self.map_power_supply_status(power_status)
 
+        # 使用飞控连接状态 (fc_connected) 而不是网络连接状态 (connected)
+        fc_connected = state.get('fc_connected', False)
+
         cells = [
             ns,
             state.get('mode', 'Unknown'),
-            str(state.get('connected', 'Unknown')),
+            str(fc_connected),  # 飞控连接状态
             str(state.get('armed', 'Unknown')),
             str(state.get('guided', 'Unknown')),  # 引导模式状态
             voltage_text,  # 电压V

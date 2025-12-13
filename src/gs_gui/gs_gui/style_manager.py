@@ -2,8 +2,13 @@
 样式管理器 - 支持多种主题快速切换
 提供现代化UI主题，增强视觉体验
 """
-from PyQt5.QtWidgets import QWidget
+
+import logging
 import os
+from PyQt5.QtWidgets import QWidget
+
+_logger = logging.getLogger("gs_gui.style")
+
 
 
 class StyleManager:
@@ -67,7 +72,7 @@ class StyleManager:
             bool: 是否成功加载
         """
         if theme_name not in self.THEMES:
-            print(f"⚠ 未知主题: {theme_name}，使用默认主题")
+            _logger.warning(f"未知主题: {theme_name}，使用默认主题")
             theme_name = 'modern_dark'
         
         qss_file = self.THEMES[theme_name]
@@ -76,7 +81,7 @@ class StyleManager:
         if qss_file is None:
             self.widget.setStyleSheet("")
             self.current_theme = theme_name
-            print(f"✓ 已切换到主题: {theme_name} (无样式表)")
+            _logger.info(f"已切换到主题: {theme_name} (无样式表)")
             return True
         
         # 加载QSS文件
@@ -88,12 +93,12 @@ class StyleManager:
                     stylesheet = f.read()
                     self.widget.setStyleSheet(stylesheet)
                     self.current_theme = theme_name
-                    print(f"✓ 已加载主题: {theme_name} ({qss_path})")
+                    _logger.info(f"已加载主题: {theme_name}")
                     return True
             else:
                 raise FileNotFoundError(f"样式表文件不存在: {qss_path}")
         except Exception as e:
-            print(f"✗ 主题加载失败: {e}")
+            _logger.error(f"主题加载失败: {e}")
             # 使用后备样式
             self._apply_fallback_style()
             return False
@@ -140,7 +145,7 @@ class StyleManager:
             }
         """
         self.widget.setStyleSheet(fallback_qss)
-        print("✓ 已应用后备样式")
+        _logger.info("已应用后备样式")
     
     def toggle_theme(self):
         """在可用主题间切换（用于未来扩展）"""

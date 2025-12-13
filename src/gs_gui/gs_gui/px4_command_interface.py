@@ -7,8 +7,7 @@ PX4 命令接口模块 - PX4 uXRCE-DDS 版本
 用于替代 ground_station_node 中的 MAVROS 命令调用。
 """
 
-from typing import Optional, Callable, Any
-import rclpy
+from typing import Optional, Callable
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 

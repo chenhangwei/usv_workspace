@@ -9,15 +9,17 @@
 
 import threading
 import math
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
-from geometry_msgs.msg import PoseStamped
+from typing import Optional, Dict, Any
+
+from rclpy.node import Node
+from common_interfaces.msg import NavigationGoal
 from common_utils import ThreadSafeDict
 
 
 class NavigationHandler:
     """导航处理器类"""
     
-    def __init__(self, node, usv_manager, ros_signal):
+    def __init__(self, node: Node, usv_manager: Any, ros_signal: Any) -> None:
         """
         初始化导航处理器
         
@@ -42,14 +44,14 @@ class NavigationHandler:
         self.MAX_DISTANCE = 500.0  # 最大水平距离 500m
         self.MAX_ALTITUDE = 10.0   # 最大高度 10m
     
-    def validate_target_position(self, x, y, z):
+    def validate_target_position(self, x: float, y: float, z: float) -> None:
         """
         验证目标点是否在安全范围内
         
         Args:
-            x (float): 目标点X坐标
-            y (float): 目标点Y坐标
-            z (float): 目标点Z坐标
+            x: 目标点X坐标
+            y: 目标点Y坐标
+            z: 目标点Z坐标
             
         Raises:
             ValueError: 如果目标点超出安全范围
@@ -69,7 +71,7 @@ class NavigationHandler:
                 f"目标点高度异常: {abs(z):.2f}m > {self.MAX_ALTITUDE}m"
             )
     
-    def _get_next_goal_id(self):
+    def _get_next_goal_id(self) -> int:
         """获取下一个目标ID"""
         with self._goal_id_lock:
             goal_id = self._next_goal_id
@@ -78,20 +80,28 @@ class NavigationHandler:
                 self._next_goal_id = 1
             return goal_id
     
-    def send_nav_goal(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
+    def send_nav_goal(
+        self, 
+        usv_id: str, 
+        x: float, 
+        y: float, 
+        z: float = 0.0, 
+        yaw: float = 0.0, 
+        timeout: float = 300.0
+    ) -> bool:
         """
         通过话题方式向指定USV发送导航目标点
         
         Args:
-            usv_id (str): USV标识符
-            x (float): 目标点X坐标
-            y (float): 目标点Y坐标
-            z (float): 目标点Z坐标
-            yaw (float): 目标偏航角(弧度)
-            timeout (float): 超时时间(秒)
+            usv_id: USV标识符
+            x: 目标点X坐标
+            y: 目标点Y坐标
+            z: 目标点Z坐标
+            yaw: 目标偏航角(弧度)
+            timeout: 超时时间(秒)
         
         Returns:
-            bool: 发送是否成功
+            发送是否成功
         """
         # 验证目标点
         try:
@@ -239,7 +249,7 @@ class NavigationHandler:
         except Exception as e:
             self.logger.error(f"处理导航结果失败: {e}")
     
-    def get_nav_target_cache(self, usv_id=None):
+    def get_nav_target_cache(self, usv_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         获取导航目标缓存
         
@@ -247,22 +257,43 @@ class NavigationHandler:
             usv_id: 指定USV ID，为None时返回所有
             
         Returns:
-            dict: 导航目标缓存
+            导航目标缓存
         """
         if usv_id:
             return self._usv_nav_target_cache.get(usv_id)
         return dict(self._usv_nav_target_cache)
     
-    def cancel_navigation(self, usv_id):
+    def cancel_navigation(self, usv_id: str) -> bool:
         """
         取消导航任务
+        
+        通过清除导航目标缓存并发送空目标点来取消当前导航。
         
         Args:
             usv_id: USV 标识符
             
         Returns:
-            bool: 是否成功
+            是否成功
         """
-        # TODO: 实现取消导航功能
-        self.logger.info(f"{usv_id} 取消导航请求")
-        return True
+        try:
+            # 清除导航目标缓存
+            if usv_id in self._usv_nav_target_cache:
+                cache = self._usv_nav_target_cache[usv_id]
+                cache['status'] = 'CANCELLED'
+                self.logger.info(f"{usv_id} 导航任务已取消 (goal_id={cache.get('goal_id', 'N/A')})")
+                del self._usv_nav_target_cache[usv_id]
+            
+            # 清除目标ID映射
+            goal_ids_to_remove = [
+                gid for gid, uid in list(self._goal_to_usv.items()) 
+                if uid == usv_id
+            ]
+            for gid in goal_ids_to_remove:
+                del self._goal_to_usv[gid]
+            
+            self.logger.info(f"✓ {usv_id} 取消导航请求已处理")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"{usv_id} 取消导航失败: {e}")
+            return False

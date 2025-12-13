@@ -248,48 +248,81 @@ class SensorStatusHandler:
         """
         statuses = []
 
-        # 1. 传感器健康状态 (IMU, Baro, Mag)
-        sensor_data = self._sensor_health_cache.get(usv_id)
-
-        if sensor_data:
-            present = sensor_data.get('onboard_control_sensors_present', 0)
-            enabled = sensor_data.get('onboard_control_sensors_enabled', 0)
-            health = sensor_data.get('onboard_control_sensors_health', 0)
+        # 1. 传感器健康状态 - 优先使用 PX4 EstimatorStatusFlags 数据
+        # 检查是否有 PX4 传感器状态字段
+        has_px4_sensor_data = 'sensor_gyro_ok' in state
+        
+        if has_px4_sensor_data:
+            # PX4 模式：使用 EstimatorStatusFlags 数据
+            sensor_map = [
+                ('Gyro', '陀螺仪', state.get('sensor_gyro_ok')),
+                ('Accel', '加速度计', state.get('sensor_accel_ok')),
+                ('Mag', '磁罗盘', state.get('sensor_mag_ok')),
+                ('Baro', '气压计', state.get('sensor_baro_ok')),
+            ]
             
-            for bit, name_en, name_cn in self.SENSORS_DEF:
-                # 只显示存在的传感器
-                if present & bit:
-                    if not (enabled & bit):
-                        # 存在但未启用
-                        status = 'Disabled'
-                        level = 'warn'
-                        detail = f"{name_cn} (未启用)"
-                    elif health & bit:
-                        # 健康 (位为1表示健康)
-                        status = 'OK'
-                        level = 'ok'
-                        detail = name_cn
-                    else:
-                        # 不健康
-                        status = 'Error'
-                        level = 'error'
-                        detail = f"{name_cn} 故障"
-                    
+            for name_en, name_cn, is_ok in sensor_map:
+                if is_ok is True:
                     statuses.append({
                         'name': name_en,
-                        'status': status,
-                        'detail': detail,
-                        'level': level
+                        'status': 'OK',
+                        'detail': name_cn,
+                        'level': 'ok'
+                    })
+                elif is_ok is False:
+                    statuses.append({
+                        'name': name_en,
+                        'status': 'Error',
+                        'detail': f"{name_cn} 故障",
+                        'level': 'error'
+                    })
+                else:
+                    statuses.append({
+                        'name': name_en,
+                        'status': 'Unknown',
+                        'detail': f"{name_cn} (未知)",
+                        'level': 'warn'
                     })
         else:
-            # 如果没有传感器数据，显示未知状态
-            for _, name_en, name_cn in self.SENSORS_DEF:
-                statuses.append({
-                    'name': name_en,
-                    'status': 'Unknown',
-                    'detail': f"{name_cn} (未知)",
-                    'level': 'warn'
-                })
+            # MAVROS 模式：使用 SYS_STATUS 数据
+            sensor_data = self._sensor_health_cache.get(usv_id)
+
+            if sensor_data:
+                present = sensor_data.get('onboard_control_sensors_present', 0)
+                enabled = sensor_data.get('onboard_control_sensors_enabled', 0)
+                health = sensor_data.get('onboard_control_sensors_health', 0)
+                
+                for bit, name_en, name_cn in self.SENSORS_DEF:
+                    # 只显示存在的传感器
+                    if present & bit:
+                        if not (enabled & bit):
+                            status = 'Disabled'
+                            level = 'warn'
+                            detail = f"{name_cn} (未启用)"
+                        elif health & bit:
+                            status = 'OK'
+                            level = 'ok'
+                            detail = name_cn
+                        else:
+                            status = 'Error'
+                            level = 'error'
+                            detail = f"{name_cn} 故障"
+                        
+                        statuses.append({
+                            'name': name_en,
+                            'status': status,
+                            'detail': detail,
+                            'level': level
+                        })
+            else:
+                # 如果没有传感器数据，显示未知状态
+                for _, name_en, name_cn in self.SENSORS_DEF:
+                    statuses.append({
+                        'name': name_en,
+                        'status': 'Unknown',
+                        'detail': f"{name_cn} (未知)",
+                        'level': 'warn'
+                    })
 
         # 2. 电池信息
         battery_pct = state.get('battery_percentage')

@@ -8,7 +8,6 @@ from PyQt5.QtWidgets import (
     QPushButton, QRadioButton, QButtonGroup, QComboBox,
     QGroupBox, QMessageBox
 )
-from PyQt5.QtCore import Qt
 
 
 class SetHomeDialog(QDialog):

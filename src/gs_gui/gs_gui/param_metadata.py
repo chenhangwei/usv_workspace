@@ -5,9 +5,12 @@ ArduPilot 参数元数据加载器
 """
 
 import json
+import logging
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional
 from dataclasses import dataclass
+
+_logger = logging.getLogger("gs_gui.param_meta")
 
 
 @dataclass
@@ -87,7 +90,7 @@ class ParamMetadataLoader:
             return True
             
         except Exception as e:
-            print(f"加载参数元数据失败: {e}")
+            _logger.error(f"加载参数元数据失败: {e}")
             # 降级到内置元数据
             self._load_built_in_metadata()
             self._loaded = True

@@ -18,8 +18,8 @@ from px4_msgs.msg import (
     VehicleStatus,
     BatteryStatus,
     VehicleLocalPosition,
-    VehicleAttitude,
     LogMessage,  # 替代 StatusText
+    Event,       # PX4 事件消息（包含 arming denied 等）
 )
 
 # 自定义消息
@@ -50,6 +50,7 @@ class UsvStatusInfo:
         self.armed = False
         self.mode = ""
         self.nav_state = 0
+        self.arming_state = 0
         self.battery_voltage = 0.0
         self.battery_percent = 0.0
         self.battery_remaining = 0.0
@@ -62,6 +63,22 @@ class UsvStatusInfo:
         self.heading = 0.0
         self.last_update_time = 0.0
         
+        # PX4 特有状态字段
+        self.in_air = False
+        self.landed = True
+        self.pre_flight_checks_pass = False
+        self.failsafe = False
+        
+        # 健康状态
+        self.health_warning_flags = 0
+        self.health_error_flags = 0
+        self.arming_check_error_flags = 0
+        self.gcs_connection_lost = False
+        
+        # 飞控消息
+        self.last_status_text = ""
+        self.last_status_severity = 7
+        
         # 系统状态
         self.cpu_load = 0.0
         self.errors_count = 0
@@ -71,8 +88,17 @@ class UsvStatusInfo:
         """从 VehicleStatus 更新"""
         self.connected = True
         self.armed = msg.arming_state == VehicleStatus.ARMING_STATE_ARMED
+        self.arming_state = msg.arming_state
         self.nav_state = msg.nav_state
         self.mode = self.NAV_STATE_NAMES.get(msg.nav_state, f'UNKNOWN({msg.nav_state})')
+        
+        # PX4 特有状态字段
+        self.in_air = (msg.arming_state == VehicleStatus.ARMING_STATE_ARMED and 
+                      msg.takeoff_time > 0)
+        self.landed = (msg.nav_state == 12 or  # DESCEND
+                      msg.nav_state == 18)     # AUTO_LAND
+        self.pre_flight_checks_pass = msg.pre_flight_checks_pass
+        self.failsafe = msg.failsafe
     
     def update_from_battery(self, msg: BatteryStatus):
         """从 BatteryStatus 更新"""
@@ -95,6 +121,51 @@ class UsvStatusInfo:
             self.velocity_z = -msg.vz
             
             self.heading = msg.heading
+
+    def update_from_usv_status(self, msg: UsvStatus):
+        """从 UsvStatus 聚合消息更新（使用 ROS 2 标准消息结构）"""
+        import time
+        self.connected = msg.connected
+        self.armed = msg.armed
+        self.arming_state = msg.arming_state
+        self.nav_state = msg.nav_state
+        self.mode = msg.mode if msg.mode else self.NAV_STATE_NAMES.get(msg.nav_state, f'UNKNOWN({msg.nav_state})')
+        
+        # PX4 特有状态字段
+        self.in_air = msg.in_air
+        self.landed = msg.landed
+        self.pre_flight_checks_pass = msg.pre_flight_checks_pass
+        self.failsafe = msg.failsafe
+        
+        # 电池信息
+        self.battery_voltage = msg.battery_voltage
+        self.battery_percent = msg.battery_percentage
+        
+        # 位置信息（来自 geometry_msgs/Pose）
+        self.position_x = msg.pose.position.x
+        self.position_y = msg.pose.position.y
+        self.position_z = msg.pose.position.z
+        
+        # 速度信息（来自 geometry_msgs/Twist）
+        self.velocity_x = msg.twist.linear.x
+        self.velocity_y = msg.twist.linear.y
+        self.velocity_z = msg.twist.linear.z
+        
+        # 航向
+        self.heading = msg.heading
+        
+        # 健康状态
+        self.health_warning_flags = msg.health_warning_flags
+        self.health_error_flags = msg.health_error_flags
+        self.arming_check_error_flags = msg.arming_check_error_flags
+        self.gcs_connection_lost = msg.gcs_connection_lost
+        
+        # 飞控消息
+        self.last_status_text = msg.last_status_text
+        self.last_status_severity = msg.last_status_severity
+        
+        # 更新时间
+        self.last_update_time = time.time()
 
 
 class UsvManager:
@@ -135,6 +206,11 @@ class UsvManager:
         self._battery_subs: Dict[str, Any] = {}
         self._local_pos_subs: Dict[str, Any] = {}
         self._log_message_subs: Dict[str, Any] = {}
+        self._event_subs: Dict[str, Any] = {}  # PX4 Event 订阅器
+        self._usv_state_subs: Dict[str, Any] = {}  # usv_state 聚合话题订阅器
+        
+        # 远程模式标志（通过 Zenoh 桥接的 USV 使用 usv_state）
+        self._remote_mode_usvs: set = set()
         
         # 命令发布器字典
         self._mode_pubs: Dict[str, Any] = {}
@@ -148,17 +224,21 @@ class UsvManager:
         self.sound_pubs: Dict[str, Any] = {}
         self.action_pubs: Dict[str, Any] = {}
         self.navigation_goal_pubs: Dict[str, Any] = {}
+        self.clear_target_pubs: Dict[str, Any] = {}  # 清除目标点发布器
+        self.nav_goal_pubs: Dict[str, Any] = self.navigation_goal_pubs  # 别名兼容
         
         # 回调函数
         self._on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None
         self._on_log_message: Optional[Callable[[str, str], None]] = None
+        self._on_event: Optional[Callable[[str, int, bytes], None]] = None  # Event 回调
         
         self.logger.info('✅ USV 管理器 (PX4 版本) 已初始化')
 
     def set_callbacks(
         self,
         on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None,
-        on_log_message: Optional[Callable[[str, str], None]] = None
+        on_log_message: Optional[Callable[[str, str], None]] = None,
+        on_event: Optional[Callable[[str, int, bytes], None]] = None
     ):
         """
         设置回调函数
@@ -166,16 +246,22 @@ class UsvManager:
         Args:
             on_status_update: 状态更新回调 (usv_id, status_info)
             on_log_message: 日志消息回调 (usv_id, message)
+            on_event: PX4 事件回调 (usv_id, event_id, arguments)
         """
         self._on_status_update = on_status_update
         self._on_log_message = on_log_message
+        self._on_event = on_event
 
-    def add_usv_namespace(self, namespace: str):
+    def add_usv_namespace(self, namespace: str, remote_mode: bool = None):
         """
         添加 USV 命名空间并创建订阅器
         
         Args:
             namespace: USV 命名空间（如 'usv_01'）
+            remote_mode: 是否使用远程模式（订阅 usv_state）
+                        None = 自动检测（检查 PX4 话题是否存在）
+                        True = 强制远程模式
+                        False = 强制本地模式
         """
         # 移除前导斜杠
         usv_id = namespace.lstrip('/').replace('/', '')
@@ -187,9 +273,45 @@ class UsvManager:
         # 创建状态对象
         self._usv_status[usv_id] = UsvStatusInfo(usv_id)
         
-        # 创建 PX4 话题订阅器（确保只有一个前导斜杠）
         prefix = f'/{usv_id}'
         
+        # 自动检测模式：检查 PX4 话题是否存在
+        if remote_mode is None:
+            topic_list = [name for name, _ in self.node.get_topic_names_and_types()]
+            px4_topic = f'{prefix}/fmu/out/vehicle_status'
+            usv_state_topic = f'{prefix}/usv_state'
+            
+            if px4_topic in topic_list:
+                remote_mode = False  # PX4 话题存在，使用本地模式
+            elif usv_state_topic in topic_list:
+                remote_mode = True   # 只有 usv_state，使用远程模式
+            else:
+                remote_mode = True   # 默认使用远程模式（Zenoh 桥接）
+        
+        if remote_mode:
+            # 远程模式：订阅 usv_state 聚合话题
+            self._remote_mode_usvs.add(usv_id)
+            self._subscribe_usv_state(usv_id, prefix)
+            self.logger.info(f'✅ 已添加 USV: {usv_id} (远程模式 - usv_state)')
+        else:
+            # 本地模式：订阅 PX4 原生话题
+            self._subscribe_px4_topics(usv_id, prefix)
+            self.logger.info(f'✅ 已添加 USV: {usv_id} (本地模式 - PX4)')
+        
+        # 创建命令发布器（两种模式都需要）
+        self._create_command_publishers(usv_id, prefix)
+    
+    def _subscribe_usv_state(self, usv_id: str, prefix: str):
+        """订阅 usv_state 聚合话题（远程模式）"""
+        self._usv_state_subs[usv_id] = self.node.create_subscription(
+            UsvStatus,
+            f'{prefix}/usv_state',
+            lambda msg, uid=usv_id: self._usv_state_callback(uid, msg),
+            10  # RELIABLE QoS
+        )
+    
+    def _subscribe_px4_topics(self, usv_id: str, prefix: str):
+        """订阅 PX4 原生话题（本地模式）"""
         # VehicleStatus 订阅
         self._vehicle_status_subs[usv_id] = self.node.create_subscription(
             VehicleStatus,
@@ -214,7 +336,7 @@ class UsvManager:
             self.qos_px4
         )
         
-        # LogMessage 订阅（替代 StatusText）
+        # LogMessage 订阅
         try:
             self._log_message_subs[usv_id] = self.node.create_subscription(
                 LogMessage,
@@ -225,7 +347,23 @@ class UsvManager:
         except Exception as e:
             self.logger.debug(f'LogMessage 订阅失败: {e}')
         
-        # 创建命令发布器（兼容原有话题）
+        # Event 订阅（用于接收 arming denied 等飞控事件消息）
+        try:
+            self._event_subs[usv_id] = self.node.create_subscription(
+                Event,
+                f'{prefix}/fmu/out/event',
+                lambda msg, uid=usv_id: self._event_callback(uid, msg),
+                self.qos_px4
+            )
+            self.logger.debug(f'{usv_id}: 已订阅 Event 话题')
+        except Exception as e:
+            self.logger.debug(f'Event 订阅失败: {e}')
+    
+    def _create_command_publishers(self, usv_id: str, prefix: str):
+        """创建命令发布器"""
+        from common_interfaces.msg import NavigationGoal
+        from std_msgs.msg import Bool
+        
         self._mode_pubs[usv_id] = self.node.create_publisher(
             String,
             f'{prefix}/set_usv_mode',
@@ -238,7 +376,17 @@ class UsvManager:
             self.qos_reliable
         )
         
-        self.logger.info(f'✅ 已添加 USV: {usv_id}')
+        self.navigation_goal_pubs[usv_id] = self.node.create_publisher(
+            NavigationGoal,
+            f'{prefix}/navigation/goal',
+            self.qos_reliable
+        )
+        
+        self.clear_target_pubs[usv_id] = self.node.create_publisher(
+            Bool,
+            f'{prefix}/navigation/clear_target',
+            self.qos_reliable
+        )
 
     def remove_usv_namespace(self, namespace: str):
         """
@@ -252,7 +400,7 @@ class UsvManager:
         if usv_id not in self._usv_status:
             return
         
-        # 销毁订阅器
+        # 销毁订阅器（本地模式）
         if usv_id in self._vehicle_status_subs:
             self.node.destroy_subscription(self._vehicle_status_subs.pop(usv_id))
         if usv_id in self._battery_subs:
@@ -261,17 +409,37 @@ class UsvManager:
             self.node.destroy_subscription(self._local_pos_subs.pop(usv_id))
         if usv_id in self._log_message_subs:
             self.node.destroy_subscription(self._log_message_subs.pop(usv_id))
+        if usv_id in self._event_subs:
+            self.node.destroy_subscription(self._event_subs.pop(usv_id))
+        
+        # 销毁订阅器（远程模式）
+        if usv_id in self._usv_state_subs:
+            self.node.destroy_subscription(self._usv_state_subs.pop(usv_id))
+        if usv_id in self._remote_mode_usvs:
+            self._remote_mode_usvs.discard(usv_id)
         
         # 销毁发布器
         if usv_id in self._mode_pubs:
             self.node.destroy_publisher(self._mode_pubs.pop(usv_id))
         if usv_id in self._arming_pubs:
             self.node.destroy_publisher(self._arming_pubs.pop(usv_id))
+        if usv_id in self.navigation_goal_pubs:
+            self.node.destroy_publisher(self.navigation_goal_pubs.pop(usv_id))
+        if usv_id in self.clear_target_pubs:
+            self.node.destroy_publisher(self.clear_target_pubs.pop(usv_id))
         
         # 移除状态
         del self._usv_status[usv_id]
         
         self.logger.info(f'已移除 USV: {usv_id}')
+
+    def _usv_state_callback(self, usv_id: str, msg: UsvStatus):
+        """UsvStatus 聚合消息回调（远程模式）"""
+        if usv_id in self._usv_status:
+            self._usv_status[usv_id].update_from_usv_status(msg)
+            
+            if self._on_status_update:
+                self._on_status_update(usv_id, self._usv_status[usv_id])
 
     def _vehicle_status_callback(self, usv_id: str, msg: VehicleStatus):
         """VehicleStatus 回调"""
@@ -299,6 +467,20 @@ class UsvManager:
                 # LogMessage 包含 text 字段
                 text = ''.join(chr(c) for c in msg.text if c != 0)
                 self._on_log_message(usv_id, text)
+            except Exception:
+                pass
+
+    def _event_callback(self, usv_id: str, msg: Event):
+        """
+        PX4 Event 回调
+        
+        处理飞控事件消息，如 arming denied、mode changes 等
+        """
+        if self._on_event:
+            try:
+                event_id = msg.id
+                arguments = bytes(msg.arguments)
+                self._on_event(usv_id, event_id, arguments)
             except Exception:
                 pass
 

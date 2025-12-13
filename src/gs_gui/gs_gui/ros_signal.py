@@ -67,6 +67,9 @@ class ROSSignal(QObject):
     
     # GUI警告信号（用于显示错误和警告消息）
     node_warning = pyqtSignal(str)  # 参数：警告字符串
+    
+    # 飞控状态文本信号（用于更新飞控消息显示）
+    status_text_received = pyqtSignal(str, str)  # 参数：USV ID, 状态文本
 
 
 

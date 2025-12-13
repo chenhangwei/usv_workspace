@@ -1,11 +1,9 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QCheckBox, QHBoxLayout, 
                              QPushButton, QLabel, QSlider, QGroupBox, QMessageBox)
-from PyQt5.QtCore import QTimer, Qt
-from PyQt5.QtCore import Qt as QtCore
+from PyQt5.QtCore import QTimer
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from math import cos, sin, sqrt
-import mpl_toolkits.mplot3d.art3d  # 用于3D绘图
 import matplotlib.pyplot as plt
 
 # 配置 matplotlib 中文显示
@@ -293,7 +291,7 @@ class UsvPlotWindow(QDialog):
         # Note: figure.patch is dynamic attribute in matplotlib
         try:
             self.figure.patch.set_facecolor('#ffffff')  # type: ignore
-        except:
+        except AttributeError:
             pass
         
         # 设置坐标轴标签
@@ -436,7 +434,13 @@ class UsvPlotWindow(QDialog):
                 # Build detailed info
                 info_text = f"=== {usv_id} ===\n"
                 info_text += f"Position: ({pos.get('x', 0):.3f}, {pos.get('y', 0):.3f}, {pos.get('z', 0):.3f})\n"
-                info_text += f"Heading: {usv_data.get('yaw', 0):.2f}°\n"
+                try:
+                    import math
+                    yaw_rad = float(usv_data.get('yaw', 0.0))
+                    yaw_deg = math.degrees(yaw_rad)
+                    info_text += f"Heading: {yaw_deg:.2f}°\n"
+                except Exception:
+                    info_text += "Heading: Unknown\n"
                 info_text += f"Mode: {usv_data.get('mode', 'N/A')}\n"
                 info_text += f"Armed: {usv_data.get('armed', 'N/A')}\n"
                 info_text += f"Battery: {usv_data.get('battery_voltage', 0):.2f}V ({usv_data.get('battery_percentage', 0):.1f}%)\n"

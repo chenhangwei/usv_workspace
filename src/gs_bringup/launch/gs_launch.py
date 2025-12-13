@@ -107,15 +107,16 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # Zenoh Bridge（Router 模式 - 地面站作为中心节点）
+    # Zenoh Bridge（Peer 模式 - 支持任意启动顺序）
     # =========================================================================
     zenoh_bridge = ExecuteProcess(
         condition=IfCondition(use_zenoh),
         cmd=[
             'zenoh-bridge-ros2dds',
+            '-l', 'tcp/0.0.0.0:7447',  # 监听端口，USV 连接到此
             '-c', zenoh_config,
             '-d', domain_id,
-            # Router 模式：监听 0.0.0.0:7447，USV 连接到此
+            'peer',  # Peer 模式（位置参数，放在最后）
         ],
         output='screen',
         name='zenoh_bridge'

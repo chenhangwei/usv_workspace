@@ -5,7 +5,6 @@
 from PyQt5.QtWidgets import QWidget
 from PyQt5.QtCore import Qt, QPointF, QRectF
 from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QFont, QPolygonF
-import math
 
 
 class CompassWidget(QWidget):

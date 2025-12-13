@@ -19,7 +19,7 @@ setup(
         ('share/' + package_name + '/launch', 
             ['launch/usv_launch.py']),
         ('share/' + package_name + '/config', 
-            ['config/usv_params.yaml']),
+            ['config/usv_params.yaml', 'config/zenoh_usv_config.json5']),
 
     ],
     install_requires=[

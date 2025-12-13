@@ -473,22 +473,22 @@ class ParamWindow(QDialog):
                 error_dialog.setText("无法连接到飞控参数服务")
                 error_dialog.setInformativeText(
                     "请检查以下事项：\n\n"
-                    "1. MAVROS 节点是否正常运行\n"
-                    "2. MAVROS param 插件是否已启用\n"
-                    "3. 飞控是否已正确连接\n"
+                    "1. PX4 飞控是否已正确连接\n"
+                    "2. uXRCE-DDS Agent 是否正常运行\n"
+                    "3. 串口连接是否正常\n"
                     "4. USV 是否在线"
                 )
                 error_dialog.setDetailedText(
                     f"详细错误信息：\n{message}\n\n"
                     f"命名空间：{self.usv_namespace}\n"
-                    f"节点信息：检查 MAVROS 插件配置"
+                    f"提示：使用串口直接通信获取参数"
                 )
             else:
                 error_dialog.setWindowTitle("参数加载失败")
                 error_dialog.setText("无法加载飞控参数")
                 error_dialog.setInformativeText(
                     "加载参数时发生错误，请重试。\n\n"
-                    "如问题持续，请检查 MAVROS 连接状态。"
+                    "如问题持续，请检查飞控连接状态。"
                 )
                 error_dialog.setDetailedText(f"错误详情：\n{message}")
             

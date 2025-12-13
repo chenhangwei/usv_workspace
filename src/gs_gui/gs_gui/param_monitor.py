@@ -4,10 +4,13 @@
 提供参数变化监控、日志记录和历史追踪功能
 """
 
+import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from .param_manager import ParamInfo
+
+_logger = logging.getLogger("gs_gui.param_monitor")
 
 
 @dataclass
@@ -116,7 +119,7 @@ class ParamMonitor:
             try:
                 callback(event)
             except Exception as e:
-                print(f"回调执行失败: {e}")
+                _logger.error(f"回调执行失败: {e}")
     
     def get_param_history(self, param_name: str) -> List[ParamChangeEvent]:
         """获取参数变化历史"""
@@ -159,5 +162,5 @@ class ParamMonitor:
                     )
             return True
         except Exception as e:
-            print(f"导出日志失败: {e}")
+            _logger.error(f"导出日志失败: {e}")
             return False

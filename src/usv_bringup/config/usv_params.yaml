@@ -24,125 +24,85 @@
 # =============================================================================
 mavros:
   ros__parameters:
-    # ==================== MAVLink 身份配置 ====================
-    # 注意: system_id/target_system_id 等参数已移至 launch 文件中配置
-    # 请在 usv_launch.py 中修改 target_system_id:
-    # - usv_02: target_system_id = 2 (匹配飞控 SYSID_THISMAV=2)
-    # - usv_03: target_system_id = 3 (匹配飞控 SYSID_THISMAV=3)
-    
-    # ==================== 插件配置（已移至 launch 文件）====================
-    # ⚠️ 插件黑名单配置已移至 usv_launch.py，此处配置已失效
-    # 请在 launch 文件中修改 plugin_blacklist 参数
-    # 
-    # 保留的核心插件（15个）：
-    # sys_status, sys_time, command, local_position, global_position,
-    # home_position, gps_status, battery, imu, rc_io, setpoint_raw,
-    # waypoint, rallypoint, geofence, vfr_hud
-    
-    # ==================== 性能优化参数（已移至 launch 文件）====================
-    # 以下参数已在 launch 文件中配置，此处保留仅作为文档参考
-    # sys.disable_diag: true
-    # mission.pull_after_gcs: false
-    # waypoint.pull_after_gcs: false
-    # rallypoint.pull_after_gcs: false
-    # geofence.pull_after_gcs: false
-    
     # 连接参数（保留作为默认值）
     conn:
-      timeout: 10.0                         # 连接超时时间（秒）
-      heartbeat_mav_type: 6                 # MAV_TYPE_SURFACE_BOAT
-      heartbeat_rate: 1.0                   # 心跳频率（Hz）
-      
-    # 视觉定位配置
+      timeout: 10.0
+      heartbeat_mav_type: 6
+      heartbeat_rate: 1.0
     vision_pose:
-      enable: true                          # 启用视觉定位 (UWB)
+      enable: true
 
 # =============================================================================
 # 通信与状态管理模块参数
 # =============================================================================
-usv_status_node:
+"/**/usv_status_node":
   ros__parameters:
-    # 电池电压范围配置（基于实际电池特性）
-    battery_voltage_full: 12.6              # 满电电压（V）- 电量显示100%
-    battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
+    battery_voltage_full: 12.6
+    battery_voltage_empty: 10.8
 
-# NavigateToPoint Action Server 参数（统一的导航到达阈值配置）
-navigate_to_point_node:
+"/**/navigate_to_point_node":
   ros__parameters:
-    nav_arrival_threshold: 1.0              # 到达目标点的距离阈值（米）- 统一使用此参数
-    nav_timeout_check_period: 1.0           # 超时检查周期（秒）
-    nav_feedback_period: 0.5                # 反馈发布周期（秒）
-    distance_mode: '3d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
-
-
-
+    nav_arrival_threshold: 1.0
+    nav_timeout_check_period: 1.0
+    nav_feedback_period: 0.5
+    distance_mode: '3d'
 
 # =============================================================================
 # 控制模块参数
 # =============================================================================
-usv_avoidance_node:
+"/**/usv_avoidance_node":
   ros__parameters:
-    # 避障距离参数
-    in_distance_value: 1.0                  # 避障触发距离（米）
+    in_distance_value: 1.0
 
-usv_command_node:
+"/**/usv_command_node":
   ros__parameters:
-    # 支持的飞行模式列表 (PX4 模式名)
     supported_modes: ['OFFBOARD', 'MANUAL', 'STABILIZED', 'AUTO.LOITER', 'AUTO.MISSION', 'AUTO.RTL', 'POSCTL']
-    # 服务超时时间
-    service_timeout_sec: 5.0                # 服务等待超时时间（秒）
-    # 解锁命令超时时间
-    arming_command_timeout_sec: 10.0        # 解锁命令超时时间（秒）
+    service_timeout_sec: 5.0
+    arming_command_timeout_sec: 10.0
 
-usv_control_node:
+"/**/usv_control_node":
   ros__parameters:
-    publish_rate: 20.0                      # 目标点发布频率（Hz）
-    frame_id: 'map'                         # 坐标系ID
-    coordinate_frame: 8                     # FRAME_LOCAL_NED = 8
+    publish_rate: 20.0
+    frame_id: 'map'
+    coordinate_frame: 8
 
 # =============================================================================
 # 传感器驱动模块参数
 # =============================================================================
-usv_uwb_node:
+"/**/usv_uwb_node":
   ros__parameters:
-    dummy_param: true                       # 占位参数
+    dummy_param: true
 
 # =============================================================================
 # 辅助功能模块参数
 # =============================================================================
-usv_head_action_node:
+"/**/usv_head_action_node":
   ros__parameters:
-    # 默认为无硬件模式，避免在无 I2C/PCA9685 环境崩溃
-    enable_head_actuator: false            # 设置为 true 以启用实际硬件控制
+    enable_head_actuator: false
 
-usv_fan_node:
+"/**/usv_fan_node":
   ros__parameters:
-    # 风扇控制引脚配置
-    fan_pin: 17                             # BCM编号，GPIO17
-    gpio_chip: gpiochip4                    # GPIO芯片名称
-    # 温度阈值配置（单位：毫摄氏度）
-    temp_threshold_on: 50000                # 风扇开启温度阈值 50°C
-    temp_threshold_off: 45000               # 风扇关闭温度阈值 45°C
+    fan_pin: 17
+    gpio_chip: gpiochip4
+    temp_threshold_on: 50000
+    temp_threshold_off: 45000
 
-usv_led_node:
+"/**/usv_led_node":
   ros__parameters:
-    # LED控制串口配置
-    port: /dev/ttyUSB1                      # 串口设备路径
-    baudrate: 115200                        # 波特率
-    # LED效果配置
-    color_list: [255, 0, 0, 255, 127, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 139, 0, 255]  # 颜色列表 [R,G,B,R,G,B,...]
-    timer_period_high: 0.03                 # 高频定时器周期（秒）
-    timer_period_low: 0.5                   # 低频定时器周期（秒）
-    transition_duration: 3.0                # 颜色渐变持续时间（秒）
-    hold_duration: 10.0                     # 颜色停留时间（秒）
-    breath_step: 6                          # 呼吸灯步进值
+    port: /dev/ttyUSB1
+    baudrate: 115200
+    color_list: [255, 0, 0, 255, 127, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 139, 0, 255]
+    timer_period_high: 0.03
+    timer_period_low: 0.5
+    transition_duration: 3.0
+    hold_duration: 10.0
+    breath_step: 6
 
-usv_sound_node:
+"/**/usv_sound_node":
   ros__parameters:
-    # 声音播放配置  
-    sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']  # 常规声音类型列表
-    moon_type: 'moon101'                    # 低电量声音类型
-    min_play_interval: 2                    # 最小播放间隔（秒）
-    max_play_interval: 10                   # 最大播放间隔（秒）
-    min_play_count: 1                       # 最小播放次数
-    max_play_count: 3                       # 最大播放次数
+    sound_types: ['gaga101', 'gaga102', 'gaga103', 'gaga104']
+    moon_type: 'moon101'
+    min_play_interval: 2
+    max_play_interval: 10
+    min_play_count: 1
+    max_play_count: 3

@@ -2,12 +2,18 @@
 USV 导航信息面板模块
 提供美观、信息丰富的 USV 导航详细信息显示界面
 """
+
+import logging
+import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                               QGroupBox, QGridLayout, QFrame, QScrollArea, 
                               QSizePolicy)
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QColor
 from .compass_widget import CompassWidget
+from .angle_utils import rad_to_normalized_deg_0_360
+
+_logger = logging.getLogger("gs_gui.nav_panel")
+
 
 # 兼容性定义
 try:
@@ -393,10 +399,11 @@ class UsvNavigationPanel(QWidget):
                 self.total_speed_label.setText("--")
             
             # ==================== 更新航向信息 ====================
-            # 当前航向（直接从 heading 字段获取，单位为度）
+            # 当前航向（UsvStatus.heading 单位为弧度；此处转换为度用于显示/罗盘）
             current_heading = None
             try:
-                heading_deg = float(state.get('heading', 0.0))
+                heading_rad = float(state.get('heading', 0.0))
+                heading_deg = rad_to_normalized_deg_0_360(heading_rad)
                 current_heading = heading_deg
                 self.current_heading_label.setText(self._format_float(heading_deg, precision=1))
             except (ValueError, TypeError):
@@ -414,10 +421,7 @@ class UsvNavigationPanel(QWidget):
                     if current_heading is not None:
                         target_heading = current_heading + heading_error
                         # 归一化到 0-360 度
-                        while target_heading >= 360:
-                            target_heading -= 360
-                        while target_heading < 0:
-                            target_heading += 360
+                        target_heading = target_heading % 360.0
                         self.target_heading_label.setText(self._format_float(target_heading, precision=1))
                     else:
                         self.target_heading_label.setText("--")
@@ -496,7 +500,7 @@ class UsvNavigationPanel(QWidget):
                 self._update_nav_status_style("空闲")
                 
         except Exception as e:
-            print(f"更新 USV 导航面板失败: {e}")
+            _logger.error(f"更新 USV 导航面板失败: {e}")
     
     def _clear_display(self):
         """清空显示"""

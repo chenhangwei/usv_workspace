@@ -8,7 +8,7 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Int32
+from std_msgs.msg import Float32
 import gpiod
 from common_utils import ParamLoader
 
@@ -39,7 +39,7 @@ class UsvFanNode(Node):
 
         # 订阅温度话题
         self.subscription = self.create_subscription(
-            Int32,
+            Float32,
             'usv_temperature',
             self.temperature_callback,
             10
@@ -68,11 +68,11 @@ class UsvFanNode(Node):
         根据接收到的温度数据控制风扇开关。
         
         Args:
-            msg (Int32): 包含温度数据的消息（单位：毫摄氏度）
+            msg (Float32): 包含温度数据的消息（单位：摄氏度）
         """
         try:
-            temp = msg.data  # 温度（毫摄氏度）
-            temp_celsius = temp / 1000.0  # 转换为摄氏度，仅用于日志
+            temp_celsius = float(msg.data)  # 摄氏度
+            temp = int(temp_celsius * 1000.0)  # 换算为毫摄氏度，复用现有阈值参数
             
             # 控制风扇
             if temp >= self.temp_threshold_on and not self.fan_state:

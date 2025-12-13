@@ -154,12 +154,13 @@ class ClusterTaskManager:
                     QMessageBox.critical(self.parent_widget, "未知错误", error_msg)
                     self.cluster_position_list = []
     
-    def toggle_task(self, usv_departed_list):
+    def toggle_task(self, usv_departed_list, usv_cluster_list=None):
         """
         切换集群任务的运行状态：运行/暂停
         
         Args:
             usv_departed_list: 离群USV列表
+            usv_cluster_list: 集群中的USV列表
             
         Returns:
             str: 返回按钮应显示的文本
@@ -170,7 +171,7 @@ class ClusterTaskManager:
         
         # 如果任务未开始且有目标点数据，则开始任务
         if not self.cluster_task_running and self.cluster_position_list:
-            self.start_task(usv_departed_list)
+            self.start_task(usv_departed_list, usv_cluster_list)
         # 如果任务正在运行，则切换暂停状态
         elif self.cluster_task_running:
             if not self.cluster_task_paused:
@@ -184,22 +185,28 @@ class ClusterTaskManager:
         
         return self.get_button_text()
     
-    def start_task(self, usv_departed_list):
+    def start_task(self, usv_departed_list, usv_cluster_list=None):
         """
         开始执行集群任务
         
         Args:
             usv_departed_list: 离群USV列表
+            usv_cluster_list: 集群中的USV列表（可选）
             
         Returns:
             bool: 任务是否成功启动
         """
-        self.append_info("开始执行集群目标点任务")
+        # 检查集群中是否有 USV
+        if usv_cluster_list is not None and len(usv_cluster_list) == 0:
+            self.append_warning("集群中没有 USV，无法发送目标点")
+            return False
         
         # 检查是否有集群列表
         if not self.cluster_position_list:
             self.append_warning("集群列表为空")
             return False
+        
+        self.append_info("开始执行集群目标点任务")
         
         # 创建副本并过滤掉离群的USV
         filtered_list = self.cluster_position_list.copy()
@@ -211,34 +218,21 @@ class ClusterTaskManager:
             self.append_warning("集群列表为空（所有 USV 均在离群列表中）")
             return False
         
-        # 弹窗确认
-        reply = QMessageBox.question(
-            self.parent_widget,
-            "确认执行",
-            f"即将执行 {len(filtered_list)} 个 USV 的集群任务。\n是否继续?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            try:
-                # 更新 cluster_position_list
-                self.cluster_position_list = filtered_list
-                # 设置任务状态
-                self.cluster_task_running = True
-                self.cluster_task_paused = False
-                # 发送 ROS 信号
-                self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-                self.append_info("集群任务已开始执行！")
-                return True
-            except Exception as e:
-                QMessageBox.critical(self.parent_widget, "错误", f"任务启动失败: {e}")
-                # 出错时重置状态
-                self.cluster_task_running = False
-                self.cluster_task_paused = False
-                return False
-        else:
-            QMessageBox.information(self.parent_widget, "取消", "任务启动已取消")
+        try:
+            # 更新 cluster_position_list
+            self.cluster_position_list = filtered_list
+            # 设置任务状态
+            self.cluster_task_running = True
+            self.cluster_task_paused = False
+            # 发送 ROS 信号
+            self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+            self.append_info(f"集群任务已开始执行，共 {len(filtered_list)} 个 USV")
+            return True
+        except Exception as e:
+            self.append_warning(f"任务启动失败: {e}")
+            # 出错时重置状态
+            self.cluster_task_running = False
+            self.cluster_task_paused = False
             return False
     
     def stop_task(self):
@@ -248,28 +242,17 @@ class ClusterTaskManager:
             self.append_info("当前没有正在运行的集群任务")
             return
         
-        # 弹窗确认
-        reply = QMessageBox.question(
-            self.parent_widget,
-            "确认停止",
-            "确定要停止当前集群任务吗？",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
+        # 直接停止，不需要确认
+        # 发送停止信号给ROS节点
+        self.ros_signal.cluster_stop_request.emit()
         
-        if reply == QMessageBox.Yes:
-            # 发送停止信号给ROS节点
-            self.ros_signal.cluster_stop_request.emit()
-            
-            # 重置任务状态
-            self.cluster_task_running = False
-            self.cluster_task_paused = False
-            self.append_info("集群任务已停止！")
-            
-            # 清空集群位置列表
-            self.cluster_position_list = []
-        else:
-            self.append_info("取消停止操作")
+        # 重置任务状态
+        self.cluster_task_running = False
+        self.cluster_task_paused = False
+        self.append_info("集群任务已停止")
+        
+        # 清空集群位置列表
+        self.cluster_position_list = []
     
     def is_task_active(self):
         """

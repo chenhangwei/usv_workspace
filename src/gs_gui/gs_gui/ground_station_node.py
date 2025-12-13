@@ -89,6 +89,15 @@ class GroundStationNode(Node):
         self.discovery_handler = DiscoveryHandler(self, self.usv_manager, signal)
         self.system_command_handler = SystemCommandHandler(self, signal)
         
+        # 设置 discovery_handler 对 sensor_handler 的引用
+        self.discovery_handler.set_sensor_handler(self.sensor_handler)
+        
+        # 注册 UsvManager 的日志消息和事件回调
+        self.usv_manager.set_callbacks(
+            on_log_message=self._on_usv_log_message,
+            on_event=self._on_usv_event
+        )
+        
         # 初始化事件解码器
         self.event_decoder = EventDecoder(self.get_logger())
         
@@ -217,6 +226,9 @@ class GroundStationNode(Node):
         # 动态发现定时器（使用 discovery_handler）
         self.discovery_timer = self.create_timer(self._discovery_interval, self._discover_wrapper)
         self.get_logger().info("🔍 动态发现模式已启用")
+        
+        # 预探测远程 USV（触发 Zenoh 桥接的 interest-based routing）
+        self._probe_remote_usvs_from_config()
 
         # TF2: Buffer/Listener for coordinate transforms
         # 注意：使用 BEST_EFFORT QoS 以匹配 USV 发布的 /tf 话题
@@ -343,6 +355,47 @@ class GroundStationNode(Node):
     def discover_new_usvs(self):
         """[已迁移到 discovery_handler] 保留用于兼容性"""
         self._discover_wrapper()
+    
+    def _probe_remote_usvs_from_config(self):
+        """
+        从配置文件读取 USV 列表并进行预探测
+        
+        用于触发 Zenoh Bridge 的 interest-based routing，
+        使远程 USV 的话题能够被桥接到 GS 端。
+        """
+        import os
+        import yaml
+        
+        # 尝试多个可能的配置文件路径
+        possible_paths = [
+            os.path.expanduser('~/usv_workspace/install/gs_bringup/share/gs_bringup/config/usv_fleet.yaml'),
+            os.path.expanduser('~/usv_workspace/src/gs_bringup/config/usv_fleet.yaml'),
+        ]
+        
+        usv_ids = []
+        for config_path in possible_paths:
+            if os.path.exists(config_path):
+                try:
+                    with open(config_path, 'r') as f:
+                        config = yaml.safe_load(f)
+                    
+                    fleet_config = config.get('usv_fleet', {})
+                    for usv_id, usv_config in fleet_config.items():
+                        if usv_config.get('enabled', False):
+                            usv_ids.append(usv_id)
+                    
+                    self.get_logger().info(f"📋 从配置文件加载 USV 列表: {usv_ids}")
+                    break
+                except Exception as e:
+                    self.get_logger().warning(f"读取 USV 配置文件失败: {e}")
+        
+        # 如果没有从配置文件读取到，使用默认探测列表
+        if not usv_ids:
+            usv_ids = ['usv_01', 'usv_02', 'usv_03']
+            self.get_logger().info(f"📋 使用默认 USV 探测列表: {usv_ids}")
+        
+        # 调用 discovery_handler 进行预探测
+        self.discovery_handler.probe_remote_usvs(usv_ids)
     
     def _register_new_usv(self, usv_id: str):
         """[已迁移到 discovery_handler] 保留用于兼容性"""
@@ -727,6 +780,92 @@ class GroundStationNode(Node):
         """优雅关闭 USV 节点回调，委托给 system_command_handler."""
         self.system_command_handler.shutdown_usv(usv_namespace)
 
+    def _on_usv_log_message(self, usv_id: str, text: str):
+        """
+        处理来自 UsvManager 的日志消息回调
+        
+        将纯文本消息转换为类似 StatusText 的消息对象，
+        然后传递给 sensor_handler 处理。
+        
+        Args:
+            usv_id: USV 标识符
+            text: 日志消息文本
+        """
+        if not text:
+            return
+        
+        # 创建一个简单的消息对象，包含 text 和 severity 属性
+        class SimpleStatusText:
+            def __init__(self, text_content, severity_level=6):
+                self.text = text_content
+                self.severity = severity_level
+        
+        # 根据文本内容推断严重性级别
+        text_upper = text.upper()
+        if 'ERROR' in text_upper or 'FAIL' in text_upper or 'CRITICAL' in text_upper:
+            severity = 3  # ERROR
+        elif 'WARN' in text_upper or 'PREARM' in text_upper or 'PREFLIGHT' in text_upper:
+            severity = 4  # WARNING
+        elif 'INFO' in text_upper:
+            severity = 6  # INFO
+        else:
+            severity = 6  # 默认 INFO
+        
+        msg = SimpleStatusText(text, severity)
+        self.handle_status_text(usv_id, msg)
+
+    def _on_usv_event(self, usv_id: str, event_id: int, arguments: bytes):
+        """
+        处理来自 UsvManager 的 PX4 Event 消息回调
+        
+        将 PX4 事件解码为人类可读的消息，如 "Arming denied: high throttle"
+        
+        Args:
+            usv_id: USV 标识符
+            event_id: PX4 事件 ID
+            arguments: 事件参数（字节数组）
+        """
+        try:
+            # 将参数字节转换为参数字符串
+            # PX4 Event 参数格式：每个参数是一个字节或多个字节
+            args_str = None
+            if arguments:
+                # 简化处理：将字节转换为 "-val1-val2-..." 格式
+                args_list = [str(b) for b in arguments if b != 0]
+                if args_list:
+                    args_str = '-' + '-'.join(args_list)
+            
+            # 尝试使用事件解码器解码
+            decoded_msg = self.event_decoder.decode(event_id, args_str)
+            
+            if decoded_msg:
+                # 解码成功，创建状态文本消息
+                self.get_logger().info(f"[FCU-EVENT] {usv_id}: {decoded_msg} (ID={event_id})")
+                
+                # 根据消息内容推断严重性级别
+                msg_upper = decoded_msg.upper()
+                if 'DENIED' in msg_upper or 'FAIL' in msg_upper or 'CRITICAL' in msg_upper or 'EMERGENCY' in msg_upper:
+                    severity = 3  # ERROR
+                elif 'WARN' in msg_upper or 'CAUTION' in msg_upper:
+                    severity = 4  # WARNING
+                else:
+                    severity = 6  # INFO
+                
+                # 创建消息对象并处理
+                class SimpleStatusText:
+                    def __init__(self, text_content, severity_level=6):
+                        self.text = text_content
+                        self.severity = severity_level
+                
+                msg = SimpleStatusText(decoded_msg, severity)
+                self.handle_status_text(usv_id, msg)
+            else:
+                # 解码失败，记录原始事件 ID
+                self.get_logger().debug(f"[FCU-EVENT] {usv_id}: 未知事件 ID={event_id}")
+                
+        except Exception as e:
+            self.get_logger().debug(f"事件处理失败: {e}")
+
     def handle_status_text(self, usv_id, msg):
         """处理飞控 status_text 消息，委托给 sensor_handler."""
         # 委托给 sensor_handler
@@ -810,7 +949,7 @@ class GroundStationNode(Node):
 
     def rosout_callback(self, msg):
         """
-        处理 ROS 日志消息，用于捕获 PX4 的 FCU: EVENT 消息
+        处理 ROS 日志消息，用于捕获 PX4 的 FCU: EVENT 消息和其他重要日志
         """
         # 过滤出 USV 相关的日志
         # PX4 的日志节点名可能是:
@@ -818,6 +957,11 @@ class GroundStationNode(Node):
         # - "usv_01.fmu" (PX4 fmu)
         # - 包含 "usv_" 的其他名称
         if 'usv_' not in msg.name:
+            return
+        
+        # 提取 USV ID
+        usv_id = self._extract_usv_id_from_log(msg.name)
+        if usv_id == "unknown":
             return
             
         # 检查是否是 FCU 事件消息
@@ -861,30 +1005,54 @@ class GroundStationNode(Node):
             except Exception as e:
                 # 解析失败则忽略
                 self.get_logger().debug(f"事件解析失败: {e}")
+            return  # 已处理 FCU EVENT，不再重复添加
+        
+        # 处理其他重要的 USV 日志消息 (WARN/ERROR 级别)
+        # ROS Log 级别: DEBUG=10, INFO=20, WARN=30, ERROR=40, FATAL=50
+        if msg.level >= 30:  # WARN 及以上
+            try:
+                now_sec = self._now_seconds()
+                # 映射 ROS 日志级别到 MAVLink severity
+                if msg.level >= 50:  # FATAL
+                    severity = 0  # EMERGENCY
+                elif msg.level >= 40:  # ERROR
+                    severity = 3  # ERROR
+                else:  # WARN
+                    severity = 4  # WARNING
+                
+                entry = {
+                    'text': msg.msg,
+                    'severity': severity,
+                    'severity_label': self._severity_to_label(severity),
+                    'time': self._format_time(now_sec),
+                    'timestamp': now_sec,
+                }
+                self.sensor_handler._vehicle_messages[usv_id].appendleft(entry)
+                self.ros_signal.status_text_received.emit(usv_id, msg.msg)
+            except Exception:
+                pass
 
     def push_state_updates(self):
         """
         定期主动推送状态更新到 GUI（5Hz 优化频率）
         
-        只在数据有变化时才重新计算，避免不必要的开销。
+        始终推送最新状态到 GUI，以确保远程 USV 的位置等实时数据能够显示。
+        augment_state_payload 用于添加传感器/预检信息，有条件地执行以节省开销。
         """
         if not self.usv_states:
             return
         
         try:
             now_sec = self._now_seconds()
-            updated = False
             
-            # 只更新有变化的 USV
+            # 遍历所有 USV，按需更新 augmented 数据
             for usv_id in list(self.usv_states.keys()):
                 # 检查是否需要更新（有新消息、PreArm 警告变化、传感器状态变化）
                 if self._should_update_augmented_state(usv_id, now_sec):
                     self.augment_state_payload(usv_id)
-                    updated = True
             
-            # 只在有更新时推送
-            if updated:
-                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            # 始终推送状态列表（位置、速度等实时数据来自 discovery_handler）
+            self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
         except Exception as exc:
             # 使用 debug 级别避免刷屏，因为这是高频调用
             pass  # 静默失败，避免日志刷屏

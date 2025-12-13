@@ -5,7 +5,6 @@ Area Center 偏移量设置对话框
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                               QDoubleSpinBox, QPushButton, QGroupBox, QMessageBox)
-from PyQt5.QtCore import Qt
 
 
 class AreaOffsetDialog(QDialog):

@@ -1,7 +1,6 @@
 import json
 import os
-import struct
-from rclpy.node import Node
+
 
 class EventDecoder:
     """
@@ -81,21 +80,34 @@ class EventDecoder:
         except Exception as e:
             self.logger.error(f"加载 PX4 事件元数据失败: {e}")
 
-    def decode(self, event_id, args_str=None):
+    def decode(self, event_id, args_str=None, args_bytes=None):
         """
         解码事件 ID
         
+        PX4 事件 ID 结构: (component_id << 24) | sub_id
+        px4_events.json 中使用的是 sub_id（24位）
+        
         Args:
-            event_id (int): 事件 ID
+            event_id (int): 事件 ID（完整的32位 ID）
             args_str (str): 参数字符串 (例如 "-4-0-0...")
+            args_bytes (bytes): 原始参数字节数组（优先使用）
             
         Returns:
             str: 解码后的消息，如果未找到定义则返回 None
         """
         if not self._loaded:
             return None
-            
-        event = self.events.get(event_id)
+        
+        # 提取 sub_id（低24位）用于查找事件定义
+        sub_id = event_id & 0xFFFFFF
+        
+        # 先尝试用 sub_id 查找
+        event = self.events.get(sub_id)
+        
+        # 如果没找到，尝试用完整的 event_id 查找（兼容旧格式）
+        if not event:
+            event = self.events.get(event_id)
+        
         if event:
             # 获取消息模板
             message = event.get('message', '')

@@ -5,10 +5,8 @@
 解决项目中参数加载不一致和异常处理缺失的问题。
 """
 
-from typing import TypeVar, Optional, Callable, Any, Union
+from typing import TypeVar, Optional, Callable, Union
 from rclpy.node import Node
-from rclpy.parameter import Parameter
-import logging
 
 T = TypeVar('T')
 
@@ -141,52 +139,6 @@ class ParamLoader:
                 cfg.get('description', '')
             )
         return result
-    
-    def load_gps_origin(
-        self,
-        default_lat: float = 0.0,
-        default_lon: float = 0.0,
-        default_alt: float = 0.0
-    ) -> dict:
-        """
-        加载 GPS 原点参数(专用方法,解决项目中 GPS 原点配置重复的问题)
-        
-        Args:
-            default_lat: 默认纬度
-            default_lon: 默认经度
-            default_alt: 默认海拔
-            
-        Returns:
-            {'lat': float, 'lon': float, 'alt': float}
-        """
-        def validate_lat(x): return -90 <= x <= 90
-        def validate_lon(x): return -180 <= x <= 180
-        def validate_alt(x): return -1000 <= x <= 10000
-        
-        lat = self.load_param(
-            'gps_origin_lat',
-            default_lat,
-            validate_lat,
-            'GPS原点纬度'
-        )
-        lon = self.load_param(
-            'gps_origin_lon',
-            default_lon,
-            validate_lon,
-            'GPS原点经度'
-        )
-        alt = self.load_param(
-            'gps_origin_alt',
-            default_alt,
-            validate_alt,
-            'GPS原点海拔'
-        )
-        
-        self.logger.info(
-            f"GPS 原点: ({lat:.7f}°, {lon:.7f}°, {alt:.2f}m)"
-        )
-        
-        return {'lat': lat, 'lon': lon, 'alt': alt}
 
 
 class ParamValidator:
@@ -263,14 +215,4 @@ class MyNode(Node):
         params = loader.load_params(config)
         self.timeout = params['timeout']
         self.port = params['port']
-        
-        # 方法3: GPS 原点专用加载
-        gps_origin = loader.load_gps_origin(
-            default_lat=22.5180977,
-            default_lon=113.9007239,
-            default_alt=-5.17
-        )
-        self.origin_lat = gps_origin['lat']
-        self.origin_lon = gps_origin['lon']
-        self.origin_alt = gps_origin['alt']
 """

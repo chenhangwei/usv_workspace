@@ -6,8 +6,7 @@
 
 import threading
 from functools import wraps
-from typing import TypeVar, Generic, Dict, Any, Optional, Callable
-from collections import defaultdict
+from typing import TypeVar, Generic, Dict, Optional, Callable
 
 K = TypeVar('K')
 V = TypeVar('V')

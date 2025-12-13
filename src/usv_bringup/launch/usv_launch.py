@@ -64,7 +64,7 @@ def generate_launch_description():
     use_zenoh_arg = DeclareLaunchArgument(
         'use_zenoh',
         default_value='true',
-        description='是否使用 Zenoh Bridge 进行跨组通信'
+        description='是否使用 Zenoh Bridge 进行跨组通信（与地面站通信不需要）'
     )
     
     router_ip_arg = DeclareLaunchArgument(
@@ -85,6 +85,32 @@ def generate_launch_description():
         description='仿真模式 UDP 端口'
     )
     
+    # 以太网连接参数
+    use_ethernet_arg = DeclareLaunchArgument(
+        'use_ethernet',
+        default_value='true',
+        description='是否使用以太网连接飞控（推荐）'
+    )
+    
+    agent_port_arg = DeclareLaunchArgument(
+        'agent_port',
+        default_value='8888',
+        description='以太网 UDP 端口（飞控 uXRCE-DDS 端口）'
+    )
+    
+    # UWB 定位参数
+    use_uwb_arg = DeclareLaunchArgument(
+        'use_uwb',
+        default_value='true',
+        description='是否启用 UWB 室内定位'
+    )
+    
+    uwb_port_arg = DeclareLaunchArgument(
+        'uwb_port',
+        default_value='/dev/serial/by-id/usb-1a86_USB_Single_Serial_5787006321-if00',
+        description='UWB 串口路径'
+    )
+    
     # 获取参数
     namespace = LaunchConfiguration('namespace')
     group_id = LaunchConfiguration('group_id')
@@ -94,15 +120,19 @@ def generate_launch_description():
     router_ip = LaunchConfiguration('router_ip')
     use_simulation = LaunchConfiguration('use_simulation')
     simulation_port = LaunchConfiguration('simulation_port')
+    use_ethernet = LaunchConfiguration('use_ethernet')
+    agent_port = LaunchConfiguration('agent_port')
+    use_uwb = LaunchConfiguration('use_uwb')
+    uwb_port = LaunchConfiguration('uwb_port')
     
     # =========================================================================
     # 分组 Domain ID 映射
-    # A -> 10, B -> 20, C -> 30, D -> 40, E -> 50, F -> 60
+    # A -> 11, B -> 12, C -> 13, D -> 14, E -> 15, F -> 16
     # =========================================================================
     domain_id = PythonExpression([
-        "{'A': 10, 'B': 20, 'C': 30, 'D': 40, 'E': 50, 'F': 60}.get('", 
+        "{'A': 11, 'B': 12, 'C': 13, 'D': 14, 'E': 15, 'F': 16}.get('", 
         group_id, 
-        "', 10)"
+        "', 11)"
     ])
     
     # 参数文件
@@ -137,18 +167,44 @@ def generate_launch_description():
             '=' * 60, '\n',
             '命名空间: ', namespace, '\n',
             '分组: ', group_id, '\n',
-            '串口: ', serial_port, '\n',
-            '波特率: ', baudrate, '\n',
             'Domain ID: ', domain_id, '\n',
             '=' * 60,
+        ]
+    )
+    
+    # 以太网模式启动信息
+    ethernet_info = LogInfo(
+        condition=IfCondition(use_ethernet),
+        msg=[
+            '📡 以太网配置:\n',
+            '   Agent端口: ', agent_port, '\n',
+            '   协议: UDP4\n',
+            '   (飞控IP在飞控端配置)\n',
+        ]
+    )
+    
+    # 串口模式启动信息
+    serial_info = LogInfo(
+        condition=IfCondition(PythonExpression([
+            "'", use_ethernet, "'.lower() == 'false' and '", use_simulation, "'.lower() == 'false'"
+        ])),
+        msg=[
+            '🔌 串口配置:\n',
+            '   设备: ', serial_port, '\n',
+            '   波特率: ', baudrate, '\n',
         ]
     )
     
     # =========================================================================
     # Micro XRCE-DDS Agent（串口模式）
     # =========================================================================
+    # 串口模式条件：非以太网 且 非仿真
+    use_serial_condition = PythonExpression([
+        "'", use_ethernet, "'.lower() == 'false' and '", use_simulation, "'.lower() == 'false'"
+    ])
+    
     micro_xrce_agent_serial = ExecuteProcess(
-        condition=UnlessCondition(use_simulation),
+        condition=IfCondition(use_serial_condition),
         cmd=[
             'MicroXRCEAgent', 'serial',
             '--dev', serial_port,
@@ -174,15 +230,33 @@ def generate_launch_description():
     )
     
     # =========================================================================
-    # Zenoh Bridge（可选，用于跨组通信）
+    # Micro XRCE-DDS Agent（以太网模式 - 推荐）
+    # 飞控通过网线连接树莓派，使用 UDP 通信
+    # =========================================================================
+    micro_xrce_agent_ethernet = ExecuteProcess(
+        condition=IfCondition(use_ethernet),
+        cmd=[
+            'MicroXRCEAgent', 'udp4',
+            '-p', agent_port,
+            '-n', namespace,
+        ],
+        output='screen',
+        name='micro_xrce_agent'
+    )
+    
+    # =========================================================================
+    # Zenoh Bridge（Peer 模式 - 支持任意启动顺序）
     # =========================================================================
     zenoh_bridge = ExecuteProcess(
         condition=IfCondition(use_zenoh),
         cmd=[
             'zenoh-bridge-ros2dds',
+            '-l', 'tcp/0.0.0.0:7448',  # 监听端口（用于其他 USV 可能的连接）
+            '-e', ['tcp/', router_ip, ':7447'],  # 连接到地面站
             '-c', zenoh_config,
-            '-e', ['tcp/', router_ip, ':7447'],
             '-d', domain_id,
+            '--no-multicast-scouting',  # 禁用组播探测（跨网络不需要）
+            'peer',  # Peer 模式（位置参数，放在最后）
         ],
         output='screen',
         name='zenoh_bridge'
@@ -199,8 +273,8 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],
         remappings=[
-            # PX4 话题映射到命名空间
-            ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
+            # PX4 话题映射到命名空间 (注意：PX4 v1.15+ 使用 vehicle_status_v1)
+            ('/fmu/out/vehicle_status_v1', 'fmu/out/vehicle_status_v1'),
             ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
             ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
             ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
@@ -216,9 +290,12 @@ def generate_launch_description():
         output='screen',
         parameters=[param_file],
         remappings=[
-            ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
+            # 注意：PX4 v1.15+ 使用 vehicle_status_v1
+            ('/fmu/out/vehicle_status_v1', 'fmu/out/vehicle_status_v1'),
+            ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
             ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
             ('/fmu/in/offboard_control_mode', 'fmu/in/offboard_control_mode'),
+            ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
         ],
     )
     
@@ -233,10 +310,13 @@ def generate_launch_description():
             {'publish_rate': 5.0},  # 降低发布频率以减少带宽
         ],
         remappings=[
-            ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
+            # 注意：PX4 v1.15+ 使用 vehicle_status_v1
+            ('/fmu/out/vehicle_status_v1', 'fmu/out/vehicle_status_v1'),
             ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
             ('/fmu/out/battery_status', 'fmu/out/battery_status'),
             ('/fmu/out/vehicle_attitude', 'fmu/out/vehicle_attitude'),
+            # 失控保护标志（PX4 默认发布，包含预检信息）
+            ('/fmu/out/failsafe_flags', 'fmu/out/failsafe_flags'),
         ],
     )
     
@@ -269,15 +349,12 @@ def generate_launch_description():
         output='screen',
         parameters=[
             param_file,
-            {'mode': 'local'},  # 使用本地坐标直传模式
-            {'coordinate_system': 'ENU'},
+            {'coordinate_system': 'ENU'},  # 室内 UWB 使用 ENU 坐标系
         ],
         remappings=[
-            ('/fmu/out/vehicle_global_position', 'fmu/out/vehicle_global_position'),
             ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
             ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
             ('/fmu/in/offboard_control_mode', 'fmu/in/offboard_control_mode'),
-            ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
         ],
     )
     
@@ -293,16 +370,36 @@ def generate_launch_description():
         parameters=[
             param_file,
             {'set_delay_sec': 5.0},
-            {'use_current_gps': False},  # 使用固定坐标作为原点
-            {'wait_for_gps': False},     # 不等待 GPS（室内/UWB 场景）
+            # 室内 UWB 场景使用虚拟坐标
+            {'fixed_lat': 0.0},
+            {'fixed_lon': 0.0},
+            {'fixed_alt': 0.0},
         ],
         remappings=[
             ('/fmu/out/vehicle_status', 'fmu/out/vehicle_status'),
             ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
-            ('/fmu/out/vehicle_global_position', 'fmu/out/vehicle_global_position'),
-            ('/fmu/out/vehicle_gps_position', 'fmu/out/vehicle_gps_position'),
             ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
         ],
+    )
+    
+    # =========================================================================
+    # UWB 定位节点
+    # =========================================================================
+    usv_uwb_node = Node(
+        package='usv_drivers',
+        executable='usv_uwb_node',
+        name='usv_uwb_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[
+            {'uwb_port': uwb_port},
+            {'uwb_baudrate': 115200},
+            {'uwb_timeout': 1.0},
+        ],
+        remappings=[
+            ('/fmu/in/vehicle_visual_odometry', 'fmu/in/vehicle_visual_odometry'),
+        ],
+        condition=IfCondition(use_uwb),
     )
     
     # =========================================================================
@@ -317,6 +414,7 @@ def generate_launch_description():
             usv_avoidance_node,
             coord_transform_node,
             auto_set_home_node,
+            usv_uwb_node,
         ]
     )
     
@@ -330,16 +428,23 @@ def generate_launch_description():
         router_ip_arg,
         use_simulation_arg,
         simulation_port_arg,
+        use_ethernet_arg,
+        agent_port_arg,
+        use_uwb_arg,
+        uwb_port_arg,
         
         # 环境设置
         set_domain_id,
         
         # 启动信息
         startup_info,
+        ethernet_info,
+        serial_info,
         
-        # Agent
-        micro_xrce_agent_serial,
-        micro_xrce_agent_udp,
+        # Agent（三选一：以太网/串口/仿真）
+        micro_xrce_agent_ethernet,  # 以太网模式
+        micro_xrce_agent_serial,    # 串口模式
+        micro_xrce_agent_udp,       # 仿真模式
         
         # Zenoh Bridge
         zenoh_bridge,

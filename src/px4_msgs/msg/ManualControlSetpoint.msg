@@ -1,3 +1,5 @@
+uint32 MESSAGE_VERSION = 0
+
 uint64 timestamp                        # time since system start (microseconds)
 uint64 timestamp_sample                 # the timestamp of the raw data (microseconds)
 
@@ -36,6 +38,8 @@ float32 aux5
 float32 aux6
 
 bool sticks_moving
+
+uint16 buttons		# From uint16 buttons field of Mavlink manual_control message
 
 # TOPICS manual_control_setpoint manual_control_input
 # DEPRECATED: float32 x

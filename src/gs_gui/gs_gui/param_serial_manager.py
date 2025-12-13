@@ -5,20 +5,21 @@
 使用 pymavlink 库实现 MAVLink 协议通信。
 """
 
-import serial
+import logging
 import threading
 import time
-from typing import Dict, List, Optional, Callable
+from typing import Dict, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
-import queue
+
+_logger = logging.getLogger("gs_gui.param_serial")
 
 try:
     from pymavlink import mavutil
     PYMAVLINK_AVAILABLE = True
 except ImportError:
     PYMAVLINK_AVAILABLE = False
-    print("⚠️  pymavlink 未安装，参数功能需要安装：pip3 install pymavlink")
+    _logger.warning("pymavlink 未安装，参数功能需要安装：pip3 install pymavlink")
 
 from .param_metadata import get_param_metadata
 
@@ -108,7 +109,7 @@ class ParamSerialManager:
             )
             
             # 等待心跳包（超时 5 秒）
-            print(f"⏳ 等待飞控心跳包...")
+            _logger.info("等待飞控心跳包...")
             self.mavlink_conn.wait_heartbeat(timeout=5)
             
             # 设置目标系统
@@ -116,7 +117,7 @@ class ParamSerialManager:
             self.mavlink_conn.target_component = target_component
             
             self.connected = True
-            print(f"✅ 已连接到飞控 (System {target_system}.{target_component})")
+            _logger.info(f"已连接到飞控 (System {target_system}.{target_component})")
             
             # 启动心跳线程
             self._start_heartbeat_thread()
@@ -124,7 +125,7 @@ class ParamSerialManager:
             return True
             
         except Exception as e:
-            print(f"❌ 连接失败: {e}")
+            _logger.error(f"连接失败: {e}")
             self.connected = False
             return False
     
@@ -137,7 +138,7 @@ class ParamSerialManager:
             self.mavlink_conn = None
         
         self.connected = False
-        print("± 已断开飞控连接")
+        _logger.info("已断开飞控连接")
     
     def _start_heartbeat_thread(self):
         """启动心跳线程（保持连接活跃）"""
@@ -165,7 +166,7 @@ class ParamSerialManager:
                 )
                 time.sleep(1)
             except Exception as e:
-                print(f"⚠️  心跳发送失败: {e}")
+                _logger.warning(f"心跳发送失败: {e}")
                 break
     
     def fetch_all_params(self, progress_callback: Optional[Callable[[int, int, str], None]] = None) -> Dict[str, ParamInfo]:
@@ -185,7 +186,7 @@ class ParamSerialManager:
         params_dict = {}
         
         try:
-            print("📥 请求参数列表...")
+            _logger.info("请求参数列表...")
             
             # 发送 PARAM_REQUEST_LIST
             self.mavlink_conn.mav.param_request_list_send(
@@ -253,9 +254,9 @@ class ParamSerialManager:
             
             if len(received_params) < param_count:
                 missing = param_count - len(received_params)
-                print(f"⚠️  部分参数丢失 ({missing}/{param_count})")
+                _logger.warning(f"部分参数丢失 ({missing}/{param_count})")
             
-            print(f"✅ 成功接收 {len(params_dict)}/{param_count} 个参数")
+            _logger.info(f"成功接收 {len(params_dict)}/{param_count} 个参数")
             
             with self._lock:
                 self.params = params_dict
@@ -263,7 +264,7 @@ class ParamSerialManager:
             return params_dict
             
         except Exception as e:
-            print(f"❌ 获取参数失败: {e}")
+            _logger.error(f"获取参数失败: {e}")
             raise
         finally:
             self._progress_callback = None
@@ -313,7 +314,7 @@ class ParamSerialManager:
                     if received_name == param_name:
                         # 验证值是否正确
                         if abs(msg.param_value - param_value) < 1e-6:
-                            print(f"✅ 参数 {param_name} 已设置为 {param_value}")
+                            _logger.info(f"参数 {param_name} 已设置为 {param_value}")
                             
                             # 更新本地缓存
                             if param_name in self.params:
@@ -322,14 +323,14 @@ class ParamSerialManager:
                             
                             return True
                         else:
-                            print(f"⚠️  参数 {param_name} 设置后值不匹配: {msg.param_value} != {param_value}")
+                            _logger.warning(f"参数 {param_name} 设置后值不匹配: {msg.param_value} != {param_value}")
                             return False
             
-            print(f"❌ 参数 {param_name} 设置超时")
+            _logger.error(f"参数 {param_name} 设置超时")
             return False
             
         except Exception as e:
-            print(f"❌ 设置参数失败: {e}")
+            _logger.error(f"设置参数失败: {e}")
             return False
     
     def get_param(self, param_name: str) -> Optional[float]:
@@ -363,11 +364,11 @@ class ParamSerialManager:
                     if received_name == param_name:
                         return msg.param_value
             
-            print(f"⚠️  获取参数 {param_name} 超时")
+            _logger.warning(f"获取参数 {param_name} 超时")
             return None
             
         except Exception as e:
-            print(f"❌ 获取参数失败: {e}")
+            _logger.error(f"获取参数失败: {e}")
             return None
     
     def get_all_params(self) -> Dict[str, ParamInfo]:
@@ -400,7 +401,7 @@ class ParamSerialManager:
             if self.set_param(name, info.value):
                 success_count += 1
             else:
-                print(f"⚠️  保存参数 {name} 失败")
+                _logger.warning(f"保存参数 {name} 失败")
         
         return success_count
     
@@ -426,9 +427,9 @@ class ParamSerialManager:
                 0, 0, 0, 0, 0, 0
             )
             
-            print("🔄 已发送重启命令")
+            _logger.info("已发送重启命令")
             return True
             
         except Exception as e:
-            print(f"❌ 发送重启命令失败: {e}")
+            _logger.error(f"发送重启命令失败: {e}")
             return False
