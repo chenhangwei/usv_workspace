@@ -19,13 +19,14 @@ from std_msgs.msg import Bool
 # PX4 消息类型
 from px4_msgs.msg import (
     TrajectorySetpoint,
+    TrajectorySetpoint6dof,
     VehicleLocalPosition,
     VehicleStatus,
     OffboardControlMode,
 )
 
 # 自定义接口（地面站导航目标）
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, NavigationAck
 
 # 导入 common_utils 工具
 from common_utils import ParamLoader, ParamValidator
@@ -65,10 +66,30 @@ class UsvControlPx4Node(Node):
         self.declare_parameter('target_reach_threshold', 1.0)
         self.declare_parameter('max_velocity', 5.0)
         self.declare_parameter('coordinate_system', 'NED')  # NED 或 ENU
+
+        # 平台执行模式：
+        # - '3d'：允许姿态(roll/pitch/yaw)目标（是否真正下发给 PX4 由 use_setpoint_6dof 控制）
+        # - '2d'：忽略 roll/pitch，只保留位置 + yaw
+        self.declare_parameter('platform_mode', '3d')
+        # 是否发布 TrajectorySetpoint6dof（位置+quaternion）。默认关闭以保持现有行为。
+        self.declare_parameter('use_setpoint_6dof', False)
         
         self.target_reach_threshold = self.get_parameter('target_reach_threshold').value
         self.max_velocity = self.get_parameter('max_velocity').value
         self.coordinate_system = self.get_parameter('coordinate_system').value
+
+        self.platform_mode = str(self.get_parameter('platform_mode').value).strip().lower()
+        if self.platform_mode not in ('2d', '3d'):
+            self.get_logger().warn(
+                f"platform_mode='{self.platform_mode}' 非法，回退为 '3d'"
+            )
+            self.platform_mode = '3d'
+
+        raw_6dof = self.get_parameter('use_setpoint_6dof').value
+        if isinstance(raw_6dof, str):
+            self.use_setpoint_6dof = raw_6dof.strip().lower() in ('1', 'true', 'yes', 'y', 'on')
+        else:
+            self.use_setpoint_6dof = bool(raw_6dof)
 
         # =====================================================================
         # QoS 配置 - PX4 uXRCE-DDS 使用 BEST_EFFORT
@@ -97,6 +118,13 @@ class UsvControlPx4Node(Node):
         self.offboard_mode_pub = self.create_publisher(
             OffboardControlMode,
             'fmu/in/offboard_control_mode',
+            qos_px4
+        )
+
+        # 可选：6DoF setpoint（位置 + quaternion）
+        self.setpoint6dof_pub = self.create_publisher(
+            TrajectorySetpoint6dof,
+            'fmu/in/trajectory_setpoint6dof',
             qos_px4
         )
 
@@ -140,6 +168,13 @@ class UsvControlPx4Node(Node):
         self.nav_feedback_pub = self.create_publisher(
             NavigationFeedback,
             'navigation/feedback',
+            qos_reliable
+        )
+
+        # 导航应答发布器：收到/接受层（用于 GS 停止 step_timeout 重发）
+        self.nav_ack_pub = self.create_publisher(
+            NavigationAck,
+            'navigation/ack',
             qos_reliable
         )
         
@@ -210,11 +245,18 @@ class UsvControlPx4Node(Node):
         self.get_logger().info('PX4 uXRCE-DDS 控制节点已启动')
         self.get_logger().info(f'发布频率: {self.publish_rate} Hz')
         self.get_logger().info(f'坐标系: {self.coordinate_system}')
+        self.get_logger().info(f'平台模式: {self.platform_mode} (2d忽略roll/pitch)')
+        self.get_logger().info(f'6DoF setpoint: {"启用" if self.use_setpoint_6dof else "禁用"} (fmu/in/trajectory_setpoint6dof)')
         self.get_logger().info(f'目标到达阈值: {self.target_reach_threshold} m')
         self.get_logger().info('📤 发布话题: fmu/in/trajectory_setpoint')
+        if self.use_setpoint_6dof:
+            self.get_logger().info('📤 发布话题: fmu/in/trajectory_setpoint6dof')
         self.get_logger().info('📥 订阅话题: fmu/out/vehicle_local_position')
         self.get_logger().info('📥 订阅话题: navigation/goal (NavigationGoal)')
         self.get_logger().info('=' * 60)
+
+        # 只打印一次的提醒
+        self._warned_enu_rpy = False
 
     def local_position_callback(self, msg: VehicleLocalPosition):
         """
@@ -280,6 +322,27 @@ class UsvControlPx4Node(Node):
             f'🎯 收到导航目标 [ID={msg.goal_id}]: '
             f'({pos.x:.2f}, {pos.y:.2f}, {pos.z:.2f}), 超时={self.goal_timeout:.0f}s'
         )
+
+        # 立即发送“收到/接受”应答（与完成结果解耦）
+        try:
+            execute_mask = int(NavigationAck.EXECUTE_POS) | int(NavigationAck.EXECUTE_YAW)
+            if self.platform_mode == '3d' and self.use_setpoint_6dof:
+                execute_mask |= int(NavigationAck.EXECUTE_ROLL) | int(NavigationAck.EXECUTE_PITCH)
+
+            ack = NavigationAck()
+            ack.goal_id = int(msg.goal_id)
+            ack.accepted = True
+            ack.execute_mask = int(execute_mask)
+            if self.platform_mode == '2d':
+                ack.message = '2D 平台：执行位置+yaw，忽略 roll/pitch'
+            elif self.platform_mode == '3d' and not self.use_setpoint_6dof:
+                ack.message = '3D 平台：已收到目标；未启用 6DoF，下发 roll/pitch 将被忽略'
+            else:
+                ack.message = '已收到目标，开始执行'
+            ack.timestamp = self.get_clock().now().to_msg()
+            self.nav_ack_pub.publish(ack)
+        except Exception as e:
+            self.get_logger().warn(f'发布 navigation/ack 失败: {e}')
         
         # 发送初始反馈（距离待计算）
         distance = self._calculate_distance_to_target()
@@ -318,15 +381,102 @@ class UsvControlPx4Node(Node):
         """发送导航反馈"""
         if self.current_goal_id is None:
             return
+
+        heading_error_deg = 0.0
+        estimated_time = 0.0
+
+        # 计算航向误差（度）
+        # 优先：使用目标姿态里的 yaw（即 GS/任务下发的 yaw）
+        # 回退：使用“朝向目标点”的方位角
+        try:
+            if self.current_position is not None and self.target_position is not None:
+                cur_heading = float(self.current_position.heading)
+                if math.isfinite(cur_heading):
+                    target_yaw = None
+
+                    # 1) 尝试从目标四元数中取 yaw
+                    q = self.target_position.pose.orientation
+                    if any(math.isfinite(float(v)) for v in (q.x, q.y, q.z, q.w)):
+                        target_yaw = self._quaternion_to_yaw(q)
+                        # ENU -> NED yaw 转换（与 publish_setpoint 保持一致）
+                        if self.coordinate_system != 'NED':
+                            target_yaw = math.pi / 2.0 - target_yaw
+
+                    # 2) 若目标 yaw 不可用，回退到朝向目标点方位角
+                    if target_yaw is None or not math.isfinite(float(target_yaw)):
+                        target = self.target_position.pose.position
+                        dx = float(target.x) - float(self.current_position.x)  # North
+                        dy = float(target.y) - float(self.current_position.y)  # East
+                        if abs(dx) > 1e-6 or abs(dy) > 1e-6:
+                            target_yaw = math.atan2(dy, dx)
+                        else:
+                            target_yaw = cur_heading
+
+                    heading_error = float(target_yaw) - cur_heading
+                    heading_error = (heading_error + math.pi) % (2.0 * math.pi) - math.pi
+                    heading_error_deg = math.degrees(heading_error)
+
+                # 简单的 ETA 估算：距离 / 水平速度
+                if distance is not None and self.current_position is not None:
+                    vx = float(self.current_position.vx)
+                    vy = float(self.current_position.vy)
+                    if math.isfinite(vx) and math.isfinite(vy):
+                        speed = math.hypot(vx, vy)
+                        if speed > 0.1 and math.isfinite(float(distance)):
+                            estimated_time = float(distance) / speed
+        except Exception:
+            heading_error_deg = 0.0
+            estimated_time = 0.0
         
         feedback = NavigationFeedback()
         feedback.goal_id = self.current_goal_id
         feedback.distance_to_goal = distance
-        feedback.heading_error = 0.0  # TODO: 计算航向误差
-        feedback.estimated_time = 0.0  # TODO: 估算剩余时间
+        feedback.heading_error = float(heading_error_deg)
+        feedback.estimated_time = float(estimated_time)
         feedback.timestamp = self.get_clock().now().to_msg()
         
         self.nav_feedback_pub.publish(feedback)
+
+    def _quaternion_to_rpy(self, q):
+        """从四元数提取 roll/pitch/yaw（弧度）。"""
+        x = float(q.x)
+        y = float(q.y)
+        z = float(q.z)
+        w = float(q.w)
+
+        # roll (x-axis rotation)
+        sinr_cosp = 2.0 * (w * x + y * z)
+        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+        roll = math.atan2(sinr_cosp, cosr_cosp)
+
+        # pitch (y-axis rotation)
+        sinp = 2.0 * (w * y - z * x)
+        if abs(sinp) >= 1.0:
+            pitch = math.copysign(math.pi / 2.0, sinp)
+        else:
+            pitch = math.asin(sinp)
+
+        # yaw (z-axis rotation)
+        siny_cosp = 2.0 * (w * z + x * y)
+        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+        yaw = math.atan2(siny_cosp, cosy_cosp)
+
+        return roll, pitch, yaw
+
+    def _rpy_to_quaternion(self, roll: float, pitch: float, yaw: float):
+        """从 roll/pitch/yaw 生成四元数 (x,y,z,w)。"""
+        cr = math.cos(roll * 0.5)
+        sr = math.sin(roll * 0.5)
+        cp = math.cos(pitch * 0.5)
+        sp = math.sin(pitch * 0.5)
+        cy = math.cos(yaw * 0.5)
+        sy = math.sin(yaw * 0.5)
+
+        w = cr * cp * cy + sr * sp * sy
+        x = sr * cp * cy - cr * sp * sy
+        y = cr * sp * cy + sr * cp * sy
+        z = cr * cp * sy - sr * sp * cy
+        return x, y, z, w
 
     def _send_nav_result(self, success: bool, message: str):
         """发送导航结果"""
@@ -456,14 +606,32 @@ class UsvControlPx4Node(Node):
         setpoint.acceleration[1] = float('nan')
         setpoint.acceleration[2] = float('nan')
         
-        # 从四元数计算偏航角
-        yaw = self._quaternion_to_yaw(target.pose.orientation)
+        # 从四元数计算目标姿态（roll/pitch/yaw）
+        # 说明：
+        # - 2D 平台：忽略 roll/pitch，仅保留 yaw
+        # - 3D 平台：允许 roll/pitch/yaw（是否下发 6DoF 由 use_setpoint_6dof 控制）
+        try:
+            roll, pitch, yaw = self._quaternion_to_rpy(target.pose.orientation)
+        except Exception:
+            roll, pitch, yaw = 0.0, 0.0, self._quaternion_to_yaw(target.pose.orientation)
+
+        if self.platform_mode == '2d':
+            roll = 0.0
+            pitch = 0.0
         
         # ENU 到 NED 偏航角转换
         if self.coordinate_system != 'NED':
             # ENU yaw: 0 = East, 增加逆时针
             # NED yaw: 0 = North, 增加顺时针
             yaw = math.pi / 2.0 - yaw
+
+            # roll/pitch 的 ENU->NED 映射在不同约定下容易出错；这里不做隐式转换。
+            # 如需要在 ENU 输入下执行 3D roll/pitch，请在边界层统一坐标系约定。
+            if (not self._warned_enu_rpy) and self.platform_mode == '3d' and self.use_setpoint_6dof:
+                self.get_logger().warn(
+                    'platform_mode=3d 且 use_setpoint_6dof=true，但 coordinate_system=ENU：当前实现仅转换 yaw，未转换 roll/pitch。'
+                )
+                self._warned_enu_rpy = True
         
         setpoint.yaw = yaw
         setpoint.yawspeed = float('nan')  # 使用偏航角控制
@@ -471,6 +639,39 @@ class UsvControlPx4Node(Node):
         setpoint.timestamp = int(self.get_clock().now().nanoseconds / 1000)
         
         self.setpoint_pub.publish(setpoint)
+
+        # =====================================================================
+        # 可选：发布 6DoF setpoint（位置 + quaternion）
+        # =====================================================================
+        if self.use_setpoint_6dof and self.platform_mode == '3d':
+            sp6 = TrajectorySetpoint6dof()
+            sp6.timestamp = int(self.get_clock().now().nanoseconds / 1000)
+
+            sp6.position[0] = setpoint.position[0]
+            sp6.position[1] = setpoint.position[1]
+            sp6.position[2] = setpoint.position[2]
+
+            # 其余量设为 NaN（由 PX4/控制器选择性使用）
+            sp6.velocity[0] = float('nan')
+            sp6.velocity[1] = float('nan')
+            sp6.velocity[2] = float('nan')
+            sp6.acceleration[0] = float('nan')
+            sp6.acceleration[1] = float('nan')
+            sp6.acceleration[2] = float('nan')
+            sp6.jerk[0] = float('nan')
+            sp6.jerk[1] = float('nan')
+            sp6.jerk[2] = float('nan')
+            sp6.angular_velocity[0] = float('nan')
+            sp6.angular_velocity[1] = float('nan')
+            sp6.angular_velocity[2] = float('nan')
+
+            qx, qy, qz, qw = self._rpy_to_quaternion(float(roll), float(pitch), float(yaw))
+            sp6.quaternion[0] = qx
+            sp6.quaternion[1] = qy
+            sp6.quaternion[2] = qz
+            sp6.quaternion[3] = qw
+
+            self.setpoint6dof_pub.publish(sp6)
 
     def _quaternion_to_yaw(self, q) -> float:
         """

@@ -84,6 +84,8 @@ class ClusterTaskManager:
                             pos_x_elem = usv.find("position/x")
                             pos_y_elem = usv.find("position/y")
                             pos_z_elem = usv.find("position/z")
+                            roll_elem = usv.find("roll/value")
+                            pitch_elem = usv.find("pitch/value")
                             yaw_elem = usv.find("yaw/value")
                             velocity_elem = usv.find("velocity/value")
 
@@ -94,6 +96,8 @@ class ClusterTaskManager:
                                     "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
                                     "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
                                 },
+                                "roll": float(roll_elem.text) if roll_elem is not None and roll_elem.text is not None else 0.0,
+                                "pitch": float(pitch_elem.text) if pitch_elem is not None and pitch_elem.text is not None else 0.0,
                                 "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
                                 "step": step_number

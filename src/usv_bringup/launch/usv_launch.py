@@ -110,6 +110,21 @@ def generate_launch_description():
         default_value='/dev/serial/by-id/usb-1a86_USB_Single_Serial_5787006321-if00',
         description='UWB 串口路径'
     )
+
+    # =========================================================================
+    # 平台模式/姿态控制参数（2D/3D）
+    # =========================================================================
+    platform_mode_arg = DeclareLaunchArgument(
+        'platform_mode',
+        default_value='3d',
+        description="平台模式：'3d'（无人球/仿生鱼）或 '2d'（差速车/无人鸭）。2d 将忽略 roll/pitch，仅保留位置+yaw"
+    )
+
+    use_setpoint_6dof_arg = DeclareLaunchArgument(
+        'use_setpoint_6dof',
+        default_value='false',
+        description='是否发布 fmu/in/trajectory_setpoint6dof（位置+姿态四元数）。默认 false 以保持现有行为'
+    )
     
     # 获取参数
     namespace = LaunchConfiguration('namespace')
@@ -124,6 +139,8 @@ def generate_launch_description():
     agent_port = LaunchConfiguration('agent_port')
     use_uwb = LaunchConfiguration('use_uwb')
     uwb_port = LaunchConfiguration('uwb_port')
+    platform_mode = LaunchConfiguration('platform_mode')
+    use_setpoint_6dof = LaunchConfiguration('use_setpoint_6dof')
     
     # =========================================================================
     # 分组 Domain ID 映射
@@ -168,6 +185,8 @@ def generate_launch_description():
             '命名空间: ', namespace, '\n',
             '分组: ', group_id, '\n',
             'Domain ID: ', domain_id, '\n',
+            '平台模式: ', platform_mode, '\n',
+            '6DoF setpoint: ', use_setpoint_6dof, '\n',
             '=' * 60,
         ]
     )
@@ -271,12 +290,19 @@ def generate_launch_description():
         name='usv_control_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file],
+        parameters=[
+            param_file,
+            {
+                'platform_mode': platform_mode,
+                'use_setpoint_6dof': use_setpoint_6dof,
+            },
+        ],
         remappings=[
             # PX4 话题映射到命名空间 (注意：PX4 v1.15+ 使用 vehicle_status_v1)
             ('/fmu/out/vehicle_status_v1', 'fmu/out/vehicle_status_v1'),
             ('/fmu/out/vehicle_local_position', 'fmu/out/vehicle_local_position'),
             ('/fmu/in/trajectory_setpoint', 'fmu/in/trajectory_setpoint'),
+            ('/fmu/in/trajectory_setpoint6dof', 'fmu/in/trajectory_setpoint6dof'),
             ('/fmu/in/vehicle_command', 'fmu/in/vehicle_command'),
             ('/fmu/in/offboard_control_mode', 'fmu/in/offboard_control_mode'),
         ],
@@ -432,6 +458,8 @@ def generate_launch_description():
         agent_port_arg,
         use_uwb_arg,
         uwb_port_arg,
+        platform_mode_arg,
+        use_setpoint_6dof_arg,
         
         # 环境设置
         set_domain_id,

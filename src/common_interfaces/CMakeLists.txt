@@ -20,6 +20,7 @@ rosidl_generate_interfaces(
   "msg/UsvStatus.msg"
   "msg/UsvSetPoint.msg"
   "msg/NavigationGoal.msg"
+  "msg/NavigationAck.msg"
   "msg/NavigationFeedback.msg"
   "msg/NavigationResult.msg"
   "msg/ClusterStatus.msg"

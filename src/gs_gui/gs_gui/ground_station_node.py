@@ -421,7 +421,7 @@ class GroundStationNode(Node):
 
     # ==================== 基于话题的导航方法 ====================
     
-    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
+    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0, roll=0.0, pitch=0.0):
         """
         通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
         
@@ -437,6 +437,8 @@ class GroundStationNode(Node):
             z (float): 目标点Z坐标
             yaw (float): 目标偏航角(弧度)
             timeout (float): 超时时间(秒)
+            roll (float): 目标翻滚角(弧度)
+            pitch (float): 目标俯仰角(弧度)
         
         Returns:
             bool: 发送是否成功
@@ -476,9 +478,9 @@ class GroundStationNode(Node):
         goal_msg.target_pose.pose.position.y = float(y)
         goal_msg.target_pose.pose.position.z = float(z)
         
-        # 设置航向 (Quaternion)
+        # 设置姿态 (Quaternion)
         from tf_transformations import quaternion_from_euler
-        q = quaternion_from_euler(0, 0, yaw)
+        q = quaternion_from_euler(float(roll), float(pitch), float(yaw))
         goal_msg.target_pose.pose.orientation.x = q[0]
         goal_msg.target_pose.pose.orientation.y = q[1]
         goal_msg.target_pose.pose.orientation.z = q[2]
@@ -595,6 +597,22 @@ class GroundStationNode(Node):
         # 清理映射
         if msg.goal_id in self._goal_to_usv:
             del self._goal_to_usv[msg.goal_id]
+
+    def navigation_ack_callback(self, msg, usv_id):
+        """导航应答回调（收到/接受层，用于停止 step_timeout 重发）。"""
+        cached = self._usv_nav_target_cache.get(usv_id)
+        if cached and cached.get('goal_id') != msg.goal_id:
+            return
+
+        if cached is not None:
+            cached['execute_mask'] = int(getattr(msg, 'execute_mask', 0))
+            cached['ack_message'] = str(getattr(msg, 'message', ''))
+
+        goal_step = cached.get('step') if cached else None
+        try:
+            self.cluster_controller.mark_usv_goal_ack(usv_id, bool(msg.accepted), goal_step)
+        except Exception as e:
+            self.get_logger().warning(f"处理 navigation/ack 失败: {e}")
 
     # 设置离群目标点回调
     def set_departed_target_point_callback(self, msg):

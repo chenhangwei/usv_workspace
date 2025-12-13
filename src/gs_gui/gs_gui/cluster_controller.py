@@ -15,6 +15,9 @@ class AckState:
     """跟踪单艘 USV 在当前集群步骤下的确认状态。"""
 
     step: int
+    # received/accepted 层：仅表示 USV 已收到并接受目标，用于停止 step_timeout 重发。
+    received: bool = False
+    received_time: Optional[float] = None
     acked: bool = False
     last_send_time: Optional[float] = None
     retry: int = 0
@@ -391,8 +394,9 @@ class ClusterController:
                 # - 这个超时用于检测USV是否在线/是否收到目标
                 # - 如果超时，会重试发送（最多max_retries次，默认3次）
                 # - 注意：这不是导航完成的超时！导航可以用300秒（cluster_action_timeout）
-                # 只有在发送目标后才进行超时检查
-                if last_send_time is not None:
+                # 只有在发送目标后才进行超时检查。
+                # 修正语义：step_timeout 仅用于“是否收到目标”的检测；收到 navigation/ack 后停止该层重发。
+                if (not state.received) and last_send_time is not None:
                     elapsed = now - last_send_time
                     if elapsed > self.node._step_timeout:
                         self._handle_usv_timeout(usv_id, ns)
@@ -435,14 +439,20 @@ class ClusterController:
             if not all(k in pos for k in ('x', 'y')):
                 self.node.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                 return
-            # 支持z坐标,yaw设为0让ArduPilot自动调整航向
+            # 支持 z 坐标与姿态（roll/pitch/yaw）。
+            # 说明：是否真正执行 roll/pitch 由 USV 端 platform_mode 决定（2D 忽略，3D 可选执行）。
+            roll = float(ns.get('roll', 0.0))
+            pitch = float(ns.get('pitch', 0.0))
+            yaw = float(ns.get('yaw', 0.0))
             self.node.send_nav_goal_via_topic(
                 usv_id,
                 pos.get('x', 0.0),
                 pos.get('y', 0.0),
                 pos.get('z', 0.0),
-                0.0,  # 不设置航向要求
+                yaw,
                 self._action_timeout,
+                roll=roll,
+                pitch=pitch,
             )
         else:
             # 达到最大重试次数，但不应标记为"已确认"
@@ -722,6 +732,10 @@ class ClusterController:
             # 将 area-relative 转为全局，再转换为 usv 本地坐标（以 usv 启动点为0,0,0）
             p_global = self._area_to_global(pos)
             p_local = self._global_to_usv_local(usv_id, p_global)
+
+            roll = float(ns.get('roll', 0.0))
+            pitch = float(ns.get('pitch', 0.0))
+            yaw = float(ns.get('yaw', 0.0))
             
             # 精简日志：集群控制器发送目标点
             self.node.get_logger().info(
@@ -734,8 +748,10 @@ class ClusterController:
                 p_local.get('x', 0.0),
                 p_local.get('y', 0.0),
                 p_local.get('z', 0.0),
-                0.0,  # 不设置航向要求
+                yaw,
                 self._action_timeout,
+                roll=roll,
+                pitch=pitch,
             )
 
     # 从USV目标列表中筛选出指定步骤(step)的USV目标
@@ -810,5 +826,24 @@ class ClusterController:
             state.last_send_time = self._now()
             self.node.get_logger().warning(f"❌ {usv_id} 导航失败，保持未确认状态")
             self._emit_current_progress()
+
+    def mark_usv_goal_ack(self, usv_id: str, accepted: bool, goal_step: Optional[int] = None) -> None:
+        """根据 navigation/ack 更新指定 USV 的 received 状态（用于停止 step_timeout 级别的重发）。"""
+        state = self._ack_states.get(usv_id)
+        if state is None:
+            return
+
+        expected_step = goal_step if goal_step is not None else self.node.run_step
+        if state.step != expected_step and state.step != expected_step - 1:
+            return
+
+        if accepted:
+            if not state.received:
+                state.received = True
+                state.received_time = self._now()
+        else:
+            # 未接受：保持 received=False 以便继续重发
+            state.received = False
+            state.received_time = None
 
 

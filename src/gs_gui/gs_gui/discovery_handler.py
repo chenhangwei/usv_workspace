@@ -11,6 +11,9 @@ from rcl_interfaces.msg import Log
 from common_interfaces.msg import UsvStatus
 from common_utils import ThreadSafeDict
 
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from common_interfaces.msg import NavigationFeedback, NavigationResult, NavigationAck
+
 
 class DiscoveryHandler:
     """USV 发现处理器类"""
@@ -45,6 +48,11 @@ class DiscoveryHandler:
         
         # usv_state 订阅列表（用于更新在线状态）
         self._usv_state_subs = []
+
+        # 导航话题订阅（每艇一组）
+        self._nav_feedback_subs = {}
+        self._nav_result_subs = {}
+        self._nav_ack_subs = {}
         
         # 预探测订阅列表（用于触发 Zenoh 桥接）
         self._probe_subs = []
@@ -197,6 +205,9 @@ class DiscoveryHandler:
             
             # 订阅该 USV 的 usv_state（通过 Zenoh 桥接的远程 USV）
             self._subscribe_usv_state(usv_id)
+
+            # 订阅导航反馈/结果/应答（用于任务推进与停止 step_timeout 重发）
+            self._subscribe_navigation_topics(usv_id)
             
             self.logger.info(f"✓ {usv_id} 注册完成（动态发现）")
             
@@ -234,6 +245,43 @@ class DiscoveryHandler:
             10
         )
         self._usv_state_subs.append(sub)
+
+    def _subscribe_navigation_topics(self, usv_id: str) -> None:
+        """订阅 USV 的导航话题：feedback/result/ack。"""
+        try:
+            qos = getattr(self.node, 'qos_a', None)
+            if qos is None:
+                qos = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
+
+            feedback_topic = f"/{usv_id}/navigation/feedback"
+            result_topic = f"/{usv_id}/navigation/result"
+            ack_topic = f"/{usv_id}/navigation/ack"
+
+            if usv_id not in self._nav_feedback_subs:
+                self._nav_feedback_subs[usv_id] = self.node.create_subscription(
+                    NavigationFeedback,
+                    feedback_topic,
+                    lambda msg, uid=usv_id: self.node.navigation_feedback_callback(msg, uid),
+                    qos,
+                )
+            if usv_id not in self._nav_result_subs:
+                self._nav_result_subs[usv_id] = self.node.create_subscription(
+                    NavigationResult,
+                    result_topic,
+                    lambda msg, uid=usv_id: self.node.navigation_result_callback(msg, uid),
+                    qos,
+                )
+            if usv_id not in self._nav_ack_subs:
+                self._nav_ack_subs[usv_id] = self.node.create_subscription(
+                    NavigationAck,
+                    ack_topic,
+                    lambda msg, uid=usv_id: self.node.navigation_ack_callback(msg, uid),
+                    qos,
+                )
+
+            self.logger.info(f"  ├─ 订阅导航话题: {feedback_topic}, {result_topic}, {ack_topic}")
+        except Exception as e:
+            self.logger.warning(f"订阅 {usv_id} 导航话题失败: {e}")
     
     def _usv_state_callback(self, msg: UsvStatus, usv_id: str):
         """处理 USV usv_state 消息，更新在线状态和状态信息"""
@@ -368,6 +416,20 @@ class DiscoveryHandler:
                 return
             
             self._discovered_usv_list.remove(usv_id)
+
+            # 销毁导航订阅（避免重复回调）
+            try:
+                sub = self._nav_feedback_subs.pop(usv_id, None)
+                if sub is not None:
+                    self.node.destroy_subscription(sub)
+                sub = self._nav_result_subs.pop(usv_id, None)
+                if sub is not None:
+                    self.node.destroy_subscription(sub)
+                sub = self._nav_ack_subs.pop(usv_id, None)
+                if sub is not None:
+                    self.node.destroy_subscription(sub)
+            except Exception:
+                pass
             
             # 从状态中移除
             if usv_id in self._usv_states:
