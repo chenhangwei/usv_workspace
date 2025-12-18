@@ -226,6 +226,7 @@ class UsvManager:
         self.navigation_goal_pubs: Dict[str, Any] = {}
         self.clear_target_pubs: Dict[str, Any] = {}  # 清除目标点发布器
         self.nav_goal_pubs: Dict[str, Any] = self.navigation_goal_pubs  # 别名兼容
+        self.attitude_cmd_pubs: Dict[str, Any] = {}  # 姿态动作指令发布器（单向）
         
         # 回调函数
         self._on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None
@@ -361,7 +362,7 @@ class UsvManager:
     
     def _create_command_publishers(self, usv_id: str, prefix: str):
         """创建命令发布器"""
-        from common_interfaces.msg import NavigationGoal
+        from common_interfaces.msg import NavigationGoal, AttitudeCommand
         from std_msgs.msg import Bool
         
         self._mode_pubs[usv_id] = self.node.create_publisher(
@@ -385,6 +386,12 @@ class UsvManager:
         self.clear_target_pubs[usv_id] = self.node.create_publisher(
             Bool,
             f'{prefix}/navigation/clear_target',
+            self.qos_reliable
+        )
+
+        self.attitude_cmd_pubs[usv_id] = self.node.create_publisher(
+            AttitudeCommand,
+            f'{prefix}/attitude/command',
             self.qos_reliable
         )
 
@@ -427,6 +434,8 @@ class UsvManager:
             self.node.destroy_publisher(self.navigation_goal_pubs.pop(usv_id))
         if usv_id in self.clear_target_pubs:
             self.node.destroy_publisher(self.clear_target_pubs.pop(usv_id))
+        if usv_id in self.attitude_cmd_pubs:
+            self.node.destroy_publisher(self.attitude_cmd_pubs.pop(usv_id))
         
         # 移除状态
         del self._usv_status[usv_id]

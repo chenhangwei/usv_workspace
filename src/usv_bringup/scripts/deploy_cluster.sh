@@ -143,6 +143,26 @@ check_usv() {
     fi
     
     IFS=':' read -r usv_ip _ _ <<< "$config"
+
+    # 检查本机与远端时钟偏差（Zenoh 对“未来时间戳”容忍通常只有 ~500ms，偏差大会导致桥接日志刷屏/潜在丢包）
+    # 说明：这里用毫秒时间戳粗略估算；网络抖动会带来少量误差，但对“秒级偏差”很敏感。
+    local local_now_ms
+    local remote_now_ms
+    local skew_ms
+    local abs_skew_ms
+    local_now_ms=$(date +%s%3N)
+    remote_now_ms=$(ssh -o ConnectTimeout=5 ${SSH_USER}@${usv_ip} "date +%s%3N" 2>/dev/null || echo "")
+    if [ -n "$remote_now_ms" ]; then
+        skew_ms=$((remote_now_ms - local_now_ms))
+        abs_skew_ms=${skew_ms#-}
+        if [ "$abs_skew_ms" -gt 500 ]; then
+            echo "[!] $usv_id 时钟偏差约 ${abs_skew_ms}ms（建议启用 NTP/chrony 同步，否则可能出现 zenoh timestamp delta 500ms 报错）"
+        else
+            echo "[✓] $usv_id 时钟偏差约 ${abs_skew_ms}ms"
+        fi
+    else
+        echo "[!] $usv_id 无法获取远端时间（跳过时钟偏差检查）"
+    fi
     
     # 检查网络连通性
     if ping -c 1 -W 1 ${usv_ip} > /dev/null 2>&1; then

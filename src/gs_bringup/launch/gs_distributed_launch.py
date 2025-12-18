@@ -73,9 +73,29 @@ def create_ssh_launch_command(usv_config):
     username = usv_config['username']
     workspace = usv_config['workspace']
     namespace = usv_config['namespace']
-    fcu_url = usv_config['fcu_url']
-    system_id = usv_config['system_id']
-    gcs_url = usv_config.get('gcs_url', '')
+    fcu_url = str(usv_config.get('fcu_url', '') or '')
+    platform_mode = str(usv_config.get('platform_mode', '3d')).strip().lower() or '3d'
+
+    # 从 fcu_url 推导串口参数（仅支持 serial:///dev/xxx:baudrate 形式；否则保持 usv_launch.py 默认值）
+    use_ethernet_arg = None
+    serial_port_arg = None
+    baudrate_arg = None
+    if fcu_url.startswith('serial://'):
+        try:
+            # serial:///dev/ttyACM0:921600
+            raw = fcu_url[len('serial://'):]
+            if raw.startswith('/'):
+                raw = raw[1:]  # 去掉多余的一个 '/'
+            # raw 现在形如 '/dev/ttyACM0:921600' 或 'dev/ttyACM0:921600'
+            if ':' in raw:
+                port, baud = raw.rsplit(':', 1)
+                if not port.startswith('/'):
+                    port = '/' + port
+                serial_port_arg = port
+                baudrate_arg = baud
+                use_ethernet_arg = 'false'
+        except Exception:
+            pass
     
     # 构造远程执行的命令
     # 1. Source ROS 2 环境
@@ -89,13 +109,15 @@ def create_ssh_launch_command(usv_config):
         f"source {workspace}/install/setup.bash; "
         f"ros2 launch usv_bringup usv_launch.py "
         f"namespace:={namespace} "
-        f"fcu_url:={fcu_url} "
-        f"tgt_system:={system_id}"
+        f"platform_mode:={platform_mode}"
     )
-    
-    # 如果配置了地面站通信地址，添加参数
-    if gcs_url:
-        remote_cmd += f" gcs_url:={gcs_url}"
+
+    if use_ethernet_arg is not None:
+        remote_cmd += f" use_ethernet:={use_ethernet_arg}"
+    if serial_port_arg is not None:
+        remote_cmd += f" serial_port:={serial_port_arg}"
+    if baudrate_arg is not None:
+        remote_cmd += f" baudrate:={baudrate_arg}"
     
     # 关闭引号
     remote_cmd += "'"

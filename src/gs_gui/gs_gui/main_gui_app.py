@@ -16,7 +16,9 @@ _logger = logging.getLogger("gs_gui.main")
 import rclpy
 from rclpy.parameter import Parameter
 from PyQt5.QtCore import QProcess, QTimer, Qt
-from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QAbstractItemView, 
+                             QMessageBox, QAction, QDialog, QPushButton, 
+                             QHBoxLayout, QSpacerItem, QSizePolicy)
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
@@ -101,6 +103,9 @@ class MainWindow(QMainWindow):
         
         # 初始化 USV 导航面板（插入到 USV Details 和 Message 之间）
         self._init_usv_navigation_panel()
+        
+        # 初始化消息栏清除按钮
+        self._init_message_clear_buttons()
         
         # 初始化表格管理器
         self.table_manager = TableManager(
@@ -323,6 +328,70 @@ class MainWindow(QMainWindow):
         main_splitter.setStretchFactor(0, 3)  # USV Details
         main_splitter.setStretchFactor(1, 2)  # Navigation
         main_splitter.setStretchFactor(2, 3)  # Message
+
+    def _init_message_clear_buttons(self):
+        """为消息栏的每个窗口添加清除按钮"""
+        try:
+            # 1. 集群导航反馈窗口 (groupBox_8)
+            if hasattr(self.ui, 'verticalLayout_12') and hasattr(self.ui, 'cluster_navigation_feedback_info_textEdit'):
+                self._add_clear_button_to_layout(
+                    self.ui.verticalLayout_12, 
+                    self.ui.cluster_navigation_feedback_info_textEdit.clear,
+                    "清除"
+                )
+            
+            # 2. 信息窗口 (groupBox_9)
+            if hasattr(self.ui, 'verticalLayout_8') and hasattr(self.ui, 'info_textEdit'):
+                self._add_clear_button_to_layout(
+                    self.ui.verticalLayout_8, 
+                    self.ui_utils.clear_info,
+                    "清除"
+                )
+            
+            # 3. 警告窗口 (groupBox_10)
+            if hasattr(self.ui, 'verticalLayout_9') and hasattr(self.ui, 'warning_textEdit'):
+                self._add_clear_button_to_layout(
+                    self.ui.verticalLayout_9, 
+                    self.ui_utils.clear_warning,
+                    "清除"
+                )
+        except Exception as e:
+            _logger.warning(f"初始化清除按钮失败: {e}")
+
+    def _add_clear_button_to_layout(self, layout, clear_callback, button_text="清除"):
+        """辅助方法：在布局顶部添加清除按钮"""
+        btn_layout = QHBoxLayout()
+        btn_layout.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        
+        clear_btn = QPushButton(button_text)
+        clear_btn.setFixedWidth(100)
+        clear_btn.setFixedHeight(20)
+        # 设置较小的字体
+        font = clear_btn.font()
+        font.setPointSize(9)
+        clear_btn.setFont(font)
+        
+        # 样式美化（可选，使其更像一个功能按钮）
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #444;
+                color: #eee;
+                border: 1px solid #666;
+                border-radius: 2px;
+            }
+            QPushButton:hover {
+                background-color: #555;
+            }
+            QPushButton:pressed {
+                background-color: #333;
+            }
+        """)
+        
+        clear_btn.clicked.connect(clear_callback)
+        btn_layout.addWidget(clear_btn)
+        
+        # 插入到布局的最顶端
+        layout.insertLayout(0, btn_layout)
     
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):

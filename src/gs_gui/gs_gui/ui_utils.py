@@ -67,6 +67,21 @@ class UIUtils:
         except Exception:
             pass
     
+    def clear_info(self):
+        """清除信息文本框和缓冲"""
+        try:
+            self._info_buffer.clear()
+            self.ui.info_textEdit.clear()
+        except Exception:
+            pass
+
+    def clear_warning(self):
+        """清除警告文本框"""
+        try:
+            self.ui.warning_textEdit.clear()
+        except Exception:
+            pass
+    
     def _flush_info_buffer(self):
         """定时器回调：把缓冲中的若干行追加到 info_textEdit"""
         try:

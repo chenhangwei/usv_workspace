@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <cluster type="triangle">
+    <!--
+      单位约定：
+        - yaw / roll / pitch 均为弧度(rad)
+        - position 为米(m)
+
+      语义约定（与当前代码一致）：
+        - yaw：随 navigation/goal 下发（带 feedback/result 完成度）
+        - roll/pitch：解释为 attitude/command 的“姿态动作”（单向下发，不做完成度反馈）
+        - 姿态动作持续时长由 GS 参数 attitude_command_duration 控制（默认 1.0s）
+
+      velocity：当前仅被解析但不会影响 PX4 setpoint（可保留作未来扩展，不填写也不影响）。
+    -->
     <step number="1">
         <usvs>
             <usv>
@@ -7,9 +19,16 @@
                 <position>
                     <x>1.4</x>
                     <y>6.1</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
-                    <value>0.5</value>
+                    <value>0</value>
                 </yaw>
                 <velocity>
                     <value>0.5</value>
@@ -20,7 +39,14 @@
                 <position>
                     <x>1.0</x>
                     <y>6.4</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -33,7 +59,14 @@
                 <position>
                     <x>0.9</x>
                     <y>5.9</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -50,7 +83,14 @@
                 <position>
                     <x>2.6</x>
                     <y>0.8</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -63,7 +103,14 @@
                 <position>
                     <x>2.9</x>
                     <y>1.4</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -76,7 +123,14 @@
                 <position>
                     <x>2.8</x>
                     <y>1.8</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>

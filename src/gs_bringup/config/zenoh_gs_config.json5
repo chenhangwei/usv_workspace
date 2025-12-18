@@ -11,14 +11,12 @@
     ]
   },
   
-  // 时间戳配置 - 增加容差以避免网络延迟导致的时间戳拒绝
+  // 时间戳配置
+  // 说明：日志中的 "incoming timestamp ... exceeding delta 500ms" 本质是跨机时钟偏差导致。
+  // 注意：zenoh-bridge-ros2dds v1.7.0 实测会强制启用 timestamping（配置项可能不生效）。
+  // 根因修复仍应通过 NTP/chrony 做时钟同步。
   "timestamping": {
-    "enabled": {
-      "router": true,
-      "peer": true,
-      "client": true
-    },
-    // 将时间戳容差从默认 500ms 增加到 2000ms
+    "enabled": false,
     "drop_future_timestamp": false
   },
   

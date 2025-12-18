@@ -40,6 +40,14 @@
 - PX4 uXRCE-DDS 话题：**BEST_EFFORT**（与 PX4 匹配）。
 - GS⇄USV 的导航/控制话题：默认 **RELIABLE**，避免丢包导致 step 推进异常。
 
+### 2.4 时钟同步（Zenoh 必需）
+- 在使用 Zenoh bridge 跨机/跨网时，GS 与所有 USV **必须进行系统时钟同步**（建议 NTP/chrony）。
+- 若看到类似日志：`incoming timestamp ... exceeding delta 500ms is rejected`，通常表示 **远端机器时间比本机“快”超过 ~500ms**。
+  - Zenoh 可能会对样本“重打时间戳”，但会持续刷 ERROR，并可能在高负载/抖动时引入额外问题。
+- 建议运维动作（按现场网络条件二选一）：
+  - 有外网：所有机器启用系统 NTP（如 `timedatectl set-ntp true`）。
+  - 无外网：以 GS 为局域网 NTP 服务器（chrony），USV 指向 GS，同步到同一时间源。
+
 ## 3. 任务模型与行为需求
 
 ### 3.1 任务输入（XML）

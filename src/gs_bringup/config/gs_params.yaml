@@ -10,6 +10,14 @@ main_gui_app:
     min_ack_rate_for_proceed: 0.8 # 继续下一步所需的最小确认率 (0.0-1.0)
     offline_grace_period: 5.0     # USV离线宽限期（秒），超时后从GUI移除
 
+    # ==================== 导航到达判定阈值（按平台模式下发） ====================
+    # 说明：这些阈值会被写入 NavigationGoal.reach_xy_threshold/reach_z_threshold。
+    # 约定：<=0 表示“不指定”，由 USV 端使用本地默认参数。
+    nav_reach_xy_threshold_2d: 1.0
+    nav_reach_z_threshold_2d: 0.0
+    nav_reach_xy_threshold_3d: 1.0
+    nav_reach_z_threshold_3d: 1.0
+
     # ==================== 注意 ====================
     # target_reach_threshold 和 distance_mode 参数已移除
     # 这些参数应在 USV 端的 usv_params.yaml 中配置

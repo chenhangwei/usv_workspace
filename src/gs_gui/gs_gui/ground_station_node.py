@@ -72,6 +72,15 @@ class GroundStationNode(Node):
         self.declare_parameter('offline_grace_period', 5.0)
         self.declare_parameter('ack_resend_interval', 2.0)
         self.declare_parameter('cluster_action_timeout', 300.0)
+        # 集群任务中 roll/pitch 的姿态动作下发时长（秒）；>0 表示持续秒数
+        self.declare_parameter('attitude_command_duration', 1.0)
+        # 方案A：先导航，再在接近目标时触发一次姿态动作（米）
+        self.declare_parameter('attitude_trigger_distance', 1.0)
+        # 导航到达判定阈值（按平台模式 2d/3d）
+        self.declare_parameter('nav_reach_xy_threshold_2d', 1.0)
+        self.declare_parameter('nav_reach_z_threshold_2d', 0.0)  # 2D 默认不需要 Z
+        self.declare_parameter('nav_reach_xy_threshold_3d', 1.0)
+        self.declare_parameter('nav_reach_z_threshold_3d', 1.0)
         self.declare_parameter('area_center_x', 0.0)
         self.declare_parameter('area_center_y', 0.0)
         self.declare_parameter('area_center_z', 0.0)
@@ -121,6 +130,9 @@ class GroundStationNode(Node):
 
         # 导航目标信息缓存（用于导航面板显示）
         self._usv_nav_target_cache = ThreadSafeDict()
+
+        # 每艇平台模式（来自 usv_fleet.yaml，可缺省为 3d）
+        self._usv_platform_mode = ThreadSafeDict()
         
         # 新增: 基于话题的导航管理
         self._next_goal_id = 1  # 目标ID生成器
@@ -163,6 +175,16 @@ class GroundStationNode(Node):
             self._cluster_action_timeout = float(self.get_parameter('cluster_action_timeout').get_parameter_value().double_value)
         except Exception:
             self._cluster_action_timeout = 300.0
+
+        try:
+            self._attitude_command_duration = float(self.get_parameter('attitude_command_duration').get_parameter_value().double_value)
+        except Exception:
+            self._attitude_command_duration = 1.0
+
+        try:
+            self._attitude_trigger_distance = float(self.get_parameter('attitude_trigger_distance').get_parameter_value().double_value)
+        except Exception:
+            self._attitude_trigger_distance = 1.0
 
         # 将最新参数同步给集群控制器
         self.cluster_controller.configure(
@@ -383,6 +405,14 @@ class GroundStationNode(Node):
                     for usv_id, usv_config in fleet_config.items():
                         if usv_config.get('enabled', False):
                             usv_ids.append(usv_id)
+
+                        # 读取平台模式（可选）：2d/3d
+                        try:
+                            pm = str(usv_config.get('platform_mode', '')).strip().lower()
+                            if pm in ('2d', '3d'):
+                                self._usv_platform_mode[usv_id] = pm
+                        except Exception:
+                            pass
                     
                     self.get_logger().info(f"📋 从配置文件加载 USV 列表: {usv_ids}")
                     break
@@ -487,6 +517,22 @@ class GroundStationNode(Node):
         goal_msg.target_pose.pose.orientation.w = q[3]
         
         goal_msg.timeout = timeout
+
+        # 按平台模式下发到达判定阈值
+        try:
+            pm = str(self._usv_platform_mode.get(usv_id, '3d')).strip().lower()
+            if pm not in ('2d', '3d'):
+                pm = '3d'
+
+            xy_thr = float(self.get_parameter(f'nav_reach_xy_threshold_{pm}').value)
+            z_thr = float(self.get_parameter(f'nav_reach_z_threshold_{pm}').value)
+
+            # 约定：<=0 表示不指定，USV 端回退本地默认
+            goal_msg.reach_xy_threshold = float(xy_thr)
+            goal_msg.reach_z_threshold = float(z_thr)
+        except Exception:
+            goal_msg.reach_xy_threshold = 0.0
+            goal_msg.reach_z_threshold = 0.0
         goal_msg.timestamp = self.get_clock().now().to_msg()
         
         # 发布目标
@@ -512,6 +558,41 @@ class GroundStationNode(Node):
             f"({x:.1f}, {y:.1f}, {z:.1f}), 超时={timeout:.0f}s")
         
         return True
+
+    def send_attitude_command_via_topic(self, usv_id, roll=0.0, pitch=0.0, yaw=None, duration=1.0):
+        """单向下发姿态动作指令（roll/pitch），不要求完成度反馈。
+
+        约定：单位均为弧度(rad)。
+
+        Args:
+            usv_id (str): USV 标识符
+            roll (float): 翻滚角(rad)
+            pitch (float): 俯仰角(rad)
+            yaw (float|None): 可选偏航(rad)。None 表示保持当前航向（将发送 NaN）。
+            duration (float): >0 表示持续秒数；<=0 持续生效直到下一条覆盖。
+
+        Returns:
+            bool: 发送是否成功
+        """
+        from common_interfaces.msg import AttitudeCommand
+
+        if usv_id not in self.usv_manager.attitude_cmd_pubs:
+            self.get_logger().error(f"未找到USV {usv_id} 的姿态动作发布器")
+            return False
+
+        msg = AttitudeCommand()
+        msg.timestamp = self.get_clock().now().to_msg()
+        msg.roll = float(roll)
+        msg.pitch = float(pitch)
+        msg.yaw = float('nan') if yaw is None else float(yaw)
+        msg.duration = float(duration)
+
+        self.usv_manager.attitude_cmd_pubs[usv_id].publish(msg)
+        self.get_logger().info(
+            f"📤 {usv_id} 姿态动作已发送: roll={msg.roll:.3f} rad, pitch={msg.pitch:.3f} rad, "
+            f"duration={msg.duration:.2f}s"
+        )
+        return True
     
     def navigation_feedback_callback(self, msg, usv_id):
         """
@@ -536,10 +617,20 @@ class GroundStationNode(Node):
         # 转换为兼容格式
         feedback_obj = type('Feedback', (), {
             'distance_to_goal': msg.distance_to_goal,
+            'xy_distance_to_goal': getattr(msg, 'xy_distance_to_goal', msg.distance_to_goal),
+            'z_error': getattr(msg, 'z_error', 0.0),
             'heading_error': msg.heading_error,
             'estimated_time': msg.estimated_time
         })()
         self.ros_signal.navigation_feedback.emit(usv_id, feedback_obj)
+
+        # 方案A：先导航，再在接近目标时触发一次姿态动作（每艇每step只触发一次）
+        try:
+            goal_step = cached.get('step') if cached else None
+            dist_for_trigger = float(getattr(msg, 'xy_distance_to_goal', msg.distance_to_goal))
+            self.cluster_controller.maybe_trigger_attitude_on_feedback(usv_id, dist_for_trigger, goal_step)
+        except Exception:
+            pass
     
     def navigation_result_callback(self, msg, usv_id):
         """

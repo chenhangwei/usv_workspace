@@ -19,6 +19,7 @@ rosidl_generate_interfaces(
   ${PROJECT_NAME}
   "msg/UsvStatus.msg"
   "msg/UsvSetPoint.msg"
+  "msg/AttitudeCommand.msg"
   "msg/NavigationGoal.msg"
   "msg/NavigationAck.msg"
   "msg/NavigationFeedback.msg"

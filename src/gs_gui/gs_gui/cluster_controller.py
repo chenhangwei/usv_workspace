@@ -23,6 +23,11 @@ class AckState:
     retry: int = 0
     ack_time: Optional[float] = None
 
+    # 姿态动作（roll/pitch）触发状态：用于“接近目标再触发一次 attitude/command”
+    attitude_roll: float = 0.0
+    attitude_pitch: float = 0.0
+    attitude_sent: bool = False
+
 
 class ClusterTaskState(Enum):
     """集群任务生命周期状态。"""
@@ -59,6 +64,76 @@ class ClusterController:
                 self._action_timeout = float(action_timeout)
             except (TypeError, ValueError):
                 self.node.get_logger().warn(f"cluster_action_timeout 参数非法: {action_timeout}, 使用 {self._action_timeout}")
+
+    def maybe_trigger_attitude_on_feedback(self, usv_id: str, distance_to_goal: float, goal_step: Optional[int] = None) -> None:
+        """方案 A：先导航，再在接近目标时触发一次姿态动作。
+
+        - 仅对当前 step 生效
+        - 每艇每 step 只触发一次
+        - 触发条件：distance_to_goal <= attitude_trigger_distance 且 roll/pitch 非零
+        """
+        try:
+            step = int(goal_step) if goal_step is not None else int(getattr(self.node, 'run_step', 0))
+        except Exception:
+            step = int(getattr(self.node, 'run_step', 0))
+
+        state = self._ack_states.get(usv_id)
+        if state is None or state.step != step:
+            return
+
+        # 2D 平台：不触发 roll/pitch 姿态动作，减少无效指令
+        try:
+            pm = str(getattr(self.node, '_usv_platform_mode', {}).get(usv_id, '3d')).strip().lower()
+            if pm == '2d':
+                return
+        except Exception:
+            # 拿不到平台模式时，默认按 3d 处理
+            pass
+
+        # 已触发过则不重复
+        if bool(getattr(state, 'attitude_sent', False)):
+            return
+
+        roll = float(getattr(state, 'attitude_roll', 0.0))
+        pitch = float(getattr(state, 'attitude_pitch', 0.0))
+        if abs(roll) <= 1e-6 and abs(pitch) <= 1e-6:
+            return
+
+        try:
+            threshold = float(getattr(self.node, '_attitude_trigger_distance', 1.0))
+        except Exception:
+            threshold = 1.0
+        if not (threshold > 0.0):
+            return
+
+        try:
+            dist = float(distance_to_goal)
+        except Exception:
+            return
+        if not (dist <= threshold):
+            return
+
+        # 触发一次姿态动作
+        try:
+            duration = float(getattr(self.node, '_attitude_command_duration', 1.0))
+        except Exception:
+            duration = 1.0
+
+        try:
+            self.node.send_attitude_command_via_topic(
+                usv_id,
+                roll=roll,
+                pitch=pitch,
+                yaw=None,
+                duration=duration,
+            )
+            state.attitude_sent = True
+            self.node.get_logger().info(
+                f"🎛️ Step {step} {usv_id}: 距离 {dist:.2f}m ≤ {threshold:.2f}m，触发姿态动作 roll={roll:.3f}, pitch={pitch:.3f}"
+            )
+        except Exception as e:
+            # 失败不置 sent，允许后续 feedback 再触发
+            self.node.get_logger().debug(f"{usv_id} 姿态动作触发失败(忽略): {e}")
 
     def _set_state(self, new_state: ClusterTaskState, reason: Optional[str] = None) -> None:
         """切换集群任务状态并通知 UI。"""
@@ -444,6 +519,15 @@ class ClusterController:
             roll = float(ns.get('roll', 0.0))
             pitch = float(ns.get('pitch', 0.0))
             yaw = float(ns.get('yaw', 0.0))
+
+            # 方案A：先发 navigation/goal，姿态动作在接近目标时由 feedback 触发
+            try:
+                state.attitude_roll = float(roll)
+                state.attitude_pitch = float(pitch)
+                state.attitude_sent = False
+            except Exception:
+                pass
+
             self.node.send_nav_goal_via_topic(
                 usv_id,
                 pos.get('x', 0.0),
@@ -451,8 +535,6 @@ class ClusterController:
                 pos.get('z', 0.0),
                 yaw,
                 self._action_timeout,
-                roll=roll,
-                pitch=pitch,
             )
         else:
             # 达到最大重试次数，但不应标记为"已确认"
@@ -736,6 +818,14 @@ class ClusterController:
             roll = float(ns.get('roll', 0.0))
             pitch = float(ns.get('pitch', 0.0))
             yaw = float(ns.get('yaw', 0.0))
+
+            # 方案A：先发 navigation/goal，姿态动作在接近目标时由 feedback 触发
+            try:
+                state.attitude_roll = float(roll)
+                state.attitude_pitch = float(pitch)
+                state.attitude_sent = False
+            except Exception:
+                pass
             
             # 精简日志：集群控制器发送目标点
             self.node.get_logger().info(
@@ -750,8 +840,6 @@ class ClusterController:
                 p_local.get('z', 0.0),
                 yaw,
                 self._action_timeout,
-                roll=roll,
-                pitch=pitch,
             )
 
     # 从USV目标列表中筛选出指定步骤(step)的USV目标

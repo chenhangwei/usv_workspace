@@ -16,6 +16,7 @@
 # - fcu_url: 飞控串口配置（格式：serial://<device>:<baudrate>）
 # - system_id: MAVLink 系统 ID（与 namespace 后缀对应）
 # - gcs_url: 地面站通信地址（可选，用于 MAVLink 转发）
+# - platform_mode: 平台模式（2d/3d）。GS 将按该模式下发 XY/Z 到达阈值；USV 端也会据此决定是否忽略 Z、roll/pitch。
 
 usv_fleet:
   # ==================== USV 01 ====================
@@ -25,6 +26,7 @@ usv_fleet:
     username: "chenhangwei"                                  # SSH 用户名
     workspace: "/home/chenhangwei/usv_workspace"             # 机载工作空间路径
     namespace: "usv_01"                              # ROS 2 命名空间
+    platform_mode: "3d"                             # 2d/3d（默认 3d）
     fcu_url: "udp://192.168.10.1:14550@192.168.10.2:14550"          # 飞控串口
     system_id: 1                                     # MAVLink 系统 ID
     gcs_url: "udp://192.168.68.55:14551@192.168.68.50:14550"      # 地面站通信地址（可选）
@@ -36,6 +38,7 @@ usv_fleet:
     username: "chenhangwei"
     workspace: "/home/chenhangwei/usv_workspace"
     namespace: "usv_02"
+    platform_mode: "3d"                             # 2d/3d（按需修改）
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 2
     gcs_url: "udp://192.168.68.54:14552@192.168.68.50:14560"
@@ -47,6 +50,7 @@ usv_fleet:
     username: "chenhangwei"
     workspace: "/home/chenhangwei/usv_workspace"
     namespace: "usv_03"
+    platform_mode: "3d"                             # 2d/3d（按需修改）
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 3
     gcs_url: "udp://192.168.68.52:14553@192.168.68.50:14570"
