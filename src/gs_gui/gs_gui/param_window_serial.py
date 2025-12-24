@@ -209,7 +209,7 @@ class ParamWindowSerial(QMainWindow):
         self.status_label = QLabel("❌ 未连接")
         # 使用较小字体以避免过高的行高
         small_font = QFont()
-        small_font.setPointSize(14)
+        small_font.setPointSize(13)
         small_font.setBold(True)
         self.status_label.setFont(small_font)
         self.status_label.setFixedHeight(18)

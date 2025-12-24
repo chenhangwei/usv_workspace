@@ -65,6 +65,8 @@ mavros:
     publish_rate: 20.0
     frame_id: 'map'
     coordinate_frame: 8
+    platform_mode: '3d'
+    use_setpoint_6dof: true
 
 # =============================================================================
 # 传感器驱动模块参数

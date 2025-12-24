@@ -18,7 +18,10 @@ from rclpy.parameter import Parameter
 from PyQt5.QtCore import QProcess, QTimer, Qt
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QAbstractItemView, 
                              QMessageBox, QAction, QDialog, QPushButton, 
-                             QHBoxLayout, QSpacerItem, QSizePolicy)
+                             QHBoxLayout, QSpacerItem, QSizePolicy,
+                             QTableWidget, QTableWidgetItem, QHeaderView,
+                             QMenu)
+from PyQt5.QtGui import QFont, QColor
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
@@ -89,7 +92,7 @@ class MainWindow(QMainWindow):
         # 可选值：9(默认小), 10(稍大), 11(中等), 12(较大), 13(大), 14(很大)
         from PyQt5.QtGui import QFont
         app_font = QFont()
-        app_font.setPointSize(14)  # 设置为 14pt，emoji 明显更大
+        app_font.setPointSize(13)  # 从 14pt 缩小到 13pt
         QApplication.instance().setFont(app_font)
         
         # 初始化UI工具
@@ -104,8 +107,11 @@ class MainWindow(QMainWindow):
         # 初始化 USV 导航面板（插入到 USV Details 和 Message 之间）
         self._init_usv_navigation_panel()
         
-        # 初始化消息栏清除按钮
-        self._init_message_clear_buttons()
+        # 初始化导航反馈表格（替换原有的文本框）
+        self._init_navigation_feedback_table()
+        
+        # 初始化消息栏右键菜单
+        self._init_message_context_menus()
         
         # 初始化表格管理器
         self.table_manager = TableManager(
@@ -259,6 +265,14 @@ class MainWindow(QMainWindow):
         self.action_led_infection_mode.setChecked(True)  # 默认打开
         led_menu.addAction(self.action_led_infection_mode)
         
+        # 随机运行菜单
+        random_run_menu = self.ui.menubar.addMenu("随机运行")
+        self.action_random_run_mode = QAction("🎲 开启随机运行模式", self)
+        self.action_random_run_mode.setCheckable(True)
+        self.action_random_run_mode.setChecked(False)
+        self.action_random_run_mode.triggered.connect(self._toggle_random_run_mode)
+        random_run_menu.addAction(self.action_random_run_mode)
+        
         # 工具菜单
         tools_menu = self.ui.menubar.addMenu("工具(&T)")
         
@@ -323,76 +337,77 @@ class MainWindow(QMainWindow):
         # 在索引 1 的位置插入导航面板
         main_splitter.insertWidget(1, navigation_group)
         
-        # 调整 splitter 的拉伸比例（可选）
-        # 设置各个部分的初始大小比例：USV Details : Navigation : Message = 3 : 2 : 3
-        main_splitter.setStretchFactor(0, 3)  # USV Details
-        main_splitter.setStretchFactor(1, 2)  # Navigation
-        main_splitter.setStretchFactor(2, 3)  # Message
+        # 设置导航面板的最大宽度为内容所需的最小宽度（固定值）
+        # 这样它就不会随着窗口拉伸而变宽，保持紧凑
+        navigation_group.setFixedWidth(navigation_group.sizeHint().width())
+        
+        # 调整 splitter 的拉伸比例
+        # 设置各个部分的初始大小比例：USV Details : Navigation : Message = 1 : 0 : 5
+        # 注意：Navigation 已设为固定宽度，拉伸因子设为 0
+        main_splitter.setStretchFactor(0, 1)  # USV Details
+        main_splitter.setStretchFactor(1, 0)  # Navigation (固定宽度)
+        main_splitter.setStretchFactor(2, 5)  # Message (占据剩余大部分空间)
 
-    def _init_message_clear_buttons(self):
-        """为消息栏的每个窗口添加清除按钮"""
-        try:
-            # 1. 集群导航反馈窗口 (groupBox_8)
-            if hasattr(self.ui, 'verticalLayout_12') and hasattr(self.ui, 'cluster_navigation_feedback_info_textEdit'):
-                self._add_clear_button_to_layout(
-                    self.ui.verticalLayout_12, 
-                    self.ui.cluster_navigation_feedback_info_textEdit.clear,
-                    "清除"
-                )
+    def _init_navigation_feedback_table(self):
+        """初始化导航反馈表格，替换原有的 QTextEdit"""
+        # 创建表格
+        self.nav_feedback_table = QTableWidget()
+        self.nav_feedback_table.setColumnCount(5)
+        self.nav_feedback_table.setHorizontalHeaderLabels(["USV ID", "目标ID", "距离(m)", "航向误差(°)", "预计(s)"])
+        
+        # 设置表头自适应
+        header = self.nav_feedback_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        
+        # 设置表格属性
+        self.nav_feedback_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.nav_feedback_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.nav_feedback_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.nav_feedback_table.verticalHeader().setVisible(False)  # 隐藏行号
+        self.nav_feedback_table.verticalHeader().setDefaultSectionSize(35)  # 设置较紧凑的行高
+        
+        # 替换 UI 中的 textEdit
+        if hasattr(self.ui, 'verticalLayout_12') and hasattr(self.ui, 'cluster_navigation_feedback_info_textEdit'):
+            self.ui.verticalLayout_12.removeWidget(self.ui.cluster_navigation_feedback_info_textEdit)
+            self.ui.cluster_navigation_feedback_info_textEdit.hide()
+            self.ui.verticalLayout_12.addWidget(self.nav_feedback_table)
             
-            # 2. 信息窗口 (groupBox_9)
-            if hasattr(self.ui, 'verticalLayout_8') and hasattr(self.ui, 'info_textEdit'):
-                self._add_clear_button_to_layout(
-                    self.ui.verticalLayout_8, 
-                    self.ui_utils.clear_info,
-                    "清除"
-                )
-            
-            # 3. 警告窗口 (groupBox_10)
-            if hasattr(self.ui, 'verticalLayout_9') and hasattr(self.ui, 'warning_textEdit'):
-                self._add_clear_button_to_layout(
-                    self.ui.verticalLayout_9, 
-                    self.ui_utils.clear_warning,
-                    "清除"
-                )
-        except Exception as e:
-            _logger.warning(f"初始化清除按钮失败: {e}")
+        # 用于存储 usv_id 到行索引的映射
+        self._nav_feedback_row_map = {}
 
-    def _add_clear_button_to_layout(self, layout, clear_callback, button_text="清除"):
-        """辅助方法：在布局顶部添加清除按钮"""
-        btn_layout = QHBoxLayout()
-        btn_layout.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+    def _clear_nav_feedback_table(self):
+        """清除导航反馈表格"""
+        if hasattr(self, 'nav_feedback_table'):
+            self.nav_feedback_table.setRowCount(0)
+            self._nav_feedback_row_map = {}
+
+    def _init_message_context_menus(self):
+        """为消息栏的窗口添加右键菜单清除功能"""
+        # 1. 导航反馈表格
+        self.nav_feedback_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.nav_feedback_table.customContextMenuRequested.connect(
+            lambda pos: self._show_clear_context_menu(pos, self.nav_feedback_table, self._clear_nav_feedback_table)
+        )
         
-        clear_btn = QPushButton(button_text)
-        clear_btn.setFixedWidth(100)
-        clear_btn.setFixedHeight(20)
-        # 设置较小的字体
-        font = clear_btn.font()
-        font.setPointSize(9)
-        clear_btn.setFont(font)
+        # 2. 信息窗口
+        self.ui.info_textEdit.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ui.info_textEdit.customContextMenuRequested.connect(
+            lambda pos: self._show_clear_context_menu(pos, self.ui.info_textEdit, self.ui_utils.clear_info)
+        )
         
-        # 样式美化（可选，使其更像一个功能按钮）
-        clear_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #444;
-                color: #eee;
-                border: 1px solid #666;
-                border-radius: 2px;
-            }
-            QPushButton:hover {
-                background-color: #555;
-            }
-            QPushButton:pressed {
-                background-color: #333;
-            }
-        """)
-        
-        clear_btn.clicked.connect(clear_callback)
-        btn_layout.addWidget(clear_btn)
-        
-        # 插入到布局的最顶端
-        layout.insertLayout(0, btn_layout)
-    
+        # 3. 警告窗口
+        self.ui.warning_textEdit.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ui.warning_textEdit.customContextMenuRequested.connect(
+            lambda pos: self._show_clear_context_menu(pos, self.ui.warning_textEdit, self.ui_utils.clear_warning)
+        )
+
+    def _show_clear_context_menu(self, pos, widget, clear_callback):
+        """显示清除右键菜单"""
+        menu = QMenu(widget)
+        clear_action = menu.addAction("清除内容")
+        clear_action.triggered.connect(clear_callback)
+        menu.exec_(widget.mapToGlobal(pos))
+
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):
         """集群解锁命令（带防抖）"""
@@ -641,23 +656,35 @@ class MainWindow(QMainWindow):
     
     # ============== 坐标系设置命令 ==============
     def set_area_offset_command(self):
-        """设置任务坐标系偏移量（Area Center）"""
+        """设置任务坐标系偏移量（Area Center）与围栏范围"""
         try:
-            # 获取当前的偏移量（从参数文件或默认值）
-            current_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            # 获取当前的偏移量
+            current_offset = getattr(self.ros_node, '_area_center', {'x': 0.0, 'y': 0.0, 'z': 0.0})
+            
+            # 获取当前围栏配置
+            current_fence = {
+                'type': self.ros_node.get_parameter('fence_type').value,
+                'radius': self.ros_node.get_parameter('fence_radius').value,
+                'length': self.ros_node.get_parameter('fence_length').value,
+                'width': self.ros_node.get_parameter('fence_width').value,
+                'height': self.ros_node.get_parameter('fence_height').value
+            }
             
             # 显示对话框
-            dialog = AreaOffsetDialog(self, current_offset)
+            dialog = AreaOffsetDialog(self, current_offset, current_fence)
             if dialog.exec_() == QDialog.Accepted:
-                new_offset = dialog.get_offset()
+                new_offset, new_fence = dialog.get_config()
+                
                 # 发送更新信号到ROS节点
                 self.ros_signal.update_area_center.emit(new_offset)
+                self.ros_signal.update_fence_config.emit(new_fence)
+                
                 self.ui_utils.append_info(
-                    f"已更新任务坐标系偏移量: X={new_offset['x']:.2f}m, "
-                    f"Y={new_offset['y']:.2f}m, Z={new_offset['z']:.2f}m"
+                    f"已更新任务区域配置: AreaCenter({new_offset['x']:.1f}, {new_offset['y']:.1f}), "
+                    f"Fence({'圆柱' if new_fence['type']==0 else '长方体'})"
                 )
         except Exception as e:
-            self.ui_utils.append_info(f"设置坐标偏移量时发生错误: {e}")
+            self.ui_utils.append_info(f"设置坐标偏移量或围栏时发生错误: {e}")
     
     def get_selected_usv_position(self):
         """
@@ -738,18 +765,52 @@ class MainWindow(QMainWindow):
     # ============== 导航反馈处理 ==============
     def handle_navigation_feedback(self, usv_id, feedback):
         """
-        处理导航反馈信息
+        处理导航反馈信息，更新到表格中
         
         Args:
             usv_id: USV标识符
             feedback: 导航反馈数据
         """
-        self.ui.cluster_navigation_feedback_info_textEdit.append(
-            f"USV {usv_id} 导航反馈 - "
-            f"距离目标: {feedback.distance_to_goal:.2f}m, "
-            f"航向误差: {feedback.heading_error:.2f}度, "
-            f"预计剩余时间: {feedback.estimated_time:.2f}秒"
-        )
+        # 检查是否已有该 USV 的行
+        if usv_id not in self._nav_feedback_row_map:
+            row = self.nav_feedback_table.rowCount()
+            self.nav_feedback_table.insertRow(row)
+            self._nav_feedback_row_map[usv_id] = row
+            
+            # 设置 ID（只在创建时设置一次）
+            id_item = QTableWidgetItem(usv_id)
+            id_item.setTextAlignment(Qt.AlignCenter)
+            self.nav_feedback_table.setItem(row, 0, id_item)
+        
+        row = self._nav_feedback_row_map[usv_id]
+        
+        # 1. 目标ID
+        goal_item = QTableWidgetItem(str(feedback.goal_id))
+        goal_item.setTextAlignment(Qt.AlignCenter)
+        self.nav_feedback_table.setItem(row, 1, goal_item)
+        
+        # 2. 距离
+        dist_item = QTableWidgetItem(f"{feedback.distance_to_goal:.2f}")
+        dist_item.setTextAlignment(Qt.AlignCenter)
+        if feedback.distance_to_goal < 1.5:
+            dist_item.setForeground(QColor("#4caf50"))  # 绿色表示接近目标
+            dist_item.setFont(QFont("", -1, QFont.Bold))
+        self.nav_feedback_table.setItem(row, 2, dist_item)
+        
+        # 3. 航向误差
+        yaw_err_item = QTableWidgetItem(f"{feedback.heading_error:.1f}")
+        yaw_err_item.setTextAlignment(Qt.AlignCenter)
+        if abs(feedback.heading_error) > 30.0:
+            yaw_err_item.setForeground(QColor("#f44336"))  # 红色警告
+            yaw_err_item.setFont(QFont("", -1, QFont.Bold))
+        elif abs(feedback.heading_error) > 15.0:
+            yaw_err_item.setForeground(QColor("#ff9800"))  # 橙色提醒
+        self.nav_feedback_table.setItem(row, 3, yaw_err_item)
+        
+        # 4. ETA
+        eta_item = QTableWidgetItem(f"{feedback.estimated_time:.0f}")
+        eta_item.setTextAlignment(Qt.AlignCenter)
+        self.nav_feedback_table.setItem(row, 4, eta_item)
     
     # ============== UI辅助方法 ==============
     def show_usv_plot_window(self):
@@ -773,6 +834,13 @@ class MainWindow(QMainWindow):
         # 刷新显示
         self._refresh_selected_usv_info()
     
+    def _toggle_random_run_mode(self, checked):
+        """切换随机运行模式"""
+        self.ros_signal.random_run_mode_changed.emit(checked)
+        status = "开启" if checked else "关闭"
+        self.ui_utils.append_info(f"🎲 随机运行模式已{status}")
+        self.action_random_run_mode.setText(f"🎲 {'关闭' if checked else '开启'}随机运行模式")
+
     def _refresh_selected_usv_info(self):
         """
         刷新当前选中USV的详细信息（由状态更新定时器调用）
@@ -1155,9 +1223,14 @@ def main(argv=None):
         cb_offset = getattr(node, 'update_area_center_callback', None)
         if sig_offset is not None and cb_offset is not None:
             sig_offset.connect(cb_offset)
+            
+        sig_fence = getattr(ros_signal, 'update_fence_config', None)
+        cb_fence = getattr(node, 'update_fence_config_callback', None)
+        if sig_fence is not None and cb_fence is not None:
+            sig_fence.connect(cb_fence)
     except Exception:
         try:
-            main_window.ui_utils.append_info('警告: 无法将 update_area_center 信号连接到 GroundStationNode')
+            main_window.ui_utils.append_info('警告: 无法将坐标系/围栏信号连接到 GroundStationNode')
         except Exception:
             pass
     
@@ -1170,6 +1243,18 @@ def main(argv=None):
     except Exception:
         try:
             main_window.ui_utils.append_info('警告: 无法将 led_infection_mode_changed 信号连接到 GroundStationNode')
+        except Exception:
+            pass
+            
+    # 连接随机运行模式控制信号
+    try:
+        sig_random_run = getattr(ros_signal, 'random_run_mode_changed', None)
+        cb_random_run = getattr(node, 'toggle_random_run', None)
+        if sig_random_run is not None and cb_random_run is not None:
+            sig_random_run.connect(cb_random_run)
+    except Exception:
+        try:
+            main_window.ui_utils.append_info('警告: 无法将 random_run_mode_changed 信号连接到 GroundStationNode')
         except Exception:
             pass
     

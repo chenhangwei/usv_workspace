@@ -235,6 +235,11 @@ class UsvManager:
         
         self.logger.info('✅ USV 管理器 (PX4 版本) 已初始化')
 
+    @property
+    def usv_states(self) -> Dict[str, UsvStatusInfo]:
+        """获取所有 USV 状态缓存"""
+        return self._usv_status
+
     def set_callbacks(
         self,
         on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None,

@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QCheckBox, QHBoxLayout, 
                              QPushButton, QLabel, QSlider, QGroupBox, QMessageBox)
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import QTimer, Qt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
 from math import cos, sin, sqrt
@@ -142,7 +142,7 @@ class UsvPlotWindow(QDialog):
         refresh_layout.addWidget(self.auto_refresh_checkbox)
         
         refresh_layout.addWidget(QLabel("Interval (s):"))
-        self.refresh_slider = QSlider(QtCore.Horizontal)
+        self.refresh_slider = QSlider(Qt.Horizontal)
         self.refresh_slider.setMinimum(1)
         self.refresh_slider.setMaximum(10)
         self.refresh_slider.setValue(2)
@@ -259,7 +259,7 @@ class UsvPlotWindow(QDialog):
         
     def on_auto_refresh_changed(self, state):
         """自动刷新开关"""
-        if state == QtCore.Checked:
+        if state == Qt.Checked:
             self.timer.start()
         else:
             self.timer.stop()

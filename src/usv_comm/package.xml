@@ -20,6 +20,10 @@
   <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
   
   <depend>common_utils</depend>
+  <depend>px4_msgs</depend>
+  <depend>common_interfaces</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
   
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

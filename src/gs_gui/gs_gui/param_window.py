@@ -235,7 +235,7 @@ class ParamWindow(QDialog):
         """应用样式表"""
         # 设置全局字体大小
         font = QFont()
-        font.setPointSize(14)  # 增大全局字体
+        font.setPointSize(13)  # 增大全局字体
         self.setFont(font)
         
         self.setStyleSheet("""

@@ -20,6 +20,7 @@ from launch.actions import (
     GroupAction,
     SetEnvironmentVariable,
     LogInfo,
+    Shutdown,
 )
 from launch.substitutions import (
     LaunchConfiguration, 
@@ -314,6 +315,7 @@ def generate_launch_description():
         name='usv_command_node',
         namespace=namespace,
         output='screen',
+        on_exit=Shutdown(),
         parameters=[param_file],
         remappings=[
             # 注意：PX4 v1.15+ 使用 vehicle_status_v1

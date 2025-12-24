@@ -85,6 +85,13 @@ class GroundStationNode(Node):
         self.declare_parameter('area_center_y', 0.0)
         self.declare_parameter('area_center_z', 0.0)
         self.declare_parameter('area_center_frame', 'map')
+        
+        # 围栏参数
+        self.declare_parameter('fence_type', 0)  # 0: Cylinder, 1: Box
+        self.declare_parameter('fence_radius', 50.0)
+        self.declare_parameter('fence_length', 100.0)
+        self.declare_parameter('fence_width', 100.0)
+        self.declare_parameter('fence_height', 10.0)
 
         # 初始化子模块
         self.usv_manager = UsvManager(self)
@@ -202,6 +209,25 @@ class GroundStationNode(Node):
         except Exception:
             self._area_center = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'frame': 'map'}
 
+        # 围栏配置
+        try:
+            ft = int(self.get_parameter('fence_type').get_parameter_value().integer_value)
+            fr = float(self.get_parameter('fence_radius').get_parameter_value().double_value)
+            fl = float(self.get_parameter('fence_length').get_parameter_value().double_value)
+            fw = float(self.get_parameter('fence_width').get_parameter_value().double_value)
+            fh = float(self.get_parameter('fence_height').get_parameter_value().double_value)
+            self._fence_config = {
+                'type': ft, 'radius': fr, 'length': fl, 'width': fw, 'height': fh
+            }
+        except Exception:
+            self._fence_config = {
+                'type': 0,      # 0: 圆柱形, 1: 长方体
+                'radius': 50.0, # 圆柱半径
+                'length': 100.0,# 长方体长度 (X)
+                'width': 100.0, # 长方体宽度 (Y)
+                'height': 10.0  # 高度 (Z 范围)
+            }
+
         try:
             self._ns_offline_grace_period = float(self.get_parameter('offline_grace_period').get_parameter_value().double_value)
         except Exception:
@@ -222,6 +248,11 @@ class GroundStationNode(Node):
         self._usv_infection_sources = ThreadSafeDict()  # 记录被传染USV的源映射
         # LED传染模式开关（默认开启）
         self._led_infection_enabled = True
+        
+        # 随机运行模式状态
+        self.random_run_enabled = False
+        self.random_run_timer = None
+        self.random_run_interval = 5.0  # 检查周期(秒)
      
         # 初始化命名空间检测历史记录
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
@@ -1377,6 +1408,45 @@ class GroundStationNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f"更新 Area Center 偏移量失败: {e}")
+
+    def update_fence_config_callback(self, fence_dict):
+        """
+        更新随机运行围栏配置
+        
+        Args:
+            fence_dict: 围栏配置字典
+        """
+        try:
+            # 同步更新内部字典
+            self._fence_config.update(fence_dict)
+            
+            fence_type = int(fence_dict.get('type', 0))
+            params = [Parameter('fence_type', Parameter.Type.INTEGER, fence_type)]
+            
+            log_msg = f"已更新围栏配置: 类型={'圆柱' if fence_type == 0 else '长方体'}"
+            
+            if fence_type == 0:
+                radius = float(fence_dict.get('radius', 50.0))
+                height = float(fence_dict.get('height', 10.0))
+                params.append(Parameter('fence_radius', Parameter.Type.DOUBLE, radius))
+                params.append(Parameter('fence_height', Parameter.Type.DOUBLE, height))
+                log_msg += f", 半径={radius}m, 高度={height}m"
+            else:
+                length = float(fence_dict.get('length', 100.0))
+                width = float(fence_dict.get('width', 100.0))
+                height = float(fence_dict.get('height', 10.0))
+                params.append(Parameter('fence_length', Parameter.Type.DOUBLE, length))
+                params.append(Parameter('fence_width', Parameter.Type.DOUBLE, width))
+                params.append(Parameter('fence_height', Parameter.Type.DOUBLE, height))
+                log_msg += f", 长度={length}m, 宽度={width}m, 高度={height}m"
+            
+            self.set_parameters(params)
+            self.get_logger().info(log_msg)
+            self.append_info(f"✅ {log_msg}")
+            
+        except Exception as e:
+            self.get_logger().error(f"更新围栏配置失败: {e}")
+            self.append_warning(f"❌ 更新围栏配置失败: {e}")
     
     def set_led_infection_mode_callback(self, enabled):
         """
@@ -1411,6 +1481,84 @@ class GroundStationNode(Node):
                 
         except Exception as e:
             self.get_logger().error(f"设置LED传染模式失败: {e}")
+
+    def toggle_random_run(self, enabled):
+        """切换随机运行模式"""
+        self.random_run_enabled = enabled
+        status = "开启" if enabled else "关闭"
+        self.get_logger().info(f"🎲 随机运行模式已{status}")
+        
+        if enabled:
+            if self.random_run_timer is None:
+                self.random_run_timer = self.create_timer(self.random_run_interval, self._random_run_callback)
+        else:
+            if self.random_run_timer is not None:
+                self.destroy_timer(self.random_run_timer)
+                self.random_run_timer = None
+
+    def _random_run_callback(self):
+        """随机运行模式定时回调"""
+        if not self.random_run_enabled:
+            return
+            
+        import random
+        import math
+        
+        # 获取在线 USV
+        for usv_id, state in self.usv_manager.usv_states.items():
+            # 检查是否在线且处于 OFFBOARD 模式且已解锁
+            if not state.connected or not state.armed or state.mode != 'OFFBOARD':
+                continue
+                
+            # 检查是否正在导航
+            nav_cache = self.navigation_handler.nav_target_cache.get(usv_id)
+            is_idle = True
+            if nav_cache:
+                status = nav_cache.get('status')
+                # 如果状态是 PENDING 或 ACTIVE，且距离目标还远，则认为不空闲
+                if status in ['PENDING', 'ACTIVE']:
+                    dist = nav_cache.get('distance_remaining', 999.0)
+                    if dist > 1.5: # 1.5米阈值，认为还没到
+                        is_idle = False
+            
+            if is_idle:
+                # 相对于 area_center 生成随机位置
+                center_x = self._area_center.get('x', 0.0)
+                center_y = self._area_center.get('y', 0.0)
+                center_z = self._area_center.get('z', 0.0)
+                
+                fence_type = self._fence_config.get('type', 0)
+                
+                if fence_type == 0: # 圆柱形
+                    radius = self._fence_config.get('radius', 50.0)
+                    height = self._fence_config.get('height', 10.0)
+                    
+                    # 极坐标生成以保证在圆内
+                    r = random.uniform(0, radius * 0.9) # 留 10% 余量
+                    theta = random.uniform(0, 2 * math.pi)
+                    
+                    target_x = center_x + r * math.cos(theta)
+                    target_y = center_y + r * math.sin(theta)
+                    target_z = center_z + random.uniform(-height/2, height/2)
+                else: # 长方体
+                    lx = self._fence_config.get('length', 100.0)
+                    wy = self._fence_config.get('width', 100.0)
+                    hz = self._fence_config.get('height', 10.0)
+                    
+                    target_x = center_x + random.uniform(-lx/2 * 0.9, lx/2 * 0.9)
+                    target_y = center_y + random.uniform(-wy/2 * 0.9, wy/2 * 0.9)
+                    target_z = center_z + random.uniform(-hz/2 * 0.9, hz/2 * 0.9)
+                
+                # 随机姿态 (弧度)
+                yaw = random.uniform(-math.pi, math.pi)
+                roll = random.uniform(-0.15, 0.15) # 限制 roll/pitch 范围，避免倾覆
+                pitch = random.uniform(-0.15, 0.15)
+                
+                self.get_logger().info(
+                    f"🎲 Random Run: Sending goal to {usv_id} -> "
+                    f"pos=({target_x:.2f}, {target_y:.2f}, {target_z:.2f}), yaw={yaw:.2f}"
+                )
+                self.send_nav_goal_via_topic(usv_id, target_x, target_y, target_z, yaw, 300.0, roll, pitch)
 
     # 销毁节点资源
     def destroy_node(self):

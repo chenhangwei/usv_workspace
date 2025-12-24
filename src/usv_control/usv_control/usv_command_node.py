@@ -23,6 +23,9 @@ from px4_msgs.msg import (
     VehicleLocalPosition
 )
 
+# 导入 Trigger 服务用于优雅关闭
+from std_srvs.srv import Trigger
+
 
 class UsvCommandPx4Node(Node):
     """
@@ -204,11 +207,40 @@ class UsvCommandPx4Node(Node):
         # 当前位置（用于 OFFBOARD 模式保持位置）
         self.current_position = [0.0, 0.0, 0.0]  # NED 坐标
 
+        # =====================================================================
+        # 服务 - 优雅关闭
+        # =====================================================================
+        self.shutdown_srv = self.create_service(
+            Trigger,
+            'shutdown_all',
+            self.shutdown_callback
+        )
+
         self.get_logger().info('=' * 60)
         self.get_logger().info('PX4 uXRCE-DDS 命令控制节点已启动')
         self.get_logger().info(f'支持的模式: {", ".join(self.supported_modes)}')
         self.get_logger().info(f'目标系统: {self.target_system}, 目标组件: {self.target_component}')
         self.get_logger().info('=' * 60)
+
+    def shutdown_callback(self, request, response):
+        """优雅关闭所有节点的回调函数"""
+        self.get_logger().warn('🛑 收到关闭指令，正在准备退出系统...')
+        response.success = True
+        response.message = "USV 节点正在关闭"
+        
+        # 延迟 1 秒执行退出，确保响应能发出去
+        import threading
+        import sys
+        def delayed_exit():
+            import time
+            time.sleep(1.0)
+            self.get_logger().info('👋 系统退出')
+            # 在 ROS 2 中，通常通过 context.shutdown() 或直接 sys.exit()
+            # 如果 launch 文件配置了 on_exit=Shutdown()，则会关闭整个 launch
+            sys.exit(0)
+            
+        threading.Thread(target=delayed_exit).start()
+        return response
 
     def vehicle_status_callback(self, msg: VehicleStatus):
         """

@@ -7,7 +7,7 @@
 /* ==================== 全局样式 ==================== */
 * {
     font-family: "Segoe UI", "Microsoft YaHei UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
-    font-size: 14pt;  /* 从 10pt 增大到 14pt，emoji 更清晰 */
+    font-size: 13pt;  /* 从 14pt 缩小到 13pt */
 }
 
 QMainWindow {

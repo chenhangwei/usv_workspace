@@ -43,6 +43,11 @@ class NavigationHandler:
         # 安全范围参数
         self.MAX_DISTANCE = 500.0  # 最大水平距离 500m
         self.MAX_ALTITUDE = 10.0   # 最大高度 10m
+
+    @property
+    def nav_target_cache(self) -> ThreadSafeDict:
+        """获取导航目标缓存"""
+        return self._usv_nav_target_cache
     
     def validate_target_position(self, x: float, y: float, z: float) -> None:
         """

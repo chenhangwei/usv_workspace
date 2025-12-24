@@ -62,6 +62,7 @@ class UsvFleetLauncher(QDialog):
         self.fleet_config = {}
         self.usv_processes = {}  # {usv_id: subprocess.Popen}
         self.usv_status = {}  # {usv_id: 'offline'|'launching'|'running'|'stopped'}
+        self.last_stop_time = {}  # {usv_id: timestamp} 用于防止停止时的状态闪烁
         
         # 初始化进程追踪器
         self.process_tracker = ProcessTracker()
@@ -121,7 +122,7 @@ class UsvFleetLauncher(QDialog):
         # ============== 标题区域 ==============
         title_label = QLabel("▶️ USV 集群管理 (性能优化)")
         title_font = QFont()
-        title_font.setPointSize(16)
+        title_font.setPointSize(15)
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
@@ -605,40 +606,40 @@ class UsvFleetLauncher(QDialog):
         while self.status_check_running:
             try:
                 self._update_usv_status_async()
-                time.sleep(3)  # 每 3 秒检测一次（降低频率）
+                # 延长查询时间，默认 10 秒检测一次，减少系统开销
+                time.sleep(10)
             except Exception as e:
-                # 始终记录异常（不管 verbose_logging）
                 import traceback
                 self._log(f"⚠️ 状态检测异常: {e}")
-                self._log(f"详细堆栈:\n{traceback.format_exc()}")
-                time.sleep(5)  # 异常后延长等待时间
+                time.sleep(10)
     
     def _update_usv_status_async(self):
         """
         异步更新所有 USV 的状态
         
         优化策略：
-        1. 使用 ThreadPoolExecutor 并行执行 ping 检测
-        2. 一次性批量更新 UI，减少信号发送次数
-        3. 使用锁保护共享数据结构
+        1. 准确判断：结合 ping (OS层)、进程追踪 (启动层) 和 ROS 状态 (应用层)
+        2. 性能优化：移除昂贵的 'ros2 node list'，改用 GroundStationNode 已有的状态缓存
+        3. 并行检测：使用线程池并行执行 ping 操作
         """
         try:
-            # 调试日志：开始检测
-            self._log("🔍 开始状态检测...")
+            self._log("🔍 开始状态检测 (应用层 + 网络层)...")
             
-            # 步骤 1: 获取所有 ROS 节点（单次检测）
-            result = subprocess.run(
-                ['ros2', 'node', 'list'],
-                capture_output=True,
-                text=True,
-                timeout=2  # 减少超时时间
-            )
+            # 步骤 1: 获取 ROS 层的在线状态（从 GroundStationNode 获取）
+            # 这比运行 'ros2 node list' 快得多且更准确
+            online_usvs_ros = set()
+            parent = self.parent()
+            if parent and hasattr(parent, 'ros_node'):
+                try:
+                    usv_manager = parent.ros_node.usv_manager
+                    for usv_id, state in usv_manager.usv_states.items():
+                        if state.connected:
+                            online_usvs_ros.add(usv_id)
+                except Exception as e:
+                    self._log(f"⚠️ 从 ROS 节点获取状态失败: {e}")
             
-            online_nodes = result.stdout.strip().split('\n') if result.returncode == 0 else []
-            
-            # 步骤 2: 并行检测所有主机的在线状态
+            # 步骤 2: 并行检测所有主机的网络在线状态 (Ping)
             host_status = {}  # {hostname: is_online}
-            
             futures = {}
             for usv_id, config in self.fleet_config.items():
                 if not config.get('enabled', False):
@@ -646,48 +647,50 @@ class UsvFleetLauncher(QDialog):
                 
                 hostname = config.get('hostname', '')
                 if hostname and hostname not in host_status:
-                    # 提交 ping 任务到线程池
                     future = self.executor.submit(self._check_host_online_fast, hostname)
                     futures[future] = hostname
             
-            self._log(f"📡 提交 {len(futures)} 个 ping 任务")
-            
-            # 等待所有 ping 任务完成
             for future in as_completed(futures):
                 hostname = futures[future]
                 try:
-                    is_online = future.result()
-                    host_status[hostname] = is_online
-                    self._log(f"  Ping {hostname}: {'✅ 在线' if is_online else '❌ 离线'}")
-                except Exception as e:
-                    self._log(f"⚠️ {hostname} ping 失败: {e}")
+                    host_status[hostname] = future.result()
+                except Exception:
                     host_status[hostname] = False
             
-            # 步骤 3: 批量更新所有 USV 状态
-            status_updates = {}  # {usv_id: new_status}
-            
-            self._log(f"📋 检查 {len(self.fleet_config)} 个 USV 状态")
+            # 步骤 3: 综合判断状态
+            status_updates = {}
             
             for usv_id, config in self.fleet_config.items():
                 if not config.get('enabled', False):
-                    self._log(f"  ⏭️ {usv_id}: 已禁用，跳过")
                     continue
                 
-                namespace = f"/{usv_id}"
                 hostname = config.get('hostname', '')
                 
-                # 检查节点是否在线
-                has_nodes = any(namespace in node for node in online_nodes)
+                # A. 应用层：ROS 节点是否已连接并发布状态
+                is_running_ros = usv_id in online_usvs_ros
                 
-                # 检查是否有正在运行的启动进程
+                # B. 启动层：本地是否有正在运行的 SSH 启动进程
                 has_process = (usv_id in self.usv_processes and 
                              self.usv_processes[usv_id].poll() is None)
                 
-                # 检查主机是否在线
+                # C. 网络层：主机是否可 Ping 通
                 is_host_online = host_status.get(hostname, False)
                 
-                # 状态判断逻辑
-                if has_nodes:
+                # D. 停止保护：如果刚刚发送了停止指令，在 5 秒内忽略 ROS 在线状态
+                is_stopping = False
+                if usv_id in self.last_stop_time:
+                    if time.time() - self.last_stop_time[usv_id] < 5.0:
+                        is_stopping = True
+                
+                # 状态优先级判断逻辑：
+                # 1. 如果正在停止 -> 已停止 (stopped)
+                # 2. 如果 ROS 节点在线 -> 运行中 (running)
+                # 3. 如果 ROS 不在线但进程还在 -> 启动中 (launching)
+                # 4. 如果进程不在但主机在线 -> 在线 (online)
+                # 5. 否则 -> 离线 (offline)
+                if is_stopping:
+                    new_status = 'stopped'
+                elif is_running_ros:
                     new_status = 'running'
                 elif has_process:
                     new_status = 'launching'
@@ -696,33 +699,25 @@ class UsvFleetLauncher(QDialog):
                 else:
                     new_status = 'offline'
                 
-                # 仅记录状态变化
                 with self.status_lock:
                     old_status = self.usv_status.get(usv_id)
-                    
-                    # 调试：总是输出状态信息
-                    self._log(f"  [{usv_id}] old={old_status}, new={new_status}, "
-                             f"host={is_host_online}, nodes={has_nodes}")
-                    
                     if old_status != new_status:
                         self.usv_status[usv_id] = new_status
                         status_updates[usv_id] = new_status
                         
-                        # 输出状态变化日志（首次检测或状态改变）
-                        self._log(f"📊 {usv_id}: {old_status or '(首次)'} → {new_status} "
-                                 f"[nodes={has_nodes}, proc={has_process}, host={is_host_online}]")
+                        if self.verbose_logging:
+                            self._log(f"📊 {usv_id}: {old_status or 'init'} → {new_status} "
+                                     f"[ROS={is_running_ros}, Proc={has_process}, Ping={is_host_online}]")
             
-            # 步骤 4: 批量发送状态更新信号（减少信号数量）
+            # 步骤 4: 批量更新 UI
             if status_updates:
-                self._log(f"🔄 发送批量状态更新: {len(status_updates)} 个 USV")
                 self.batch_status_updated.emit(status_updates)
-            else:
-                self._log("✅ 状态检测完成，无变化")
+            
+            if self.verbose_logging:
+                self._log("✅ 状态检测完成")
         
-        except subprocess.TimeoutExpired:
-            self._log("⚠️ ROS 节点检测超时")
         except Exception as e:
-            self._log(f"⚠️ 状态检测失败: {e}")
+            self._log(f"❌ 状态检测失败: {e}")
     
     def _check_host_online_fast(self, hostname):
         """
@@ -1005,6 +1000,11 @@ class UsvFleetLauncher(QDialog):
         if reply == QMessageBox.Yes:
             self._log(f"⏹️ 正在停止 {usv_id} 的所有节点...")
             
+            # 记录停止时间，防止状态闪烁
+            self.last_stop_time[usv_id] = time.time()
+            self.usv_status[usv_id] = 'stopped'
+            self.status_updated.emit(usv_id, 'stopped')
+            
             try:
                 parent = self.parent()
                 if parent and hasattr(parent, 'ros_signal'):
@@ -1042,6 +1042,11 @@ class UsvFleetLauncher(QDialog):
         if reply == QMessageBox.Yes:
             self._log(f"⏹️ 批量停止: {', '.join(selected)}")
             for usv_id in selected:
+                # 记录停止时间
+                self.last_stop_time[usv_id] = time.time()
+                self.usv_status[usv_id] = 'stopped'
+                self.status_updated.emit(usv_id, 'stopped')
+                
                 try:
                     parent = self.parent()
                     if parent and hasattr(parent, 'ros_signal'):
