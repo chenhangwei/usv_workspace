@@ -1,19 +1,20 @@
 """
-信息面板样式更新函数
+信息面板样式更新模块。
 
-提供各种状态的样式更新函数。
+提供各种状态的样式更新函数，用于统一管理 GUI 组件的视觉表现。
 """
+
 from PyQt5.QtWidgets import QLabel, QProgressBar
-from typing import Tuple
+from typing import Tuple, Any, Union
 
 
 def update_mode_style(label: QLabel, mode: str) -> None:
     """
-    根据模式更新标签样式
+    根据飞行模式更新标签样式。
     
     Args:
-        label: 模式标签
-        mode: 模式字符串
+        label: 模式标签。
+        mode: 模式字符串。
     """
     mode_str = str(mode).upper()
     if "GUIDED" in mode_str or "OFFBOARD" in mode_str:
@@ -40,11 +41,11 @@ def update_mode_style(label: QLabel, mode: str) -> None:
 
 def update_status_style(label: QLabel, status: str) -> None:
     """
-    根据状态更新标签样式
+    根据连接状态更新标签样式。
     
     Args:
-        label: 状态标签
-        status: 状态字符串 ("在线", "离线", "飞控断开" 等)
+        label: 状态标签。
+        status: 状态字符串 ("在线", "离线", "飞控断开" 等)。
     """
     status_str = str(status).upper()
     if "在线" in status or "ACTIVE" in status_str or "ONLINE" in status_str:
@@ -71,13 +72,13 @@ def update_status_style(label: QLabel, status: str) -> None:
     """)
 
 
-def update_armed_style(label: QLabel, armed) -> None:
+def update_armed_style(label: QLabel, armed: Union[bool, str]) -> None:
     """
-    根据解锁状态更新标签样式
+    根据解锁状态更新标签样式。
     
     Args:
-        label: 解锁状态标签
-        armed: 是否解锁
+        label: 解锁状态标签。
+        armed: 是否解锁（布尔值或字符串）。
     """
     armed_str = str(armed).upper()
     if "TRUE" in armed_str or "ARMED" in armed_str or armed is True:
@@ -101,16 +102,16 @@ def update_armed_style(label: QLabel, armed) -> None:
 
 def update_battery_style(progress_bar: QProgressBar, percentage: float) -> None:
     """
-    根据电池百分比更新进度条样式
+    根据电池百分比更新进度条样式。
     
     Args:
-        progress_bar: 电池进度条
-        percentage: 电池百分比 (0-100)
+        progress_bar: 电池进度条。
+        percentage: 电池百分比 (0-100)。
     """
     try:
         pct = float(percentage)
     except (ValueError, TypeError):
-        pct = 0
+        pct = 0.0
     
     if pct > 50:
         color = "#27ae60"  # 绿色
@@ -139,14 +140,14 @@ def get_temperature_style(
     is_high_temperature: bool
 ) -> Tuple[str, str, bool]:
     """
-    根据温度返回样式（带滞后效果）
+    根据温度返回样式（带滞后效果）。
     
     Args:
-        temp_celsius: 温度（摄氏度）
-        is_high_temperature: 当前是否处于高温状态
+        temp_celsius: 温度（摄氏度）。
+        is_high_temperature: 当前是否处于高温状态。
         
     Returns:
-        (文字颜色, 背景颜色, 新的高温状态)
+        Tuple[str, str, bool]: (文字颜色, 背景颜色, 新的高温状态)。
     """
     try:
         temp = float(temp_celsius)
