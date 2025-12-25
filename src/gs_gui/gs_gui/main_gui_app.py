@@ -20,7 +20,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QAbstractItemView,
                              QMessageBox, QAction, QDialog, QPushButton, 
                              QHBoxLayout, QSpacerItem, QSizePolicy,
                              QTableWidget, QTableWidgetItem, QHeaderView,
-                             QMenu)
+                             QMenu, QTabWidget, QWidget, QVBoxLayout,
+                             QFrame, QLabel, QProgressBar)
 from PyQt5.QtGui import QFont, QColor
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
@@ -92,7 +93,7 @@ class MainWindow(QMainWindow):
         # 可选值：9(默认小), 10(稍大), 11(中等), 12(较大), 13(大), 14(很大)
         from PyQt5.QtGui import QFont
         app_font = QFont()
-        app_font.setPointSize(13)  # 从 14pt 缩小到 13pt
+        app_font.setPointSize(11)  # 从 13pt 缩小到 11pt
         QApplication.instance().setFont(app_font)
         
         # 初始化UI工具
@@ -101,11 +102,8 @@ class MainWindow(QMainWindow):
         # 初始化额外菜单
         self._init_custom_menu()
         
-        # 初始化 USV 信息面板并替换原有的 groupBox_3
-        self._init_usv_info_panel()
-        
-        # 初始化 USV 导航面板（插入到 USV Details 和 Message 之间）
-        self._init_usv_navigation_panel()
+        # 初始化侧边栏选项卡（合并详情与导航）
+        self._init_side_tab_panel()
         
         # 初始化导航反馈表格（替换原有的文本框）
         self._init_navigation_feedback_table()
@@ -291,86 +289,189 @@ class MainWindow(QMainWindow):
         self.action_param_config.setToolTip("通过串口直连配置飞控参数")
         tools_menu.addAction(self.action_param_config)
     
-    def _init_usv_info_panel(self):
-        """初始化 USV 信息面板，替换原有的 groupBox_3"""
-        # 创建 USV 信息面板
+    def _init_side_tab_panel(self):
+        """初始化侧边栏选项卡，合并 USV 详情、导航、反馈及日志"""
+        # 1. 创建选项卡控件
+        self.side_tab_widget = QTabWidget()
+        self.side_tab_widget.setTabPosition(QTabWidget.North)
+        self.side_tab_widget.setDocumentMode(True)  # 扁平化设计
+        
+        # 2. 创建并添加详情面板
         self.usv_info_panel = UsvInfoPanel()
+        self.side_tab_widget.addTab(self.usv_info_panel, "📋 详情")
         
-        # 获取原有的 groupBox_3 的父布局
-        # groupBox_3 在 verticalLayout_10 中
-        parent_layout = self.ui.groupBox_3.parent().layout()
-        
-        if parent_layout is not None:
-            # 找到 groupBox_3 在布局中的索引
-            index = parent_layout.indexOf(self.ui.groupBox_3)
-            
-            # 移除并隐藏原有的 groupBox_3
-            parent_layout.removeWidget(self.ui.groupBox_3)
-            self.ui.groupBox_3.hide()
-            
-            # 在相同位置插入新的信息面板
-            if index >= 0:
-                parent_layout.insertWidget(index, self.usv_info_panel)
-            else:
-                parent_layout.addWidget(self.usv_info_panel)
-    
-    def _init_usv_navigation_panel(self):
-        """初始化 USV 导航面板，插入到 mainSplitter 中（USV Details 和 Message 之间）"""
-        # 创建 USV 导航面板
+        # 3. 创建并添加导航面板
         self.usv_navigation_panel = UsvNavigationPanel()
+        self.side_tab_widget.addTab(self.usv_navigation_panel, "🧭 导航")
+
+        # 4. 添加导航反馈页
+        self.nav_feedback_container = QWidget()
+        self.nav_feedback_layout = QVBoxLayout(self.nav_feedback_container)
+        self.nav_feedback_layout.setContentsMargins(5, 5, 5, 5)
+        self.nav_feedback_layout.setSpacing(5)
+
+        # --- 新增：集群任务进度仪表盘 (科幻风格) ---
+        self.mission_dashboard = QFrame()
+        self.mission_dashboard.setObjectName("missionDashboard")
+        self.mission_dashboard.setStyleSheet("""
+            QFrame#missionDashboard {
+                background-color: #0a192f;
+                border: 1px solid #00f2ff;
+                border-radius: 4px;
+                padding: 8px;
+            }
+            QLabel {
+                color: #00f2ff;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 12pt;
+            }
+            .dashValue {
+                color: #ffffff;
+                font-weight: bold;
+            }
+        """)
         
-        # 创建一个 GroupBox 包装导航面板（保持与其他面板风格一致）
-        from PyQt5.QtWidgets import QGroupBox, QVBoxLayout
-        navigation_group = QGroupBox("USV Navigation")
-        navigation_layout = QVBoxLayout(navigation_group)
-        navigation_layout.setContentsMargins(5, 5, 5, 5)
-        navigation_layout.addWidget(self.usv_navigation_panel)
+        dash_main_layout = QVBoxLayout(self.mission_dashboard)
+        dash_main_layout.setContentsMargins(5, 5, 5, 5)
         
-        # 获取 mainSplitter
+        # 第一行：标题和状态
+        header_layout = QHBoxLayout()
+        title_label = QLabel(" MISSION STATUS ")
+        title_label.setStyleSheet("background-color: #00f2ff; color: #0a192f; font-weight: bold; padding: 2px;")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        self.dash_status_label = QLabel("IDLE")
+        self.dash_status_label.setStyleSheet("color: #95a5a6; font-weight: bold;")
+        header_layout.addWidget(self.dash_status_label)
+        dash_main_layout.addLayout(header_layout)
+        
+        # 第二行：核心数据
+        stats_layout = QHBoxLayout()
+        self.dash_step_label = QLabel("STEP: <span class='dashValue'>--/--</span>")
+        self.dash_units_label = QLabel("UNITS: <span class='dashValue'>--/--</span>")
+        self.dash_time_label = QLabel("TIME: <span class='dashValue'>0.0s</span>")
+        
+        stats_layout.addWidget(self.dash_step_label)
+        stats_layout.addStretch()
+        stats_layout.addWidget(self.dash_units_label)
+        stats_layout.addStretch()
+        stats_layout.addWidget(self.dash_time_label)
+        dash_main_layout.addLayout(stats_layout)
+        
+        # 第三行：进度条
+        self.mission_progress_bar = QProgressBar()
+        self.mission_progress_bar.setRange(0, 100)
+        self.mission_progress_bar.setValue(0)
+        self.mission_progress_bar.setTextVisible(True)
+        self.mission_progress_bar.setFormat("MISSION PROGRESS: %p%")
+        self.mission_progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #00f2ff;
+                background-color: #05101e;
+                height: 22px;
+                text-align: center;
+                color: #00f2ff;
+                font-weight: bold;
+                font-size: 10pt;
+                border-radius: 2px;
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                                  stop:0 #00d2ff, stop:0.5 #0072ff, stop:1 #00d2ff);
+                width: 20px;
+                margin: 1px;
+            }
+        """)
+        dash_main_layout.addWidget(self.mission_progress_bar)
+        
+        self.nav_feedback_layout.addWidget(self.mission_dashboard)
+        
+        self.side_tab_widget.addTab(self.nav_feedback_container, "📊 反馈")
+
+        # 5. 添加信息日志页
+        self.side_tab_widget.addTab(self.ui.info_textEdit, "ℹ️ 信息")
+
+        # 6. 添加警告日志页
+        self.side_tab_widget.addTab(self.ui.warning_textEdit, "⚠️ 警告")
+        
+        # 7. 将选项卡控件放入 groupBox_usv_details
+        # 清除 groupBox_usv_details 原有的布局内容
+        layout = self.ui.verticalLayout_usv_details
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+        
+        layout.addWidget(self.side_tab_widget)
+        self.ui.groupBox_usv_details.setTitle("系统监控与反馈")
+
+        # 8. 隐藏原有的消息区域 groupBox_2
+        self.ui.groupBox_2.hide()
+        
+        # 9. 调整主分隔条比例
+        # 现在主分隔条只有 2 个主要部分：左侧列表(0)、右侧综合监控(1)
         main_splitter = self.ui.mainSplitter
-        
-        # mainSplitter 的结构：
-        # 0: groupBox_usv_details (USV Details)
-        # 1: groupBox_2 (Message 区域)
-        # 我们要在它们之间插入导航面板
-        
-        # 在索引 1 的位置插入导航面板
-        main_splitter.insertWidget(1, navigation_group)
-        
-        # 设置导航面板的最大宽度为内容所需的最小宽度（固定值）
-        # 这样它就不会随着窗口拉伸而变宽，保持紧凑
-        navigation_group.setFixedWidth(navigation_group.sizeHint().width())
-        
-        # 调整 splitter 的拉伸比例
-        # 设置各个部分的初始大小比例：USV Details : Navigation : Message = 1 : 0 : 5
-        # 注意：Navigation 已设为固定宽度，拉伸因子设为 0
-        main_splitter.setStretchFactor(0, 1)  # USV Details
-        main_splitter.setStretchFactor(1, 0)  # Navigation (固定宽度)
-        main_splitter.setStretchFactor(2, 5)  # Message (占据剩余大部分空间)
+        main_splitter.setStretchFactor(0, 3)  # 左侧列表/控制区
+        main_splitter.setStretchFactor(1, 7)  # 右侧综合监控选项卡
 
     def _init_navigation_feedback_table(self):
-        """初始化导航反馈表格，替换原有的 QTextEdit"""
-        # 创建表格
+        """初始化导航反馈表格，采用科幻风格设计"""
         self.nav_feedback_table = QTableWidget()
-        self.nav_feedback_table.setColumnCount(5)
-        self.nav_feedback_table.setHorizontalHeaderLabels(["USV ID", "目标ID", "距离(m)", "航向误差(°)", "预计(s)"])
+        self.nav_feedback_table.setColumnCount(6)
+        self.nav_feedback_table.setHorizontalHeaderLabels(["STATUS", "USV ID", "TARGET", "DISTANCE", "HEADING ERR", "ETA"])
         
         # 设置表头自适应
         header = self.nav_feedback_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents) # Status 宽度自适应
         
         # 设置表格属性
         self.nav_feedback_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.nav_feedback_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.nav_feedback_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.nav_feedback_table.verticalHeader().setVisible(False)  # 隐藏行号
-        self.nav_feedback_table.verticalHeader().setDefaultSectionSize(35)  # 设置较紧凑的行高
+        self.nav_feedback_table.verticalHeader().setVisible(False)
+        self.nav_feedback_table.verticalHeader().setDefaultSectionSize(40)
+        self.nav_feedback_table.setShowGrid(False)
+        self.nav_feedback_table.setAlternatingRowColors(True)
         
-        # 替换 UI 中的 textEdit
-        if hasattr(self.ui, 'verticalLayout_12') and hasattr(self.ui, 'cluster_navigation_feedback_info_textEdit'):
-            self.ui.verticalLayout_12.removeWidget(self.ui.cluster_navigation_feedback_info_textEdit)
-            self.ui.cluster_navigation_feedback_info_textEdit.hide()
-            self.ui.verticalLayout_12.addWidget(self.nav_feedback_table)
+        # 科幻风格 QSS
+        self.nav_feedback_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1a1a1a;
+                alternate-background-color: #222222;
+                color: #e0e0e0;
+                gridline-color: transparent;
+                border: none;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 10pt;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QTableWidget::item:hover {
+                background-color: rgba(0, 242, 255, 0.05);
+            }
+            QTableWidget::item:selected {
+                background-color: rgba(0, 242, 255, 0.15);
+                color: #00f2ff;
+                border-left: 2px solid #00f2ff;
+            }
+            QHeaderView::section {
+                background-color: #0d1b2a;
+                color: #00f2ff;
+                padding: 8px;
+                border: none;
+                border-bottom: 1px solid #00f2ff;
+                font-weight: bold;
+                text-transform: uppercase;
+                font-size: 9pt;
+            }
+        """)
+        
+        # 将表格放入选项卡的反馈页布局中
+        if hasattr(self, 'nav_feedback_layout'):
+            self.nav_feedback_layout.addWidget(self.nav_feedback_table)
             
         # 用于存储 usv_id 到行索引的映射
         self._nav_feedback_row_map = {}
@@ -553,6 +654,48 @@ class MainWindow(QMainWindow):
         """处理集群任务进度更新并同步按钮文本"""
         self.task_manager.update_progress(progress_info)
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        
+        # 更新科幻仪表盘
+        self._update_mission_dashboard(progress_info)
+
+    def _update_mission_dashboard(self, progress_info):
+        """更新科幻风格的任务进度仪表盘"""
+        if not hasattr(self, 'mission_dashboard'):
+            return
+            
+        current_step = progress_info.get('current_step', 0)
+        total_steps = progress_info.get('total_steps', 0)
+        total_usvs = progress_info.get('total_usvs', 0)
+        acked_usvs = progress_info.get('acked_usvs', 0)
+        ack_rate = progress_info.get('ack_rate', 0.0)
+        elapsed_time = progress_info.get('elapsed_time', 0.0)
+        state = progress_info.get('state', 'idle')
+        
+        # 更新标签
+        self.dash_step_label.setText(f"STEP: <span class='dashValue'>{current_step}/{total_steps}</span>")
+        self.dash_units_label.setText(f"UNITS: <span class='dashValue'>{acked_usvs}/{total_usvs}</span>")
+        self.dash_time_label.setText(f"TIME: <span class='dashValue'>{elapsed_time:.1f}s</span>")
+        
+        # 更新进度条
+        self.mission_progress_bar.setValue(int(ack_rate * 100))
+        
+        # 更新状态样式
+        state_map = {
+            'running': ('ACTIVE', '#00f2ff'),
+            'paused': ('PAUSED', '#f1c40f'),
+            'completed': ('COMPLETED', '#2ecc71'),
+            'idle': ('IDLE', '#95a5a6'),
+            'failed': ('FAILED', '#e74c3c')
+        }
+        label_text, color = state_map.get(state, ('UNKNOWN', '#95a5a6'))
+        self.dash_status_label.setText(label_text)
+        self.dash_status_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        
+        # 如果是运行中，给仪表盘边框加个呼吸灯效果（简单实现：切换边框颜色）
+        if state == 'running':
+            self.mission_dashboard.setStyleSheet(self.mission_dashboard.styleSheet().replace("border: 1px solid #00f2ff;", "border: 2px solid #00f2ff;"))
+        else:
+            self.mission_dashboard.setStyleSheet(self.mission_dashboard.styleSheet().replace("border: 2px solid #00f2ff;", "border: 1px solid #00f2ff;"))
 
     # ============== 离群目标点命令 ==============
     def send_departed_point_command(self):
@@ -765,11 +908,7 @@ class MainWindow(QMainWindow):
     # ============== 导航反馈处理 ==============
     def handle_navigation_feedback(self, usv_id, feedback):
         """
-        处理导航反馈信息，更新到表格中
-        
-        Args:
-            usv_id: USV标识符
-            feedback: 导航反馈数据
+        处理导航反馈信息，更新到表格中（科幻增强版 V2）
         """
         # 检查是否已有该 USV 的行
         if usv_id not in self._nav_feedback_row_map:
@@ -777,40 +916,90 @@ class MainWindow(QMainWindow):
             self.nav_feedback_table.insertRow(row)
             self._nav_feedback_row_map[usv_id] = row
             
-            # 设置 ID（只在创建时设置一次）
+            # 0. 状态 (STATUS) - 初始为等待
+            status_item = QTableWidgetItem("●")
+            status_item.setTextAlignment(Qt.AlignCenter)
+            status_item.setForeground(QColor("#ff9800")) # 橙色
+            self.nav_feedback_table.setItem(row, 0, status_item)
+            
+            # 1. ID
             id_item = QTableWidgetItem(usv_id)
             id_item.setTextAlignment(Qt.AlignCenter)
-            self.nav_feedback_table.setItem(row, 0, id_item)
+            id_item.setForeground(QColor("#00f2ff"))
+            self.nav_feedback_table.setItem(row, 1, id_item)
         
         row = self._nav_feedback_row_map[usv_id]
+        dist = feedback.distance_to_goal
+        abs_err = abs(feedback.heading_error)
         
-        # 1. 目标ID
-        goal_item = QTableWidgetItem(str(feedback.goal_id))
+        # 更新状态颜色
+        status_item = self.nav_feedback_table.item(row, 0)
+        if dist < 1.5:
+            status_item.setText("✔")
+            status_item.setForeground(QColor("#4caf50")) # 绿色
+        elif abs_err > 30.0:
+            status_item.setText("⚠")
+            status_item.setForeground(QColor("#f44336")) # 红色
+        else:
+            status_item.setText("●")
+            status_item.setForeground(QColor("#00f2ff")) # 青色
+            
+        # 2. 目标ID (TARGET)
+        goal_item = QTableWidgetItem(f"T-{feedback.goal_id:02d}")
         goal_item.setTextAlignment(Qt.AlignCenter)
-        self.nav_feedback_table.setItem(row, 1, goal_item)
+        self.nav_feedback_table.setItem(row, 2, goal_item)
         
-        # 2. 距离
-        dist_item = QTableWidgetItem(f"{feedback.distance_to_goal:.2f}")
-        dist_item.setTextAlignment(Qt.AlignCenter)
-        if feedback.distance_to_goal < 1.5:
-            dist_item.setForeground(QColor("#4caf50"))  # 绿色表示接近目标
-            dist_item.setFont(QFont("", -1, QFont.Bold))
-        self.nav_feedback_table.setItem(row, 2, dist_item)
+        # 3. 距离 (DISTANCE) - 使用进度条展示接近程度
+        # 假设 30m 为满量程，越近进度条越满
+        max_dist = 30.0
+        progress_val = int(max(0, min(100, (1.0 - dist / max_dist) * 100)))
         
-        # 3. 航向误差
-        yaw_err_item = QTableWidgetItem(f"{feedback.heading_error:.1f}")
-        yaw_err_item.setTextAlignment(Qt.AlignCenter)
-        if abs(feedback.heading_error) > 30.0:
-            yaw_err_item.setForeground(QColor("#f44336"))  # 红色警告
-            yaw_err_item.setFont(QFont("", -1, QFont.Bold))
-        elif abs(feedback.heading_error) > 15.0:
-            yaw_err_item.setForeground(QColor("#ff9800"))  # 橙色提醒
-        self.nav_feedback_table.setItem(row, 3, yaw_err_item)
+        bar = self.nav_feedback_table.cellWidget(row, 3)
+        if not isinstance(bar, QProgressBar):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setTextVisible(True)
+            bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #333;
+                    border-radius: 2px;
+                    background-color: #0a0a0a;
+                    text-align: center;
+                    color: #ffffff;
+                    font-size: 8pt;
+                    height: 16px;
+                }
+                QProgressBar::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
+                }
+            """)
+            self.nav_feedback_table.setCellWidget(row, 3, bar)
         
-        # 4. ETA
-        eta_item = QTableWidgetItem(f"{feedback.estimated_time:.0f}")
+        bar.setValue(progress_val)
+        bar.setFormat(f"{dist:.1f}m")
+        
+        # 4. 航向误差 (HEADING ERR)
+        dir_sym = "◀" if feedback.heading_error > 0 else "▶"
+        if abs_err < 5.0: dir_sym = "◈"
+        
+        yaw_item = QTableWidgetItem(f"{dir_sym} {abs_err:.1f}°")
+        yaw_item.setTextAlignment(Qt.AlignCenter)
+        if abs_err > 30.0:
+            yaw_item.setForeground(QColor("#f44336"))
+        elif abs_err > 15.0:
+            yaw_item.setForeground(QColor("#ff9800"))
+        else:
+            yaw_item.setForeground(QColor("#4caf50"))
+        self.nav_feedback_table.setItem(row, 4, yaw_item)
+        
+        # 5. ETA
+        eta = feedback.estimated_time
+        eta_str = f"{int(eta)}s" if eta > 0 else "--"
+        eta_item = QTableWidgetItem(eta_str)
         eta_item.setTextAlignment(Qt.AlignCenter)
-        self.nav_feedback_table.setItem(row, 4, eta_item)
+        if 0 < eta < 10:
+            eta_item.setForeground(QColor("#00f2ff"))
+        self.nav_feedback_table.setItem(row, 5, eta_item)
     
     # ============== UI辅助方法 ==============
     def show_usv_plot_window(self):

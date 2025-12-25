@@ -308,11 +308,11 @@ class ClusterTaskManager:
         state_label = state_label_map.get(state, '未知')
         
         # 更新标签显示
-        progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
-                        f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
-                        f"耗时 {elapsed_time:.1f}s, 状态 {state_label}")
+        # progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
+        #                 f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
+        #                 f"耗时 {elapsed_time:.1f}s, 状态 {state_label}")
         
-        self.append_info(progress_text)
+        # self.append_info(progress_text)
         
         if state == 'running':
             self.cluster_task_running = True

@@ -46,7 +46,7 @@ class UsvNavigationPanel(QWidget):
     GROUPBOX_STYLE = """
         QGroupBox {
             font-weight: bold;
-            font-size: 16px;
+            font-size: 14px;
             border: 1.5px solid #e67e22;
             border-radius: 5px;
             margin-top: 6px;
@@ -328,7 +328,7 @@ class UsvNavigationPanel(QWidget):
             QLabel {
                 color: #7f8c8d;
                 font-weight: bold;
-                font-size: 16px;
+                font-size: 14px;
                 min-width: 70px;
             }
         """)
@@ -345,7 +345,7 @@ class UsvNavigationPanel(QWidget):
         label.setStyleSheet("""
             QLabel {
                 color: #34495e;
-                font-size: 16px;
+                font-size: 14px;
                 font-weight: 600;
             }
         """)

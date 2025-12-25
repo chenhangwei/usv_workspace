@@ -24,7 +24,7 @@ except AttributeError:
 GROUPBOX_STYLE = """
     QGroupBox {
         font-weight: bold;
-        font-size: 16px;
+        font-size: 12px;
         border: 1.5px solid #3498db;
         border-radius: 5px;
         margin-top: 6px;
@@ -52,7 +52,7 @@ def create_key_label(text: str) -> QLabel:
     label.setStyleSheet("""
         QLabel {
             color: #7f8c8d;
-            font-size: 14px;
+            font-size: 12px;
             padding: 2px 5px;
         }
     """)
@@ -72,7 +72,7 @@ def create_value_label(text: str, large: bool = False) -> QLabel:
         配置好样式的 QLabel
     """
     label = QLabel(text)
-    font_size = 18 if large else 14
+    font_size = 16 if large else 14
     label.setStyleSheet(f"""
         QLabel {{
             color: #2c3e50;

@@ -431,6 +431,45 @@ def generate_launch_description():
     )
     
     # =========================================================================
+    # 辅助功能节点 (LED, 声音, 扭脖子, 风扇)
+    # =========================================================================
+    usv_led_node = Node(
+        package='usv_led',
+        executable='usv_led_node',
+        name='usv_led_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file],
+    )
+    
+    usv_sound_node = Node(
+        package='usv_sound',
+        executable='usv_sound_node',
+        name='usv_sound_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file],
+    )
+    
+    usv_head_action_node = Node(
+        package='usv_action',
+        executable='usv_head_action_node',
+        name='usv_head_action_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file],
+    )
+    
+    usv_fan_node = Node(
+        package='usv_fan',
+        executable='usv_fan_node',
+        name='usv_fan_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file],
+    )
+    
+    # =========================================================================
     # 延迟启动控制节点（等待 Agent 连接）
     # =========================================================================
     delayed_nodes = TimerAction(
@@ -443,6 +482,10 @@ def generate_launch_description():
             coord_transform_node,
             auto_set_home_node,
             usv_uwb_node,
+            usv_led_node,
+            usv_sound_node,
+            usv_head_action_node,
+            usv_fan_node,
         ]
     )
     

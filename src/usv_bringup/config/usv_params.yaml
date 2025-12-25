@@ -80,7 +80,7 @@ mavros:
 # =============================================================================
 "/**/usv_head_action_node":
   ros__parameters:
-    enable_head_actuator: false
+    enable_head_actuator: true
 
 "/**/usv_fan_node":
   ros__parameters:

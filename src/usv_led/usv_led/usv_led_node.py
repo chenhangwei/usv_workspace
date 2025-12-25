@@ -63,8 +63,7 @@ class UsvLedNode(Node):
         
         # 打开串口
         if not self.serial_manager.open(port, baud, timeout):
-            self.get_logger().error('初始化LED串口失败，节点退出')
-            raise RuntimeError(f'Failed to open serial port {port}')
+            self.get_logger().error('初始化LED串口失败，将以无硬件模式运行')
         
         # 声明并获取LED效果参数
         self.declare_parameter('color_list', [255, 0, 0, 255, 127, 0, 255, 255, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 139, 0, 255])
