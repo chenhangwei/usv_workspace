@@ -47,6 +47,9 @@
           "group_mode_command",
           "all_arm",
           "all_disarm"
+        ],
+        "service_clients": [
+          ".*/shutdown_all"
         ]
       }
     }

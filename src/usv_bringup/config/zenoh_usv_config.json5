@@ -46,6 +46,9 @@
           ".*/fmu/in/vehicle_command",
           ".*/fmu/in/trajectory_setpoint",
           ".*/fmu/in/offboard_control_mode"
+        ],
+        "service_servers": [
+          ".*/shutdown_all"
         ]
       }
     }

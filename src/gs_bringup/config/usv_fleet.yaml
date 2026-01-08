@@ -24,6 +24,7 @@ usv_fleet:
     enabled: true                                    # 是否启用
     hostname: "192.168.68.55"                       # USV 01 机载计算机 IP
     username: "chenhangwei"                                  # SSH 用户名
+    password: "c3467684"                                    # SSH 密码 (用于重启)
     workspace: "/home/chenhangwei/usv_workspace"             # 机载工作空间路径
     namespace: "usv_01"                              # ROS 2 命名空间
     platform_mode: "3d"                             # 2d/3d（默认 3d）
@@ -36,6 +37,7 @@ usv_fleet:
     enabled: true
     hostname: "192.168.68.54"
     username: "chenhangwei"
+    password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
     namespace: "usv_02"
     platform_mode: "3d"                             # 2d/3d（按需修改）
@@ -48,6 +50,7 @@ usv_fleet:
     enabled: true
     hostname: "192.168.68.52"
     username: "chenhangwei"
+    password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
     namespace: "usv_03"
     platform_mode: "3d"                             # 2d/3d（按需修改）

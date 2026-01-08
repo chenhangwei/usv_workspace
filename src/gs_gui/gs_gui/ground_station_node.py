@@ -647,6 +647,8 @@ class GroundStationNode(Node):
         # 发射信号更新GUI
         # 转换为兼容格式
         feedback_obj = type('Feedback', (), {
+            'goal_id': msg.goal_id,
+            'step': cached.get('step', 0) if cached else 0,
             'distance_to_goal': msg.distance_to_goal,
             'xy_distance_to_goal': getattr(msg, 'xy_distance_to_goal', msg.distance_to_goal),
             'z_error': getattr(msg, 'z_error', 0.0),

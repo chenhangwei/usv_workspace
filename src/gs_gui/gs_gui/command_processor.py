@@ -240,7 +240,11 @@ class CommandProcessor:
         # 转换为小写
         msg_lower = msg.lower()
         # 根据关键字识别命令类型
-        if "sound" in msg_lower:
+        if msg_lower.startswith('exclude_cluster:'):
+            return 'exclude_cluster'
+        elif msg_lower.startswith('include_cluster:'):
+            return 'include_cluster'
+        elif "sound" in msg_lower:
             return 'sound'
         elif "led" in msg_lower or "color" in msg_lower:
             return 'led'
@@ -281,6 +285,21 @@ class CommandProcessor:
 
                 # 识别命令类型
                 command_type = self._identify_command_type(msg)
+
+                # 处理集群排除命令 (不通过通用流程遍历发送)
+                if command_type == 'exclude_cluster':
+                    parts = msg.split(':')
+                    if len(parts) > 1:
+                        usv_id = parts[1]
+                        self.node.cluster_controller.exclude_usv(usv_id)
+                    continue
+                
+                if command_type == 'include_cluster':
+                    parts = msg.split(':')
+                    if len(parts) > 1:
+                        usv_id = parts[1]
+                        self.node.cluster_controller.include_usv(usv_id)
+                    continue
 
                 # 遍历命名空间列表（在节点线程访问 last_ns_list 是安全的）
                 sent_count = 0

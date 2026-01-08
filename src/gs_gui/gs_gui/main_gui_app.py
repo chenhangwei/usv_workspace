@@ -15,7 +15,7 @@ _logger = logging.getLogger("gs_gui.main")
 
 import rclpy
 from rclpy.parameter import Parameter
-from PyQt5.QtCore import QProcess, QTimer, Qt
+from PyQt5.QtCore import QProcess, QTimer, Qt, QEvent
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QAbstractItemView, 
                              QMessageBox, QAction, QDialog, QPushButton, 
                              QHBoxLayout, QSpacerItem, QSizePolicy,
@@ -78,6 +78,13 @@ class MainWindow(QMainWindow):
             self.ui.set_departed_guided_pushButton.setText("OFFBOARD")
         except Exception:
             pass
+            
+        # 设置操作按钮不获取焦点，避免点击时清除表格选择
+        try:
+            self.ui.add_cluster_pushButton.setFocusPolicy(Qt.NoFocus)
+            self.ui.quit_cluster_pushButton.setFocusPolicy(Qt.NoFocus)
+        except Exception:
+            pass
         
         self.ros_signal = ros_signal
         
@@ -116,6 +123,10 @@ class MainWindow(QMainWindow):
             self.ui.cluster_tableView,
             self.ui.departed_tableView
         )
+        
+        # 安装事件过滤器，处理失去焦点清除选择的问题
+        self.ui.cluster_tableView.installEventFilter(self)
+        self.ui.departed_tableView.installEventFilter(self)
         
         # 设置表格为单行选择模式
         self.ui.cluster_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -163,6 +174,24 @@ class MainWindow(QMainWindow):
         
         # 在初始化最后刷新表格表头
         self.table_manager.refresh_table_header()
+
+    def eventFilter(self, source, event):
+        """事件过滤器：处理特定的UI事件"""
+        if event.type() == QEvent.FocusOut:
+            if source == self.nav_feedback_table:
+                # 当导航反馈表格失去焦点时，清除选择
+                self.nav_feedback_table.clearSelection()
+                self.nav_feedback_table.setCurrentItem(None)
+            elif source == self.ui.cluster_tableView:
+                # 当集群表格失去焦点时
+                self.ui.cluster_tableView.clearSelection()
+                self.ui.cluster_tableView.setCurrentIndex(self.ui.cluster_tableView.rootIndex())
+            elif source == self.ui.departed_tableView:
+                # 当离群表格失去焦点时
+                self.ui.departed_tableView.clearSelection()
+                self.ui.departed_tableView.setCurrentIndex(self.ui.departed_tableView.rootIndex())
+                
+        return super().eventFilter(source, event)
     
     def _connect_ros_signals(self):
         """连接ROS信号到处理函数"""
@@ -418,6 +447,8 @@ class MainWindow(QMainWindow):
     def _init_navigation_feedback_table(self):
         """初始化导航反馈表格，采用科幻风格设计"""
         self.nav_feedback_table = QTableWidget()
+        # 安装事件过滤器以处理焦点丢失时的选择清除
+        self.nav_feedback_table.installEventFilter(self)
         self.nav_feedback_table.setColumnCount(6)
         self.nav_feedback_table.setHorizontalHeaderLabels(["STATUS", "USV ID", "TARGET", "DISTANCE", "HEADING ERR", "ETA"])
         
@@ -481,6 +512,18 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'nav_feedback_table'):
             self.nav_feedback_table.setRowCount(0)
             self._nav_feedback_row_map = {}
+
+    def _remove_nav_feedback_row(self, usv_id):
+        """移除指定USV的导航反馈行"""
+        if usv_id in self._nav_feedback_row_map:
+            row = self._nav_feedback_row_map[usv_id]
+            self.nav_feedback_table.removeRow(row)
+            del self._nav_feedback_row_map[usv_id]
+            
+            # 更新其他行的映射索引
+            for uid, r in self._nav_feedback_row_map.items():
+                if r > row:
+                    self._nav_feedback_row_map[uid] = r - 1
 
     def _init_message_context_menus(self):
         """为消息栏的窗口添加右键菜单清除功能"""
@@ -649,6 +692,9 @@ class MainWindow(QMainWindow):
         """停止集群任务并刷新按钮文本"""
         self.task_manager.stop_task()
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        
+        # 清除导航反馈表格
+        self._clear_nav_feedback_table()
 
     def _handle_cluster_progress_update(self, progress_info):
         """处理集群任务进度更新并同步按钮文本"""
@@ -727,6 +773,10 @@ class MainWindow(QMainWindow):
         usv_info = self.table_manager.get_selected_usv_info(is_cluster=False)
         if usv_info:
             if self.list_manager.add_to_cluster(usv_info):
+                # 恢复该 USV 的集群任务资格（如果之前被排除）
+                usv_id = usv_info['namespace']
+                self.ros_signal.str_command.emit(f"INCLUDE_CLUSTER:{usv_id}")
+                
                 # 更新表格显示
                 self.table_manager.update_cluster_table(
                     self.list_manager.usv_cluster_list,
@@ -745,6 +795,19 @@ class MainWindow(QMainWindow):
         """将选中的集群USV移到离群列表"""
         usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
         if usv_info:
+            usv_id = usv_info['namespace']
+            
+            # 1. 发送 HOLD 模式指令，确保物理静止
+            self.ui_utils.append_info(f"🚦 正在将 {usv_id} 切换为 HOLD 模式 (集群脱离)")
+            # set_cluster_hold 期望的是一个列表，所以这里转换为列表
+            self.command_handler.set_cluster_hold([usv_info])
+            
+            # 2. 发送排除命令，确保节点逻辑不再等待/控制该 USV
+            self.ros_signal.str_command.emit(f"EXCLUDE_CLUSTER:{usv_id}")
+
+            # 3. 从导航反馈列表中移除该 USV
+            self._remove_nav_feedback_row(usv_id)
+
             if self.list_manager.remove_from_cluster(usv_info):
                 # 更新表格显示
                 self.table_manager.update_cluster_table(
@@ -910,6 +973,13 @@ class MainWindow(QMainWindow):
         """
         处理导航反馈信息，更新到表格中（科幻增强版 V2）
         """
+        # Feature: 如果USV在离群列表中，不显示反馈，并从表格中移除
+        is_departed = any(u.get('namespace') == usv_id for u in self.list_manager.usv_departed_list)
+        if is_departed:
+            if usv_id in self._nav_feedback_row_map:
+                self._remove_nav_feedback_row(usv_id)
+            return
+
         # 检查是否已有该 USV 的行
         if usv_id not in self._nav_feedback_row_map:
             row = self.nav_feedback_table.rowCount()
@@ -945,7 +1015,14 @@ class MainWindow(QMainWindow):
             status_item.setForeground(QColor("#00f2ff")) # 青色
             
         # 2. 目标ID (TARGET)
-        goal_item = QTableWidgetItem(f"T-{feedback.goal_id:02d}")
+        # 优先显示 Step 步骤号，如果是单点导航(step=0)则显示 Goal ID
+        step_val = getattr(feedback, 'step', 0)
+        if step_val > 0:
+            display_text = f"Step-{step_val}"
+        else:
+            display_text = f"T-{feedback.goal_id:02d}"
+            
+        goal_item = QTableWidgetItem(display_text)
         goal_item.setTextAlignment(Qt.AlignCenter)
         self.nav_feedback_table.setItem(row, 2, goal_item)
         

@@ -47,6 +47,7 @@ class ClusterController:
         self._action_timeout = float(getattr(node, '_cluster_action_timeout', 300.0))
         self._cluster_start_time: Optional[float] = None
         self._state = ClusterTaskState.IDLE
+        self._excluded_ids = set()  # 排除的 USV ID 集合
 
     def _now(self) -> float:
         """返回当前 ROS 时钟的秒值。"""
@@ -854,8 +855,11 @@ class ClusterController:
         Returns:
             list: 指定步骤的USV目标列表
         """
-        # 使用列表推导式筛选出指定步骤的USV目标
-        result = [usv for usv in cluster_usv_list if usv.get('step', 0) == step]
+        # 使用列表推导式筛选出指定步骤，且不在排除列表中的 USV 目标
+        result = [
+            usv for usv in cluster_usv_list 
+            if usv.get('step', 0) == step and usv.get('usv_id') not in self._excluded_ids
+        ]
         
         # 🔍 调试日志：输出筛选结果
         if result:
@@ -932,6 +936,19 @@ class ClusterController:
         else:
             # 未接受：保持 received=False 以便继续重发
             state.received = False
-            state.received_time = None
+
+    def exclude_usv(self, usv_id: str) -> None:
+        """从集群任务中排除指定USV。"""
+        self._excluded_ids.add(usv_id)
+        # 清除 ACK 状态
+        if usv_id in self._ack_states:
+            del self._ack_states[usv_id]
+        self.node.get_logger().info(f"🚫 {usv_id} 已从集群任务中排除")
+
+    def include_usv(self, usv_id: str) -> None:
+        """重新将指定USV纳入集群任务。"""
+        self._excluded_ids.discard(usv_id)
+        # 注意：重新纳入后，如果在任务进行中，可能需要等待下一个步骤或手动干预
+        self.node.get_logger().info(f"✅ {usv_id} 已恢复集群任务资格")
 
 

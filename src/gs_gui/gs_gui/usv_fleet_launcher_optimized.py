@@ -111,7 +111,7 @@ class UsvFleetLauncher(QDialog):
     
     def _init_ui(self):
         """初始化用户界面"""
-        self.setWindowTitle("USV 集群启动器 (优化版)")
+        self.setWindowTitle("USV 集群启动器")
         self.setMinimumSize(900, 600)
         
         # 主布局
@@ -120,19 +120,13 @@ class UsvFleetLauncher(QDialog):
         main_layout.setContentsMargins(20, 20, 20, 20)
         
         # ============== 标题区域 ==============
-        title_label = QLabel("▶️ USV 集群管理 (性能优化)")
+        title_label = QLabel("▶️ USV 集群管理")
         title_font = QFont()
         title_font.setPointSize(15)
         title_font.setBold(True)
         title_label.setFont(title_font)
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
-        
-        # 副标题
-        subtitle_label = QLabel("管理和监控所有 USV 节点的启动与停止 | 异步检测 + 并行优化")
-        subtitle_label.setAlignment(Qt.AlignCenter)
-        subtitle_label.setStyleSheet("color: #9e9e9e; font-size: 14px;")
-        main_layout.addWidget(subtitle_label)
         
         # ============== USV 列表区域 ==============
         list_group = QGroupBox("📝 USV 设备列表")
@@ -185,23 +179,6 @@ class UsvFleetLauncher(QDialog):
         batch_layout.addWidget(self.deselect_all_btn)
         
         batch_layout.addStretch()
-        
-        self.stop_selected_btn = QPushButton("⏹️ 停止选中")
-        self.stop_selected_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 5px;
-                border: 1px solid #d32f2f;
-            }
-            QPushButton:hover {
-                background-color: #e57373;
-            }
-        """)
-        self.stop_selected_btn.clicked.connect(self._stop_selected)
-        batch_layout.addWidget(self.stop_selected_btn)
         
         self.launch_selected_btn = QPushButton("▶️️ 启动选中")
         self.launch_selected_btn.setStyleSheet("""
@@ -539,32 +516,6 @@ class UsvFleetLauncher(QDialog):
         reboot_btn.clicked.connect(lambda: self._reboot_single(usv_id))
         layout.addWidget(reboot_btn)
         
-        # 停止按钮
-        stop_btn = QPushButton("⏹️ 停止")
-        stop_btn.setFixedHeight(38)
-        stop_btn.setMinimumWidth(70)
-        stop_btn.setMaximumWidth(85)
-        stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                padding: 4px 8px;
-                border-radius: 4px;
-                border: 1px solid #d32f2f;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e57373;
-                border-color: #f44336;
-            }
-            QPushButton:pressed {
-                background-color: #d32f2f;
-            }
-        """)
-        stop_btn.clicked.connect(lambda: self._stop_single(usv_id))
-        layout.addWidget(stop_btn)
-        
         layout.addStretch()
         
         btn_container.setLayout(layout)
@@ -631,10 +582,20 @@ class UsvFleetLauncher(QDialog):
             parent = self.parent()
             if parent and hasattr(parent, 'ros_node'):
                 try:
-                    usv_manager = parent.ros_node.usv_manager
-                    for usv_id, state in usv_manager.usv_states.items():
-                        if state.connected:
-                            online_usvs_ros.add(usv_id)
+                    # 优先使用 discovery_handler，因为它包含超时掉线检测逻辑 (offline_threshold)
+                    # usv_manager 仅作为底层消息接收器，可能无法及时感知掉线
+                    if hasattr(parent.ros_node, 'discovery_handler'):
+                        discovery = parent.ros_node.discovery_handler
+                        states = discovery.get_usv_states()
+                        for usv_id, state in states.items():
+                            if state.get('connected', False):
+                                online_usvs_ros.add(usv_id)
+                    # 备选方案：如果 discovery_handler 不可用，回退到 usv_manager (可能存在状态滞后)
+                    elif hasattr(parent.ros_node, 'usv_manager'):
+                        usv_manager = parent.ros_node.usv_manager
+                        for usv_id, state in usv_manager.usv_states.items():
+                            if state.connected:
+                                online_usvs_ros.add(usv_id)
                 except Exception as e:
                     self._log(f"⚠️ 从 ROS 节点获取状态失败: {e}")
             
@@ -684,20 +645,23 @@ class UsvFleetLauncher(QDialog):
                 
                 # 状态优先级判断逻辑：
                 # 1. 如果正在停止 -> 已停止 (stopped)
-                # 2. 如果 ROS 节点在线 -> 运行中 (running)
-                # 3. 如果 ROS 不在线但进程还在 -> 启动中 (launching)
-                # 4. 如果进程不在但主机在线 -> 在线 (online)
+                # 2. 如果 Ping 不通 -> 离线 (offline) [新增优先级，解决重启后状态滞后问题]
+                # 3. 如果 ROS 节点在线 -> 运行中 (running)
+                # 4. 如果 ROS 不在线但进程还在 -> 启动中 (launching)
                 # 5. 否则 -> 离线 (offline)
                 if is_stopping:
                     new_status = 'stopped'
+                elif not is_host_online:
+                    # 如果物理网络都不通了，强制判定为离线
+                    # 这能解决重启/断电后，ROS 心跳超时导致的状态滞后显示为"运行中"的问题
+                    new_status = 'offline'
                 elif is_running_ros:
                     new_status = 'running'
                 elif has_process:
                     new_status = 'launching'
-                elif is_host_online:
-                    new_status = 'online'
                 else:
-                    new_status = 'offline'
+                    # 网络通，但无 ROS 节点运行且无启动进程 -> 待机在线
+                    new_status = 'online'
                 
                 with self.status_lock:
                     old_status = self.usv_status.get(usv_id)
@@ -936,6 +900,15 @@ class UsvFleetLauncher(QDialog):
         if reply == QMessageBox.Yes:
             self._log(f"🔄 正在重启 {usv_id} 的机载计算机...")
             
+            # 清理本地关联的启动进程，避免重启后显示为 'launching'
+            if usv_id in self.usv_processes:
+                try:
+                    proc = self.usv_processes.pop(usv_id)
+                    proc.terminate()
+                    self._log(f"🧹 已清理 {usv_id} 的本地启动进程")
+                except Exception:
+                    pass
+            
             try:
                 parent = self.parent()
                 if parent and hasattr(parent, 'ros_signal'):
@@ -973,6 +946,12 @@ class UsvFleetLauncher(QDialog):
         if reply == QMessageBox.Yes:
             self._log(f"🔄 批量重启: {', '.join(selected)}")
             for usv_id in selected:
+                # 清理本地进程
+                if usv_id in self.usv_processes:
+                    try:
+                        self.usv_processes.pop(usv_id).terminate()
+                    except: pass
+                
                 try:
                     parent = self.parent()
                     if parent and hasattr(parent, 'ros_signal'):
@@ -984,80 +963,6 @@ class UsvFleetLauncher(QDialog):
                     self._log(f"❌ {usv_id} 重启失败: {e}")
                 
                 time.sleep(2)  # 延迟 2 秒避免同时发送
-    
-    def _stop_single(self, usv_id):
-        """停止单个 USV 的所有 ROS 节点"""
-        reply = QMessageBox.question(
-            self,
-            "确认停止",
-            f"确定要停止 {usv_id} 的所有 ROS 节点吗？\n\n"
-            f"⚠️ 所有运行中的节点将被优雅关闭\n"
-            f"⚠️ 可通过【启动】按钮重新启动",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self._log(f"⏹️ 正在停止 {usv_id} 的所有节点...")
-            
-            # 记录停止时间，防止状态闪烁
-            self.last_stop_time[usv_id] = time.time()
-            self.usv_status[usv_id] = 'stopped'
-            self.status_updated.emit(usv_id, 'stopped')
-            
-            try:
-                parent = self.parent()
-                if parent and hasattr(parent, 'ros_signal'):
-                    parent.ros_signal.shutdown_usv.emit(usv_id)
-                    self._log(f"✅ {usv_id} 停止命令已发送")
-                else:
-                    self._log(f"❌ 无法获取 ROS 信号对象，停止失败")
-                    QMessageBox.warning(
-                        self,
-                        "停止失败",
-                        f"无法访问 ROS 通信接口\n请确保地面站已正常启动"
-                    )
-            except Exception as e:
-                self._log(f"❌ {usv_id} 停止失败: {e}")
-    
-    def _stop_selected(self):
-        """批量停止选中的 USV 节点"""
-        selected = self._get_selected_usvs()
-        
-        if not selected:
-            QMessageBox.information(self, "提示", "请先选择要停止的 USV")
-            return
-        
-        reply = QMessageBox.question(
-            self,
-            "确认批量停止",
-            f"确定要停止以下 {len(selected)} 艘 USV 的所有节点吗？\n\n" + 
-            "\n".join(selected) + "\n\n" +
-            "⚠️ 所有运行中的节点将被优雅关闭\n"
-            "⚠️ 可通过【启动选中】按钮重新启动",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self._log(f"⏹️ 批量停止: {', '.join(selected)}")
-            for usv_id in selected:
-                # 记录停止时间
-                self.last_stop_time[usv_id] = time.time()
-                self.usv_status[usv_id] = 'stopped'
-                self.status_updated.emit(usv_id, 'stopped')
-                
-                try:
-                    parent = self.parent()
-                    if parent and hasattr(parent, 'ros_signal'):
-                        parent.ros_signal.shutdown_usv.emit(usv_id)
-                        self._log(f"✅ {usv_id} 停止命令已发送")
-                    else:
-                        self._log(f"❌ {usv_id}: 无法获取 ROS 信号对象")
-                except Exception as e:
-                    self._log(f"❌ {usv_id} 停止失败: {e}")
-                
-                time.sleep(1)  # 延迟 1 秒避免同时发送
     
     def closeEvent(self, event):
         """窗口关闭事件"""
