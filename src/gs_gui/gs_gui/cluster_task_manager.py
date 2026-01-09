@@ -73,6 +73,10 @@ class ClusterTaskManager:
                                 f"Step 节点 number='{raw_step_number}' 解析失败，使用顺序值 {idx}"
                             )
 
+                        # 获取 sync 属性，默认为 true
+                        sync_attr = step.get("sync", "true").lower()
+                        sync_val = (sync_attr == "true")
+                        
                         usvs_elem = step.find("usvs")
                         if usvs_elem is None:
                             self.append_warning(f"step {step_number} 缺少 usvs 节点，已跳过")
@@ -88,6 +92,9 @@ class ClusterTaskManager:
                             pitch_elem = usv.find("pitch/value")
                             yaw_elem = usv.find("yaw/value")
                             velocity_elem = usv.find("velocity/value")
+                            
+                            # 获取 led 属性
+                            led_val = usv.get("led", "")
 
                             usv_data = {
                                 "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
@@ -100,20 +107,52 @@ class ClusterTaskManager:
                                 "pitch": float(pitch_elem.text) if pitch_elem is not None and pitch_elem.text is not None else 0.0,
                                 "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
-                                "step": step_number
+                                "step": step_number,
+                                "sync": sync_val,
+                                "led": led_val
                             }
                             combined_list.append(usv_data)
                             step_usv_count += 1
 
                         if step_usv_count:
-                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘")
+                            sync_str = "同步" if sync_val else "异步"
+                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{sync_str}]")
 
                     if combined_list:
                         combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
                         self.cluster_position_list = combined_list
-                        total_steps = len({item.get("step", 0) for item in combined_list})
+                        
+                        # 统计信息
+                        unique_steps = sorted(list({item.get("step", 0) for item in combined_list}))
+                        total_steps = len(unique_steps)
+                        unique_usvs = sorted(list({item.get("usv_id", "") for item in combined_list}))
+                        usv_count = len(unique_usvs)
+                        
+                        # 格式验证
+                        is_standard = (root.tag == "cluster")
+                        format_status = "符合标准格式" if is_standard else "不符合标准格式 (根节点应为 <cluster>)"
+                        
+                        # 构建弹窗信息
+                        msg_lines = [
+                            f"解析结果: 成功",
+                            f"格式检查: {format_status}",
+                            f"----------------------------------------",
+                            f"总步数: {total_steps}",
+                            f"参与 USV 数量: {usv_count}",
+                            f"USV ID 列表: {', '.join(unique_usvs)}",
+                            f"----------------------------------------",
+                            "各步骤摘要:"
+                        ]
+                        if step_summaries:
+                            msg_lines.extend([f"  - {s}" for s in step_summaries])
+                        
+                        info_text = "\n".join(msg_lines)
+                        
+                        # 弹窗显示
+                        QMessageBox.information(self.parent_widget, "XML 文件加载报告", info_text)
+
                         self.append_info(
-                            f"读取数据成功，共 {len(combined_list)} 个 USV 数据，涵盖 {total_steps} 个步骤"
+                            f"读取数据成功，共 {usv_count} 艘 USV，涵盖 {total_steps} 个步骤"
                         )
                         if step_summaries:
                             self.append_info("步骤分布：" + "，".join(step_summaries))
@@ -230,7 +269,12 @@ class ClusterTaskManager:
             self.cluster_task_paused = False
             # 发送 ROS 信号
             self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-            self.append_info(f"集群任务已开始执行，共 {len(filtered_list)} 个 USV")
+            
+            # 统计参与的唯一 USV 数量
+            unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list}
+            usv_count_in_task = len(unique_usvs_in_task)
+            
+            self.append_info(f"集群任务已开始执行，共 {usv_count_in_task} 艘 USV")
             return True
         except Exception as e:
             self.append_warning(f"任务启动失败: {e}")

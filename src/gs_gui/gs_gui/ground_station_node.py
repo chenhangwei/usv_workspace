@@ -246,8 +246,8 @@ class GroundStationNode(Node):
         # 维护本地 LED 状态 (线程安全)
         self._usv_current_led_state = ThreadSafeDict() # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
         self._usv_infection_sources = ThreadSafeDict()  # 记录被传染USV的源映射
-        # LED传染模式开关（默认开启）
-        self._led_infection_enabled = True
+        # LED传染模式开关（默认关闭）
+        self._led_infection_enabled = False
         
         # 随机运行模式状态
         self.random_run_enabled = False

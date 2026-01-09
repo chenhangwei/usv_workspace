@@ -289,7 +289,7 @@ class MainWindow(QMainWindow):
         led_menu = self.ui.menubar.addMenu("LED设置")
         self.action_led_infection_mode = QAction("LED传染模式", self)
         self.action_led_infection_mode.setCheckable(True)
-        self.action_led_infection_mode.setChecked(True)  # 默认打开
+        self.action_led_infection_mode.setChecked(False)  # 默认关闭
         led_menu.addAction(self.action_led_infection_mode)
         
         # 随机运行菜单

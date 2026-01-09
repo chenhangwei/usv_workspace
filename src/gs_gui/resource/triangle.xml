@@ -9,12 +9,17 @@
         - yaw：随 navigation/goal 下发（带 feedback/result 完成度）
         - roll/pitch：解释为 attitude/command 的“姿态动作”（单向下发，不做完成度反馈）
         - 姿态动作持续时长由 GS 参数 attitude_command_duration 控制（默认 1.0s）
+        - sync: true/false (true: 等待同组完成; false: 不等待)
+        - led: color_select|r,g,b 或 led_off (控制灯光)
 
       velocity：当前仅被解析但不会影响 PX4 setpoint（可保留作未来扩展，不填写也不影响）。
     -->
-    <step number="1">
+    
+    <!-- 步骤 1: 编队集结 (同步, 演示独立颜色: 01红/02蓝/03黄) -->
+    <step number="1" sync="true">
         <usvs>
-            <usv>
+            <!-- USV_01: 红色 (255,0,0) -->
+            <usv led="color_select|255,0,0">
                 <usv_id>usv_01</usv_id>
                 <position>
                     <x>1.4</x>
@@ -34,7 +39,8 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <!-- USV_02: 蓝色 (0,0,255) -->
+            <usv led="color_select|0,0,255">
                 <usv_id>usv_02</usv_id>
                 <position>
                     <x>1.0</x>
@@ -54,7 +60,8 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <!-- USV_03: 黄色 (255,255,0) -->
+            <usv led="color_select|255,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
                     <x>0.9</x>
@@ -76,9 +83,11 @@
             </usv>
         </usvs>
     </step>
-    <step number="2">
+
+    <!-- 步骤 2: 目标点到达 (同步, 绿色完成色) -->
+    <step number="2" sync="true">
         <usvs>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_01</usv_id>
                 <position>
                     <x>2.6</x>
@@ -98,7 +107,7 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_02</usv_id>
                 <position>
                     <x>2.9</x>
@@ -118,7 +127,7 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
                     <x>2.8</x>
