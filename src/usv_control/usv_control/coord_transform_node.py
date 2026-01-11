@@ -23,7 +23,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
 
 # 导入common_utils工具
-from common_utils import ParamLoader
+from common_utils import ParamLoader, GeoUtils
 
 
 class CoordTransformNode(Node):
@@ -304,31 +304,10 @@ class CoordTransformNode(Node):
     def _xyz_to_gps(self, x: float, y: float, z: float) -> dict:
         """
         本地 XYZ (ENU) → GPS (lat/lon/alt)
-        
-        公式（适用于小范围 <100km，误差 <0.5%）：
-        - 纬度1度 ≈ 111320米
-        - 经度1度 ≈ 111320 * cos(纬度)米
-        
-        Args:
-            x: 东向距离（米）
-            y: 北向距离（米）
-            z: 天向距离（米）
-        
-        Returns:
-            {'lat': 纬度(度), 'lon': 经度(度), 'alt': 海拔(米)}
+        使用 common_utils.GeoUtils 进行转换
         """
-        # 北向距离 → 纬度差
-        dlat = y / 111320.0
-        lat = self.origin_lat + dlat
-        
-        # 东向距离 → 经度差
-        dlon = x / (111320.0 * math.cos(math.radians(self.origin_lat)))
-        lon = self.origin_lon + dlon
-        
-        # 天向距离 → 海拔
-        alt = z + self.origin_alt
-        
-        return {'lat': lat, 'lon': lon, 'alt': alt}
+        return GeoUtils.xyz_to_gps(x, y, z, self.origin_lat, self.origin_lon, self.origin_alt)
+
 
     def destroy_node(self):
         """节点销毁时的资源清理"""

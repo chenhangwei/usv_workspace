@@ -107,25 +107,45 @@ class UIUtils:
             except Exception:
                 pass
     
+    def get_or_create_plot_window(self, usv_online_list_getter):
+        """
+        获取或创建 USV 绘图窗口实例
+        
+        Args:
+            usv_online_list_getter: 获取在线USV列表的回调函数
+            
+        Returns:
+            UsvPlotWindow: 窗口实例
+        """
+        if self.usv_plot_window_ref and self.usv_plot_window_ref():
+            return self.usv_plot_window_ref()
+        
+        # 如果不存在，创建新窗口并保存弱引用
+        usv_plot_window = UsvPlotWindow(usv_online_list_getter, self.parent_widget)
+        self.usv_plot_window_ref = weakref.ref(usv_plot_window)
+        return usv_plot_window
+
     def show_usv_plot_window(self, usv_online_list_getter):
         """
         显示 USV 绘图窗口
         
         Args:
             usv_online_list_getter: 获取在线USV列表的回调函数
+            
+        Returns:
+            UsvPlotWindow: 窗口实例
         """
-        # 检查是否已经存在绘图窗口实例
-        if self.usv_plot_window_ref and self.usv_plot_window_ref():
-            # 如果存在，将其激活到前台
-            window = self.usv_plot_window_ref()
-            if window:
-                window.raise_()
-                window.activateWindow()
-        else:
-            # 如果不存在，创建新窗口并保存弱引用
-            usv_plot_window = UsvPlotWindow(usv_online_list_getter, self.parent_widget)
-            self.usv_plot_window_ref = weakref.ref(usv_plot_window)
-            usv_plot_window.show()
+        window = self.get_or_create_plot_window(usv_online_list_getter)
+        
+        if not window.isVisible():
+            window.show()
+        
+        if window.isMinimized():
+            window.showNormal()
+            
+        window.raise_()
+        window.activateWindow()
+        return window
     
     def start_rviz(self):
         """启动 RViz2"""

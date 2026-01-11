@@ -99,42 +99,42 @@ class SetHomeDialog(QDialog):
         layout.addWidget(coord_group)
         
         # 坐标输入
-        coords_group = QGroupBox("坐标输入")
+        coords_group = QGroupBox("局部坐标输入 (ENU)")
         coords_layout = QVBoxLayout(coords_group)
         
-        # 纬度
-        lat_layout = QHBoxLayout()
-        lat_layout.addWidget(QLabel("纬度 (°):"))
-        self.lat_input = QLineEdit()
-        self.lat_input.setPlaceholderText("例如: 22.5180977")
-        self.lat_input.setToolTip("北纬为正，南纬为负")
-        lat_layout.addWidget(self.lat_input)
-        coords_layout.addLayout(lat_layout)
+        # X轴 (东向)
+        x_layout = QHBoxLayout()
+        x_layout.addWidget(QLabel("X (东向 East):"))
+        self.x_input = QLineEdit()
+        self.x_input.setPlaceholderText("例如: 0.0")
+        self.x_input.setToolTip("相对于原点的东向距离 (米)")
+        x_layout.addWidget(self.x_input)
+        coords_layout.addLayout(x_layout)
         
-        # 经度
-        lon_layout = QHBoxLayout()
-        lon_layout.addWidget(QLabel("经度 (°):"))
-        self.lon_input = QLineEdit()
-        self.lon_input.setPlaceholderText("例如: 113.9007239")
-        self.lon_input.setToolTip("东经为正，西经为负")
-        lon_layout.addWidget(self.lon_input)
-        coords_layout.addLayout(lon_layout)
+        # Y轴 (北向)
+        y_layout = QHBoxLayout()
+        y_layout.addWidget(QLabel("Y (北向 North):"))
+        self.y_input = QLineEdit()
+        self.y_input.setPlaceholderText("例如: 0.0")
+        self.y_input.setToolTip("相对于原点的北向距离 (米)")
+        y_layout.addWidget(self.y_input)
+        coords_layout.addLayout(y_layout)
         
-        # 高度
-        alt_layout = QHBoxLayout()
-        alt_layout.addWidget(QLabel("高度 (m):"))
-        self.alt_input = QLineEdit()
-        self.alt_input.setPlaceholderText("例如: 0.0")
-        self.alt_input.setToolTip("相对于海平面的高度（米）")
-        alt_layout.addWidget(self.alt_input)
-        coords_layout.addLayout(alt_layout)
+        # Z轴 (高度)
+        z_layout = QHBoxLayout()
+        z_layout.addWidget(QLabel("Z (高度 Up):"))
+        self.z_input = QLineEdit()
+        self.z_input.setPlaceholderText("例如: 0.0")
+        self.z_input.setToolTip("相对于原点的高度 (米)")
+        z_layout.addWidget(self.z_input)
+        coords_layout.addLayout(z_layout)
         
         # 快捷按钮
         shortcut_layout = QHBoxLayout()
-        self.btn_a0 = QPushButton("使用 A0 基站坐标")
-        self.btn_a0.setToolTip("快速填入 A0 基站坐标 (22.5180977, 113.9007239, 0.0)")
-        self.btn_a0.clicked.connect(self._set_default_coords)
-        shortcut_layout.addWidget(self.btn_a0)
+        self.btn_origin = QPushButton("设为原点 (0,0,0)")
+        self.btn_origin.setToolTip("快速填入 (0, 0, 0)")
+        self.btn_origin.clicked.connect(self._set_zero_coords)
+        shortcut_layout.addWidget(self.btn_origin)
         coords_layout.addLayout(shortcut_layout)
         
         layout.addWidget(coords_group)
@@ -165,16 +165,16 @@ class SetHomeDialog(QDialog):
         
         # 禁用/启用坐标输入
         self.coords_group.setEnabled(not use_current)
-        self.lat_input.setEnabled(not use_current)
-        self.lon_input.setEnabled(not use_current)
-        self.alt_input.setEnabled(not use_current)
-        self.btn_a0.setEnabled(not use_current)
     
+    def _set_zero_coords(self):
+        """填入 (0,0,0)"""
+        self.x_input.setText("0.0")
+        self.y_input.setText("0.0")
+        self.z_input.setText("0.0")
+
     def _set_default_coords(self):
-        """设置默认坐标（A0 基站）"""
-        self.lat_input.setText(str(self.default_lat))
-        self.lon_input.setText(str(self.default_lon))
-        self.alt_input.setText(str(self.default_alt))
+        """设置默认坐标"""
+        self._set_zero_coords()
     
     def get_result(self):
         """
@@ -184,22 +184,22 @@ class SetHomeDialog(QDialog):
             tuple: (usv_namespace, use_current, coords)
                 - usv_namespace: str, USV 命名空间
                 - use_current: bool, 是否使用当前位置
-                - coords: dict, 坐标字典 {'lat': float, 'lon': float, 'alt': float}
+                - coords: dict, 坐标字典 {'x': float, 'y': float, 'z': float}
         """
         usv_namespace = self.usv_combo.currentText()
         use_current = self.radio_current.isChecked()
         
         coords = {
-            'lat': 0.0,
-            'lon': 0.0,
-            'alt': 0.0
+            'x': 0.0,
+            'y': 0.0,
+            'z': 0.0
         }
         
         if not use_current:
             try:
-                coords['lat'] = float(self.lat_input.text())
-                coords['lon'] = float(self.lon_input.text())
-                coords['alt'] = float(self.alt_input.text())
+                coords['x'] = float(self.x_input.text() or 0.0)
+                coords['y'] = float(self.y_input.text() or 0.0)
+                coords['z'] = float(self.z_input.text() or 0.0)
             except ValueError as e:
                 QMessageBox.warning(
                     self,
@@ -223,11 +223,9 @@ class SetHomeDialog(QDialog):
         
         # 验证坐标范围
         if not use_current:
-            if not (-90 <= coords['lat'] <= 90):
-                QMessageBox.warning(self, "输入错误", "纬度必须在 -90° 到 90° 之间。")
-                return
-            if not (-180 <= coords['lon'] <= 180):
-                QMessageBox.warning(self, "输入错误", "经度必须在 -180° 到 180° 之间。")
-                return
+            # 简单范围验证 (例如避免过大的数值)
+            if abs(coords['x']) > 50000 or abs(coords['y']) > 50000:
+                 QMessageBox.warning(self, "输入警告", "输入的局部坐标距离过大 (>50km)，请确认是否正确。")
+                 # 依然允许通过，只是警告
         
         super().accept()

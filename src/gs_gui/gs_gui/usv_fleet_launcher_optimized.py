@@ -26,6 +26,8 @@ from threading import Thread, Lock
 
 # 导入common_utils工具
 from common_utils import ProcessTracker
+# 导入系统命令处理器
+from gs_gui.system_command_handler import SystemCommandHandler
 
 from PyQt5.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
@@ -65,6 +67,9 @@ class UsvFleetLauncher(QDialog):
         
         # 初始化进程追踪器
         self.process_tracker = ProcessTracker()
+        
+        # 初始化系统命令处理器
+        self.system_command_handler = SystemCommandHandler()
         
         # 状态检测线程相关
         self.status_check_thread = None
@@ -185,23 +190,7 @@ class UsvFleetLauncher(QDialog):
         
         batch_layout.addStretch()
         
-        self.stop_selected_btn = QPushButton("⏹️ 停止选中")
-        self.stop_selected_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                font-weight: bold;
-                padding: 8px 16px;
-                border-radius: 5px;
-                border: 1px solid #d32f2f;
-            }
-            QPushButton:hover {
-                background-color: #e57373;
-            }
-        """)
-        self.stop_selected_btn.clicked.connect(self._stop_selected)
-        batch_layout.addWidget(self.stop_selected_btn)
-        
+
         self.launch_selected_btn = QPushButton("▶️️ 启动选中")
         self.launch_selected_btn.setStyleSheet("""
             QPushButton {
@@ -538,32 +527,7 @@ class UsvFleetLauncher(QDialog):
         reboot_btn.clicked.connect(lambda: self._reboot_single(usv_id))
         layout.addWidget(reboot_btn)
         
-        # 停止按钮
-        stop_btn = QPushButton("⏹️ 停止")
-        stop_btn.setFixedHeight(38)
-        stop_btn.setMinimumWidth(70)
-        stop_btn.setMaximumWidth(85)
-        stop_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #f44336;
-                color: white;
-                padding: 4px 8px;
-                border-radius: 4px;
-                border: 1px solid #d32f2f;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #e57373;
-                border-color: #f44336;
-            }
-            QPushButton:pressed {
-                background-color: #d32f2f;
-            }
-        """)
-        stop_btn.clicked.connect(lambda: self._stop_single(usv_id))
-        layout.addWidget(stop_btn)
-        
+
         layout.addStretch()
         
         btn_container.setLayout(layout)
@@ -605,13 +569,13 @@ class UsvFleetLauncher(QDialog):
         while self.status_check_running:
             try:
                 self._update_usv_status_async()
-                time.sleep(3)  # 每 3 秒检测一次（降低频率）
+                time.sleep(5)  # 每 5 秒检测一次（降低频率）
             except Exception as e:
                 # 始终记录异常（不管 verbose_logging）
                 import traceback
                 self._log(f"⚠️ 状态检测异常: {e}")
                 self._log(f"详细堆栈:\n{traceback.format_exc()}")
-                time.sleep(5)  # 异常后延长等待时间
+                time.sleep(10)  # 异常后延长等待时间
     
     def _update_usv_status_async(self):
         """
@@ -623,15 +587,17 @@ class UsvFleetLauncher(QDialog):
         3. 使用锁保护共享数据结构
         """
         try:
-            # 调试日志：开始检测
-            self._log("🔍 开始状态检测...")
+            # 调试日志：开始检测（仅详细模式）
+            if self.verbose_logging:
+                self._log("🔍 开始状态检测...")
             
             # 步骤 1: 获取所有 ROS 节点（单次检测）
+            # 增加超时时间到 5 秒，确保在网络复杂时能获取完整列表
             result = subprocess.run(
                 ['ros2', 'node', 'list'],
                 capture_output=True,
                 text=True,
-                timeout=2  # 减少超时时间
+                timeout=5
             )
             
             online_nodes = result.stdout.strip().split('\n') if result.returncode == 0 else []
@@ -650,7 +616,8 @@ class UsvFleetLauncher(QDialog):
                     future = self.executor.submit(self._check_host_online_fast, hostname)
                     futures[future] = hostname
             
-            self._log(f"📡 提交 {len(futures)} 个 ping 任务")
+            if self.verbose_logging:
+                self._log(f"📡 提交 {len(futures)} 个 ping 任务")
             
             # 等待所有 ping 任务完成
             for future in as_completed(futures):
@@ -658,7 +625,8 @@ class UsvFleetLauncher(QDialog):
                 try:
                     is_online = future.result()
                     host_status[hostname] = is_online
-                    self._log(f"  Ping {hostname}: {'✅ 在线' if is_online else '❌ 离线'}")
+                    if self.verbose_logging:
+                        self._log(f"  Ping {hostname}: {'✅ 在线' if is_online else '❌ 离线'}")
                 except Exception as e:
                     self._log(f"⚠️ {hostname} ping 失败: {e}")
                     host_status[hostname] = False
@@ -666,18 +634,54 @@ class UsvFleetLauncher(QDialog):
             # 步骤 3: 批量更新所有 USV 状态
             status_updates = {}  # {usv_id: new_status}
             
-            self._log(f"📋 检查 {len(self.fleet_config)} 个 USV 状态")
+            if self.verbose_logging:
+                self._log(f"📋 检查 {len(self.fleet_config)} 个 USV 状态")
             
             for usv_id, config in self.fleet_config.items():
                 if not config.get('enabled', False):
-                    self._log(f"  ⏭️ {usv_id}: 已禁用，跳过")
+                    if self.verbose_logging:
+                        self._log(f"  ⏭️ {usv_id}: 已禁用，跳过")
                     continue
                 
-                namespace = f"/{usv_id}"
+                namespace = f"/{usv_id}" if not usv_id.startswith('/') else usv_id
+                # 兼容性处理：配置中可能没有写 namespace, 默认为 /usv_id
+                # 但实际运行的节点通常带有 namespace 前缀
+                
                 hostname = config.get('hostname', '')
                 
                 # 检查节点是否在线
-                has_nodes = any(namespace in node for node in online_nodes)
+                # 优化匹配逻辑：只要节点路径中包含该 usv_id 即可
+                # 例如 /usv_02/mavros 分割后包含 'usv_02'
+                # 这比 startswith 更通用，且比简单的 in 更安全（防止 usv_1 匹配到 usv_10）
+                has_nodes = False
+                raw_id = usv_id.lstrip('/') # 确保是纯 ID
+                
+                # 双重检查：
+                # 1. 尝试从 main_app 获取实时连接状态（最准）
+                if self.parent() and hasattr(self.parent(), 'state_handler'):
+                    try:
+                       state = self.parent().state_handler.get_usv_state(usv_id)
+                       if state and state.get('connected'):
+                           has_nodes = True
+                    except Exception:
+                        pass
+                
+                # 2. 如果方法1没结果，再查 ros2 node list
+                if not has_nodes:
+                    for node in online_nodes:
+                        # 移除开头的 / 并按 / 分割
+                        parts = node.lstrip('/').split('/')
+                        if raw_id in parts:
+                            has_nodes = True
+                            break
+                        
+                        # 兼容处理：有些节点可能命名为 /usv_02_driver (下划线连接)
+                        # 检查是否有以 id 开头的部分
+                        for part in parts:
+                             if part == raw_id or part.startswith(f"{raw_id}_"):
+                                 has_nodes = True
+                                 break
+                        if has_nodes: break
                 
                 # 检查是否有正在运行的启动进程
                 has_process = (usv_id in self.usv_processes and 
@@ -687,11 +691,14 @@ class UsvFleetLauncher(QDialog):
                 is_host_online = host_status.get(hostname, False)
                 
                 # 状态判断逻辑
+                # 修改判断逻辑：如果检测到 ROS 节点，则无论是否有 usv_process，都优先认为是 running
+                # 这解决了外部已启动（非本启动器启动）场景下的状态显示问题
                 if has_nodes:
                     new_status = 'running'
                 elif has_process:
                     new_status = 'launching'
                 elif is_host_online:
+                    # 如果主机在线且没有检测到节点，也没有启动进程，则为 only online (就绪)
                     new_status = 'online'
                 else:
                     new_status = 'offline'
@@ -700,23 +707,28 @@ class UsvFleetLauncher(QDialog):
                 with self.status_lock:
                     old_status = self.usv_status.get(usv_id)
                     
-                    # 调试：总是输出状态信息
-                    self._log(f"  [{usv_id}] old={old_status}, new={new_status}, "
+                    # 调试：总是输出状态信息（仅详细模式）
+                    if self.verbose_logging:
+                        self._log(f"  [{usv_id}] old={old_status}, new={new_status}, "
                              f"host={is_host_online}, nodes={has_nodes}")
                     
                     if old_status != new_status:
                         self.usv_status[usv_id] = new_status
                         status_updates[usv_id] = new_status
                         
-                        # 输出状态变化日志（首次检测或状态改变）
-                        self._log(f"📊 {usv_id}: {old_status or '(首次)'} → {new_status} "
-                                 f"[nodes={has_nodes}, proc={has_process}, host={is_host_online}]")
+                        # 输出状态变化日志（首次检测或状态改变）- 这个始终保留，因为是关键变化
+                        # 修改：响应用户需求，默认隐藏详细的进程状态变化日志，避免刷屏
+                        # 仅在调试模式(verbose_logging)下显示
+                        if self.verbose_logging:
+                            self._log(f"📊 {usv_id}: {old_status or '(首次)'} → {new_status} "
+                                     f"[nodes={has_nodes}, proc={has_process}, host={is_host_online}]")
             
             # 步骤 4: 批量发送状态更新信号（减少信号数量）
             if status_updates:
-                self._log(f"🔄 发送批量状态更新: {len(status_updates)} 个 USV")
+                if self.verbose_logging:
+                    self._log(f"🔄 发送批量状态更新: {len(status_updates)} 个 USV")
                 self.batch_status_updated.emit(status_updates)
-            else:
+            elif self.verbose_logging:
                 self._log("✅ 状态检测完成，无变化")
         
         except subprocess.TimeoutExpired:
@@ -805,9 +817,11 @@ class UsvFleetLauncher(QDialog):
             fcu_url = config['fcu_url']
             system_id = config['system_id']
             gcs_url = config.get('gcs_url', '')
+            domain_id = config.get('domain_id', '0')
             
             remote_cmd = (
                 f"bash -c '"
+                f"export ROS_DOMAIN_ID={domain_id}; " 
                 f"source /opt/ros/*/setup.bash 2>/dev/null || source /opt/ros/jazzy/setup.bash; "
                 f"source {workspace}/install/setup.bash; "
                 f"ros2 launch usv_bringup usv_launch.py "
@@ -821,7 +835,19 @@ class UsvFleetLauncher(QDialog):
             
             remote_cmd += "'"
             
-            ssh_cmd = [
+            # 检查是否配置了密码
+            password = config.get('password', '')
+            use_sshpass = False
+            
+            if password:
+                import shutil
+                if shutil.which('sshpass'):
+                    use_sshpass = True
+                else:
+                    self._log(f"⚠️ {usv_id} 配置了密码但系统未安装 sshpass，请运行: sudo apt install sshpass")
+            
+            # 构建 SSH 命令
+            base_ssh_cmd = [
                 'ssh',
                 '-o', 'StrictHostKeyChecking=no',
                 '-o', 'ConnectTimeout=10',
@@ -830,14 +856,39 @@ class UsvFleetLauncher(QDialog):
                 remote_cmd
             ]
             
+            if use_sshpass:
+                ssh_cmd = ['sshpass', '-p', password] + base_ssh_cmd
+                self._log(f"🔑 使用 sshpass 自动输入密码")
+            else:
+                ssh_cmd = base_ssh_cmd
+            
             # 启动进程并追踪
             process = subprocess.Popen(
                 ssh_cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
+                stderr=subprocess.STDOUT, # 将 stderr 合并到 stdout
+                text=True,
+                bufsize=1  # 行缓冲
             )
             
+            # 调试：立即检查进程是否存活并读取错误输出
+            time.sleep(0.5)
+            if process.poll() is not None:
+                # 进程立即退出，捕获错误
+                stdout, stderr = process.communicate()
+                self._log(f"❌ {usv_id} 启动进程立即退出 (Code {process.returncode})")
+                if stderr:
+                    self._log(f"📋 错误详情:\n{stderr.strip()}")
+                self.status_updated.emit(usv_id, 'offline')
+                with self.status_lock:
+                    self.usv_status[usv_id] = 'offline'
+                return
+
+            # 如果设置了显示详细日志，打印完整命令
+            if self.verbose_logging:
+                masked_cmd = ' '.join(ssh_cmd).replace(password, '******') if password else ' '.join(ssh_cmd)
+                self._log(f"🔧 执行命令: {masked_cmd}")
+
             # 追踪进程
             self.process_tracker.track(process, f'USV {usv_id} SSH Launch')
             
@@ -849,9 +900,58 @@ class UsvFleetLauncher(QDialog):
             self.status_updated.emit(usv_id, 'launching')
             
             self._log(f"✅ {usv_id} 启动命令已发送 (PID: {process.pid})")
+            
+            # 启动输出流读取线程
+            Thread(target=self._read_process_output, args=(usv_id, process), daemon=True).start()
         
         except Exception as e:
             self._log(f"❌ {usv_id} 启动失败: {e}")
+
+    def _read_process_output(self, usv_id, process):
+        """读取 SSH 进程输出"""
+        try:
+            # 循环读取 stdout 和 stderr
+            while process.poll() is None:
+                # 读取一行 stdout
+                line = process.stdout.readline()
+                if line:
+                    line = line.strip()
+                    if line:
+                        # 过滤掉一些没什么用的 SSH 警告
+                        if "Connection to" in line and "closed" in line:
+                            continue
+                        self._log(f"[{usv_id}] {line}")
+                
+                # 读取 stderr (非阻塞方式比较麻烦，这里简单处理，或者是读完 stdout 再读 stderr)
+                # 由于是 readline，可能会阻塞。
+                # 更好的方式是使用 select 或者两个线程，这里简化为只读 stdout 
+                # 因为 Popen 不合并 stderr，我们暂时只关注 stdout，或者将 stderr合并到 stdout
+                
+                # 稍微休眠避免 CPU 占用过高
+                # time.sleep(0.01) 
+                
+                # 在 python subprocess 中最好合并 stderr 到 stdout，或者使用 communicate
+                # 但我们需要实时流。
+                pass
+            
+            # 进程结束后，读取剩余输出
+            stdout, stderr = process.communicate()
+            if stdout:
+                for line in stdout.split('\n'):
+                    if line.strip(): self._log(f"[{usv_id}] {line.strip()}")
+            if stderr:
+                for line in stderr.split('\n'):
+                    if line.strip(): self._log(f"[{usv_id} ERR] {line.strip()}")
+                    
+            # 检查返回码
+            if process.returncode != 0:
+                 self._log(f"⚠️ {usv_id} 进程退出，返回码: {process.returncode}")
+                 self.status_updated.emit(usv_id, 'offline')
+            else:
+                 self._log(f"ℹ️ {usv_id} 进程已结束") # 通常 ssh 命令结束意味着远程程序结束
+
+        except Exception as e:
+            self._log(f"⚠️读取 {usv_id} 输出出错: {e}")
     
     def _select_all(self):
         """全选所有 USV"""
@@ -905,12 +1005,35 @@ class UsvFleetLauncher(QDialog):
         # 触发一次异步状态检测
         Thread(target=self._update_usv_status_async, daemon=True).start()
     
+    def _perform_ssh_reboot(self, usv_id):
+        """执行 SSH 重启操作"""
+        config = self.fleet_config.get(usv_id, {})
+        hostname = config.get('hostname')
+        username = config.get('username')
+        password = config.get('password')
+
+        if not hostname or not username:
+             self.log_message.emit(f"❌ {usv_id} 配置错误: 缺少 hostname 或 username")
+             return
+
+        self.log_message.emit(f"🔄 正在通过 SSH 重启 {usv_id} ({hostname})...")
+        
+        def run_reboot():
+            success, msg = self.system_command_handler.reboot_usv(hostname, username, password)
+            if success:
+                 self.log_message.emit(f"✅ {usv_id} 重启命令已发送")
+            else:
+                 self.log_message.emit(f"❌ {usv_id} 重启失败: {msg}")
+
+        Thread(target=run_reboot, daemon=True).start()
+
     def _reboot_single(self, usv_id):
         """重启单个 USV 的机载计算机"""
         reply = QMessageBox.question(
             self,
             "确认重启",
             f"确定要重启 {usv_id} 的机载计算机吗？\n\n"
+            f"⚠️ 将使用 SSH 发送重启命令\n"
             f"⚠️ 重启后系统需要 30-60 秒恢复在线\n"
             f"⚠️ 所有运行中的节点将被终止",
             QMessageBox.Yes | QMessageBox.No,
@@ -918,22 +1041,7 @@ class UsvFleetLauncher(QDialog):
         )
         
         if reply == QMessageBox.Yes:
-            self._log(f"🔄 正在重启 {usv_id} 的机载计算机...")
-            
-            try:
-                parent = self.parent()
-                if parent and hasattr(parent, 'ros_signal'):
-                    parent.ros_signal.reboot_companion.emit(usv_id)
-                    self._log(f"✅ {usv_id} 重启命令已发送")
-                else:
-                    self._log(f"❌ 无法获取 ROS 信号对象，重启失败")
-                    QMessageBox.warning(
-                        self,
-                        "重启失败",
-                        f"无法访问 ROS 通信接口\n请确保地面站已正常启动"
-                    )
-            except Exception as e:
-                self._log(f"❌ {usv_id} 重启失败: {e}")
+            self._perform_ssh_reboot(usv_id)
     
     def _reboot_selected(self):
         """批量重启选中的 USV 机载计算机"""
@@ -948,8 +1056,8 @@ class UsvFleetLauncher(QDialog):
             "确认批量重启",
             f"确定要重启以下 {len(selected)} 艘 USV 的机载计算机吗？\n\n" + 
             "\n".join(selected) + "\n\n" +
-            "⚠️ 重启后系统需要 30-60 秒恢复在线\n"
-            "⚠️ 所有运行中的节点将被终止",
+            "⚠️ 将使用 SSH (带密码) 发送重启命令\n"
+            "⚠️ 重启后系统需要一些时间恢复",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -957,81 +1065,9 @@ class UsvFleetLauncher(QDialog):
         if reply == QMessageBox.Yes:
             self._log(f"🔄 批量重启: {', '.join(selected)}")
             for usv_id in selected:
-                try:
-                    parent = self.parent()
-                    if parent and hasattr(parent, 'ros_signal'):
-                        parent.ros_signal.reboot_companion.emit(usv_id)
-                        self._log(f"✅ {usv_id} 重启命令已发送")
-                    else:
-                        self._log(f"❌ {usv_id}: 无法获取 ROS 信号对象")
-                except Exception as e:
-                    self._log(f"❌ {usv_id} 重启失败: {e}")
-                
-                time.sleep(2)  # 延迟 2 秒避免同时发送
-    
-    def _stop_single(self, usv_id):
-        """停止单个 USV 的所有 ROS 节点"""
-        reply = QMessageBox.question(
-            self,
-            "确认停止",
-            f"确定要停止 {usv_id} 的所有 ROS 节点吗？\n\n"
-            f"⚠️ 所有运行中的节点将被优雅关闭\n"
-            f"⚠️ 可通过【启动】按钮重新启动",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self._log(f"⏹️ 正在停止 {usv_id} 的所有节点...")
-            
-            try:
-                parent = self.parent()
-                if parent and hasattr(parent, 'ros_signal'):
-                    parent.ros_signal.shutdown_usv.emit(usv_id)
-                    self._log(f"✅ {usv_id} 停止命令已发送")
-                else:
-                    self._log(f"❌ 无法获取 ROS 信号对象，停止失败")
-                    QMessageBox.warning(
-                        self,
-                        "停止失败",
-                        f"无法访问 ROS 通信接口\n请确保地面站已正常启动"
-                    )
-            except Exception as e:
-                self._log(f"❌ {usv_id} 停止失败: {e}")
-    
-    def _stop_selected(self):
-        """批量停止选中的 USV 节点"""
-        selected = self._get_selected_usvs()
-        
-        if not selected:
-            QMessageBox.information(self, "提示", "请先选择要停止的 USV")
-            return
-        
-        reply = QMessageBox.question(
-            self,
-            "确认批量停止",
-            f"确定要停止以下 {len(selected)} 艘 USV 的所有节点吗？\n\n" + 
-            "\n".join(selected) + "\n\n" +
-            "⚠️ 所有运行中的节点将被优雅关闭\n"
-            "⚠️ 可通过【启动选中】按钮重新启动",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        
-        if reply == QMessageBox.Yes:
-            self._log(f"⏹️ 批量停止: {', '.join(selected)}")
-            for usv_id in selected:
-                try:
-                    parent = self.parent()
-                    if parent and hasattr(parent, 'ros_signal'):
-                        parent.ros_signal.shutdown_usv.emit(usv_id)
-                        self._log(f"✅ {usv_id} 停止命令已发送")
-                    else:
-                        self._log(f"❌ {usv_id}: 无法获取 ROS 信号对象")
-                except Exception as e:
-                    self._log(f"❌ {usv_id} 停止失败: {e}")
-                
-                time.sleep(1)  # 延迟 1 秒避免同时发送
+                self._perform_ssh_reboot(usv_id)
+                time.sleep(1)  # 间隔防止拥塞
+
     
     def closeEvent(self, event):
         """窗口关闭事件"""

@@ -36,9 +36,9 @@ class TestLEDInfectionMode:
         assert self.main_window.action_led_infection_mode is not None
 
     def test_led_infection_mode_default_checked(self):
-        """测试LED传染模式默认为开启状态"""
+        """测试LED传染模式默认为关闭状态"""
         # 检查默认状态是否为勾选
-        assert self.main_window.action_led_infection_mode.isChecked() is True
+        assert self.main_window.action_led_infection_mode.isChecked() is False
 
     def test_led_infection_mode_checkable(self):
         """测试LED传染模式菜单项是否可勾选"""

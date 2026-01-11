@@ -24,6 +24,11 @@ class ClusterTaskManager:
         self.append_warning = warning_callback
         self.parent_widget = parent_widget
         
+        # 状态更新回调
+        self.update_status_callback = None
+        # 任务加载回调 (用于更新 2D 预览)
+        self.task_loaded_callback = None
+        
         # 集群任务状态
         self.cluster_task_running = False
         self.cluster_task_paused = False
@@ -34,6 +39,19 @@ class ClusterTaskManager:
         # 集群任务进度信息
         self.cluster_progress_info = {}
     
+    def set_update_status_callback(self, callback):
+        """设置状态更新回调"""
+        self.update_status_callback = callback
+
+    def set_task_loaded_callback(self, callback):
+        """设置任务加载回调"""
+        self.task_loaded_callback = callback
+
+    def _update_status(self, text, style="normal"):
+        """内部方法：调用回调更新状态"""
+        if self.update_status_callback:
+            self.update_status_callback(text, style)
+
     def read_data_from_file(self):
         """从XML文件中读取集群任务数据"""
         # 打开文件对话框，选择XML文件
@@ -73,6 +91,10 @@ class ClusterTaskManager:
                                 f"Step 节点 number='{raw_step_number}' 解析失败，使用顺序值 {idx}"
                             )
 
+                        # 获取 sync 属性，默认为 true
+                        sync_attr = step.get("sync", "true").lower()
+                        sync_val = (sync_attr == "true")
+                        
                         usvs_elem = step.find("usvs")
                         if usvs_elem is None:
                             self.append_warning(f"step {step_number} 缺少 usvs 节点，已跳过")
@@ -84,8 +106,13 @@ class ClusterTaskManager:
                             pos_x_elem = usv.find("position/x")
                             pos_y_elem = usv.find("position/y")
                             pos_z_elem = usv.find("position/z")
+                            roll_elem = usv.find("roll/value")
+                            pitch_elem = usv.find("pitch/value")
                             yaw_elem = usv.find("yaw/value")
                             velocity_elem = usv.find("velocity/value")
+                            
+                            # 获取 led 属性
+                            led_val = usv.get("led", "")
 
                             usv_data = {
                                 "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
@@ -94,22 +121,61 @@ class ClusterTaskManager:
                                     "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
                                     "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
                                 },
+                                "roll": float(roll_elem.text) if roll_elem is not None and roll_elem.text is not None else 0.0,
+                                "pitch": float(pitch_elem.text) if pitch_elem is not None and pitch_elem.text is not None else 0.0,
                                 "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
-                                "step": step_number
+                                "step": step_number,
+                                "sync": sync_val,
+                                "led": led_val
                             }
                             combined_list.append(usv_data)
                             step_usv_count += 1
 
                         if step_usv_count:
-                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘")
+                            sync_str = "同步" if sync_val else "异步"
+                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{sync_str}]")
 
                     if combined_list:
                         combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
                         self.cluster_position_list = combined_list
-                        total_steps = len({item.get("step", 0) for item in combined_list})
+                        
+                        # 统计信息
+                        unique_steps = sorted(list({item.get("step", 0) for item in combined_list}))
+                        total_steps = len(unique_steps)
+                        unique_usvs = sorted(list({item.get("usv_id", "") for item in combined_list}))
+                        usv_count = len(unique_usvs)
+                        
+                        # 格式验证
+                        is_standard = (root.tag == "cluster")
+                        format_status = "符合标准格式" if is_standard else "不符合标准格式 (根节点应为 <cluster>)"
+                        
+                        # 构建弹窗信息
+                        msg_lines = [
+                            f"解析结果: 成功",
+                            f"格式检查: {format_status}",
+                            f"----------------------------------------",
+                            f"总步数: {total_steps}",
+                            f"参与 USV 数量: {usv_count}",
+                            f"USV ID 列表: {', '.join(unique_usvs)}",
+                            f"----------------------------------------",
+                            "各步骤摘要:"
+                        ]
+                        if step_summaries:
+                            msg_lines.extend([f"  - {s}" for s in step_summaries])
+                        
+                        info_text = "\n".join(msg_lines)
+                        
+                        # 弹窗显示
+                        QMessageBox.information(self.parent_widget, "XML 文件加载报告", info_text)
+                        
+                        # 更新状态指示器
+                        import os
+                        file_name = os.path.basename(xml_file)
+                        self._update_status(f"✅ 任务就绪: {file_name} (共 {total_steps} 步)", "ready")
+
                         self.append_info(
-                            f"读取数据成功，共 {len(combined_list)} 个 USV 数据，涵盖 {total_steps} 个步骤"
+                            f"读取数据成功，共 {usv_count} 艘 USV，涵盖 {total_steps} 个步骤"
                         )
                         if step_summaries:
                             self.append_info("步骤分布：" + "，".join(step_summaries))
@@ -118,6 +184,10 @@ class ClusterTaskManager:
 
                         # 重置任务状态
                         self.cluster_task_running = False
+
+                        # 触发任务加载回调
+                        if self.task_loaded_callback:
+                            self.task_loaded_callback(self.cluster_position_list)
                         self.cluster_task_paused = False
                     else:
                         error_msg = "XML文件中未找到任何 USV 数据"
@@ -166,6 +236,7 @@ class ClusterTaskManager:
         """
         if not self.cluster_task_running and not self.cluster_position_list:
             self.append_warning("请先导入集群目标点数据")
+            self._update_status("⚠️ 未加载任务", "warning")
             return self.get_button_text()
         
         # 如果任务未开始且有目标点数据，则开始任务
@@ -177,10 +248,12 @@ class ClusterTaskManager:
                 self.cluster_task_paused = True
                 self.append_info("集群任务已暂停")
                 self.ros_signal.cluster_pause_request.emit()
+                self._update_status("⏸️ 任务暂停", "paused")
             else:
                 self.cluster_task_paused = False
                 self.append_info("集群任务已继续")
                 self.ros_signal.cluster_resume_request.emit()
+                self._update_status("🚀 任务继续", "running")
         
         return self.get_button_text()
     
@@ -211,11 +284,15 @@ class ClusterTaskManager:
             self.append_warning("集群列表为空（所有 USV 均在离群列表中）")
             return False
         
+        # 统计参与的唯一 USV 数量
+        unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list}
+        usv_count_in_task = len(unique_usvs_in_task)
+
         # 弹窗确认
         reply = QMessageBox.question(
             self.parent_widget,
             "确认执行",
-            f"即将执行 {len(filtered_list)} 个 USV 的集群任务。\n是否继续?",
+            f"即将执行 {usv_count_in_task} 个 USV 的集群任务。\n是否继续?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No
         )
@@ -229,7 +306,14 @@ class ClusterTaskManager:
                 self.cluster_task_paused = False
                 # 发送 ROS 信号
                 self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-                self.append_info("集群任务已开始执行！")
+                
+                # 通知 UI 清理任务反馈列表（通过回调或信号）
+                if self.parent_widget and hasattr(self.parent_widget, 'clear_navigation_feedback_table'):
+                    self.parent_widget.clear_navigation_feedback_table()
+                
+                self.append_info(f"集群任务已开始执行，共 {usv_count_in_task} 艘 USV")
+                unique_steps = sorted(list({item.get("step", 0) for item in self.cluster_position_list}))
+                self._update_status(f"🚀 正在执行: 第 {unique_steps[0] if unique_steps else 1} / {len(unique_steps)} 步", "running")
                 return True
             except Exception as e:
                 QMessageBox.critical(self.parent_widget, "错误", f"任务启动失败: {e}")
@@ -265,9 +349,14 @@ class ClusterTaskManager:
             self.cluster_task_running = False
             self.cluster_task_paused = False
             self.append_info("集群任务已停止！")
+            self._update_status("⏹ 任务已停止", "stopped")
             
             # 清空集群位置列表
             self.cluster_position_list = []
+            
+            # 通知 UI 清理任务反馈列表
+            if self.parent_widget and hasattr(self.parent_widget, 'clear_navigation_feedback_table'):
+                self.parent_widget.clear_navigation_feedback_table()
         else:
             self.append_info("取消停止操作")
     

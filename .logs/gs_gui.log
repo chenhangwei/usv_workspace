@@ -124,3 +124,58 @@
 2025-11-20 10:45:25,982 INFO common_utils.process_tracker: 所有子进程已清理
 2025-11-20 16:54:43,992 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
 2025-11-20 19:05:21,536 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 10:36:31,650 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 10:41:46,658 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 10:46:12,989 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 10:54:51,680 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 12:47:01,352 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 12:54:01,538 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 13:07:16,093 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 14:57:19,524 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 15:04:13,314 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 15:13:51,614 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 16:51:52,334 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 16:55:37,130 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-10 16:55:37,131 INFO common_utils.process_tracker: 终止进程 PID=351821: USV usv_03 SSH Launch
+2026-01-10 16:55:37,132 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-10 17:08:25,161 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-10 17:08:25,162 INFO common_utils.process_tracker: 终止进程 PID=357737: USV usv_03 SSH Launch
+2026-01-10 17:08:25,163 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-10 17:09:15,464 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 17:10:52,693 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-10 17:10:52,694 INFO common_utils.process_tracker: 终止进程 PID=366716: USV usv_03 SSH Launch
+2026-01-10 17:10:52,695 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-10 17:16:26,206 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 17:20:35,252 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-10 17:20:35,253 INFO common_utils.process_tracker: 终止进程 PID=371955: USV usv_03 SSH Launch
+2026-01-10 17:20:35,257 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-10 17:21:59,552 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-10 17:30:18,200 INFO SystemCommandHandler: Command successful on 192.168.68.52: echo 'c3467684' | sudo -S reboot
+2026-01-11 11:19:39,658 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 11:40:21,743 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 11:51:40,480 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 11:53:37,768 INFO SystemCommandHandler: Command successful on 192.168.68.54: echo 'c3467684' | sudo -S reboot
+2026-01-11 12:00:27,767 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 12:14:42,373 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-11 12:14:42,374 INFO common_utils.process_tracker: 终止进程 PID=103109: USV usv_02 SSH Launch
+2026-01-11 12:14:42,375 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-11 12:25:42,663 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 12:37:50,723 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 12:48:46,562 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 14:54:19,776 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:01:44,804 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:23:46,386 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:33:11,554 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:40:21,196 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:44:21,402 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:54:56,409 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 15:59:02,954 INFO common_utils.process_tracker: 清理 1 个子进程...
+2026-01-11 15:59:02,955 INFO common_utils.process_tracker: 终止进程 PID=35350: USV usv_02 SSH Launch
+2026-01-11 15:59:02,956 INFO common_utils.process_tracker: 所有子进程已清理
+2026-01-11 16:06:56,593 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:13:28,026 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:19:19,828 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:29:37,929 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:37:56,797 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:44:46,852 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-11 16:55:48,866 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log

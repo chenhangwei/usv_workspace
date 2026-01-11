@@ -7,6 +7,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QSizePolicy)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
+import math
 from .compass_widget import CompassWidget
 
 # 兼容性定义
@@ -18,6 +19,47 @@ except AttributeError:
     AlignRight = Qt.AlignRight  # type: ignore
     AlignLeft = Qt.AlignLeft  # type: ignore
     AlignVCenter = Qt.AlignVCenter  # type: ignore
+
+
+class AngleSmoother:
+    """
+    角度平滑器
+    使用指数移动平均(EMA)处理角度数据，解决 0/360 度跳变问题
+    """
+    def __init__(self, alpha=0.15):
+        self.alpha = alpha
+        self.current_rad = None
+
+    def update(self, target_deg):
+        """
+        更新角度值
+        Args:
+            target_deg: 目标角度（度）
+        Returns:
+            平滑后的角度（度，0-360）
+        """
+        if target_deg is None:
+            return 0.0
+            
+        target_rad = math.radians(target_deg)
+        
+        if self.current_rad is None:
+            self.current_rad = target_rad
+            return target_deg
+            
+        # 计算角度差（使用 atan2 处理周期性，确保是最短路径）
+        # diff 范围是 -pi 到 pi
+        diff = math.atan2(math.sin(target_rad - self.current_rad), 
+                         math.cos(target_rad - self.current_rad))
+        
+        # 更新当前角度
+        self.current_rad += self.alpha * diff
+        
+        # 返回度数 (0-360)
+        return math.degrees(self.current_rad) % 360.0
+
+    def reset(self):
+        self.current_rad = None
 
 
 class UsvNavigationPanel(QWidget):
@@ -59,6 +101,11 @@ class UsvNavigationPanel(QWidget):
         # 当前导航状态缓存
         self._current_navigation_state = None
         self._current_feedback = None
+        
+        # 初始化平滑器 (alpha越小越平滑但延迟越高)
+        self.heading_smoother = AngleSmoother(alpha=0.15)
+        # 误差平滑器 (误差可能在+/-180跳变，也作为角度处理)
+        self.error_smoother = AngleSmoother(alpha=0.15) 
         
         # 设置主布局（包含滚动区域）
         self._setup_ui()
@@ -393,42 +440,71 @@ class UsvNavigationPanel(QWidget):
                 self.total_speed_label.setText("--")
             
             # ==================== 更新航向信息 ====================
-            # 当前航向（直接从 heading 字段获取，单位为度）
+            # 1. 获取并平滑当前航向
             current_heading = None
             try:
-                heading_deg = float(state.get('heading', 0.0))
-                current_heading = heading_deg
-                self.current_heading_label.setText(self._format_float(heading_deg, precision=1))
+                raw_heading = float(state.get('heading', 0.0))
+                # 使用平滑器处理
+                current_heading = self.heading_smoother.update(raw_heading)
+                self.current_heading_label.setText(self._format_float(current_heading, precision=1))
             except (ValueError, TypeError):
                 self.current_heading_label.setText("--")
+                self.heading_smoother.reset()
             
-            # 目标航向和航向误差（从导航反馈中获取）
+            # 2. 获取并平滑航向误差，然后计算目标航向
             target_heading = None
             heading_error = None
             
             if feedback is not None and hasattr(feedback, 'heading_error'):
                 try:
-                    heading_error = float(feedback.heading_error)
+                    # 误差也是角度性质的，需要平滑
+                    raw_error = float(feedback.heading_error)
+                    heading_error = raw_error # 显示用的误差可以保持原始值或也平滑
                     
-                    # 计算目标航向 = 当前航向 + 航向误差
+                    # 为了计算稳定的目标航向，我们使用平滑后的误差
+                    # 注意：这里我们单独维护误差的平滑，或者直接用平滑后的航向+原始误差计算目标航向再平滑
+                    # 策略：Target = Smooth(Current) + Smooth(Error)
+                    # 但Error的平滑需要特殊处理，因为它是在0附近震荡。
+                    # 实际上，Error本身就是 Target - Current。
+                    # 如果我们信任 Feedback 中的 Error，那么 Target = Current + Error。
+                    # 为了稳定，我们计算出瞬时 Target，然后对 Target 进行平滑。
+                    
                     if current_heading is not None:
-                        target_heading = current_heading + heading_error
-                        # 归一化到 0-360 度
-                        while target_heading >= 360:
-                            target_heading -= 360
-                        while target_heading < 0:
-                            target_heading += 360
+                        # 瞬时目标航向
+                        inst_target = raw_heading + raw_error
+                        
+                        # 我们不需要单独平滑 Target，因为如果我们平滑了 Current，
+                        # 且假设 Error 只是控制偏差，直接加会导致 Target 随 Current 波动。
+                        # 正确的做法是：由于 Target 通常是固定的（或者变化很慢），
+                        # 我们应该直接根据 (Current + Error) 计算出 Target，然后对 Target 进行强力平滑。
+                        
+                        # 这里我们复用 error_smoother 来作为 "Target Heading Smoother"
+                        # 改名可能更合适，但为了最小修改，我们直接用它存 Target 的状态
+                        target_heading = self.error_smoother.update(inst_target)
+                        
                         self.target_heading_label.setText(self._format_float(target_heading, precision=1))
                     else:
                         self.target_heading_label.setText("--")
+                        self.error_smoother.reset()
                 except (ValueError, TypeError, AttributeError):
                     self.target_heading_label.setText("--")
+                    self.error_smoother.reset()
             else:
                 self.target_heading_label.setText("--")
+                # 如果没有反馈，重置平滑器状态，避免保留旧值
+                self.error_smoother.reset() 
             
-            # 更新罗盘显示（传递当前航向、目标航向和航向误差）
+            # 更新罗盘显示
             if current_heading is not None:
-                self.compass_widget.set_heading(current_heading, target_heading, heading_error)
+                # 重新计算用于显示的误差 (Target - Current) 以保持一致性
+                display_error = heading_error # 默认显示原始误差
+                if target_heading is not None:
+                    # 计算平滑后的显示误差
+                    diff_rad = math.radians(target_heading) - math.radians(current_heading)
+                    diff_rad = math.atan2(math.sin(diff_rad), math.cos(diff_rad))
+                    display_error = math.degrees(diff_rad)
+                
+                self.compass_widget.set_heading(current_heading, target_heading, display_error)
             else:
                 self.compass_widget.set_heading(0.0)
             
@@ -523,6 +599,10 @@ class UsvNavigationPanel(QWidget):
         
         self._current_navigation_state = None
         self._current_feedback = None
+        
+        # 重置平滑器
+        self.heading_smoother.reset()
+        self.error_smoother.reset()
     
     def _format_float(self, value, precision=2):
         """格式化浮点数"""

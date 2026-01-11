@@ -14,6 +14,7 @@ from .param_loader import ParamLoader, ParamValidator
 from .serial_manager import SerialResourceManager
 from .process_tracker import ProcessTracker
 from .thread_safety import thread_safe, ThreadSafeDict
+from .geo_utils import GeoUtils
 
 __all__ = [
     'ParamLoader',
@@ -22,4 +23,5 @@ __all__ = [
     'ProcessTracker',
     'thread_safe',
     'ThreadSafeDict',
+    'GeoUtils'
 ]

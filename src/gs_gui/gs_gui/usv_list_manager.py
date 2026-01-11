@@ -162,3 +162,12 @@ class USVListManager:
         self.usv_online_list = state_list
         self.update_departed_list_status()
         self.update_cluster_list()
+
+    def get_usv_list(self):
+        """
+        获取当前在线 USV 列表
+        
+        Returns:
+            list: 在线 USV 状态列表
+        """
+        return self.usv_online_list

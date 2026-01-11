@@ -66,5 +66,6 @@
         "ylabel"
     ],
     "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces",
-    "ros.distro": "jazzy"
+    "ros.distro": "jazzy",
+    "ROS2.distro": "jazzy"
 }

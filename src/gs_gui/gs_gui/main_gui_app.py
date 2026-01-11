@@ -13,8 +13,13 @@ from logging.handlers import RotatingFileHandler
 
 import rclpy
 from rclpy.parameter import Parameter
-from PyQt5.QtCore import QProcess, QTimer
-from PyQt5.QtWidgets import QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog
+from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog, QMenu,
+    QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, 
+    QHeaderView, QProgressBar, QFrame, QLabel
+)
+from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
@@ -30,6 +35,8 @@ from gs_gui.area_offset_dialog import AreaOffsetDialog
 from gs_gui.usv_info_panel import UsvInfoPanel
 from gs_gui.usv_navigation_panel import UsvNavigationPanel
 from gs_gui.style_manager import StyleManager
+from gs_gui.geofence_manager import GeofenceManager
+from gs_gui.geofence_dialog import GeofenceDialog
 # 使用性能优化版本的集群启动器（异步检测 + 并行 ping）
 from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
 
@@ -42,8 +49,15 @@ class MainWindow(QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self.setWindowTitle("Ground Station GUI")
-        self.resize(1024, 512)
-        self.setGeometry(100, 100, 1124, 612)
+        
+        # 恢复窗口大小和位置
+        self.settings = QSettings("USV_Team", "GroundStation")
+        geometry = self.settings.value("geometry")
+        if geometry:
+            self.restoreGeometry(geometry)
+        else:
+            self.resize(1024, 512)
+            self.setGeometry(100, 100, 1124, 612)
 
         # 更新按钮文本以匹配新的彩虹循环行为
         try:
@@ -60,12 +74,12 @@ class MainWindow(QMainWindow):
         self.style_manager = StyleManager(self)
         self.style_manager.load_theme('modern_dark')
         
-        # 设置全局字体大小（增大 emoji 显示）
+        # 设置全局字体大小
         # 必须在 StyleManager 之后设置，以避免被主题覆盖
         # 可选值：9(默认小), 10(稍大), 11(中等), 12(较大), 13(大), 14(很大)
         from PyQt5.QtGui import QFont
         app_font = QFont()
-        app_font.setPointSize(14)  # 设置为 14pt，emoji 明显更大
+        app_font.setPointSize(11)  # 设置为 11pt，更精致紧凑
         QApplication.instance().setFont(app_font)
         
         # 初始化UI工具
@@ -74,11 +88,8 @@ class MainWindow(QMainWindow):
         # 初始化额外菜单
         self._init_custom_menu()
         
-        # 初始化 USV 信息面板并替换原有的 groupBox_3
-        self._init_usv_info_panel()
-        
-        # 初始化 USV 导航面板（插入到 USV Details 和 Message 之间）
-        self._init_usv_navigation_panel()
+        # 初始化消息框右键菜单
+        self._init_text_edit_context_menus()
         
         # 初始化表格管理器
         self.table_manager = TableManager(
@@ -100,6 +111,10 @@ class MainWindow(QMainWindow):
         
         # 初始化USV列表管理器
         self.list_manager = USVListManager(self.ui_utils.append_info)
+
+        # 初始化右侧侧边栏综合选项卡（合并详情、导航、反馈、日志）
+        # 注意：这需要用到 list_manager 初始化 2D 绘图窗口
+        self._init_side_tab_panel()
         
         # 初始化状态处理器（传入信息面板和导航面板更新回调）
         self.state_handler = StateHandler(
@@ -124,6 +139,16 @@ class MainWindow(QMainWindow):
             self
         )
         
+        # 初始化电子围栏管理器
+        self.geofence_manager = GeofenceManager(
+            self.ros_signal,
+            self.ui_utils.append_warning  # 使用warning通道输出围栏警告
+        )
+        
+        # 初始化初始化界面控件
+        self._init_task_status_label()
+        self._init_geofence_checkbox()
+        
         # 连接ROS信号
         self._connect_ros_signals()
         
@@ -133,10 +158,95 @@ class MainWindow(QMainWindow):
         # 在初始化最后刷新表格表头
         self.table_manager.refresh_table_header()
     
+    def _init_task_status_label(self):
+        """初始化集群任务状态标签"""
+        # 创建标签
+        self.cluster_status_label = QLabel("当前没有加载任务")
+        self.cluster_status_label.setAlignment(Qt.AlignCenter)
+        self.cluster_status_label.setMinimumHeight(30)
+        
+        # 初始样式
+        default_style = """
+            QLabel {
+                background-color: #2D2D2D;
+                color: #888888;
+                border: 1px solid #444444;
+                border-radius: 4px;
+                padding: 4px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+        """
+        self.cluster_status_label.setStyleSheet(default_style)
+        
+        # 将标签插入到verticalLayout_5的最上方 (集群控制区域)
+        # verticalLayout_5 是右侧面板中"集群控制"GroupBox的布局
+        self.ui.verticalLayout_5.insertWidget(0, self.cluster_status_label)
+        
+        # 将更新回调函数传递给Task Manager
+        if hasattr(self, 'task_manager'):
+            self.task_manager.set_update_status_callback(self.update_cluster_status)
+            self.task_manager.set_task_loaded_callback(self.update_plot_preview)
+
+    def _init_geofence_checkbox(self):
+        """初始化电子围栏复选框到主界面"""
+        from PyQt5.QtWidgets import QCheckBox
+        self.geofence_checkbox = QCheckBox("🛡️ 启用电子围栏保护")
+        self.geofence_checkbox.setToolTip("开启后，若USV超出设定矩形范围将自动锁定(HOLD)")
+        self.geofence_checkbox.setStyleSheet("""
+            QCheckBox {
+                color: #CCCCCC;
+                spacing: 5px;
+                margin-top: 5px;
+                margin-bottom: 5px;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+            }
+        """)
+        
+        # 插入到集群控制区域 (在状态标签下面)
+        self.ui.verticalLayout_5.insertWidget(1, self.geofence_checkbox)
+        
+        # 连接信号
+        self.geofence_checkbox.clicked.connect(self._on_geofence_checkbox_toggled)
+
+    def _on_geofence_checkbox_toggled(self, checked):
+        """主界面复选框切换处理"""
+        # 更新管理器
+        if hasattr(self, 'geofence_manager'):
+            self.geofence_manager.set_enabled(checked)
+        # 同步菜单
+        if hasattr(self, 'action_geofence_toggle'):
+            self.action_geofence_toggle.blockSignals(True)
+            self.action_geofence_toggle.setChecked(checked)
+            self.action_geofence_toggle.blockSignals(False)
+
+    def update_plot_preview(self, task_data):
+        """当任务加载后，更新绘图窗口的预览路径"""
+        # 此时窗口已嵌入在 Feedback Tab 中，直接更新数据
+        if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
+             self.usv_plot_window.set_preview_path(task_data)
+             
+        # 自动切换到反馈选项卡 (Tab Index 2: 📊 反馈)
+        if hasattr(self, 'right_tab_widget'):
+            self.right_tab_widget.setCurrentIndex(2)
+
+    def update_cluster_status(self, text, style_sheet=None):
+        """更新集群任务状态标签"""
+        if hasattr(self, 'cluster_status_label'):
+            self.cluster_status_label.setText(text)
+            if style_sheet:
+                self.cluster_status_label.setStyleSheet(style_sheet)
+    
     def _connect_ros_signals(self):
         """连接ROS信号到处理函数"""
         # 状态更新信号
         self.ros_signal.receive_state_list.connect(self.state_handler.receive_state_callback)
+        # 连接电子围栏检查
+        if hasattr(self, 'geofence_manager'):
+            self.ros_signal.receive_state_list.connect(self.geofence_manager.check_usv_states)
         
         # 集群任务进度信号
         self.ros_signal.cluster_progress_update.connect(self._handle_cluster_progress_update)
@@ -208,6 +318,8 @@ class MainWindow(QMainWindow):
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
         self.action_set_home.triggered.connect(self.open_set_home_dialog)
+        self.action_geofence_settings.triggered.connect(self.open_geofence_dialog)
+        self.action_geofence_toggle.toggled.connect(self.toggle_geofence_from_menu)
         self.action_param_config.triggered.connect(self.open_param_config_window)
 
     def _init_custom_menu(self):
@@ -228,7 +340,7 @@ class MainWindow(QMainWindow):
         led_menu = self.ui.menubar.addMenu("LED设置")
         self.action_led_infection_mode = QAction("LED传染模式", self)
         self.action_led_infection_mode.setCheckable(True)
-        self.action_led_infection_mode.setChecked(True)  # 默认打开
+        self.action_led_infection_mode.setChecked(False)  # 默认关闭
         led_menu.addAction(self.action_led_infection_mode)
         
         # 工具菜单
@@ -239,6 +351,18 @@ class MainWindow(QMainWindow):
         self.action_set_home.setShortcut("Ctrl+H")
         self.action_set_home.setToolTip("设置 USV 的 Home Position（RTL 返航点）")
         tools_menu.addAction(self.action_set_home)
+
+        # 电子围栏设置
+        self.action_geofence_settings = QAction("🚧 电子围栏设置...", self)
+        self.action_geofence_settings.setToolTip("设置矩形活动区域，越界自动HOLD")
+        tools_menu.addAction(self.action_geofence_settings)
+        
+        # 电子围栏快速开关
+        self.action_geofence_toggle = QAction("🛡️ 启用电子围栏", self)
+        self.action_geofence_toggle.setCheckable(True)
+        self.action_geofence_toggle.setChecked(False)
+        self.action_geofence_toggle.setToolTip("快速开启/关闭电子围栏监控")
+        tools_menu.addAction(self.action_geofence_toggle)
         
         # 分隔线
         tools_menu.addSeparator()
@@ -248,58 +372,298 @@ class MainWindow(QMainWindow):
         self.action_param_config.setShortcut("Ctrl+P")
         self.action_param_config.setToolTip("通过串口直连配置飞控参数")
         tools_menu.addAction(self.action_param_config)
+
+    def _init_text_edit_context_menus(self):
+        """初始化消息框的右键清空功能"""
+        
+        # 定义通用的上下文菜单策略处理函数
+        def setup_context_menu(text_edit):
+            text_edit.setContextMenuPolicy(Qt.CustomContextMenu)
+            text_edit.customContextMenuRequested.connect(
+                lambda pos: show_context_menu(text_edit, pos)
+            )
+
+        def show_context_menu(text_edit, pos):
+            # 创建标准菜单（包含复制/全选等）
+            menu = text_edit.createStandardContextMenu()
+            menu.addSeparator()
+            # 添加清空动作
+            clear_action = QAction("🗑️ 清除内容", menu)
+            clear_action.triggered.connect(text_edit.clear)
+            menu.addAction(clear_action)
+            # 显示菜单
+            menu.exec_(text_edit.mapToGlobal(pos))
+
+        # 为三个文本框应用策略
+        setup_context_menu(self.ui.cluster_navigation_feedback_info_textEdit)
+        setup_context_menu(self.ui.info_textEdit)
+        setup_context_menu(self.ui.warning_textEdit)
     
-    def _init_usv_info_panel(self):
-        """初始化 USV 信息面板，替换原有的 groupBox_3"""
-        # 创建 USV 信息面板
+    def _init_side_tab_panel(self):
+        """初始化右侧侧边栏综合选项卡（合并详情、导航、反馈、日志）"""
+        # 1. 创建 TabWidget
+        self.right_tab_widget = QTabWidget()
+        self.right_tab_widget.setTabPosition(QTabWidget.North)
+        self.right_tab_widget.setDocumentMode(True)  # 更现代的文档模式外观
+        
+        # 2. 准备各个面板
+        # [Tab 1] USV 详情
         self.usv_info_panel = UsvInfoPanel()
+        self.right_tab_widget.addTab(self.usv_info_panel, "📋 详情")
         
-        # 获取原有的 groupBox_3 的父布局
-        # groupBox_3 在 verticalLayout_10 中
-        parent_layout = self.ui.groupBox_3.parent().layout()
-        
-        if parent_layout is not None:
-            # 找到 groupBox_3 在布局中的索引
-            index = parent_layout.indexOf(self.ui.groupBox_3)
-            
-            # 移除并隐藏原有的 groupBox_3
-            parent_layout.removeWidget(self.ui.groupBox_3)
-            self.ui.groupBox_3.hide()
-            
-            # 在相同位置插入新的信息面板
-            if index >= 0:
-                parent_layout.insertWidget(index, self.usv_info_panel)
-            else:
-                parent_layout.addWidget(self.usv_info_panel)
-    
-    def _init_usv_navigation_panel(self):
-        """初始化 USV 导航面板，插入到 mainSplitter 中（USV Details 和 Message 之间）"""
-        # 创建 USV 导航面板
+        # [Tab 2] USV 导航
         self.usv_navigation_panel = UsvNavigationPanel()
+        self.right_tab_widget.addTab(self.usv_navigation_panel, "🧭 导航")
         
-        # 创建一个 GroupBox 包装导航面板（保持与其他面板风格一致）
-        from PyQt5.QtWidgets import QGroupBox, QVBoxLayout
-        navigation_group = QGroupBox("USV Navigation")
-        navigation_layout = QVBoxLayout(navigation_group)
-        navigation_layout.setContentsMargins(5, 5, 5, 5)
-        navigation_layout.addWidget(self.usv_navigation_panel)
+        # [Tab 3] 任务反馈 (Dashboard + Table)
+        feedback_widget = self._init_feedback_tab()
+        self.right_tab_widget.addTab(feedback_widget, "📊 反馈")
         
-        # 获取 mainSplitter
+        # [Tab 4] 系统信息 (复用现有控件)
+        if self.ui.info_textEdit.parent():
+            self.ui.info_textEdit.setParent(None)
+        self.right_tab_widget.addTab(self.ui.info_textEdit, "ℹ 信息")
+        
+        # [Tab 5] 系统警告 (复用现有控件)
+        if self.ui.warning_textEdit.parent():
+            self.ui.warning_textEdit.setParent(None)
+        self.right_tab_widget.addTab(self.ui.warning_textEdit, "⚠ 警告")
+        
+        # 3. 清理旧布局
+        # 隐藏原有的 groupBox_usv_details 和 groupBox_2 (Message)
+        self.ui.groupBox_usv_details.hide()
+        self.ui.groupBox_2.hide()
+        
+        # 4. 添加到 Splitter (替换右侧区域)
         main_splitter = self.ui.mainSplitter
+        # 现在的 Splitter 应该有: [0: LeftControl, 1: OldDetails, 2: OldMessage]
+        # 我们调整拉伸因子，因为现在只有两部分：List(0) 和 Tabs(1-added)
+        main_splitter.addWidget(self.right_tab_widget)
         
-        # mainSplitter 的结构：
-        # 0: groupBox_usv_details (USV Details)
-        # 1: groupBox_2 (Message 区域)
-        # 我们要在它们之间插入导航面板
+        # 5. 设置科幻风格 QSS
+        self.right_tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #444;
+                background: #1e1e1e;
+                top: -1px; 
+            }
+            QTabBar::tab {
+                background: #2d2d2d;
+                color: #aaa;
+                padding: 8px 20px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                margin-right: 2px;
+                font-family: "Segoe UI", sans-serif;
+                font-size: 11pt;
+            }
+            QTabBar::tab:selected {
+                background: #1e1e1e;
+                color: #00f2ff;
+                border-bottom: 2px solid #00f2ff;
+            }
+            QTabBar::tab:hover {
+                background: #3d3d3d;
+                color: #fff;
+            }
+        """)
+
+    def _init_feedback_tab(self):
+        """初始化反馈选项卡内容"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)
         
-        # 在索引 1 的位置插入导航面板
-        main_splitter.insertWidget(1, navigation_group)
+        # 1. 任务仪表盘 (Mission Dashboard)
+        self._init_mission_dashboard(layout)
         
-        # 调整 splitter 的拉伸比例（可选）
-        # 设置各个部分的初始大小比例：USV Details : Navigation : Message = 3 : 2 : 3
-        main_splitter.setStretchFactor(0, 3)  # USV Details
-        main_splitter.setStretchFactor(1, 2)  # Navigation
-        main_splitter.setStretchFactor(2, 3)  # Message
+        # 2. 导航反馈表格 (Navigation Table)
+        self._init_navigation_feedback_table()
+        layout.addWidget(self.nav_feedback_table)
+        
+        # 3. 嵌入 2D 绘图窗口 (Embedded 2D Plot)
+        from gs_gui.usv_plot_window import UsvPlotWindow
+        # 我们在这里创建唯一的实例，放在表格下面
+        self.usv_plot_window = UsvPlotWindow(self.list_manager.get_usv_list, self)
+        layout.addWidget(self.usv_plot_window, stretch=1) # 占据剩余空间
+        
+        # 保存 layout 引用以便后续使用
+        self.nav_feedback_layout = layout
+        
+        return widget
+
+    def _init_mission_dashboard(self, parent_layout):
+        """初始化科幻任务仪表盘"""
+        self.mission_dashboard = QFrame()
+        self.mission_dashboard.setFixedHeight(100) # 固定高度
+        self.mission_dashboard.setObjectName("missionDashboard")
+        
+        db_layout = QVBoxLayout(self.mission_dashboard)
+        db_layout.setContentsMargins(15, 10, 15, 10)
+        
+        # 上部分：标题与状态标签
+        top_layout = QHBoxLayout()
+        title_label = QLabel("MISSION STATUS")
+        title_label.setObjectName("dbTitle")
+        
+        self.mission_state_label = QLabel("IDLE")
+        self.mission_state_label.setObjectName("dbState")
+        self.mission_state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        top_layout.addWidget(title_label)
+        top_layout.addStretch()
+        top_layout.addWidget(self.mission_state_label)
+        db_layout.addLayout(top_layout)
+        
+        # 中部分：数据概览
+        info_layout = QHBoxLayout()
+        self.mission_step_label = QLabel("STEP: 0/0")
+        self.mission_units_label = QLabel("UNITS: 0/0")
+        self.mission_time_label = QLabel("TIME: 0.0s")
+        for lbl in [self.mission_step_label, self.mission_units_label, self.mission_time_label]:
+            lbl.setObjectName("dbInfo")
+            info_layout.addWidget(lbl)
+            info_layout.addStretch()
+        # 移除最后一个 stretch
+        if info_layout.count() > 0:
+            info_layout.takeAt(info_layout.count()-1)
+        db_layout.addLayout(info_layout)
+        
+        # 下部分：进度条
+        self.mission_progress_bar = QProgressBar()
+        self.mission_progress_bar.setObjectName("dbProgress")
+        self.mission_progress_bar.setValue(0)
+        self.mission_progress_bar.setFormat("MISSION PROGRESS: %p%")
+        self.mission_progress_bar.setAlignment(Qt.AlignCenter)
+        self.mission_progress_bar.setFixedHeight(20)
+        db_layout.addWidget(self.mission_progress_bar)
+        
+        # Dashboard QSS
+        self.mission_dashboard.setStyleSheet("""
+            QFrame#missionDashboard {
+                background-color: #0a192f;
+                border: 1px solid #00f2ff;
+                border-radius: 5px;
+            }
+            QLabel#dbTitle {
+                font-family: "Impact", sans-serif;
+                font-size: 14pt;
+                color: #000;
+                background-color: #00f2ff;
+                padding: 2px 5px;
+                font-weight: bold;
+            }
+            QLabel#dbState {
+                font-family: "Consolas", monospace;
+                font-size: 12pt;
+                color: #00f2ff;
+                font-weight: bold;
+            }
+            QLabel#dbInfo {
+                font-family: "Consolas", monospace;
+                font-size: 10pt;
+                color: #00f2ff;
+            }
+            QProgressBar#dbProgress {
+                border: 1px solid #00f2ff;
+                border-radius: 2px;
+                text-align: center;
+                color: #00f2ff;
+                background-color: #001122;
+                font-family: "Consolas", monospace;
+                font-weight: bold;
+            }
+            QProgressBar#dbProgress::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
+            }
+        """)
+        
+        parent_layout.addWidget(self.mission_dashboard)
+
+    def _update_mission_dashboard(self, progress_info):
+        """更新任务仪表盘数据"""
+        # 1. 进度条
+        ack_rate = progress_info.get('ack_rate', 0.0)
+        self.mission_progress_bar.setValue(int(ack_rate * 100))
+        
+        # 2. 文本信息
+        current_step = progress_info.get('current_step', 0)
+        total_steps = progress_info.get('total_steps', 0)
+        acked_usvs = progress_info.get('acked_usvs', 0)
+        total_usvs = progress_info.get('total_usvs', 0)
+        elapsed_time = progress_info.get('elapsed_time', 0.0)
+        state = progress_info.get('state', 'unknown')
+        
+        self.mission_step_label.setText(f"STEP: {current_step}/{total_steps}")
+        self.mission_units_label.setText(f"UNITS: {acked_usvs}/{total_usvs}")
+        self.mission_time_label.setText(f"TIME: {elapsed_time:.1f}s")
+        
+        # 3. 状态与呼吸灯效果
+        state_map = {'idle': 'IDLE', 'running': 'RUNNING', 'completed': 'COMPLETED', 'failed': 'FAILED'}
+        state_text = state_map.get(state, state.upper())
+        self.mission_state_label.setText(state_text)
+        
+        if state == 'running':
+             self.mission_state_label.setStyleSheet("QLabel#dbState { color: #00f2ff; }") # 简单处理，可加定时器闪烁
+        elif state == 'completed':
+             self.mission_state_label.setStyleSheet("QLabel#dbState { color: #4caf50; }")
+        elif state == 'failed':
+             self.mission_state_label.setStyleSheet("QLabel#dbState { color: #f44336; }")
+
+    def _init_navigation_feedback_table(self):
+        """初始化导航反馈表格，采用科幻风格设计"""
+        self.nav_feedback_table = QTableWidget()
+        self.nav_feedback_table.setColumnCount(6)
+        self.nav_feedback_table.setHorizontalHeaderLabels(["STATUS", "USV ID", "TARGET", "DISTANCE", "HEADING ERR", "ETA"])
+        
+        # 设置表头自适应
+        header = self.nav_feedback_table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Stretch)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents) # Status 宽度自适应
+        
+        # 设置表格属性
+        self.nav_feedback_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.nav_feedback_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.nav_feedback_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.nav_feedback_table.verticalHeader().setVisible(False)
+        self.nav_feedback_table.verticalHeader().setDefaultSectionSize(40)
+        self.nav_feedback_table.setShowGrid(False)
+        self.nav_feedback_table.setAlternatingRowColors(True)
+        
+        # 科幻风格 QSS
+        self.nav_feedback_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1a1a1a;
+                alternate-background-color: #222222;
+                color: #e0e0e0;
+                gridline-color: transparent;
+                border: none;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 10pt;
+            }
+            QTableWidget::item {
+                padding: 5px;
+            }
+            QTableWidget::item:selected {
+                background-color: rgba(0, 242, 255, 0.15);
+                color: #00f2ff;
+                border-left: 2px solid #00f2ff;
+            }
+            QHeaderView::section {
+                background-color: #0d1b2a;
+                color: #00f2ff;
+                padding: 8px;
+                border: none;
+                border-bottom: 1px solid #00f2ff;
+                font-weight: bold;
+                text-transform: uppercase;
+                font-size: 9pt;
+            }
+        """)
+        
+        # 用于存储 usv_id 到行索引的映射
+        self._nav_feedback_row_map = {}
     
     # ============== 集群命令包装方法 ==============
     def set_cluster_arming_command(self):
@@ -430,6 +794,10 @@ class MainWindow(QMainWindow):
         """处理集群任务进度更新并同步按钮文本"""
         self.task_manager.update_progress(progress_info)
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        
+        # 更新科幻仪表盘
+        if hasattr(self, 'mission_dashboard'):
+            self._update_mission_dashboard(progress_info)
 
     # ============== 离群目标点命令 ==============
     def send_departed_point_command(self):
@@ -628,25 +996,117 @@ class MainWindow(QMainWindow):
         self.ui.led1_pushButton.setText("彩虹循环")
     
     # ============== 导航反馈处理 ==============
+    def clear_navigation_feedback_table(self):
+        """清空导航反馈列表"""
+        self.nav_feedback_table.setRowCount(0)
+        self._nav_feedback_row_map.clear()
+        
     def handle_navigation_feedback(self, usv_id, feedback):
         """
-        处理导航反馈信息
-        
-        Args:
-            usv_id: USV标识符
-            feedback: 导航反馈数据
+        处理导航反馈信息，更新到表格中（科幻增强版）
         """
-        self.ui.cluster_navigation_feedback_info_textEdit.append(
-            f"USV {usv_id} 导航反馈 - "
-            f"距离目标: {feedback.distance_to_goal:.2f}m, "
-            f"航向误差: {feedback.heading_error:.2f}度, "
-            f"预计剩余时间: {feedback.estimated_time:.2f}秒"
-        )
+        # 检查是否已有该 USV 的行
+        if usv_id not in self._nav_feedback_row_map:
+            row = self.nav_feedback_table.rowCount()
+            self.nav_feedback_table.insertRow(row)
+            self._nav_feedback_row_map[usv_id] = row
+            
+            # 0. 状态 (STATUS) - 初始为等待
+            status_item = QTableWidgetItem("●")
+            status_item.setTextAlignment(Qt.AlignCenter)
+            status_item.setForeground(QColor("#ff9800")) # 橙色
+            self.nav_feedback_table.setItem(row, 0, status_item)
+            
+            # 1. ID
+            id_item = QTableWidgetItem(usv_id)
+            id_item.setTextAlignment(Qt.AlignCenter)
+            id_item.setForeground(QColor("#00f2ff"))
+            self.nav_feedback_table.setItem(row, 1, id_item)
+        
+        row = self._nav_feedback_row_map[usv_id]
+        dist = feedback.distance_to_goal
+        abs_err = abs(feedback.heading_error)
+        
+        # 更新状态颜色
+        status_item = self.nav_feedback_table.item(row, 0)
+        if dist < 1.5:
+            status_item.setText("✔")
+            status_item.setForeground(QColor("#4caf50")) # 绿色
+        elif abs_err > 30.0:
+            status_item.setText("⚠")
+            status_item.setForeground(QColor("#f44336")) # 红色
+        else:
+            status_item.setText("●")
+            status_item.setForeground(QColor("#00f2ff")) # 青色
+            
+        # 2. 目标ID (TARGET)
+        # 优先显示 Step 数值（T-xx），如果是单点导航则显示 Goal ID
+        target_val = getattr(feedback, 'step', 0)
+        if target_val <= 0:
+            target_val = feedback.goal_id
+            
+        goal_item = QTableWidgetItem(f"T-{target_val:02d}")
+        goal_item.setTextAlignment(Qt.AlignCenter)
+        self.nav_feedback_table.setItem(row, 2, goal_item)
+        
+        # 3. 距离 (DISTANCE) - 使用进度条展示接近程度
+        # 假设 30m 为满量程，越近进度条越满
+        max_dist = 30.0
+        progress_val = int(max(0, min(100, (1.0 - dist / max_dist) * 100)))
+        
+        bar = self.nav_feedback_table.cellWidget(row, 3)
+        if not isinstance(bar, QProgressBar):
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setTextVisible(True)
+            bar.setStyleSheet("""
+                QProgressBar {
+                    border: 1px solid #333;
+                    border-radius: 2px;
+                    background-color: #0a0a0a;
+                    text-align: center;
+                    color: #ffffff;
+                    font-size: 8pt;
+                    height: 16px;
+                }
+                QProgressBar::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
+                }
+            """)
+            self.nav_feedback_table.setCellWidget(row, 3, bar)
+        
+        bar.setValue(progress_val)
+        bar.setFormat(f"{dist:.1f}m")
+        
+        # 4. 航向误差 (HEADING ERR)
+        dir_sym = "◀" if feedback.heading_error > 0 else "▶"
+        if abs_err < 5.0: dir_sym = "◈"
+        
+        yaw_item = QTableWidgetItem(f"{dir_sym} {abs_err:.1f}°")
+        yaw_item.setTextAlignment(Qt.AlignCenter)
+        if abs_err > 30.0:
+            yaw_item.setForeground(QColor("#f44336"))
+        elif abs_err > 15.0:
+            yaw_item.setForeground(QColor("#ff9800"))
+        else:
+            yaw_item.setForeground(QColor("#4caf50"))
+        self.nav_feedback_table.setItem(row, 4, yaw_item)
+        
+        # 5. ETA
+        eta = feedback.estimated_time
+        eta_str = f"{int(eta)}s" if eta > 0 else "--"
+        eta_item = QTableWidgetItem(eta_str)
+        eta_item.setTextAlignment(Qt.AlignCenter)
+        if 0 < eta < 10:
+            eta_item.setForeground(QColor("#00f2ff"))
+        self.nav_feedback_table.setItem(row, 5, eta_item)
     
     # ============== UI辅助方法 ==============
     def show_usv_plot_window(self):
-        """显示USV绘图窗口"""
-        self.ui_utils.show_usv_plot_window(lambda: self.list_manager.usv_online_list)
+        """显示USV绘图窗口 (切换到反馈Tab)"""
+        # 以前是弹窗，现在是切换到 Feedback Tab
+        if hasattr(self, 'right_tab_widget'):
+            self.right_tab_widget.setCurrentIndex(2) # Index 2 is Feedback tab
     
     def update_selected_table_row(self):
         """更新选中行数据"""
@@ -760,6 +1220,44 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
     
+    def open_geofence_dialog(self):
+        """打开电子围栏设置对话框"""
+        dialog = GeofenceDialog(
+            self,
+            current_bounds=self.geofence_manager.rect,
+            current_enabled=self.geofence_manager.enabled
+        )
+        if dialog.exec_() == QDialog.Accepted:
+            bounds, enabled = dialog.get_settings()
+            self.geofence_manager.set_bounds(bounds)
+            self.geofence_manager.set_enabled(enabled)
+            
+            # 同步更新UI状态
+            self._sync_geofence_ui(enabled)
+
+    def toggle_geofence_from_menu(self, checked):
+        """从菜单快速切换电子围栏状态"""
+        if hasattr(self, 'geofence_manager'):
+            self.geofence_manager.set_enabled(checked)
+        # 同步复选框
+        if hasattr(self, 'geofence_checkbox'):
+            self.geofence_checkbox.blockSignals(True)
+            self.geofence_checkbox.setChecked(checked)
+            self.geofence_checkbox.blockSignals(False)
+            
+    def _sync_geofence_ui(self, enabled):
+        """同步所有电子围栏相关的UI控件状态"""
+        # 1. 菜单
+        if hasattr(self, 'action_geofence_toggle'):
+            self.action_geofence_toggle.blockSignals(True)
+            self.action_geofence_toggle.setChecked(enabled)
+            self.action_geofence_toggle.blockSignals(False)
+        # 2. 主界面复选框
+        if hasattr(self, 'geofence_checkbox'):
+            self.geofence_checkbox.blockSignals(True)
+            self.geofence_checkbox.setChecked(enabled)
+            self.geofence_checkbox.blockSignals(False)
+
     def open_set_home_dialog(self):
         """打开设置 Home Position 对话框"""
         try:
@@ -796,7 +1294,7 @@ class MainWindow(QMainWindow):
                     else:
                         self.ui_utils.append_info(
                             f"📍 已向 {usv_namespace} 发送设置 Home Position 命令\n"
-                            f"    坐标: {coords.get('lat'):.7f}, {coords.get('lon'):.7f}, {coords.get('alt'):.2f}m"
+                            f"    坐标 (XYZ): {coords.get('x'):.2f}, {coords.get('y'):.2f}, {coords.get('z'):.2f}m"
                         )
         
         except Exception as e:
@@ -862,6 +1360,9 @@ class MainWindow(QMainWindow):
         Args:
             event: QCloseEvent对象
         """
+        # 保存窗口大小和位置
+        self.settings.setValue("geometry", self.saveGeometry())
+        
         try:
             # 如果已经发送过关闭命令，直接接受关闭事件
             if self._shutdown_commands_sent:

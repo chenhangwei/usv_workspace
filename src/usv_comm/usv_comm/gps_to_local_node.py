@@ -16,16 +16,11 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
 
 # 导入common_utils工具
-from common_utils import ParamLoader
+from common_utils import ParamLoader, GeoUtils
 
 
 class GpsToLocalNode(Node):
     """GPS 到本地坐标转换节点"""
-    
-    # WGS84 椭球参数（国际标准）
-    WGS84_A = 6378137.0                          # 赤道半径（米）
-    WGS84_B = 6356752.314245                     # 极半径（米）
-    WGS84_E2 = 1 - (WGS84_B * WGS84_B) / (WGS84_A * WGS84_A)  # 第一偏心率平方
 
     def __init__(self):
         super().__init__('gps_to_local_node')
@@ -98,10 +93,11 @@ class GpsToLocalNode(Node):
         self.publish_timer = self.create_timer(timer_period, self.publish_local_pose)
         
         # 计算并显示该纬度处的转换系数（调试信息）
-        meters_per_lat = self._meters_per_lat_degree(self.origin_lat)
-        meters_per_lon = self._meters_per_lon_degree(self.origin_lat)
+        meters_per_lat = GeoUtils.meters_per_lat_degree(self.origin_lat)
+        meters_per_lon = GeoUtils.meters_per_lon_degree(self.origin_lat)
         
         self.get_logger().info('✅ GPS→本地坐标转换节点已启动 (WGS84 椭球模型)')
+
         self.get_logger().info(
             f'📍 GPS 原点: ({self.origin_lat:.7f}°, {self.origin_lon:.7f}°, {self.origin_alt:.2f}m)'
         )
@@ -170,91 +166,14 @@ class GpsToLocalNode(Node):
         except Exception as e:
             self.get_logger().error(f'GPS→本地坐标转换失败: {e}')
     
-    @staticmethod
-    def _meters_per_lat_degree(lat: float) -> float:
-        """
-        计算指定纬度处 1° 纬度对应的弧长（米/度）
-        使用 WGS84 椭球模型，精度优于球体近似
-        
-        Args:
-            lat: 纬度（度）
-        
-        Returns:
-            float: 该纬度处 1° 纬度的弧长（米）
-        """
-        lat_rad = math.radians(lat)
-        sin_lat = math.sin(lat_rad)
-        
-        # WGS84 椭球纬度弧长公式
-        # M(φ) = πa(1-e²) / [180(1-e²sin²φ)^(3/2)]
-        numerator = math.pi * GpsToLocalNode.WGS84_A * (1 - GpsToLocalNode.WGS84_E2)
-        denominator = 180 * math.pow(1 - GpsToLocalNode.WGS84_E2 * sin_lat * sin_lat, 1.5)
-        
-        return numerator / denominator
-    
-    @staticmethod
-    def _meters_per_lon_degree(lat: float) -> float:
-        """
-        计算指定纬度处 1° 经度对应的弧长（米/度）
-        使用 WGS84 椭球模型，精度优于球体近似
-        
-        Args:
-            lat: 纬度（度）
-        
-        Returns:
-            float: 该纬度处 1° 经度的弧长（米）
-        """
-        lat_rad = math.radians(lat)
-        cos_lat = math.cos(lat_rad)
-        sin_lat = math.sin(lat_rad)
-        
-        # WGS84 椭球经度弧长公式
-        # N(φ) = πa·cosφ / [180·√(1-e²sin²φ)]
-        numerator = math.pi * GpsToLocalNode.WGS84_A * cos_lat
-        denominator = 180 * math.sqrt(1 - GpsToLocalNode.WGS84_E2 * sin_lat * sin_lat)
-        
-        return numerator / denominator
-    
+
     def _gps_to_xyz(self, lat: float, lon: float, alt: float) -> dict:
         """
         GPS 坐标 → 本地 XYZ (ENU坐标系)
-        
-        使用 WGS84 椭球模型进行高精度转换：
-        - 22.5° 处纬度 1° ≈ 110,697 m（vs 球体近似 111,320 m）
-        - 22.5° 处经度 1° ≈ 102,510 m（vs 球体近似 102,593 m）
-        - 20 km 范围内误差 < 1 mm（vs 球体近似 ~10 cm）
-        
-        参考：
-        - TAG UWB 文档转换系数：LSB_M_TO_LAT_LONG = 8.993216059e-6 (度/米)
-        - 对应反向转换：1 / 8.993216e-6 ≈ 111,195 m/度（球体近似）
-        
-        Args:
-            lat: 纬度（度）
-            lon: 经度（度）
-            alt: 海拔（米）
-        
-        Returns:
-            {'x': 东向距离(m), 'y': 北向距离(m), 'z': 天向距离(m)}
+        使用 common_utils.GeoUtils 进行转换
         """
-        # 计算中点纬度（用于经度转换，减少误差）
-        mid_lat = (lat + self.origin_lat) / 2.0
-        
-        # 使用 WGS84 椭球公式计算转换系数
-        meters_per_lat = self._meters_per_lat_degree(mid_lat)
-        meters_per_lon = self._meters_per_lon_degree(mid_lat)
-        
-        # 纬度差 → 北向距离 (Y轴)
-        dlat = lat - self.origin_lat
-        y = dlat * meters_per_lat
-        
-        # 经度差 → 东向距离 (X轴)
-        dlon = lon - self.origin_lon
-        x = dlon * meters_per_lon
-        
-        # 海拔差 → 天向距离 (Z轴)
-        z = alt - self.origin_alt
-        
-        return {'x': x, 'y': y, 'z': z}
+        return GeoUtils.gps_to_xyz(lat, lon, alt, self.origin_lat, self.origin_lon, self.origin_alt)
+
 
     def destroy_node(self):
         """节点销毁时的资源清理"""

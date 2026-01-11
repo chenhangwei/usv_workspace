@@ -86,10 +86,13 @@ class TableManager:
             model = self.cluster_table_model
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
-            online_state_list = [
-                s for s in state_list
-                if isinstance(s, dict) and s.get('connected', False)
-            ]
+            # 用户要求：不在线或断开连接的不要出现在列表里面，启动时也是
+            # 注意：state_list 传入时如果包含离线设备，在这里过滤掉
+            online_state_list = []
+            if state_list:
+                for s in state_list:
+                    if isinstance(s, dict) and s.get('connected', False):
+                        online_state_list.append(s)
 
             # 构建当前表中 namespace -> row 的映射
             current_ns_to_row = {}
@@ -153,10 +156,12 @@ class TableManager:
             model = self.departed_table_model
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
-            online_state_list = [
-                s for s in state_list
-                if isinstance(s, dict) and s.get('connected', False)
-            ]
+            # 用户要求：不在线或断开连接的不要出现在列表里面
+            online_state_list = []
+            if state_list:
+                for s in state_list:
+                    if isinstance(s, dict) and s.get('connected', False):
+                        online_state_list.append(s)
 
             # 当前表中 namespace -> row 映射
             current_ns_to_row = {}

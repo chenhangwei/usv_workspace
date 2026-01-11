@@ -1,26 +1,58 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <cluster type="triangle">
-    <step number="1">
+    <!--
+      单位约定：
+        - yaw / roll / pitch 均为弧度(rad)
+        - position 为米(m)
+
+      语义约定（与当前代码一致）：
+        - yaw：随 navigation/goal 下发（带 feedback/result 完成度）
+        - roll/pitch：解释为 attitude/command 的“姿态动作”（单向下发，不做完成度反馈）
+        - 姿态动作持续时长由 GS 参数 attitude_command_duration 控制（默认 1.0s）
+        - sync: true/false (true: 等待同组完成; false: 不等待)
+        - led: color_select|r,g,b 或 led_off (控制灯光)
+
+      velocity：当前仅被解析但不会影响 PX4 setpoint（可保留作未来扩展，不填写也不影响）。
+    -->
+    
+    <!-- 步骤 1: 编队集结 (同步, 演示独立颜色: 01红/02蓝/03黄) -->
+    <step number="1" sync="true">
         <usvs>
-            <usv>
+            <!-- USV_01: 红色 (255,0,0) -->
+            <usv led="color_select|255,0,0">
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>1.4</x>
-                    <y>6.1</y>
+                    <x>5</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
-                    <value>0.5</value>
+                    <value>0</value>
                 </yaw>
                 <velocity>
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <!-- USV_02: 蓝色 (0,0,255) -->
+            <usv led="color_select|0,0,255">
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>1.0</x>
-                    <y>6.4</y>
+                    <x>5</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -28,12 +60,20 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <!-- USV_03: 黄色 (255,255,0) -->
+            <usv led="color_select|255,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>0.9</x>
-                    <y>5.9</y>
+                    <x>5</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -43,14 +83,23 @@
             </usv>
         </usvs>
     </step>
-    <step number="2">
+
+    <!-- 步骤 2: 目标点到达 (同步, 绿色完成色) -->
+    <step number="2" sync="true">
         <usvs>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>2.6</x>
-                    <y>0.8</y>
+                    <x>3</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -58,12 +107,19 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>2.9</x>
-                    <y>1.4</y>
+                    <x>3</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>
@@ -71,12 +127,19 @@
                     <value>0.5</value>
                 </velocity>
             </usv>
-            <usv>
+            <usv led="color_select|0,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>2.8</x>
-                    <y>1.8</y>
+                    <x>3</x>
+                    <y>3</y>
+                    <z>0.0</z>
                 </position>
+                <roll>
+                    <value>0.0</value>
+                </roll>
+                <pitch>
+                    <value>0.0</value>
+                </pitch>
                 <yaw>
                     <value>0.5</value>
                 </yaw>

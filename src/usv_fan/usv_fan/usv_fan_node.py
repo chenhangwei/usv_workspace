@@ -56,8 +56,9 @@ class UsvFanNode(Node):
             self.line.request(consumer='usv_fan', type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
             self.get_logger().info('GPIO初始化成功')
         except Exception as e:
-            self.get_logger().error(f'GPIO初始化失败: {e}')
-            raise
+            self.get_logger().error(f'GPIO初始化失败: {e} (已忽略，风扇将不可用)')
+            self.line = None
+            # raise # 不抛出异常，允许节点继续运行
 
         self.get_logger().info('散热风扇控制器节点已启动')
 
@@ -74,6 +75,10 @@ class UsvFanNode(Node):
             temp = msg.data  # 温度（毫摄氏度）
             temp_celsius = temp / 1000.0  # 转换为摄氏度，仅用于日志
             
+            # 如果GPIO不可用，直接返回
+            if self.line is None:
+                return
+
             # 控制风扇
             if temp >= self.temp_threshold_on and not self.fan_state:
                 self.line.set_value(1)  # 开启风扇

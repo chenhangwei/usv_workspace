@@ -401,4 +401,4 @@ class Ui_MainWindow(object):
         self.menuVisual.setTitle(_translate("MainWindow", "Visual"))
         self.actionopen.setText(_translate("MainWindow", "open"))
         self.actionrviz2.setText(_translate("MainWindow", "rviz2"))
-        self.action3D.setText(_translate("MainWindow", "3D"))
+        self.action3D.setText(_translate("MainWindow", "2D"))

@@ -159,7 +159,7 @@ class GroundStationNode(Node):
         try:
             self._ns_offline_grace_period = float(self.get_parameter('offline_grace_period').get_parameter_value().double_value)
         except Exception:
-            self._ns_offline_grace_period = 5.0  # 从 20.0 减少到 5.0 秒，加快移除速度
+            self._ns_offline_grace_period = 15.0  # 增加到 15.0 秒，避免 WiFi 抖动导致误判离线
         # 离线判定的宽限期（秒），在此时间内即便 ROS 图暂时看不到也不移除
 
         # 用于通知后台线程退出的事件
@@ -174,8 +174,8 @@ class GroundStationNode(Node):
         # 维护本地 LED 状态 (线程安全)
         self._usv_current_led_state = ThreadSafeDict() # 维护 USV ID -> {'mode': str, 'color': [r,g,b]} 
         self._usv_infection_sources = ThreadSafeDict()  # 记录被传染USV的源映射
-        # LED传染模式开关（默认开启）
-        self._led_infection_enabled = True
+        # LED传染模式开关（默认关闭）
+        self._led_infection_enabled = False
      
         # 初始化命名空间检测历史记录
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
@@ -381,7 +381,8 @@ class GroundStationNode(Node):
                     now_sec = self.get_clock().now().nanoseconds / 1e9
                 except Exception:
                     now_sec = 0.0
-                self._ns_last_seen[usv_id] = now_sec
+                # 初始化时设置为0，避免刚启动时误判为在线
+                self._ns_last_seen[usv_id] = 0.0
                 
                 self.get_logger().info(f"✓ {usv_id} 初始化完成")
                 
@@ -730,7 +731,10 @@ class GroundStationNode(Node):
         
         # 发射信号更新GUI
         # 转换为兼容格式
+        step_val = cached.get('step', 0) if cached else 0
         feedback_obj = type('Feedback', (), {
+            'goal_id': msg.goal_id,
+            'step': step_val,
             'distance_to_goal': msg.distance_to_goal,
             'heading_error': msg.heading_error,
             'estimated_time': msg.estimated_time
@@ -746,22 +750,22 @@ class GroundStationNode(Node):
             usv_id (str): USV标识符
         """
         # 详细调试日志
-        self.get_logger().info(
-            f"🔍 [DEBUG] 收到导航结果: usv_id={usv_id}, goal_id={msg.goal_id}, "
-            f"success={msg.success}, message={msg.message}"
-        )
+        # self.get_logger().info(
+        #     f"🔍 [DEBUG] 收到导航结果: usv_id={usv_id}, goal_id={msg.goal_id}, "
+        #     f"success={msg.success}, message={msg.message}"
+        # )
         
         # 检查是否是当前目标的结果
         cached = self._usv_nav_target_cache.get(usv_id)
-        if cached:
-            self.get_logger().info(
-                f"🔍 [DEBUG] 缓存目标信息: goal_id={cached.get('goal_id')}, "
-                f"step={cached.get('step')}, x={cached.get('x'):.2f}, y={cached.get('y'):.2f}"
-            )
-        else:
-            self.get_logger().warning(
-                f"⚠️ {usv_id} 没有缓存目标，可能已被清除或过期"
-            )
+        # if cached:
+        #     self.get_logger().info(
+        #         f"🔍 [DEBUG] 缓存目标信息: goal_id={cached.get('goal_id')}, "
+        #         f"step={cached.get('step')}, x={cached.get('x'):.2f}, y={cached.get('y'):.2f}"
+        #     )
+        # else:
+        #     self.get_logger().warning(
+        #         f"⚠️ {usv_id} 没有缓存目标，可能已被清除或过期"
+        #     )
         
         if cached and cached.get('goal_id') != msg.goal_id:
             self.get_logger().warning(
@@ -785,7 +789,7 @@ class GroundStationNode(Node):
             
             # ✅ 修复：不在每个目标点完成时切换HOLD，让USV保持GUIDED模式继续执行后续步骤
             # 集群任务完成后会统一切换到HOLD（在_reset_cluster_task中处理）
-            self.get_logger().info(f"✅ {usv_id} 导航成功，保持GUIDED模式等待下一步任务")
+            # self.get_logger().info(f"✅ {usv_id} 导航成功，保持GUIDED模式等待下一步任务")
         else:
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             self.cluster_controller.mark_usv_goal_result(usv_id, False, goal_step)
@@ -1182,34 +1186,63 @@ class GroundStationNode(Node):
         """
         设置 Home Position 回调
         
-        发送 MAV_CMD_DO_SET_HOME 命令设置 Home Position
-        
         Args:
             usv_namespace: USV 命名空间（如 'usv_01'）
             use_current: 是否使用当前位置（True=使用当前位置, False=使用指定坐标）
-            coords: 坐标字典 {'lat': float, 'lon': float, 'alt': float}（仅当 use_current=False 时使用）
+            coords: 坐标字典 {'x': float, 'y': float, 'z': float}
         """
         try:
             # 导入 MAVROS 命令服务
             from mavros_msgs.srv import CommandLong
             
-            # 创建服务客户端
-            service_name = f'/{usv_namespace}/cmd/command'
+            # 根据是否使用当前位置，决定调用的服务和参数
+            if use_current:
+                # 使用当前位置: 直接调用 MAVROS 标准服务
+                service_name = f'/{usv_namespace}/cmd/command'
+                is_local_cmd = False
+            else:
+                # 使用指定 XYZ: 调用 USV 端的局部坐标设置服务
+                # 注意：该服务由 auto_set_home_node 提供
+                # 假设该节点在 usv 命名空间下运行
+                # 尝试路径 1: /usv_ns/auto_set_home_node/cmd/set_home_local
+                # 尝试路径 2: /usv_ns/cmd/set_home_local
+                # 这里我们假设 launch 文件没有将 node name 加入 path，或者我们使用 remapping
+                # 为了保险，我们先试 /usv_ns/auto_set_home_node/cmd/set_home_local，
+                # 如果找不到可以回退，但在 ROS2 中检测服务存在比较慢。
+                # 暂时使用 /usv_ns/cmd/set_home_local 约定 (需要在 launch 文件中 remap 或者 node namespace 设置对)
+                # 查看 auto_set_home_node 代码，它是 create_service('cmd/set_home_local')
+                # 如果 node namespace 是 /usv_01，则服务名是 /usv_01/cmd/set_home_local
+                service_name = f'/{usv_namespace}/auto_set_home_node/cmd/set_home_local'
+                is_local_cmd = True
+            
             client = self.create_client(CommandLong, service_name)
             
             # 等待服务可用
-            if not client.wait_for_service(timeout_sec=3.0):
-                self.get_logger().error(f'[X] 服务不可用: {service_name}')
-                try:
-                    self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home Position 失败：服务不可用')
-                except Exception:
-                    pass
-                return
+            # 对于 XYZ 模式，如果找不到服务，可能是路径不对，我们可以尝试备用路径（简化起见先不写复杂重试）
+            if not client.wait_for_service(timeout_sec=2.0):
+                if is_local_cmd:
+                     # 尝试备用路径
+                     service_name = f'/{usv_namespace}/cmd/set_home_local'
+                     client = self.create_client(CommandLong, service_name)
+                     if not client.wait_for_service(timeout_sec=2.0):
+                        self.get_logger().error(f'[X] 服务不可用: {service_name}')
+                        try:
+                            self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：无法连接 USV 转换服务')
+                        except Exception:
+                            pass
+                        return
+                else:
+                    self.get_logger().error(f'[X] 服务不可用: {service_name}')
+                    try:
+                        self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：服务不可用')
+                    except Exception:
+                        pass
+                    return
             
-            # 构建 MAV_CMD_DO_SET_HOME 命令
+            # 构建命令
             request = CommandLong.Request()
             request.broadcast = False
-            request.command = 179  # MAV_CMD_DO_SET_HOME
+            request.command = 179  # MAV_CMD_DO_SET_HOME (或对于 local cmd 只是个占位符)
             request.confirmation = 0
             
             if use_current:
@@ -1218,81 +1251,66 @@ class GroundStationNode(Node):
                 request.param2 = 0.0
                 request.param3 = 0.0
                 request.param4 = 0.0
-                request.param5 = 0.0  # 纬度（使用当前位置时忽略）
-                request.param6 = 0.0  # 经度（使用当前位置时忽略）
-                request.param7 = 0.0  # 高度（使用当前位置时忽略）
+                request.param5 = 0.0
+                request.param6 = 0.0
+                request.param7 = 0.0
                 
                 self.get_logger().info(f'[OK] 设置 {usv_namespace} Home Position 为当前位置')
             else:
-                # 使用指定坐标作为 Home Position
-                request.param1 = 0.0  # 0=使用指定坐标
+                # 使用指定 XYZ 发送给 USV 端处理
+                # 复用 CommandLong 字段传递 XYZ
+                request.param1 = 0.0  # 0=Specify Coords
                 request.param2 = 0.0
                 request.param3 = 0.0
                 request.param4 = 0.0
-                request.param5 = float(coords.get('lat', 0.0))  # 纬度
-                request.param6 = float(coords.get('lon', 0.0))  # 经度
-                request.param7 = float(coords.get('alt', 0.0))  # 高度
+                request.param5 = float(coords.get('x', 0.0))  # X
+                request.param6 = float(coords.get('y', 0.0))  # Y
+                request.param7 = float(coords.get('z', 0.0))  # Z
                 
                 self.get_logger().info(
-                    f'[OK] 设置 {usv_namespace} Home Position 为指定坐标: '
-                    f'lat={request.param5:.7f}, lon={request.param6:.7f}, alt={request.param7:.2f}m'
+                    f'[OK] 发送设置 {usv_namespace} Home 请求 (XYZ): '
+                    f'X={request.param5:.1f}, Y={request.param6:.1f}, Z={request.param7:.1f}'
                 )
-            
+
             # 异步发送命令
             future = client.call_async(request)
-            future.add_done_callback(
-                lambda f: self._handle_set_home_response(f, usv_namespace, use_current, coords)
-            )
             
-            try:
-                if use_current:
-                    self.ros_signal.node_info.emit(f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令（使用当前位置）')
-                else:
-                    self.ros_signal.node_info.emit(
-                        f'[OK] 已向 {usv_namespace} 发送设置 Home Position 命令\n'
-                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
-                    )
-            except Exception:
-                pass
+            # 兼容性定义回调处理结果
+            def response_callback(future):
+                try:
+                    result = future.result()
+                    if result.success:
+                        info_msg = f'✅ {usv_namespace} Home 设置请求成功'
+                        if not use_current:
+                            loc_x = coords.get('x', 0.0)
+                            loc_y = coords.get('y', 0.0)
+                            info_msg += f' (X={loc_x:.1f}, Y={loc_y:.1f})'
+                        self.get_logger().info(info_msg)
+                        try:
+                            self.ros_signal.node_info.emit(info_msg)
+                        except Exception:
+                            pass
+                    else:
+                        err_msg = f'❌ {usv_namespace} Home 设置请求失败: result={result.result}'
+                        self.get_logger().error(err_msg)
+                        try:
+                            self.ros_signal.node_info.emit(f'❌ {usv_namespace} Home 设置失败 (Code {result.result})')
+                        except Exception:
+                            pass
+                except Exception as e:
+                    self.get_logger().error(f'调用服务异常: {e}')
+
+            future.add_done_callback(response_callback)
             
+        except ImportError:
+            self.get_logger().error('无法导入 mavros_msgs，请确保已安装 MAVROS')
         except Exception as e:
             self.get_logger().error(f'[X] 发送设置 Home Position 命令失败: {e}')
             try:
                 self.ros_signal.node_info.emit(f'[X] 发送设置 Home Position 命令失败: {e}')
             except Exception:
                 pass
-    
-    def _handle_set_home_response(self, future, usv_namespace, use_current, coords):
-        """处理设置 Home Position 命令响应"""
-        try:
-            response = future.result()
-            if response.success:
-                if use_current:
-                    msg = f'[OK] {usv_namespace} Home Position 已设置为当前位置'
-                else:
-                    msg = (
-                        f'[OK] {usv_namespace} Home Position 已设置为指定坐标\n'
-                        f'    坐标: {coords.get("lat"):.7f}, {coords.get("lon"):.7f}, {coords.get("alt"):.2f}m'
-                    )
-                self.get_logger().info(msg)
-                try:
-                    self.ros_signal.node_info.emit(msg)
-                except Exception:
-                    pass
-            else:
-                self.get_logger().warn(
-                    f'[!] {usv_namespace} 设置 Home Position 命令失败: result={response.result}'
-                )
-                try:
-                    self.ros_signal.node_info.emit(f'[!] {usv_namespace} 设置 Home Position 命令失败')
-                except Exception:
-                    pass
-        except Exception as e:
-            self.get_logger().error(f'[X] 处理设置 Home Position 命令响应失败: {e}')
-            try:
-                self.ros_signal.node_info.emit(f'[X] 处理设置 Home Position 命令响应失败: {e}')
-            except Exception:
-                pass
+
 
     def shutdown_usv_callback(self, usv_namespace):
         """
@@ -1572,6 +1590,8 @@ class GroundStationNode(Node):
         state_data['sensor_status'] = self._sensor_status_cache[usv_id]
         # 附加导航目标缓存（用于导航面板显示）
         state_data['nav_target_cache'] = self._usv_nav_target_cache.get(usv_id)
+        # 附加 LED 状态 (用于3D/2D显示)
+        state_data['led_status'] = self._usv_current_led_state.get(usv_id)
 
         return state_data
 
