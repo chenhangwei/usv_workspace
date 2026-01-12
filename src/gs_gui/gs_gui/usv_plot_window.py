@@ -85,6 +85,7 @@ class UsvPlotWindow(QWidget):
             'preview_markers_start': {}, # {usv_id: PathCollection}
             'preview_markers_end': {},   # {usv_id: PathCollection}
             'preview_markers_mid': {},   # {usv_id: PathCollection}
+            'preview_markers_maneuver': {}, # {usv_id: PathCollection} (Rings for maneuvers)
             'home_marker': None # Home marker aritst
         }
         
@@ -280,7 +281,7 @@ class UsvPlotWindow(QWidget):
         """Set task data for preview"""
         self.preview_trails = {}
         # Clear previous preview artists
-        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid']:
+        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver']:
             for artist in self.artists[key].values():
                 artist.remove()
             self.artists[key].clear()
@@ -306,14 +307,22 @@ class UsvPlotWindow(QWidget):
                 x = float(item.get('x', 0.0))
                 y = float(item.get('y', 0.0))
             
+            # Extract Maneuver info
+            m_type = item.get('maneuver_type', 0)
+            
             if uid not in temp:
                 temp[uid] = []
-            temp[uid].append({'step': step, 'pos': (x, y)})
+            temp[uid].append({
+                'step': step, 
+                'pos': (x, y),
+                'maneuver_type': m_type
+            })
             
         # Sort and store
         for uid, items in temp.items():
             items.sort(key=lambda x: x['step'])
-            self.preview_trails[uid] = [x['pos'] for x in items]
+            # Store full item dict to preserve maneuver info
+            self.preview_trails[uid] = items 
             
         self.update_plot()
 
@@ -366,7 +375,10 @@ class UsvPlotWindow(QWidget):
         if self.show_preview and hasattr(self, 'preview_trails'):
             for uid, points in self.preview_trails.items():
                 if len(points) > 0:
-                    px, py = zip(*points)
+                    # points is list of dicts: {'pos': (x,y), ...}
+                    px = [p['pos'][0] for p in points]
+                    py = [p['pos'][1] for p in points]
+                    
                     plain_x = list(px)
                     plain_y = list(py)
                     all_x.extend(plain_x)
@@ -381,11 +393,6 @@ class UsvPlotWindow(QWidget):
                         self.artists['preview_lines'][uid].set_visible(True)
                     
                     # 2. Start/End Points
-                    # Optimization: Scatter plots are hard to update individually cleanly, 
-                    # but for static plans we can check if they exist.
-                    # Since preview path might change, we rebuilt them in set_preview_path if needed.
-                    # Here we just make sure they are created if missing (e.g. first draw)
-                    
                     if uid not in self.artists['preview_markers_start']:
                         start = self.ax.scatter([px[0]], [py[0]], c='#2ecc71', s=20, marker='o', zorder=2, edgecolors='none', label='Start')
                         end = self.ax.scatter([px[-1]], [py[-1]], c='#e74c3c', s=20, marker='o', zorder=2, edgecolors='none', label='End')
@@ -396,16 +403,30 @@ class UsvPlotWindow(QWidget):
                             mid = self.ax.scatter(px[1:-1], py[1:-1], c='#7f8c8d', s=4, marker='o', zorder=2, edgecolors='none')
                             self.artists['preview_markers_mid'][uid] = mid
                     else:
-                        # Toggle visibility based on checkbox
-                        # (Ideally we update positions but preview is static mostly)
                         self.artists['preview_markers_start'][uid].set_visible(True)
                         self.artists['preview_markers_end'][uid].set_visible(True)
                         if uid in self.artists['preview_markers_mid']:
                             self.artists['preview_markers_mid'][uid].set_visible(True)
 
+                    # 3. Maneuver Rings
+                    maneuver_points = [p['pos'] for p in points if p.get('maneuver_type', 0) == 1]
+                    if maneuver_points:
+                        mx, my = zip(*maneuver_points)
+                        if uid not in self.artists['preview_markers_maneuver']:
+                            # s=300 for larger ring, facecolor='none'
+                            rings = self.ax.scatter(mx, my, s=300, marker='o', 
+                                                  facecolor='none', edgecolor='#f39c12', 
+                                                  linewidth=2.5, zorder=2, label='Maneuver')
+                            self.artists['preview_markers_maneuver'][uid] = rings
+                        else:
+                            self.artists['preview_markers_maneuver'][uid].set_offsets(np.c_[mx, my])
+                            self.artists['preview_markers_maneuver'][uid].set_visible(True)
+                    elif uid in self.artists['preview_markers_maneuver']:
+                         self.artists['preview_markers_maneuver'][uid].set_visible(False)
+
         else:
             # Hide preview artists
-            for cat in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid']:
+            for cat in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver']:
                  for artist in self.artists[cat].values():
                      artist.set_visible(False)
 
@@ -556,7 +577,8 @@ class UsvPlotWindow(QWidget):
              self.ax.set_ylim(-10, 10)
 
         # Update Info
-        self.info_label.setText(f"Active USVs: {len(usv_list)} | {datetime.datetime.now().strftime('%H:%M:%S')}")
+        # Change: Display actual online USVs count instead of total list length
+        self.info_label.setText(f"Active USVs: {len(active_usv_ids)} | {datetime.datetime.now().strftime('%H:%M:%S')}")
 
         # Optimize draw call
         self.canvas.draw_idle()

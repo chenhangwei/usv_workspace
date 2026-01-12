@@ -7,9 +7,11 @@
 
 import rclpy
 from rclpy.node import Node
+import math
 from geometry_msgs.msg import PoseStamped
 from mavros_msgs.msg import State, PositionTarget, HomePosition, GlobalPositionTarget
 from std_msgs.msg import Bool
+from common_interfaces.msg import NavigationGoal
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 # 导入common_utils工具
@@ -61,9 +63,10 @@ class UsvControlNode(Node):
             reliability=QoSReliabilityPolicy.RELIABLE
         )
         
+        # 始终创建发布器: 发布 PositionTarget 到 setpoint_raw/local (用于局部控制模式或特殊机动如旋转)
+        self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)
+
         if self.enable_local_control:
-            # 创建发布器: 发布 PositionTarget 到 setpoint_raw/local
-            self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)
             self.get_logger().info('✅ 局部坐标控制模式已启用')
             self.get_logger().info('📤 发布: setpoint_raw/local (PositionTarget)')
         else:
@@ -77,7 +80,7 @@ class UsvControlNode(Node):
         
         # 订阅需要运行的目标点 (来自地面站)
         self.target_point_sub = self.create_subscription(
-            PoseStamped, 'set_usv_target_position', self.set_target_point_callback, qos_best_effort)
+            NavigationGoal, 'set_usv_nav_goal', self.set_target_point_callback, qos_best_effort)
         
         # 订阅避障目标点
         self.avoidance_target_point_sub = self.create_subscription(
@@ -101,11 +104,25 @@ class UsvControlNode(Node):
         # 初始化状态变量
         self.current_state = State()              # 当前状态
         self.current_target_position = PoseStamped()  # 常规目标点
+        self.current_maneuver_type = 0            # 当前机动类型
+        self.current_maneuver_param = 0.0         # 当前机动参数
+        self.current_goal_id = 0                  # 当前目标ID
+
+        # 旋转机动相关变量
+        self.rotating = False                     # 是否正在旋转
+        self.rotation_accumulated_yaw = 0.0       # 累积旋转角度
+        self.rotation_target_yaw = 0.0            # 目标总旋转量
+        self.rotation_last_yaw = 0.0              # 上一次的航向
+        self.rotation_initialized = False         # 旋转是否已初始化（记录初始Yaw）
+        
+        self.use_yaw = False                          # 是否使用偏航角
         self.avoidance_position = PositionTarget()    # 避障目标点
         self.avoidance_flag = Bool(data=False)        # 避障标记，默认为False
         self.home_position_set = False                # Home Position 是否已设置
         self.local_position_valid = False             # 本地位置是否有效（验证 EKF Origin）
         self.ekf_origin_ready = False                 # EKF 原点就绪标志（Home + LocalPos 都有效）
+
+        self.current_local_pose = None            # 当前本地位姿 (Pose)
         
         # 初始化消息对象和状态跟踪
         self.point_msg = PositionTarget()         # 目标点消息
@@ -154,6 +171,8 @@ class UsvControlNode(Node):
             msg (PoseStamped): 包含本地位置信息的消息
         """
         if isinstance(msg, PoseStamped):
+            self.current_local_pose = msg.pose # 保存当前位姿
+
             # 检查本地位置是否有效（不是全0或NaN）
             pos = msg.pose.position
             if not (pos.x == 0.0 and pos.y == 0.0 and pos.z == 0.0):
@@ -175,28 +194,51 @@ class UsvControlNode(Node):
         设置目标点回调函数
         
         Args:
-            msg (PoseStamped): 包含目标点信息的消息
+            msg (NavigationGoal): 包含目标点信息的消息
         """
-        if not isinstance(msg, PoseStamped):
+        if not isinstance(msg, NavigationGoal):
             self.get_logger().warn('收到无效的目标点消息类型')
-            return      
+            return
         
         # 检查目标点坐标有效性
-        if (msg.pose.position.x is None or msg.pose.position.y is None or 
-            msg.pose.position.z is None):
+        if (msg.target_pose.pose.position.x is None or msg.target_pose.pose.position.y is None or 
+            msg.target_pose.pose.position.z is None):
             self.get_logger().warn('收到的目标点坐标无效')
             return
             
         old_position = self.current_target_position.pose.position
-        new_position = msg.pose.position
+        new_position = msg.target_pose.pose.position
         
+        # 更新目标点和Yaw标志
+        self.current_target_position = msg.target_pose
+        self.use_yaw = msg.enable_yaw
+        
+        # 更新机动参数
+        new_maneuver_type = getattr(msg, 'maneuver_type', 0)
+        new_maneuver_param = getattr(msg, 'maneuver_param', 0.0)
+        
+        # 如果是新的目标ID，或者机动类型变化，重置机动状态
+        if msg.goal_id != self.current_goal_id:
+            self.current_goal_id = msg.goal_id
+            self.current_maneuver_type = new_maneuver_type
+            self.current_maneuver_param = new_maneuver_param
+            
+            if self.current_maneuver_type == NavigationGoal.MANEUVER_TYPE_ROTATE:
+                self.get_logger().info(f"收到旋转指令: 圈数 {self.current_maneuver_param}")
+                self.rotating = True
+                self.rotation_accumulated_yaw = 0.0
+                self.rotation_initialized = False # 等待下一次循环获取初始Yaw
+                # 计算目标总角度 (param * 2PI)
+                self.rotation_target_yaw = self.current_maneuver_param * 2 * math.pi
+            else:
+                self.rotating = False
+
         # 只有当目标点发生变化时才更新
         if (old_position.x != new_position.x or 
             old_position.y != new_position.y or 
             old_position.z != new_position.z):
             
-            self.current_target_position = msg
-            self.get_logger().info(f'更新常规目标点: ({new_position.x:.2f}, {new_position.y:.2f}, {new_position.z:.2f})')
+            self.get_logger().info(f'更新常规目标点: ({new_position.x:.2f}, {new_position.y:.2f}, {new_position.z:.2f}), Use Yaw: {self.use_yaw}')
 
     def set_avoidance_target_position_callback(self, msg):
         """
@@ -297,13 +339,110 @@ class UsvControlNode(Node):
             if self.last_published_position == current_position:
                 return  # 目标点未改变，跳过发布
                 
-            # 更新最后发布的坐标
-            self.last_published_position = current_position
+            # 更新最后发布的坐标 (如果不是旋转模式)
+            if not self.rotating:
+                self.last_published_position = current_position
             
+            # 计算距离目标的距离 (2D)
+            dist_to_target = 0.0
+            if self.current_local_pose:
+                dx = px - self.current_local_pose.position.x
+                dy = py - self.current_local_pose.position.y
+                dist_to_target = math.sqrt(dx*dx + dy*dy)
+            
+            # 设定开始机动的距离阈值 (米)
+            MANEUVER_Is_CLOSE_ENOUGH = 1.0 
+
             # ============================================================
             # 根据模式发布不同类型的消息
             # ============================================================
-            
+
+            # 优先处理特殊机动: 原地旋转
+            # 只有当 1. 处于旋转请求状态 2. 机动类型正确 3. 已经到达目标点附近 时才执行旋转
+            should_rotate = (self.rotating and 
+                           self.current_maneuver_type == NavigationGoal.MANEUVER_TYPE_ROTATE and
+                           dist_to_target <= MANEUVER_Is_CLOSE_ENOUGH)
+
+            if should_rotate:
+                if self.current_local_pose is None:
+                    return # 等待定位数据
+
+                # 获取当前Yaw
+                q = self.current_local_pose.orientation
+                siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                current_yaw = math.atan2(siny_cosp, cosy_cosp)
+
+                if not self.rotation_initialized:
+                    self.rotation_last_yaw = current_yaw
+                    self.rotation_initialized = True
+                    self.rotation_accumulated_yaw = 0.0
+                    return
+
+                # 计算Yaw delta
+                delta_yaw = current_yaw - self.rotation_last_yaw
+                # 处理角度跳变 (-PI <-> PI)
+                if delta_yaw > math.pi:
+                    delta_yaw -= 2*math.pi
+                elif delta_yaw < -math.pi:
+                    delta_yaw += 2*math.pi
+                
+                self.rotation_accumulated_yaw += delta_yaw
+                self.rotation_last_yaw = current_yaw
+
+                # 检查是否完成
+                # 目标是 param * 2PI. param 可以是正负.
+                # 如果 param > 0, 我们期望 accumulated_yaw 增加到 target_yaw
+                # 如果 param < 0, 我们期望 accumulated_yaw 减小到 target_yaw
+                
+                done = False
+                target_yaw_rate = 0.5 # rad/s 默认
+                
+                if self.rotation_target_yaw > 0:
+                    if self.rotation_accumulated_yaw >= self.rotation_target_yaw:
+                        done = True
+                    else:
+                        target_yaw_rate = 0.5
+                else:
+                    if self.rotation_accumulated_yaw <= self.rotation_target_yaw:
+                        done = True
+                    else:
+                        target_yaw_rate = -0.5
+                
+                msg = PositionTarget()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.header.frame_id = 'body' # 使用机体坐标系? 或者 FRAME_LOCAL_NED
+                msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+                
+                # 发送角速度
+                msg.type_mask = (
+                    PositionTarget.IGNORE_PX |
+                    PositionTarget.IGNORE_PY |
+                    PositionTarget.IGNORE_PZ |
+                    PositionTarget.IGNORE_VX |
+                    PositionTarget.IGNORE_VY |
+                    PositionTarget.IGNORE_VZ |
+                    PositionTarget.IGNORE_AFX |
+                    PositionTarget.IGNORE_AFY |
+                    PositionTarget.IGNORE_AFZ |
+                    PositionTarget.IGNORE_YAW 
+                    # 不忽略 RATE
+                )
+
+                if done:
+                    msg.yaw_rate = 0.0
+                    self.rotating = False
+                    self.current_maneuver_type = 0 # 结束机动
+                    self.get_logger().info("旋转机动完成")
+                else:
+                    msg.yaw_rate = target_yaw_rate
+                    # 调试进度
+                    # self.get_logger().info(f"旋转中: {self.rotation_accumulated_yaw:.2f}/{self.rotation_target_yaw:.2f}")
+
+                # 发布到本地控制 (Rotation usually local)
+                self.target_point_pub.publish(msg)
+                return
+
             if self.enable_local_control:
                 # ========== 局部坐标模式: PositionTarget ==========
                 self.point_msg.header.stamp = self.get_clock().now().to_msg()
@@ -317,9 +456,18 @@ class UsvControlNode(Node):
                     PositionTarget.IGNORE_AFY |
                     PositionTarget.IGNORE_AFZ |
                     PositionTarget.FORCE |
-                    PositionTarget.IGNORE_YAW |
                     PositionTarget.IGNORE_YAW_RATE
                 )
+                
+                if self.use_yaw and not self.avoidance_flag.data:
+                    # 仅在非避障模式下使用Yaw控制
+                    q = self.current_target_position.pose.orientation
+                    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                    self.point_msg.yaw = math.atan2(siny_cosp, cosy_cosp)
+                else:
+                    self.point_msg.type_mask |= PositionTarget.IGNORE_YAW
+
                 self.point_msg.position.x = px
                 self.point_msg.position.y = py
                 self.point_msg.position.z = pz  
@@ -349,6 +497,15 @@ class UsvControlNode(Node):
                     GlobalPositionTarget.FORCE |
                     GlobalPositionTarget.IGNORE_YAW_RATE
                 )
+
+                if self.use_yaw and not self.avoidance_flag.data:
+                    # 仅在非避障模式下使用Yaw控制
+                    q = self.current_target_position.pose.orientation
+                    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                    global_msg.yaw = math.atan2(siny_cosp, cosy_cosp)
+                else:
+                    global_msg.type_mask |= GlobalPositionTarget.IGNORE_YAW
                 
                 # 设置GPS坐标
                 global_msg.latitude = gps_coord['lat']

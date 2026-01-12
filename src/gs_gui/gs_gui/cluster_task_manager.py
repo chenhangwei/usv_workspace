@@ -106,9 +106,61 @@ class ClusterTaskManager:
                             pos_x_elem = usv.find("position/x")
                             pos_y_elem = usv.find("position/y")
                             pos_z_elem = usv.find("position/z")
-                            roll_elem = usv.find("roll/value")
-                            pitch_elem = usv.find("pitch/value")
-                            yaw_elem = usv.find("yaw/value")
+                            
+                            # Yaw & Maneuver Parsing Logic
+                            yaw_val = 0.0
+                            use_yaw_val = False
+                            maneuver_type = 0
+                            maneuver_param = 0.0
+                            
+                            # 1. Parse <maneuver> tag (Preferred for actions)
+                            maneuver_node = usv.find("maneuver")
+                            if maneuver_node is not None:
+                                m_type = maneuver_node.get("type", "").lower()
+                                if m_type in ["rotate", "spin"]:
+                                    maneuver_type = 1 # ROTATE
+                                    use_yaw_val = True # Maneuver implies specific yaw control
+                                    
+                                    circles_attr = maneuver_node.get("circles")
+                                    direction_attr = maneuver_node.get("direction", "clockwise") # Default to clockwise
+
+                                    if circles_attr:
+                                        try:
+                                            maneuver_param = float(circles_attr)
+                                            # If logic requires counter-clockwise, negate the param (assuming positive is CW)
+                                            if direction_attr.lower() in ["ccw", "counter_clockwise", "anticlockwise", "left"]:
+                                                maneuver_param = -abs(maneuver_param)
+                                            else:
+                                                maneuver_param = abs(maneuver_param)
+                                        except ValueError:
+                                            self.append_warning(f"Step {step_number} USV {usv_id_elem.text}: circles value '{circles_attr}' invalid")
+
+                            # 2. Parse <yaw> tag (Fallback or Static Heading)
+                            # Only parse if no maneuver overrides it, or if maneuver allows parallel yaw setting (usually not for spin)
+                            yaw_node = usv.find("yaw")
+                            if yaw_node is not None and maneuver_type == 0:
+                                # Check for attribute use="true" or mode="fixed"
+                                use_attr = yaw_node.get("use")
+                                mode_attr = yaw_node.get("mode")
+                                
+                                if (use_attr and use_attr.lower() == "true") or (mode_attr and mode_attr.lower() == "fixed"):
+                                    use_yaw_val = True
+                                elif mode_attr and mode_attr.lower() == "auto":
+                                    use_yaw_val = False
+
+                                # Try to get value from <value> child or direct text
+                                val_child = yaw_node.find("value")
+                                if val_child is not None and val_child.text:
+                                    try:
+                                        yaw_val = float(val_child.text)
+                                    except ValueError:
+                                        pass
+                                elif yaw_node.text and yaw_node.text.strip():
+                                    try:
+                                        yaw_val = float(yaw_node.text)
+                                    except ValueError:
+                                        pass
+
                             velocity_elem = usv.find("velocity/value")
                             
                             # 获取 led 属性
@@ -121,9 +173,10 @@ class ClusterTaskManager:
                                     "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
                                     "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
                                 },
-                                "roll": float(roll_elem.text) if roll_elem is not None and roll_elem.text is not None else 0.0,
-                                "pitch": float(pitch_elem.text) if pitch_elem is not None and pitch_elem.text is not None else 0.0,
-                                "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
+                                "yaw": yaw_val,
+                                "use_yaw": use_yaw_val,
+                                "maneuver_type": maneuver_type,
+                                "maneuver_param": maneuver_param,
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
                                 "step": step_number,
                                 "sync": sync_val,

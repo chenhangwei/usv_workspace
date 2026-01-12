@@ -392,6 +392,9 @@ class ClusterController:
                 p_local = self._global_to_usv_local(usv_id, p_global)
                 
                 yaw = float(target_data.get('yaw', 0.0))
+                use_yaw = target_data.get('use_yaw', False)
+                maneuver_type = target_data.get('maneuver_type', 0)
+                maneuver_param = target_data.get('maneuver_param', 0.0)
                 
                 self.node.get_logger().info(
                     f"📤执行 Step {state.step} {usv_id}: Pos=({p_local['x']:.1f}, {p_local['y']:.1f})"
@@ -401,7 +404,10 @@ class ClusterController:
                     usv_id,
                     p_local['x'], p_local['y'], p_local.get('z', 0.0),
                     yaw,
-                    self._action_timeout
+                    use_yaw,
+                    self._action_timeout,
+                    maneuver_type=maneuver_type,
+                    maneuver_param=maneuver_param
                 )
         else:
             if state.retry >= self.node._max_retries:

@@ -75,8 +75,8 @@ class NavigateToPointNode(Node):
         
         # 发布目标位置到控制节点
         self.target_pub = self.create_publisher(
-            PoseStamped,
-            'set_usv_target_position',
+            NavigationGoal,
+            'set_usv_nav_goal',
             qos_reliable)
         
         # 订阅当前位置 (使用 GPS 转换的统一坐标系)
@@ -137,7 +137,7 @@ class NavigateToPointNode(Node):
         self.goal_start_time = self.get_clock().now()
         
         # 立即转发目标到控制节点
-        self.target_pub.publish(msg.target_pose)
+        self.target_pub.publish(msg)
         self.get_logger().info(f'✓ 目标点已转发到控制节点')
     
     def navigation_loop(self):

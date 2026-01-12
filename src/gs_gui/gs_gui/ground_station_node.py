@@ -620,7 +620,7 @@ class GroundStationNode(Node):
 
     # ==================== 基于话题的导航方法 ====================
     
-    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0):
+    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, maneuver_type=0, maneuver_param=0.0):
         """
         通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
         
@@ -634,9 +634,12 @@ class GroundStationNode(Node):
             x (float): 目标点X坐标
             y (float): 目标点Y坐标
             z (float): 目标点Z坐标
-            yaw (float): 目标偏航角(弧度)
+            yaw (float): 目标航向
+            use_yaw (bool): 是否启用航向控制
             timeout (float): 超时时间(秒)
-        
+            maneuver_type (int): 机动类型
+            maneuver_param (float): 机动参数
+
         Returns:
             bool: 发送是否成功
         """
@@ -676,12 +679,22 @@ class GroundStationNode(Node):
         goal_msg.target_pose.pose.position.z = float(z)
         
         # 设置航向 (Quaternion)
+        goal_msg.enable_yaw = use_yaw
         from tf_transformations import quaternion_from_euler
-        q = quaternion_from_euler(0, 0, yaw)
+        if use_yaw:
+            # 如果启用 Yaw，则根据传入的一样计算四元数
+            q = quaternion_from_euler(0, 0, yaw)
+        else:
+            # 否则保持默认朝向 (或者0)
+            q = quaternion_from_euler(0, 0, 0)
+
         goal_msg.target_pose.pose.orientation.x = q[0]
         goal_msg.target_pose.pose.orientation.y = q[1]
         goal_msg.target_pose.pose.orientation.z = q[2]
         goal_msg.target_pose.pose.orientation.w = q[3]
+
+        goal_msg.maneuver_type = maneuver_type
+        goal_msg.maneuver_param = maneuver_param
         
         goal_msg.timeout = timeout
         goal_msg.timestamp = self.get_clock().now().to_msg()

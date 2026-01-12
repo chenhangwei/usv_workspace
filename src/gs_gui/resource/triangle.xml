@@ -2,13 +2,11 @@
 <cluster type="triangle">
     <!--
       单位约定：
-        - yaw / roll / pitch 均为弧度(rad)
+        - yaw 均为弧度(rad)
         - position 为米(m)
 
       语义约定（与当前代码一致）：
         - yaw：随 navigation/goal 下发（带 feedback/result 完成度）
-        - roll/pitch：解释为 attitude/command 的“姿态动作”（单向下发，不做完成度反馈）
-        - 姿态动作持续时长由 GS 参数 attitude_command_duration 控制（默认 1.0s）
         - sync: true/false (true: 等待同组完成; false: 不等待)
         - led: color_select|r,g,b 或 led_off (控制灯光)
 
@@ -26,15 +24,8 @@
                     <y>3</y>
                     <z>0.0</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0</value>
-                </yaw>
+                <!-- mode="auto": 不采用yaw, 飞控自动决定朝向 (推荐新写法) -->
+                <yaw mode="auto" />
                 <velocity>
                     <value>0.5</value>
                 </velocity>
@@ -45,17 +36,10 @@
                 <position>
                     <x>5</x>
                     <y>3</y>
-                    <z>0.0</z>
+                    <z>0.1</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0.5</value>
-                </yaw>
+                <!-- 兼容旧写法 -->
+                <yaw use="false">0</yaw>
                 <velocity>
                     <value>0.5</value>
                 </velocity>
@@ -68,15 +52,7 @@
                     <y>3</y>
                     <z>0.0</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0.5</value>
-                </yaw>
+                <yaw mode="auto" />
                 <velocity>
                     <value>0.5</value>
                 </velocity>
@@ -84,7 +60,7 @@
         </usvs>
     </step>
 
-    <!-- 步骤 2: 目标点到达 (同步, 绿色完成色) -->
+    <!-- 步骤 2: 目标点到达 & 原地旋转 (同步, 绿色完成色) -->
     <step number="2" sync="true">
         <usvs>
             <usv led="color_select|0,255,0">
@@ -94,15 +70,8 @@
                     <y>3</y>
                     <z>0.0</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0.5</value>
-                </yaw>
+                <!-- 强制指定朝向 -->
+                <yaw mode="fixed">0.5</yaw>
                 <velocity>
                     <value>0.5</value>
                 </velocity>
@@ -114,15 +83,17 @@
                     <y>3</y>
                     <z>0.0</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0.5</value>
-                </yaw>
+                
+                <!-- 
+                  MANEUVER: 动作定义
+                  type="spin": 原地旋转
+                  circles="3.0": 圈数
+                  direction="ccw": 逆时针
+                  
+                  注意：当定义了 maneuver 时，不需要再定义 <yaw>
+                -->
+                <maneuver type="spin" circles="3.0" direction="ccw" />
+                
                 <velocity>
                     <value>0.5</value>
                 </velocity>
@@ -134,15 +105,7 @@
                     <y>3</y>
                     <z>0.0</z>
                 </position>
-                <roll>
-                    <value>0.0</value>
-                </roll>
-                <pitch>
-                    <value>0.0</value>
-                </pitch>
-                <yaw>
-                    <value>0.5</value>
-                </yaw>
+                <yaw mode="fixed">0.5</yaw>
                 <velocity>
                     <value>0.5</value>
                 </velocity>
