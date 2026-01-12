@@ -40,7 +40,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_02',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -88,8 +88,12 @@ def generate_launch_description():
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
         #default_value='udp://192.168.68.55:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
-        default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
+        #default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
+
+         #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
+        default_value='udp://192.168.68.54:14552@192.168.68.53:14560',  # usv_02 → 地面站端口14560
+        #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
     )
     
