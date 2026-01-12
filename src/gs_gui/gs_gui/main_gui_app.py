@@ -17,7 +17,7 @@ from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog, QMenu,
     QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QProgressBar, QFrame, QLabel
+    QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup
 )
 from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush
 from gs_gui.ros_signal import ROSSignal
@@ -259,7 +259,37 @@ class MainWindow(QMainWindow):
         
         # 导航反馈信号（连接到主窗口进行日志显示）
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
+        
+        # 连接 Plot Window 的 "Set Home" 回调
+        if hasattr(self, 'usv_plot_window'):
+            self.usv_plot_window.request_set_home_callback = self._handle_plot_set_home_request
     
+    def _handle_plot_set_home_request(self, x, y):
+        """处理来自 2D 地图的 Set Home 请求"""
+        coords = {'x': x, 'y': y, 'z': 0.0}
+        
+        # 1. 尝试对选中的 USV 发送（目前无法从 Plot 获取选中状态，所以广播给所有在线的）
+        online_usvs = self.list_manager.usv_online_list
+        if not online_usvs:
+            self.ui_utils.append_info("⚠️ 无在线 USV，Home 点已更新但无法发送命令。")
+            return
+            
+        # 2. 简单的策略：发送给所有在线 USV
+        # 或者 弹窗询问？为了操作流畅，这里假定地图上的 Home 是全局的
+        count = 0
+        for usv_data in online_usvs:
+             # Extract namespace from dict if necessary
+             usv_ns = usv_data.get('namespace') if isinstance(usv_data, dict) else usv_data
+             
+             if usv_ns and isinstance(usv_ns, str):
+                 self.ros_signal.set_home_position.emit(usv_ns, False, coords)
+                 count += 1
+        
+        self.ui_utils.append_info(
+            f"📍 Map Set Home: 已向 {count} 个在线 USV 发送 Home Position 更新命令\n"
+            f"    坐标 (XYZ): {x:.2f}, {y:.2f}, 0.00m"
+        )
+
     def _connect_ui_signals(self):
         """连接UI按钮信号到处理函数"""
         # ============== 集群控制按钮 ==============
@@ -313,7 +343,7 @@ class MainWindow(QMainWindow):
         self.ui.departed_tableView.clicked.connect(
             lambda index: self._handle_table_clicked(index, is_cluster=False)
         )
-        self.ui.action3D.triggered.connect(self.show_usv_plot_window)
+        # self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_launch_usv_fleet.triggered.connect(self.launch_usv_fleet)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
@@ -372,6 +402,310 @@ class MainWindow(QMainWindow):
         self.action_param_config.setShortcut("Ctrl+P")
         self.action_param_config.setToolTip("通过串口直连配置飞控参数")
         tools_menu.addAction(self.action_param_config)
+
+        # 设置菜单
+        settings_menu = self.ui.menubar.addMenu("设置(&S)")
+        
+        # 主题子菜单
+        theme_menu = settings_menu.addMenu("主题(&T)")
+        
+        # Dark Mode
+        self.action_theme_dark = QAction("🌙 Dark Mode", self)
+        self.action_theme_dark.setCheckable(True)
+        self.action_theme_dark.setChecked(True)  # 默认为 Dark
+        self.action_theme_dark.triggered.connect(lambda: self.switch_theme('modern_dark'))
+        theme_menu.addAction(self.action_theme_dark)
+        
+        # Light Mode
+        self.action_theme_light = QAction("☀ Light Mode", self)
+        self.action_theme_light.setCheckable(True)
+        self.action_theme_light.setChecked(False)
+        self.action_theme_light.triggered.connect(lambda: self.switch_theme('light'))
+        theme_menu.addAction(self.action_theme_light)
+        
+        # 创建互斥组，确保一次只能选择一个主题
+        self.theme_action_group =  QActionGroup(self)
+        self.theme_action_group.addAction(self.action_theme_dark)
+        self.theme_action_group.addAction(self.action_theme_light)
+
+        # 帮助菜单
+        help_menu = self.ui.menubar.addMenu("帮助(&H)")
+        
+        # 查看许可证
+        self.action_view_license = QAction("📄 查看许可证", self)
+        self.action_view_license.triggered.connect(self.show_license_dialog)
+        help_menu.addAction(self.action_view_license)
+        
+        # 隐私说明
+        self.action_view_privacy = QAction("🔒 隐私说明", self)
+        self.action_view_privacy.triggered.connect(self.show_privacy_dialog)
+        help_menu.addAction(self.action_view_privacy)
+        
+        # 关于
+        self.action_about = QAction("ℹ 关于", self)
+        self.action_about.triggered.connect(self.show_about_dialog)
+        help_menu.addAction(self.action_about)
+
+    def switch_theme(self, theme_name):
+        """切换应用主题"""
+        if self.style_manager.load_theme(theme_name):
+            # 1. 更新主窗口样式
+            # self.settings.setValue("theme", theme_name)
+            
+            # 2. 更新 Matplotlib 绘图窗口样式 (如果已初始化)
+            if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
+                self.usv_plot_window.set_theme(theme_name)
+            
+            # 3. 更新反馈页面的上部面板样式
+            self._update_feedback_tab_style(theme_name)
+
+            # 4. 更新 USV 集群启动器样式 (如果已打开)
+            if hasattr(self, '_usv_fleet_launcher') and self._usv_fleet_launcher is not None:
+                try:
+                    self._usv_fleet_launcher.set_theme(theme_name)
+                except Exception:
+                    pass
+                
+            pass
+        else:
+            QMessageBox.warning(self, "主题切换失败", f"无法加载主题: {theme_name}")
+            # 回滚Checkbox状态
+            if theme_name == 'modern_dark':
+                self.action_theme_light.setChecked(True)
+            else:
+                self.action_theme_dark.setChecked(True)
+    
+    def _update_feedback_tab_style(self, theme_name):
+        """更新反馈页面的上部面板样式"""
+        if not hasattr(self, 'mission_dashboard'):
+            return
+            
+        is_dark = (theme_name == 'modern_dark')
+        
+        if is_dark:
+            # ============ DARK THEME ============
+            
+            # Mission Dashboard Style
+            dashboard_style = """
+                QFrame#missionDashboard {
+                    background-color: #0a192f;
+                    border: 1px solid #00f2ff;
+                    border-radius: 5px;
+                }
+                QLabel#dbTitle {
+                    font-family: "Impact", sans-serif;
+                    font-size: 14pt;
+                    color: #000;
+                    background-color: #00f2ff;
+                    padding: 2px 5px;
+                    font-weight: bold;
+                }
+                QLabel#dbState {
+                    font-family: "Consolas", monospace;
+                    font-size: 12pt;
+                    color: #00f2ff;
+                    font-weight: bold;
+                }
+                QLabel#dbInfo {
+                    font-family: "Consolas", monospace;
+                    font-size: 10pt;
+                    color: #00f2ff;
+                }
+                QProgressBar#dbProgress {
+                    border: 1px solid #00f2ff;
+                    border-radius: 2px;
+                    text-align: center;
+                    color: #00f2ff;
+                    background-color: #001122;
+                    font-family: "Consolas", monospace;
+                    font-weight: bold;
+                }
+                QProgressBar#dbProgress::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
+                }
+            """
+            
+            # Table Style
+            table_style = """
+                QTableWidget {
+                    background-color: #1a1a1a;
+                    alternate-background-color: #222222;
+                    color: #e0e0e0;
+                    gridline-color: transparent;
+                    border: none;
+                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-size: 10pt;
+                }
+                QTableWidget::item {
+                    padding: 5px;
+                }
+                QTableWidget::item:selected {
+                    background-color: rgba(0, 242, 255, 0.15);
+                    color: #00f2ff;
+                    border-left: 2px solid #00f2ff;
+                }
+                QHeaderView::section {
+                    background-color: #0d1b2a;
+                    color: #00f2ff;
+                    padding: 8px;
+                    border: none;
+                    border-bottom: 1px solid #00f2ff;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    font-size: 9pt;
+                }
+            """
+        else:
+            # ============ LIGHT THEME ============
+            
+            # Blue accent: #0078d7
+            # Backgrounds: White (#ffffff) or Light Gray (#f5f5f5)
+            
+            # Mission Dashboard Style
+            dashboard_style = """
+                QFrame#missionDashboard {
+                    background-color: #ffffff;
+                    border: 1px solid #0078d7;
+                    border-radius: 5px;
+                }
+                QLabel#dbTitle {
+                    font-family: "Segoe UI Black", "Arial Black", sans-serif;
+                    font-size: 14pt;
+                    color: #ffffff;
+                    background-color: #0078d7;
+                    padding: 2px 5px;
+                    font-weight: bold;
+                }
+                QLabel#dbState {
+                    font-family: "Consolas", monospace;
+                    font-size: 12pt;
+                    color: #0078d7;
+                    font-weight: bold;
+                }
+                QLabel#dbInfo {
+                    font-family: "Consolas", monospace;
+                    font-size: 10pt;
+                    color: #333333;
+                }
+                QProgressBar#dbProgress {
+                    border: 1px solid #0078d7;
+                    border-radius: 2px;
+                    text-align: center;
+                    color: #ffffff;
+                    background-color: #f0f0f0;
+                    font-family: "Consolas", monospace;
+                    font-weight: bold;
+                }
+                QProgressBar#dbProgress::chunk {
+                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4da6ff, stop:1 #0078d7);
+                }
+            """
+            
+            # Table Style
+            table_style = """
+                QTableWidget {
+                    background-color: #ffffff;
+                    alternate-background-color: #f9f9f9;
+                    color: #333333;
+                    gridline-color: #eeeeee;
+                    border: 1px solid #e0e0e0;
+                    font-family: 'Consolas', 'Monaco', monospace;
+                    font-size: 10pt;
+                }
+                QTableWidget::item {
+                    padding: 5px;
+                }
+                QTableWidget::item:selected {
+                    background-color: #e6f7ff;
+                    color: #0078d7;
+                    border-left: 3px solid #0078d7;
+                }
+                QHeaderView::section {
+                    background-color: #f0f0f0;
+                    color: #0078d7;
+                    padding: 8px;
+                    border: none;
+                    border-bottom: 2px solid #0078d7;
+                    font-weight: bold;
+                    text-transform: uppercase;
+                    font-size: 9pt;
+                }
+            """
+
+        self.mission_dashboard.setStyleSheet(dashboard_style)
+        self.nav_feedback_table.setStyleSheet(table_style)
+
+    def show_license_dialog(self):
+        """显示许可证对话框"""
+        license_text = """
+Apache License
+Version 2.0, January 2004
+http://www.apache.org/licenses/
+
+TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+1. Definitions.
+"License" shall mean the terms and conditions for use, reproduction, and distribution as defined by Sections 1 through 9 of this document.
+
+(See full license in LICENSE file)
+
+Copyright 2026 USV Team
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+        QMessageBox.about(self, "许可证 (License)", license_text)
+
+    def show_privacy_dialog(self):
+        """显示隐私说明对话框"""
+        privacy_text = """
+隐私说明 (Privacy Policy)
+
+1. 数据收集：
+   本软件（Ground Station GUI）作为本地控制端，仅通过本地 ROS (Robot Operating System) 网络与无人船（USV）进行通信。我们不收集、存储或上传您的任何个人数据、任务数据或遥测数据到外部服务器。
+
+2. 数据使用：
+   所有产生的日志文件、航点数据和配置参数均存储在您的本地计算机上。这些数据仅用于任务回放、故障诊断和系统配置。
+
+3. 通信安全：
+   本软件使用标准的 ROS 通信协议。建议在受保护的局域网（LAN）或 VPN 环境下运行，以防止未授权的控制指令接入。
+
+4. 权限：
+   本软件可能需要读取本地文件的权限以加载地图配置、任务文件和保存日志。
+
+如果您对数据安全有任何疑问，请联系 USV 开发团队。
+"""
+        QMessageBox.about(self, "隐私说明", privacy_text)
+
+    def show_about_dialog(self):
+        """显示关于对话框"""
+        about_text = """
+<h3>Ground Station GUI</h3>
+<p>Version 2.0.0 (2026)</p>
+<p>Developed by <b>USV Team</b></p>
+<hr>
+<p>这是一个专为无人船集群（USV Swarm）设计的高级地面站控制软件。</p>
+<p><b>主要功能：</b></p>
+<ul>
+    <li>多机状态实时监控</li>
+    <li>集群任务规划与下发</li>
+    <li>电子围栏与安全保护</li>
+    <li>实时路径回放与数据分析</li>
+    <li>远程参数配置与诊断</li>
+</ul>
+<p>基于 ROS 2 和 PyQt5 构建。</p>
+<p>Copyright © 2026 USV Team. All rights reserved.</p>
+"""
+        QMessageBox.about(self, "关于 Ground Station", about_text)
 
     def _init_text_edit_context_menus(self):
         """初始化消息框的右键清空功能"""
@@ -491,6 +825,9 @@ class MainWindow(QMainWindow):
         # 保存 layout 引用以便后续使用
         self.nav_feedback_layout = layout
         
+        # 应用初始样式 (默认 Dark) - 必须在所有控件初始化后调用
+        self._update_feedback_tab_style('modern_dark')
+        
         return widget
 
     def _init_mission_dashboard(self, parent_layout):
@@ -538,46 +875,6 @@ class MainWindow(QMainWindow):
         self.mission_progress_bar.setAlignment(Qt.AlignCenter)
         self.mission_progress_bar.setFixedHeight(20)
         db_layout.addWidget(self.mission_progress_bar)
-        
-        # Dashboard QSS
-        self.mission_dashboard.setStyleSheet("""
-            QFrame#missionDashboard {
-                background-color: #0a192f;
-                border: 1px solid #00f2ff;
-                border-radius: 5px;
-            }
-            QLabel#dbTitle {
-                font-family: "Impact", sans-serif;
-                font-size: 14pt;
-                color: #000;
-                background-color: #00f2ff;
-                padding: 2px 5px;
-                font-weight: bold;
-            }
-            QLabel#dbState {
-                font-family: "Consolas", monospace;
-                font-size: 12pt;
-                color: #00f2ff;
-                font-weight: bold;
-            }
-            QLabel#dbInfo {
-                font-family: "Consolas", monospace;
-                font-size: 10pt;
-                color: #00f2ff;
-            }
-            QProgressBar#dbProgress {
-                border: 1px solid #00f2ff;
-                border-radius: 2px;
-                text-align: center;
-                color: #00f2ff;
-                background-color: #001122;
-                font-family: "Consolas", monospace;
-                font-weight: bold;
-            }
-            QProgressBar#dbProgress::chunk {
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
-            }
-        """)
         
         parent_layout.addWidget(self.mission_dashboard)
 
@@ -631,36 +928,8 @@ class MainWindow(QMainWindow):
         self.nav_feedback_table.setShowGrid(False)
         self.nav_feedback_table.setAlternatingRowColors(True)
         
-        # 科幻风格 QSS
-        self.nav_feedback_table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1a1a1a;
-                alternate-background-color: #222222;
-                color: #e0e0e0;
-                gridline-color: transparent;
-                border: none;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 10pt;
-            }
-            QTableWidget::item {
-                padding: 5px;
-            }
-            QTableWidget::item:selected {
-                background-color: rgba(0, 242, 255, 0.15);
-                color: #00f2ff;
-                border-left: 2px solid #00f2ff;
-            }
-            QHeaderView::section {
-                background-color: #0d1b2a;
-                color: #00f2ff;
-                padding: 8px;
-                border: none;
-                border-bottom: 1px solid #00f2ff;
-                font-weight: bold;
-                text-transform: uppercase;
-                font-size: 9pt;
-            }
-        """)
+        # 初始样式（稍后会由 _update_feedback_tab_style 统一管理）
+        # self.nav_feedback_table.setStyleSheet(...) (Removed)
         
         # 用于存储 usv_id 到行索引的映射
         self._nav_feedback_row_map = {}
@@ -889,6 +1158,11 @@ class MainWindow(QMainWindow):
             else:
                 # 创建新窗口（非模态）
                 self._usv_fleet_launcher = UsvFleetLauncher(self, workspace_path)
+                
+                # 应用当前主题
+                if hasattr(self, 'style_manager'):
+                     self._usv_fleet_launcher.set_theme(self.style_manager.current_theme)
+                     
                 self._usv_fleet_launcher.show()  # 使用 show() 而非 exec_()，允许同时操作主界面
             
         except Exception as e:
@@ -1296,6 +1570,9 @@ class MainWindow(QMainWindow):
                             f"📍 已向 {usv_namespace} 发送设置 Home Position 命令\n"
                             f"    坐标 (XYZ): {coords.get('x'):.2f}, {coords.get('y'):.2f}, {coords.get('z'):.2f}m"
                         )
+                        # 更新 2D 地图上的 Home 图标
+                        if hasattr(self, 'usv_plot_window'):
+                            self.usv_plot_window.set_home_position(coords.get('x', 0.0), coords.get('y', 0.0))
         
         except Exception as e:
             from PyQt5.QtWidgets import QMessageBox

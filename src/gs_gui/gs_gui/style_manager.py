@@ -12,7 +12,7 @@ class StyleManager:
     # 预定义主题
     THEMES = {
         'modern_dark': 'modern_style.qss',  # 现代深色主题（默认）
-        'light': None,  # 浅色主题（未来扩展）
+        'light': 'light_style.qss',  # 浅色主题
         'classic': None,  # 经典主题（禁用样式表）
     }
     

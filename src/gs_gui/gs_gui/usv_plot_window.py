@@ -1,5 +1,5 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QCheckBox, QHBoxLayout, 
-                             QPushButton, QLabel, QSlider, QGroupBox, QMessageBox, QWidget)
+                             QPushButton, QLabel, QSlider, QGroupBox, QMessageBox, QWidget, QMenu, QAction)
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtCore import Qt as QtCore
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
@@ -28,68 +28,8 @@ class UsvPlotWindow(QWidget):
         # self.setWindowFlags(self.windowFlags() | Qt.WindowMinMaxButtonsHint)
         
         # Styles
-        self.setStyleSheet("""
-            QDialog {
-                background-color: #f5f5f5;
-            }
-            QGroupBox {
-                background-color: #ffffff;
-                border: 2px solid #e0e0e0;
-                border-radius: 6px;
-                margin-top: 15px;
-                padding: 15px;
-                font-weight: bold;
-                color: #2c3e50;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 10px;
-                padding: 0px 8px 0px 8px;
-                background-color: #ffffff;
-                color: #2c3e50;
-            }
-            QCheckBox {
-                background-color: transparent;
-                color: #2c3e50;
-                font-size: 14px;
-                spacing: 5px;
-            }
-            QPushButton {
-                background-color: #3498db;
-                color: #ffffff;
-                border: none;
-                padding: 8px 15px;
-                border-radius: 5px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-            QPushButton:pressed {
-                background-color: #21618c;
-            }
-            QLabel {
-                background-color: transparent;
-                color: #2c3e50;
-                font-size: 14px;
-            }
-            QSlider::groove:horizontal {
-                background: #ecf0f1;
-                height: 8px;
-                border-radius: 4px;
-                border: 1px solid #bdc3c7;
-            }
-            QSlider::handle:horizontal {
-                background: #3498db;
-                width: 18px;
-                height: 18px;
-                margin: -6px 0;
-                border-radius: 9px;
-                border: 2px solid #2980b9;
-            }
-        """)
+        # Initial call to set default theme (Dark)
+        self.set_theme('modern_dark')
         
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(5)
@@ -106,23 +46,21 @@ class UsvPlotWindow(QWidget):
         # ========== Info Bar ==========
         info_layout = QHBoxLayout()
         self.info_label = QLabel("Waiting for data...")
-        self.info_label.setStyleSheet("color: #ecf0f1; font-weight: bold;") # Light text for dark theme
+        # Style will be set in set_theme
         info_layout.addWidget(self.info_label)
         info_layout.addStretch()
         main_layout.addLayout(info_layout)
 
-        # ========== Matplotlib Canvas (Dark Theme) ==========
-        # Dark gray background for the figure
-        self.figure = Figure(facecolor='#2b2b2b') 
+        # ========== Matplotlib Canvas ==========
+        # Initial colors will be set in set_theme
+        self.figure = Figure() 
         self.canvas = FigureCanvas(self.figure)
         
         from PyQt5.QtWidgets import QSizePolicy
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
-        # Toolbar hidden or styled dark (user asked to remove controls group, usually toolbar is separate but lets style it)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         self.toolbar.setMaximumHeight(35)
-        self.toolbar.setStyleSheet("background-color: #34495e; border: none; color: white;")
         
         main_layout.addWidget(self.toolbar)
         main_layout.addWidget(self.canvas, stretch=1)
@@ -132,6 +70,9 @@ class UsvPlotWindow(QWidget):
         self.preview_trails = {} # {usv_id: [(x,y), ...]}
         self.max_trail_length = 500
         
+        # Default Home Position
+        self.home_pos = (0.0, 0.0)
+
         # ========== Graphics Objects Cache (Optimization) ==========
         self.ax = self.figure.add_subplot(111)
         self.artists = {
@@ -143,9 +84,15 @@ class UsvPlotWindow(QWidget):
             'preview_lines': {}, # {usv_id: Line2D}
             'preview_markers_start': {}, # {usv_id: PathCollection}
             'preview_markers_end': {},   # {usv_id: PathCollection}
-            'preview_markers_mid': {}    # {usv_id: PathCollection}
+            'preview_markers_mid': {},   # {usv_id: PathCollection}
+            'home_marker': None # Home marker aritst
         }
-        self._init_axes()
+        
+        # Apply theme to axes
+        self.set_theme('modern_dark')
+
+        # Callback for Set Home Request
+        self.request_set_home_callback = None
 
         # ========== Timer ==========
         # Update at 5Hz to prevent blocking main thread
@@ -160,29 +107,174 @@ class UsvPlotWindow(QWidget):
         # Track last data update to avoid excessive plotting
         self.last_update_time = time.time()
 
+    def set_theme(self, theme_name):
+        """Set the theme for the plot window (Dark/Light)"""
+        is_dark = (theme_name == 'modern_dark')
+        
+        if is_dark:
+            # Colors for Dark Mode
+            bg_color = "#2b2b2b" # Window BG
+            fg_color = "#ecf0f1" # Text Color
+            group_bg = "#3a3a3a"
+            button_bg = "#3498db"
+            button_fg = "#ffffff"
+            
+            # Matplotlib Colors
+            mpl_fig_bg = '#2b2b2b'
+            mpl_ax_bg = '#1e1e1e'
+            mpl_text = '#ecf0f1'
+            mpl_grid = '#7f8c8d'
+            mpl_toolbar_bg = "#34495e"
+            home_color = '#ffffff'  # White home in dark mode
+            home_edge = '#000000'
+        else:
+            # Colors for Light Mode
+            bg_color = "#f5f5f5" # Window BG
+            fg_color = "#2c3e50" # Text Color
+            group_bg = "#ffffff"
+            button_bg = "#3498db"
+            button_fg = "#ffffff"
+            
+            # Matplotlib Colors
+            mpl_fig_bg = '#f5f5f5'
+            mpl_ax_bg = '#ffffff'
+            mpl_text = '#2c3e50'
+            mpl_grid = '#bdc3c7'
+            mpl_toolbar_bg = "#e0e0e0"
+            home_color = '#333333' # Dark grey home in light mode
+            home_edge = '#ffffff'
+
+        self.home_marker_style = {'facecolor': home_color, 'edgecolor': home_edge, 'linewidth': 1}
+        
+        # 1. Qt Widget Stylesheet
+        style_sheet = f"""
+            QWidget {{
+                background-color: {bg_color};
+                color: {fg_color};
+            }}
+            QGroupBox {{
+                background-color: {group_bg};
+                border: 2px solid {mpl_grid};
+                border-radius: 6px;
+                margin-top: 15px;
+                padding: 15px;
+                font-weight: bold;
+                color: {fg_color};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 10px;
+                padding: 0px 8px 0px 8px;
+                background-color: {bg_color};
+                color: {fg_color};
+            }}
+            QCheckBox {{
+                background-color: transparent;
+                color: {fg_color};
+                font-size: 14px;
+                spacing: 5px;
+            }}
+            QPushButton {{
+                background-color: {button_bg};
+                color: {button_fg};
+                border: none;
+                padding: 8px 15px;
+                border-radius: 5px;
+                font-size: 14px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{
+                background-color: #2980b9;
+            }}
+            QLabel {{
+                background-color: transparent;
+                color: {fg_color};
+                font-size: 14px;
+            }}
+        """
+        self.setStyleSheet(style_sheet)
+        
+        # Update Info Label specifically if needed
+        if hasattr(self, 'info_label'):
+             self.info_label.setStyleSheet(f"color: {fg_color}; font-weight: bold;")
+
+        # Update Toolbar
+        if hasattr(self, 'toolbar'):
+             self.toolbar.setStyleSheet(f"background-color: {mpl_toolbar_bg}; border: none; color: {fg_color};")
+        
+        # 2. Matplotlib Figure & Axes
+        if hasattr(self, 'figure'):
+            self.figure.patch.set_facecolor(mpl_fig_bg)
+        
+        if hasattr(self, 'ax'):
+            self.ax.set_facecolor(mpl_ax_bg)
+            self.ax.set_title("USV Fleet Overview (Live)", color=mpl_text)
+            self.ax.set_xlabel('X (m)', color=mpl_text)
+            self.ax.set_ylabel('Y (m)', color=mpl_text)
+            
+            # Grid
+            self.ax.grid(True, linestyle='--', alpha=0.3, color=mpl_grid)
+            
+            # Spines
+            for spine in self.ax.spines.values():
+                spine.set_color(mpl_text)
+            
+            # Ticks
+            self.ax.tick_params(axis='x', colors=mpl_text)
+            self.ax.tick_params(axis='y', colors=mpl_text)
+            
+            # Redraw
+            if hasattr(self, 'canvas'):
+                # Force redraw home marker if it exists
+                self._draw_home_marker()
+                self.canvas.draw_idle()
+
     def _init_axes(self):
         """Initialize fixed axes properties."""
-        # Dark theme colors
-        axis_bg = '#1e1e1e' # Very dark gray/black
-        text_color = '#ecf0f1' # Light gray/white
-        grid_color = '#7f8c8d' # Gray
-        
-        self.ax.set_facecolor(axis_bg)
-        
-        self.ax.set_xlabel('X (m)', color=text_color)
-        self.ax.set_ylabel('Y (m)', color=text_color)
-        self.ax.set_title("USV Fleet Overview (Live)", color=text_color)
         self.ax.set_aspect('equal')
+        # Detailed styling is now handled in set_theme()
         
-        self.ax.grid(True, linestyle='--', alpha=0.3, color=grid_color)
+        # Draw initial home marker
+        self._draw_home_marker()
         
-        # Style spines (borders)
-        for spine in self.ax.spines.values():
-            spine.set_color(text_color)
+    def _draw_home_marker(self):
+        """Draw or update the Home marker at current home position"""
+        # Define House Icon Path (Triangle on Top, Square on bottom)
+        # Vertices for a simple house shape centered at (0,0)
+        # Scale can be adjusted with 's' parameter in scatter, but path vertices are relative
+        vertices = [
+            (-1, -1), (1, -1), (1, 0.5), (0, 1.5), (-1, 0.5), (0,0) # Close polygon technically not needed if filled, but good practice
+        ]
+        codes = [
+            patches.Path.MOVETO,
+            patches.Path.LINETO,
+            patches.Path.LINETO,
+            patches.Path.LINETO,
+            patches.Path.LINETO,
+            patches.Path.CLOSEPOLY
+        ]
+        house_path = patches.Path(vertices, codes)
+        
+        # Remove old marker if exists
+        if self.artists['home_marker']:
+            self.artists['home_marker'].remove()
+            self.artists['home_marker'] = None
             
-        # Style ticks
-        self.ax.tick_params(axis='x', colors=text_color)
-        self.ax.tick_params(axis='y', colors=text_color)
+        style = getattr(self, 'home_marker_style', {'facecolor': 'white', 'edgecolor': 'black', 'linewidth': 1})
+        
+        # Draw new marker using Scatter with custom path
+        # s=150 is the size area in points^2
+        self.artists['home_marker'] = self.ax.scatter(
+            [self.home_pos[0]], [self.home_pos[1]], 
+            marker=house_path, 
+            s=200, 
+            facecolor=style['facecolor'],
+            edgecolor=style['edgecolor'],
+            linewidth=style['linewidth'],
+            zorder=3, # Below USVs but above grid
+            label='Home'
+        )
 
     def set_preview_path(self, task_data_list):
         """Set task data for preview"""
@@ -470,9 +562,13 @@ class UsvPlotWindow(QWidget):
         self.canvas.draw_idle()
 
     def on_click(self, event):
-        if event.button == 1 and event.inaxes:
-            click_x, click_y = event.xdata, event.ydata
-            
+        if not event.inaxes:
+            return
+
+        click_x, click_y = event.xdata, event.ydata
+
+        # Left Click: Select USV
+        if event.button == 1:
             # specific simple hit detection
             closest = None
             min_dist = 999.0
@@ -485,6 +581,35 @@ class UsvPlotWindow(QWidget):
             
             if closest:
                 self.show_usv_details(closest['usv'])
+        
+        # Right Click: Context Menu
+        elif event.button == 3:
+            self._show_context_menu(event)
+
+    def _show_context_menu(self, event):
+        """Show context menu for plot interactions"""
+        menu = QMenu(self)
+        
+        # Action: Set Home Here
+        set_home_action = QAction("Set Home Here", self)
+        set_home_action.triggered.connect(lambda: self.set_home_position(event.xdata, event.ydata))
+        menu.addAction(set_home_action)
+        
+        # Convert matplotlib event position to global screen position for QMenu
+        # event.guiEvent is a QMouseEvent
+        cursor_pos = event.guiEvent.globalPos()
+        menu.exec_(cursor_pos)
+
+    def set_home_position(self, x, y):
+        """Update Home position and redraw marker"""
+        self.home_pos = (x, y)
+        self._draw_home_marker()
+        self.canvas.draw_idle()
+        # Emit signal to notify parent (MainGuiApp) to send ROS command
+        if hasattr(self, 'request_set_home_callback') and self.request_set_home_callback:
+            self.request_set_home_callback(x, y)
+        # Optional: Emit signal or log
+        print(f"Home position set to: ({x:.2f}, {y:.2f})")
 
     def show_usv_details(self, usv_data):
         usv_id = usv_data.get('namespace', 'Unknown')

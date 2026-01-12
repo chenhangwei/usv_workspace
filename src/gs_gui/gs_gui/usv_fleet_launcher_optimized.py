@@ -281,111 +281,138 @@ class UsvFleetLauncher(QDialog):
         # 设置主布局
         self.setLayout(main_layout)
         
-        # 应用全局样式
-        self._apply_styles()
+        # 应用初始主题 (默认 Dark)
+        self.set_theme('modern_dark')
     
-    def _apply_styles(self):
-        """应用全局样式（深色主题，与主界面一致）"""
-        self.setStyleSheet("""
-            /* 对话框主背景 - 深色主题 */
-            QDialog {
-                background-color: #1e1e1e;
-                color: #e0e0e0;
-            }
+    def set_theme(self, theme_name):
+        """设置界面主题 (Light / Dark)"""
+        is_dark = (theme_name == 'modern_dark')
+        
+        if is_dark:
+            # Dark colors
+            bg_color = "#1e1e1e"
+            text_color = "#e0e0e0"
+            group_bg = "#252525"
+            group_border = "#3a3a3a"
+            group_title = "#4fc3f7"
+            table_bg = "#2b2b2b"
+            table_alt = "#252525"
+            table_header_bg = "#1976d2"
+            table_header_text = "white"
+            btn_bg = "#424242"
+            btn_text = "#e0e0e0"
+            log_bg = "#1e1e1e"
+            log_text = "#00ff00"
+        else:
+            # Light colors
+            bg_color = "#f5f5f5"
+            text_color = "#333333"
+            group_bg = "#ffffff"
+            group_border = "#d0d0d0"
+            group_title = "#0078d7"
+            table_bg = "#ffffff"
+            table_alt = "#f9f9f9"
+            table_header_bg = "#f0f0f0"
+            table_header_text = "#0078d7"
+            btn_bg = "#ffffff"
+            btn_text = "#333333"
+            log_bg = "#ffffff"
+            log_text = "#333333"
+            
+        style_sheet = f"""
+            /* 对话框主背景 */
+            QDialog {{
+                background-color: {bg_color};
+                color: {text_color};
+            }}
             
             /* 标签颜色 */
-            QLabel {
-                color: #e0e0e0;
-            }
+            QLabel {{
+                color: {text_color};
+            }}
             
-            /* 分组框样式 - 深色主题 */
-            QGroupBox {
+            /* 分组框样式 */
+            QGroupBox {{
                 font-weight: bold;
-                border: 2px solid #3a3a3a;
+                border: 2px solid {group_border};
                 border-radius: 8px;
                 margin-top: 12px;
                 padding-top: 10px;
-                background-color: #252525;
-                color: #4fc3f7;
-            }
-            QGroupBox::title {
+                background-color: {group_bg};
+                color: {group_title};
+            }}
+            QGroupBox::title {{
                 subcontrol-origin: margin;
                 left: 15px;
                 padding: 0 5px;
-                color: #4fc3f7;
-            }
+                background-color: {group_bg};
+                color: {group_title};
+            }}
             
-            /* 表格样式 - 深色主题 */
-            QTableWidget {
-                border: 1px solid #3a3a3a;
+            /* 表格样式 */
+            QTableWidget {{
+                border: 1px solid {group_border};
                 border-radius: 4px;
-                background-color: #2b2b2b;
-                color: #e0e0e0;
-                gridline-color: #3a3a3a;
-            }
-            QTableWidget::item {
+                background-color: {table_bg};
+                color: {text_color};
+                gridline-color: {group_border};
+            }}
+            QTableWidget::item {{
                 padding: 5px;
-                color: #e0e0e0;
-            }
-            QTableWidget::item:selected {
-                background-color: #1976d2;
-                color: #ffffff;
-            }
-            QTableWidget::item:alternate {
-                background-color: #252525;
-            }
+                color: {text_color};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {('#1976d2' if is_dark else '#e6f7ff')};
+                color: {('#ffffff' if is_dark else '#0078d7')};
+            }}
+            QTableWidget::item:alternate {{
+                background-color: {table_alt};
+            }}
             
             /* 表头样式 */
-            QHeaderView::section {
-                background-color: #1976d2;
-                color: white;
+            QHeaderView::section {{
+                background-color: {table_header_bg};
+                color: {table_header_text};
                 padding: 8px;
-                border: 1px solid #3a3a3a;
+                border: 1px solid {group_border};
                 font-weight: bold;
-            }
+            }}
             
-            /* 通用按钮样式 */
-            QPushButton {
+            /* 通用按钮样式 (Refresh, Close, Select All) */
+            QPushButton {{
                 padding: 8px 16px;
                 border-radius: 5px;
-                border: 1px solid #555555;
-                background-color: #424242;
-                color: #e0e0e0;
+                border: 1px solid {('#555555' if is_dark else '#cccccc')};
+                background-color: {btn_bg};
+                color: {btn_text};
                 min-height: 28px;
-            }
-            QPushButton:hover {
-                background-color: #4fc3f7;
-                color: #000000;
-            }
-            QPushButton:pressed {
-                background-color: #0277bd;
-                color: #ffffff;
-            }
-            QPushButton:disabled {
-                background-color: #2a2a2a;
-                color: #666666;
-            }
+            }}
+            QPushButton:hover {{
+                background-color: {('#4fc3f7' if is_dark else '#e6f7ff')};
+                color: {('#000000' if is_dark else '#0078d7')};
+            }}
+            QPushButton:pressed {{
+                background-color: {('#0277bd' if is_dark else '#cceeff')};
+                color: {('#ffffff' if is_dark else '#005a9e')};
+            }}
             
             /* 复选框样式 */
-            QCheckBox {
-                color: #e0e0e0;
+            QCheckBox {{
+                color: {text_color};
                 spacing: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-                border: 2px solid #555555;
-                border-radius: 3px;
-                background-color: #2b2b2b;
-            }
-            QCheckBox::indicator:checked {
-                background-color: #4fc3f7;
-                border-color: #4fc3f7;
-            }
-            QCheckBox::indicator:hover {
-                border-color: #4fc3f7;
-            }
-        """)
+            }}
+            
+            /* 日志框 */
+            QTextEdit {{
+                background-color: {log_bg};
+                color: {log_text};
+                font-family: 'Courier New', monospace;
+                font-size: 14px;
+                border: 1px solid {group_border};
+            }}
+        """
+        self.setStyleSheet(style_sheet)
+
     
     def _load_fleet_config(self):
         """加载 USV 集群配置"""
@@ -773,7 +800,8 @@ class UsvFleetLauncher(QDialog):
     
     def _on_batch_status_updated(self, status_dict):
         """批量状态更新时的回调"""
-        self._log(f"🎨 UI 更新回调: {list(status_dict.items())}")
+        if self.verbose_logging:
+            self._log(f"🎨 UI 更新回调: {list(status_dict.items())}")
         for usv_id, status in status_dict.items():
             self._update_table_row(usv_id, status)
     

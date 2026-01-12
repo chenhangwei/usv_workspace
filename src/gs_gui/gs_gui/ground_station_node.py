@@ -1184,60 +1184,83 @@ class GroundStationNode(Node):
 
     def set_home_position_callback(self, usv_namespace, use_current, coords):
         """
-        设置 Home Position 回调
-        
-        Args:
-            usv_namespace: USV 命名空间（如 'usv_01'）
-            use_current: 是否使用当前位置（True=使用当前位置, False=使用指定坐标）
-            coords: 坐标字典 {'x': float, 'y': float, 'z': float}
+        设置 Home Position 回调 (异步执行，避免阻塞 GUI)
         """
+        # 启动独立线程处理服务调用，避免阻塞主线程（特别是 GUI 线程）
+        threading.Thread(
+            target=self._set_home_position_thread,
+            args=(usv_namespace, use_current, coords),
+            daemon=True
+        ).start()
+
+    def _set_home_position_thread(self, usv_namespace, use_current, coords):
+        """后台线程执行 Home Position 设置逻辑"""
         try:
             # 导入 MAVROS 命令服务
             from mavros_msgs.srv import CommandLong
             
-            # 根据是否使用当前位置，决定调用的服务和参数
-            if use_current:
-                # 使用当前位置: 直接调用 MAVROS 标准服务
-                service_name = f'/{usv_namespace}/cmd/command'
-                is_local_cmd = False
-            else:
-                # 使用指定 XYZ: 调用 USV 端的局部坐标设置服务
-                # 注意：该服务由 auto_set_home_node 提供
-                # 假设该节点在 usv 命名空间下运行
-                # 尝试路径 1: /usv_ns/auto_set_home_node/cmd/set_home_local
-                # 尝试路径 2: /usv_ns/cmd/set_home_local
-                # 这里我们假设 launch 文件没有将 node name 加入 path，或者我们使用 remapping
-                # 为了保险，我们先试 /usv_ns/auto_set_home_node/cmd/set_home_local，
-                # 如果找不到可以回退，但在 ROS2 中检测服务存在比较慢。
-                # 暂时使用 /usv_ns/cmd/set_home_local 约定 (需要在 launch 文件中 remap 或者 node namespace 设置对)
-                # 查看 auto_set_home_node 代码，它是 create_service('cmd/set_home_local')
-                # 如果 node namespace 是 /usv_01，则服务名是 /usv_01/cmd/set_home_local
-                service_name = f'/{usv_namespace}/auto_set_home_node/cmd/set_home_local'
-                is_local_cmd = True
+            # 客户端缓存 (避免重复创建)
+            if not hasattr(self, '_set_home_clients'):
+                self._set_home_clients = {}
             
-            client = self.create_client(CommandLong, service_name)
+            # 只有当使用指定坐标(local_cmd)时才需要复杂寻找逻辑
+            # check cache key: '{namespace}_{use_current}'
+            cache_key = f"{usv_namespace}_{use_current}"
             
-            # 等待服务可用
-            # 对于 XYZ 模式，如果找不到服务，可能是路径不对，我们可以尝试备用路径（简化起见先不写复杂重试）
-            if not client.wait_for_service(timeout_sec=2.0):
-                if is_local_cmd:
-                     # 尝试备用路径
-                     service_name = f'/{usv_namespace}/cmd/set_home_local'
-                     client = self.create_client(CommandLong, service_name)
-                     if not client.wait_for_service(timeout_sec=2.0):
-                        self.get_logger().error(f'[X] 服务不可用: {service_name}')
-                        try:
-                            self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：无法连接 USV 转换服务')
-                        except Exception:
-                            pass
-                        return
-                else:
-                    self.get_logger().error(f'[X] 服务不可用: {service_name}')
-                    try:
-                        self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：服务不可用')
-                    except Exception:
-                        pass
-                    return
+            # 线程安全锁，避免多线程同时操作 _set_home_clients
+            if not hasattr(self, '_client_cache_lock'):
+                self._client_cache_lock = threading.Lock()
+
+            client = None
+            service_name = None
+
+            with self._client_cache_lock:
+                if cache_key in self._set_home_clients:
+                     client, service_name = self._set_home_clients[cache_key]
+                     # 检查客户端有效性
+                     if not client.service_is_ready():
+                          # 如果缓存不可用，稍作等待（此时不占锁太久最好，但为了简单逻辑先这样）
+                          pass
+
+            # 如果没有缓存或服务未就绪，则重新创建
+            # 注意：在线程中 wait_for_service 是安全的
+            if client is None or not client.service_is_ready():
+                 if client:
+                     self.get_logger().info(f" Cached service {service_name} not ready, recreating...")
+                 
+                 # 根据是否使用当前位置，决定调用的服务和参数
+                 if use_current:
+                    # 使用当前位置: 直接调用 MAVROS 标准服务
+                    service_name = f'/{usv_namespace}/cmd/command'
+                    is_local_cmd = False
+                    client = self.create_client(CommandLong, service_name)
+                    if not client.wait_for_service(timeout_sec=3.0):
+                         self.get_logger().error(f'[X] 服务不可用: {service_name}')
+                         try:
+                             self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：MAVROS 服务未连接')
+                         except:
+                             pass
+                         return
+                 else:
+                    service_name = f'/{usv_namespace}/auto_set_home_node/cmd/set_home_local'
+                    client = self.create_client(CommandLong, service_name)
+                    # 首次尝试 (Path 1)
+                    if not client.wait_for_service(timeout_sec=2.0):
+                         self.get_logger().warn(f"Path 1 failed: {service_name}, trying Path 2...")
+                         # 尝试备用路径 (Path 2)
+                         service_name = f'/{usv_namespace}/cmd/set_home_local'
+                         client = self.create_client(CommandLong, service_name)
+                         if not client.wait_for_service(timeout_sec=2.0):
+                            self.get_logger().error(f'[X] 服务不可用 (Both paths failed): {service_name}')
+                            try:
+                                self.ros_signal.node_info.emit(f'[X] {usv_namespace} 设置 Home 失败：无法连接 USV 转接服务')
+                            except Exception:
+                                pass
+                            return
+                 
+                 # 更新缓存
+                 with self._client_cache_lock:
+                     self._set_home_clients[cache_key] = (client, service_name)
             
             # 构建命令
             request = CommandLong.Request()
