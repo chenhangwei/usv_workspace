@@ -889,7 +889,17 @@ class GroundStationNode(Node):
                 )
                 
                 # 支持z坐标
-                self.send_nav_goal_via_topic(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
+                # 修复BUG：调用 send_nav_goal_via_topic 时显式传递 step=0 (单点导航)，防止内部访问 step 出错
+                self.send_nav_goal_via_topic(
+                    usv_id, 
+                    p_local.get('x', 0.0), 
+                    p_local.get('y', 0.0), 
+                    p_local.get('z', 0.0), 
+                    yaw, 
+                    use_yaw=False, # 明确 use_yaw
+                    timeout=300.0,
+                    step=0 # 单点导航强制step=0
+                )
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
