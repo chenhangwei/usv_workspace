@@ -44,7 +44,11 @@ class UsvControlNode(Node):
         self.frame_id = self.get_parameter('frame_id').value
 
         # 加载 GPS 原点参数（用于 Global 模式转换）
-        gps_origin = param_loader.load_gps_origin()
+        gps_origin = param_loader.load_gps_origin(
+            default_lat=22.5180977,
+            default_lon=113.9007239,
+            default_alt=-5.17
+        )
         self.origin_lat = gps_origin['lat']
         self.origin_lon = gps_origin['lon']
         self.origin_alt = gps_origin['alt']
@@ -467,9 +471,10 @@ class UsvControlNode(Node):
             global_msg.altitude = gps_coord['alt'] # 虽然设置了值，但 mask 已忽略之
             
             self.global_target_pub.publish(global_msg)
-            self.get_logger().debug(
+            # 修改为INFO级别并在日志中显示更高精度的经纬度，以便调试厘米级误差
+            self.get_logger().info(
                 f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
-                f'GPS({gps_coord["lat"]:.7f}°, {gps_coord["lon"]:.7f}°, {gps_coord["alt"]:.2f}m)')
+                f'GPS({gps_coord["lat"]:.9f}°, {gps_coord["lon"]:.9f}°, {gps_coord["alt"]:.3f}m)')
 
         except Exception as e:
 

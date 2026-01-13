@@ -20,7 +20,7 @@
             <usv led="color_select|255,0,0">
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>5.0</x>
+                    <x>5</x>
                     <y>5.0</y>
                     <z>0.0</z>
                 </position>
@@ -34,8 +34,8 @@
             <usv led="color_select|0,0,255">
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>6.0</x>
-                    <y>6.0</y>
+                    <x>3.62</x>
+                    <y>3.16</y>
                     <z>0.0</z>
                 </position>
                 <!-- 兼容旧写法 -->
