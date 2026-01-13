@@ -100,6 +100,31 @@ class CommandProcessor:
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "STEERING")
 
+    def set_rtl_callback(self, msg):
+        """
+        设置USV为RTL模式
+        
+        Args:
+            msg: 包含USV列表的消息
+        """
+        # 记录日志信息
+        self.node.get_logger().info("接收到RTL模式命令")
+        
+        # 切换到RTL模式时，应该停止所有导航任务
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            # 提取USV ID
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            # 如果该USV有正在执行的导航任务，取消它
+            if usv_id in self.node._usv_nav_target_cache:
+                self.node.get_logger().info(f"🛑 切换RTL模式，取消 {usv_id} 的导航任务")
+                del self.node._usv_nav_target_cache[usv_id]
+                # 更新导航状态显示为"已停止" (或者"返航中"?)
+                self.node.ros_signal.nav_status_update.emit(usv_id, "返航中")
+        
+        # 调用通用设置模式方法
+        self._set_mode_for_usvs(msg, "RTL")
+
     def _set_mode_for_usvs(self, msg, mode):
         """
         为USV列表设置指定模式

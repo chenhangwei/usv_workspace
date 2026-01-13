@@ -25,6 +25,7 @@ class ROSSignal(QObject):
     guided_command = pyqtSignal(list)   # 制导模式命令，参数：USV命名空间列表
     arco_command = pyqtSignal(list)     # ARCO模式命令，参数：USV命名空间列表
     steering_command = pyqtSignal(list) # 转向模式命令，参数：USV命名空间列表
+    rtl_command = pyqtSignal(list)      # RTL模式命令，参数：USV命名空间列表
 
     # 目标点命令信号
     cluster_target_point_command = pyqtSignal(list)     # 集群目标点命令，参数：目标点列表

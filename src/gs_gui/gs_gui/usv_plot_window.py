@@ -4,7 +4,7 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtCore import Qt as QtCore
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
-from math import cos, sin, pi, atan2, sqrt
+from math import cos, sin, pi, atan2, sqrt, radians
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
@@ -42,6 +42,10 @@ class UsvPlotWindow(QWidget):
         self.show_preview = True
         self.show_grid = True
         self.auto_scale = True
+        
+        # Position Trackers
+        self.home_pos = (0.0, 0.0)
+        self.area_center_pos = None
 
         # ========== Info Bar ==========
         info_layout = QHBoxLayout()
@@ -75,18 +79,25 @@ class UsvPlotWindow(QWidget):
 
         # ========== Graphics Objects Cache (Optimization) ==========
         self.ax = self.figure.add_subplot(111)
+        self._updating_limits = False  # Flag to distinguish programmatic updates
+        self.ax.callbacks.connect('xlim_changed', self.on_limits_changed)
+        self.ax.callbacks.connect('ylim_changed', self.on_limits_changed)
+        
         self.artists = {
             'usv_polys': {},    # {usv_id: Polygon}
             'usv_labels': {},   # {usv_id: Text}
             'usv_trails': {},   # {usv_id: Line2D}
             'nav_lines': {},    # {usv_id: Line2D}
             'nav_markers': {},  # {usv_id: Line2D (marker)}
+            'nav_labels': {},   # {usv_id: Text (target coordinates)}
             'preview_lines': {}, # {usv_id: Line2D}
             'preview_markers_start': {}, # {usv_id: PathCollection}
             'preview_markers_end': {},   # {usv_id: PathCollection}
             'preview_markers_mid': {},   # {usv_id: PathCollection}
             'preview_markers_maneuver': {}, # {usv_id: PathCollection} (Rings for maneuvers)
-            'home_marker': None # Home marker aritst
+            'preview_labels_start': {},  # {usv_id: Text (USV ID at start)}
+            'home_marker': None, # Home marker aritst
+            'area_center_marker': None # Area Center marker (Red Cross)
         }
         
         # Apply theme to axes
@@ -101,8 +112,15 @@ class UsvPlotWindow(QWidget):
         self.timer.timeout.connect(self.update_plot)
         self.timer.start(200) # 200ms
 
+        # Interaction State
+        self.is_panning = False
+        self.last_mouse_pos = None
+
         # Signals
+        self.canvas.mpl_connect('scroll_event', self.on_scroll)
         self.canvas.mpl_connect('button_press_event', self.on_click)
+        self.canvas.mpl_connect('button_release_event', self.on_release)
+        self.canvas.mpl_connect('motion_notify_event', self.on_move)
 
         self._center_on_screen()
         # Track last data update to avoid excessive plotting
@@ -277,11 +295,41 @@ class UsvPlotWindow(QWidget):
             label='Home'
         )
 
-    def set_preview_path(self, task_data_list):
-        """Set task data for preview"""
+    def draw_area_center_marker(self, x, y):
+        """Draw or update the Area Center marker (Red Cross)"""
+        # Update stored position for auto-scale logic
+        self.area_center_pos = (x, y)
+
+        # Remove old marker if exists
+        if self.artists['area_center_marker']:
+            self.artists['area_center_marker'].remove()
+            self.artists['area_center_marker'] = None
+            
+        # Draw new marker (Red Cross)
+        # Using zorder=4 to be above grid/home but below USVs
+        self.artists['area_center_marker'] = self.ax.scatter(
+            [x], [y], 
+            marker='+', 
+            s=150, 
+            c='red', 
+            linewidth=2.0, 
+            zorder=4, 
+            label='Area Center'
+        )
+        self.canvas.draw_idle()
+
+    def set_preview_path(self, task_data_list, offset=(0.0, 0.0), angle=0.0):
+        """Set task data for preview
+        Args:
+            task_data_list: List of task steps
+            offset: (x, y) offset to add to task coordinates (e.g. area_center)
+            angle: Rotation angle in degrees (0-359), rotating around the Area Center origin (before offset translation if using local coords assumption, or after?)
+                   Usually: Global = R * Local + Offset
+        """
+        # print(f"DEBUG: set_preview_path called with {len(task_data_list)} items, offset={offset}, angle={angle}")
         self.preview_trails = {}
         # Clear previous preview artists
-        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver']:
+        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver', 'preview_labels_start']:
             for artist in self.artists[key].values():
                 artist.remove()
             self.artists[key].clear()
@@ -289,7 +337,16 @@ class UsvPlotWindow(QWidget):
         if not task_data_list:
             self.update_plot()
             return
-            
+
+        # Prepare rotation
+        theta = radians(angle)
+        cos_t = cos(theta)
+        sin_t = sin(theta)
+
+        # Ensure autoscaling is active on new task load
+        # self.auto_scale = True 
+        # (Already done in main block below, but ensuring reset is good)
+
         # Group by USV
         temp = {}
         for item in task_data_list:
@@ -297,15 +354,23 @@ class UsvPlotWindow(QWidget):
             step = item.get('step', 0)
             
             # Extract position (handle nested dictionary structure from ClusterTaskManager)
-            x = 0.0
-            y = 0.0
+            x_local = 0.0
+            y_local = 0.0
             
             if 'position' in item and isinstance(item['position'], dict):
-                x = float(item['position'].get('x', 0.0))
-                y = float(item['position'].get('y', 0.0))
+                x_local = float(item['position'].get('x', 0.0))
+                y_local = float(item['position'].get('y', 0.0))
             else:
-                x = float(item.get('x', 0.0))
-                y = float(item.get('y', 0.0))
+                x_local = float(item.get('x', 0.0))
+                y_local = float(item.get('y', 0.0))
+            
+            # Apply Rotation (around local 0,0)
+            x_rot = x_local * cos_t - y_local * sin_t
+            y_rot = x_local * sin_t + y_local * cos_t
+            
+            # Apply Offset (Translate to Area Center global position)
+            x_final = x_rot + offset[0]
+            y_final = y_rot + offset[1]
             
             # Extract Maneuver info
             m_type = item.get('maneuver_type', 0)
@@ -314,7 +379,7 @@ class UsvPlotWindow(QWidget):
                 temp[uid] = []
             temp[uid].append({
                 'step': step, 
-                'pos': (x, y),
+                'pos': (x_final, y_final), 
                 'maneuver_type': m_type
             })
             
@@ -323,7 +388,11 @@ class UsvPlotWindow(QWidget):
             items.sort(key=lambda x: x['step'])
             # Store full item dict to preserve maneuver info
             self.preview_trails[uid] = items 
+        
+        # print(f"DEBUG: Processed preview trails: {len(self.preview_trails)} USVs")
             
+        # Force re-enable auto scale to make sure user sees the new path
+        # self.auto_scale = True
         self.update_plot()
 
     def request_redraw(self):
@@ -349,6 +418,11 @@ class UsvPlotWindow(QWidget):
             pass
         return None
 
+    def on_limits_changed(self, event=None):
+        """Callback for axis limit changes (zoom/pan)"""
+        if not self._updating_limits and self.auto_scale:
+            self.auto_scale = False
+            
     def update_plot(self):
         # 如果控件被隐藏或其父窗口被隐藏，则不刷新（节省资源）
         if not self.isVisible() and not self.parentWidget():
@@ -365,6 +439,15 @@ class UsvPlotWindow(QWidget):
 
         all_x = []
         all_y = []
+        
+        # Include Fixed Points in Auto Scale (Home & Area Center)
+        if hasattr(self, 'home_pos') and self.home_pos:
+            all_x.append(self.home_pos[0])
+            all_y.append(self.home_pos[1])
+            
+        if hasattr(self, 'area_center_pos') and self.area_center_pos:
+            all_x.append(self.area_center_pos[0])
+            all_y.append(self.area_center_pos[1])
         
         # Default colors
         default_colors = ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6']
@@ -386,27 +469,60 @@ class UsvPlotWindow(QWidget):
 
                     # 1. Dashed Line
                     if uid not in self.artists['preview_lines']:
-                        line, = self.ax.plot(px, py, color='#7f8c8d', alpha=0.6, linestyle='-.', linewidth=1.5, zorder=1)
+                        # Zorder 5 (above grid/home/area_center)
+                        line, = self.ax.plot(px, py, color='#aaaaaa', alpha=0.6, linestyle='--', linewidth=1.0, zorder=5)
                         self.artists['preview_lines'][uid] = line
                     else:
                         self.artists['preview_lines'][uid].set_data(px, py)
+                        # Ensure visibility and style
+                        self.artists['preview_lines'][uid].set_color('#aaaaaa')
+                        self.artists['preview_lines'][uid].set_linestyle('--')
+                        self.artists['preview_lines'][uid].set_linewidth(1.0)
+                        self.artists['preview_lines'][uid].set_zorder(5)
                         self.artists['preview_lines'][uid].set_visible(True)
                     
                     # 2. Start/End Points
                     if uid not in self.artists['preview_markers_start']:
-                        start = self.ax.scatter([px[0]], [py[0]], c='#2ecc71', s=20, marker='o', zorder=2, edgecolors='none', label='Start')
-                        end = self.ax.scatter([px[-1]], [py[-1]], c='#e74c3c', s=20, marker='o', zorder=2, edgecolors='none', label='End')
+                        # Zorder increased to 6
+                        start = self.ax.scatter([px[0]], [py[0]], c='#2ecc71', s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='Start')
+                        end = self.ax.scatter([px[-1]], [py[-1]], c='#e74c3c', s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='End')
                         self.artists['preview_markers_start'][uid] = start
                         self.artists['preview_markers_end'][uid] = end
                         
+                        # Add USV ID Label at Start
+                        text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color='#2ecc71', verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
+                        self.artists['preview_labels_start'][uid] = text_artist
+                        
                         if len(points) > 2:
-                            mid = self.ax.scatter(px[1:-1], py[1:-1], c='#7f8c8d', s=4, marker='o', zorder=2, edgecolors='none')
+                            mid = self.ax.scatter(px[1:-1], py[1:-1], c='#bdc3c7', s=10, marker='.', zorder=6, edgecolors='none')
                             self.artists['preview_markers_mid'][uid] = mid
                     else:
                         self.artists['preview_markers_start'][uid].set_visible(True)
                         self.artists['preview_markers_end'][uid].set_visible(True)
+                        self.artists['preview_markers_start'][uid].set_zorder(6)
+                        self.artists['preview_markers_end'][uid].set_zorder(6)
+                        
+                        # Update Start Label
+                        if uid in self.artists['preview_labels_start']:
+                            self.artists['preview_labels_start'][uid].set_position((px[0], py[0]))
+                            self.artists['preview_labels_start'][uid].set_visible(True)
+                        else:
+                            # Create if missing (defensive)
+                            text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color='#2ecc71', verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
+                            self.artists['preview_labels_start'][uid] = text_artist
+                        
                         if uid in self.artists['preview_markers_mid']:
                             self.artists['preview_markers_mid'][uid].set_visible(True)
+                            self.artists['preview_markers_mid'][uid].set_zorder(6)
+                            # Update mid points offsets
+                            if len(points) > 2:
+                                self.artists['preview_markers_mid'][uid].set_offsets(np.c_[px[1:-1], py[1:-1]])
+                            else:
+                                self.artists['preview_markers_mid'][uid].set_visible(False)
+                                
+                        # Update start/end positions
+                        self.artists['preview_markers_start'][uid].set_offsets([[px[0], py[0]]])
+                        self.artists['preview_markers_end'][uid].set_offsets([[px[-1], py[-1]]])
 
                     # 3. Maneuver Rings
                     maneuver_points = [p['pos'] for p in points if p.get('maneuver_type', 0) == 1]
@@ -525,11 +641,27 @@ class UsvPlotWindow(QWidget):
                          mark.set_data([tx], [ty])
                          mark.set_color(color_hex)
                          mark.set_visible(True)
+                     
+                     # Nav Target Label (XY Coordinates)
+                     label_text = f"({tx:.1f}, {ty:.1f})"
+                     if usv_id not in self.artists['nav_labels']:
+                         text = self.ax.text(tx, ty + 1.0, label_text, 
+                                            color=color_hex, fontsize=8, ha='center',
+                                            bbox=dict(facecolor='#2c3e50', alpha=0.3, edgecolor='none', pad=1))
+                         self.artists['nav_labels'][usv_id] = text
+                     else:
+                         text = self.artists['nav_labels'][usv_id]
+                         text.set_position((tx, ty + 1.0))
+                         text.set_text(label_text)
+                         text.set_color(color_hex)
+                         text.set_visible(True)
+
                      all_x.append(tx)
                      all_y.append(ty)
             else:
                  if usv_id in self.artists['nav_lines']: self.artists['nav_lines'][usv_id].set_visible(False)
                  if usv_id in self.artists['nav_markers']: self.artists['nav_markers'][usv_id].set_visible(False)
+                 if usv_id in self.artists['nav_labels']: self.artists['nav_labels'][usv_id].set_visible(False)
 
             # --- 6. Label ---
             if self.show_labels:
@@ -555,32 +687,71 @@ class UsvPlotWindow(QWidget):
             if uid not in active_usv_ids:
                 self.artists['usv_polys'][uid].set_visible(False)
                 if uid in self.artists['usv_labels']: self.artists['usv_labels'][uid].set_visible(False)
+                if uid in self.artists['nav_labels']: self.artists['nav_labels'][uid].set_visible(False)
                 # Trails persist usually, but maybe hide them? Keeping them for now.
 
         # --- 7. Auto Scale ---
-        if self.auto_scale and all_x:
-            margin = 5.0
-            min_x, max_x = min(all_x), max(all_x)
-            min_y, max_y = min(all_y), max(all_y)
-            
-            width = max_x - min_x
-            height = max_y - min_y
-            
-            # Ensure not zero range
-            if width < 10: width = 10; mid_x = (min_x+max_x)/2; min_x = mid_x - 5; max_x = mid_x + 5
-            if height < 10: height = 10; mid_y = (min_y+max_y)/2; min_y = mid_y - 5; max_y = mid_y + 5
-            
-            self.ax.set_xlim(min_x - margin, max_x + margin)
-            self.ax.set_ylim(min_y - margin, max_y + margin)
-        elif not all_x:
-             self.ax.set_xlim(-10, 10)
-             self.ax.set_ylim(-10, 10)
+        if self.auto_scale:
+            if all_x:
+                margin = 5.0
+                min_x, max_x = min(all_x), max(all_x)
+                min_y, max_y = min(all_y), max(all_y)
+                
+                width = max_x - min_x
+                height = max_y - min_y
+                
+                # Ensure not zero range
+                if width < 10: width = 10; mid_x = (min_x+max_x)/2; min_x = mid_x - 5; max_x = mid_x + 5
+                if height < 10: height = 10; mid_y = (min_y+max_y)/2; min_y = mid_y - 5; max_y = mid_y + 5
+                
+                self._updating_limits = True
+                self.ax.set_xlim(min_x - margin, max_x + margin)
+                self.ax.set_ylim(min_y - margin, max_y + margin)
+                self._updating_limits = False
+            else:
+                 self._updating_limits = True
+                 self.ax.set_xlim(-10, 10)
+                 self.ax.set_ylim(-10, 10)
+                 self._updating_limits = False
 
         # Update Info
-        # Change: Display actual online USVs count instead of total list length
-        self.info_label.setText(f"Active USVs: {len(active_usv_ids)} | {datetime.datetime.now().strftime('%H:%M:%S')}")
+        # Change: Display actual online USVs count and Preview count
+        preview_count = sum(len(pts) for pts in self.preview_trails.values()) if hasattr(self, 'preview_trails') else 0
+        self.info_label.setText(f"Active: {len(active_usv_ids)} | Preview Pts: {preview_count} | Scale: {'Auto' if self.auto_scale else 'Manual'} | {datetime.datetime.now().strftime('%H:%M:%S')}")
 
         # Optimize draw call
+        self.canvas.draw_idle()
+
+    def on_scroll(self, event):
+        """Zoom with mouse wheel at cursor position"""
+        if not event.inaxes: return
+        
+        # Disable auto-scale on manual interaction
+        self.auto_scale = False
+
+        zoom_factor = 1.2
+        if event.button == 'up':
+            scale = 1 / zoom_factor
+        elif event.button == 'down':
+            scale = zoom_factor
+        else:
+            scale = 1
+
+        xdata = event.xdata
+        ydata = event.ydata
+
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        new_width = (xlim[1] - xlim[0]) * scale
+        new_height = (ylim[1] - ylim[0]) * scale
+
+        relx = (xlim[1] - xdata) / (xlim[1] - xlim[0])
+        rely = (ylim[1] - ydata) / (ylim[1] - ylim[0])
+
+        self.ax.set_xlim([xdata - new_width * (1 - relx), xdata + new_width * relx])
+        self.ax.set_ylim([ydata - new_height * (1 - rely), ydata + new_height * rely])
+        
         self.canvas.draw_idle()
 
     def on_click(self, event):
@@ -589,8 +760,21 @@ class UsvPlotWindow(QWidget):
 
         click_x, click_y = event.xdata, event.ydata
 
-        # Left Click: Select USV
+        # Middle Click (2): Start Dragging (Pan)
+        if event.button == 2:
+            self.is_panning = True
+            self.last_mouse_pos = (event.x, event.y)
+            self.auto_scale = False # Disable auto scale on interaction
+            return
+
+        # Left Click (1): Select USV or Double Click for Fit
         if event.button == 1:
+            if event.dblclick:
+                # Double Click: Fit All and Re-enable Auto Scale
+                self.auto_scale = True
+                self.update_plot() # Force update to re-calc limits
+                return
+            
             # specific simple hit detection
             closest = None
             min_dist = 999.0
@@ -604,9 +788,49 @@ class UsvPlotWindow(QWidget):
             if closest:
                 self.show_usv_details(closest['usv'])
         
-        # Right Click: Context Menu
+        # Right Click (3): Context Menu
         elif event.button == 3:
             self._show_context_menu(event)
+
+    def on_release(self, event):
+        """Handle mouse button release"""
+        if event.button == 2: # Middle Click
+            self.is_panning = False
+            self.last_mouse_pos = None
+
+    def on_move(self, event):
+        """Handle mouse movement for panning"""
+        if self.is_panning:
+            if self.last_mouse_pos is None:
+                self.last_mouse_pos = (event.x, event.y)
+                return
+            
+            if event.x is None or event.y is None:
+                return
+            
+            # Calculate shift in pixels
+            dx_pix = event.x - self.last_mouse_pos[0]
+            dy_pix = event.y - self.last_mouse_pos[1]
+            
+            # Convert to data coordinates
+            xlim = self.ax.get_xlim()
+            ylim = self.ax.get_ylim()
+            
+            # Get pixel width/height of axes
+            bbox = self.ax.get_window_extent().transformed(self.figure.dpi_scale_trans.inverted())
+            width_pix = bbox.width * self.figure.dpi
+            height_pix = bbox.height * self.figure.dpi
+            
+            # Calculate data shift
+            dx_data = (xlim[1] - xlim[0]) * dx_pix / width_pix
+            dy_data = (ylim[1] - ylim[0]) * dy_pix / height_pix
+            
+            # Apply shift (inverted because dragging map means moving view opposite)
+            self.ax.set_xlim(xlim[0] - dx_data, xlim[1] - dx_data)
+            self.ax.set_ylim(ylim[0] - dy_data, ylim[1] - dy_data)
+            
+            self.last_mouse_pos = (event.x, event.y)
+            self.canvas.draw_idle()
 
     def _show_context_menu(self, event):
         """Show context menu for plot interactions"""

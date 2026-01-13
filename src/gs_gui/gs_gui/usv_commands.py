@@ -126,9 +126,27 @@ class USVCommandHandler:
             self.append_info(f"离群设置manual模式命令已发送: {namespace_list}")
         except Exception as e:
             self.append_info(f"发送离群manual模式命令失败: {e}")
-    
+
+    def set_departed_hold(self, usv_departed_list):
+        """发送离群设置HOLD模式命令"""
+        try:
+            namespace_list = self._extract_namespaces(usv_departed_list)
+            self.ros_signal.hold_command.emit(namespace_list)
+            self.append_info(f"离群设置HOLD模式命令已发送: {namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群HOLD模式命令失败: {e}")
+
+    def set_departed_rtl(self, usv_departed_list):
+        """发送离群设置RTL模式命令"""
+        try:
+            namespace_list = self._extract_namespaces(usv_departed_list)
+            self.ros_signal.rtl_command.emit(namespace_list)
+            self.append_info(f"离群设置RTL模式命令已发送: {namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送离群RTL模式命令失败: {e}")
+
     def set_departed_arco(self, usv_departed_list):
-        """发送离群设置ARCO模式命令"""
+        """（保留兼容）发送离群设置ARCO模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
             self.ros_signal.arco_command.emit(namespace_list)
@@ -137,7 +155,7 @@ class USVCommandHandler:
             self.append_info(f"发送离群ARCO模式命令失败: {e}")
     
     def set_departed_steering(self, usv_departed_list):
-        """发送离群设置Steering模式命令"""
+        """（保留兼容）发送离群设置Steering模式命令"""
         try:
             namespace_list = self._extract_namespaces(usv_departed_list)
             self.ros_signal.steering_command.emit(namespace_list)

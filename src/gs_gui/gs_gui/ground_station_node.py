@@ -74,6 +74,7 @@ class GroundStationNode(Node):
         self.declare_parameter('area_center_x', 0.0)
         self.declare_parameter('area_center_y', 0.0)
         self.declare_parameter('area_center_z', 0.0)
+        self.declare_parameter('area_center_angle', 0.0)
         self.declare_parameter('area_center_frame', 'map')
 
         # 初始化子模块
@@ -151,10 +152,11 @@ class GroundStationNode(Node):
             ax = float(self.get_parameter('area_center_x').get_parameter_value().double_value)
             ay = float(self.get_parameter('area_center_y').get_parameter_value().double_value)
             az = float(self.get_parameter('area_center_z').get_parameter_value().double_value)
+            aa = float(self.get_parameter('area_center_angle').get_parameter_value().double_value)
             afr = str(self.get_parameter('area_center_frame').get_parameter_value().string_value)
-            self._area_center = {'x': ax, 'y': ay, 'z': az, 'frame': afr}
+            self._area_center = {'x': ax, 'y': ay, 'z': az, 'angle': aa, 'frame': afr}
         except Exception:
-            self._area_center = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'frame': 'map'}
+            self._area_center = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'angle': 0.0, 'frame': 'map'}
 
         try:
             self._ns_offline_grace_period = float(self.get_parameter('offline_grace_period').get_parameter_value().double_value)
@@ -405,6 +407,10 @@ class GroundStationNode(Node):
         
         注意：这个方法不会添加或删除USV，只会标记离线状态。
         """
+        # 广播偏移量，确保 UI 同步 Area Center (移除周期性广播，避免重置Plot视图)
+        # if hasattr(self, '_area_center'):
+        #      self.ros_signal.update_area_center.emit(self._area_center)
+
         if not self._static_usv_list:
             return
         
@@ -436,7 +442,9 @@ class GroundStationNode(Node):
                 if self.usv_states[usv_id].get('connected', True):
                     self.usv_states[usv_id]['connected'] = False
                     state_changed = True
-                    self.get_logger().warn(f"⚠️  {usv_id} 已离线（{elapsed:.1f}s未收到数据）")
+                    warning_msg = f"⚠️ {usv_id} 已离线 ({elapsed:.1f}s未收到数据)"
+                    self.get_logger().warn(warning_msg)
+                    self.append_warning(f"[{datetime.now().strftime('%H:%M:%S')}] {warning_msg}")
             else:
                 # 标记为在线
                 if not self.usv_states[usv_id].get('connected', False):
@@ -620,7 +628,7 @@ class GroundStationNode(Node):
 
     # ==================== 基于话题的导航方法 ====================
     
-    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, maneuver_type=0, maneuver_param=0.0):
+    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, maneuver_type=0, maneuver_param=0.0, step=None):
         """
         通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
         
@@ -639,6 +647,7 @@ class GroundStationNode(Node):
             timeout (float): 超时时间(秒)
             maneuver_type (int): 机动类型
             maneuver_param (float): 机动参数
+            step (int, optional): 任务步骤号. 如果为None,则使用self.run_step.
 
         Returns:
             bool: 发送是否成功
@@ -704,13 +713,14 @@ class GroundStationNode(Node):
         pub.publish(goal_msg)
         
         # 更新缓存和状态
+        current_step = step if step is not None else self.run_step
         self._usv_nav_target_cache[usv_id] = {
             'goal_id': goal_id,
             'x': float(x),
             'y': float(y),
             'z': float(z),
             'yaw': float(yaw),
-            'step': self.run_step,
+            'step': current_step,
             'timestamp': self.get_clock().now().nanoseconds / 1e9
         }
         
@@ -719,7 +729,8 @@ class GroundStationNode(Node):
         
         self.get_logger().info(
             f"📤 {usv_id} 导航目标已发送 [ID={goal_id}]: "
-            f"({x:.1f}, {y:.1f}, {z:.1f}), 超时={timeout:.0f}s")
+            f"XY({x:.1f}, {y:.1f}), Yaw({yaw:.1f}°), "
+            f"机动({maneuver_type}, {maneuver_param:.1f}), 超时={timeout:.0f}s")
         
         return True
     
@@ -733,7 +744,13 @@ class GroundStationNode(Node):
         """
         # 检查是否是当前目标的反馈
         cached = self._usv_nav_target_cache.get(usv_id)
-        if cached and cached.get('goal_id') != msg.goal_id:
+        
+        # 修复：如果没有缓存的目标信息（例如因为任务已停止/取消），则忽略该反馈
+        # 防止界面重置显示为 T-xx 的旧目标ID
+        if not cached:
+            return
+
+        if cached.get('goal_id') != msg.goal_id:
             return  # 忽略旧目标的反馈
         
         # 简化日志输出
@@ -799,6 +816,10 @@ class GroundStationNode(Node):
         if msg.success:
             self.ros_signal.nav_status_update.emit(usv_id, "成功")
             self.cluster_controller.mark_usv_goal_result(usv_id, True, goal_step)
+            
+            # 清除导航目标缓存，取消UI显示
+            if usv_id in self._usv_nav_target_cache:
+                del self._usv_nav_target_cache[usv_id]
             
             # ✅ 修复：不在每个目标点完成时切换HOLD，让USV保持GUIDED模式继续执行后续步骤
             # 集群任务完成后会统一切换到HOLD（在_reset_cluster_task中处理）
@@ -888,6 +909,9 @@ class GroundStationNode(Node):
 
     def set_steering_callback(self, msg):
         self.command_processor.set_steering_callback(msg)
+
+    def set_rtl_callback(self, msg):
+        self.command_processor.set_rtl_callback(msg)
 
     def set_arming_callback(self, msg):
         self.command_processor.set_arming_callback(msg)
@@ -1957,36 +1981,33 @@ class GroundStationNode(Node):
         更新任务坐标系偏移量（Area Center）
         
         Args:
-            offset_dict: 偏移量字典 {'x': float, 'y': float, 'z': float}
+            offset_dict: 偏移量字典 {'x': float, 'y': float, 'z': float, 'angle': float}
         """
         try:
             # 更新内部存储的area_center
             self._area_center['x'] = float(offset_dict.get('x', 0.0))
             self._area_center['y'] = float(offset_dict.get('y', 0.0))
             self._area_center['z'] = float(offset_dict.get('z', 0.0))
+            self._area_center['angle'] = float(offset_dict.get('angle', 0.0))
             
-            self.get_logger().info(
-                f"已更新 Area Center 偏移量: "
-                f"X={self._area_center['x']:.2f}, "
-                f"Y={self._area_center['y']:.2f}, "
-                f"Z={self._area_center['z']:.2f}"
-            )
+            # self.get_logger().info(
+            #     f"已更新 Area Center: Offset(x={self._area_center['x']}, y={self._area_center['y']}), Angle={self._area_center['angle']}°"
+            # )
             
             # 可选：将新偏移量保存到参数服务器
             try:
                 self.set_parameters([
-                    Parameter('area_center_x', 
-                        Parameter.Type.DOUBLE, 
-                        self._area_center['x']),
-                    Parameter('area_center_y', 
-                        Parameter.Type.DOUBLE, 
-                        self._area_center['y']),
-                    Parameter('area_center_z', 
-                        Parameter.Type.DOUBLE, 
-                        self._area_center['z'])
+                    Parameter('area_center_x', Parameter.Type.DOUBLE, self._area_center['x']),
+                    Parameter('area_center_y', Parameter.Type.DOUBLE, self._area_center['y']),
+                    Parameter('area_center_z', Parameter.Type.DOUBLE, self._area_center['z']),
+                    Parameter('area_center_angle', Parameter.Type.DOUBLE, self._area_center['angle'])
                 ])
             except Exception as e:
                 self.get_logger().warn(f"更新参数服务器失败: {e}")
+
+            # 同时通知 Cluster Controller 刷新坐标（如果它缓存了什么）
+            if hasattr(self, 'cluster_controller'):
+                self.cluster_controller.set_area_context(self._area_center)
                 
         except Exception as e:
             self.get_logger().error(f"更新 Area Center 偏移量失败: {e}")

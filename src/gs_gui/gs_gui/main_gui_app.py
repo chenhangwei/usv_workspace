@@ -62,6 +62,9 @@ class MainWindow(QMainWindow):
         # 更新按钮文本以匹配新的彩虹循环行为
         try:
             self.ui.led1_pushButton.setText("彩虹循环")
+            # 更新手动操作模式按钮文本 (Arco->Hold, Steering->RTL)
+            self.ui.set_departed_ARCO_pushButton.setText("HOLD")
+            self.ui.set_departed_Steering_pushButton.setText("RTL")
         except Exception:
             pass
         
@@ -225,9 +228,22 @@ class MainWindow(QMainWindow):
 
     def update_plot_preview(self, task_data):
         """当任务加载后，更新绘图窗口的预览路径"""
+        # 保存当前任务数据，以便在修改坐标原点时重新计算
+        self.current_task_data = task_data
+
         # 此时窗口已嵌入在 Feedback Tab 中，直接更新数据
         if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
-             self.usv_plot_window.set_preview_path(task_data)
+             offset_x = 0.0
+             offset_y = 0.0
+             offset_angle = 0.0
+             if hasattr(self, 'current_area_offset') and self.current_area_offset:
+                 offset_x = float(self.current_area_offset.get('x', 0.0))
+                 offset_y = float(self.current_area_offset.get('y', 0.0))
+                 offset_angle = float(self.current_area_offset.get('angle', 0.0))
+             
+             self.usv_plot_window.set_preview_path(task_data, offset=(offset_x, offset_y), angle=offset_angle)
+             # 确保标记也被绘制/更新
+             self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
              
         # 自动切换到反馈选项卡 (Tab Index 2: 📊 反馈)
         if hasattr(self, 'right_tab_widget'):
@@ -247,7 +263,11 @@ class MainWindow(QMainWindow):
         # 连接电子围栏检查
         if hasattr(self, 'geofence_manager'):
             self.ros_signal.receive_state_list.connect(self.geofence_manager.check_usv_states)
-        
+
+        # 连接 Area Center 更新信号
+        if hasattr(self.ros_signal, 'update_area_center'):
+            self.ros_signal.update_area_center.connect(self.on_area_center_updated)
+            
         # 集群任务进度信号
         self.ros_signal.cluster_progress_update.connect(self._handle_cluster_progress_update)
         
@@ -259,11 +279,28 @@ class MainWindow(QMainWindow):
         
         # 导航反馈信号（连接到主窗口进行日志显示）
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
-        
-        # 连接 Plot Window 的 "Set Home" 回调
-        if hasattr(self, 'usv_plot_window'):
-            self.usv_plot_window.request_set_home_callback = self._handle_plot_set_home_request
+
+    def on_area_center_updated(self, offset_dict):
+        """处理 Area Center 更新信号"""
+        self.current_area_offset = offset_dict
+        # 实时刷新 Plot Window 的 Area Center 标记
+        if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
+             offset_x = float(offset_dict.get('x', 0.0))
+             offset_y = float(offset_dict.get('y', 0.0))
+             # 获取偏转角度, 默认0
+             offset_angle = float(offset_dict.get('angle', 0.0))
+             
+             # 传递角度给 plot window 绘制中心点（也许以后十字也可以旋转）
+             self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
+             
+             # 如果当前有加载的任务，重新计算预览偏移
+             if hasattr(self, 'current_task_data') and self.current_task_data:
+                 self.usv_plot_window.set_preview_path(self.current_task_data, offset=(offset_x, offset_y), angle=offset_angle)
+                 # 刷新以显示变更
+                 if hasattr(self.usv_plot_window, 'canvas'):
+                    self.usv_plot_window.canvas.draw_idle()
     
+
     def _handle_plot_set_home_request(self, x, y):
         """处理来自 2D 地图的 Set Home 请求"""
         coords = {'x': x, 'y': y, 'z': 0.0}
@@ -305,8 +342,8 @@ class MainWindow(QMainWindow):
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command)
         self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command)
         self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command)
-        self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_arco_command)
-        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_steering_command)
+        self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_hold_command)
+        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_rtl_command)
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)
         
         # ============== 集群列表管理按钮 ==============
@@ -820,6 +857,8 @@ limitations under the License.
         from gs_gui.usv_plot_window import UsvPlotWindow
         # 我们在这里创建唯一的实例，放在表格下面
         self.usv_plot_window = UsvPlotWindow(self.list_manager.get_usv_list, self)
+        # 连接 Plot Window 的 "Set Home" 回调
+        self.usv_plot_window.request_set_home_callback = self._handle_plot_set_home_request
         layout.addWidget(self.usv_plot_window, stretch=1) # 占据剩余空间
         
         # 保存 layout 引用以便后续使用
@@ -1040,13 +1079,13 @@ limitations under the License.
         self._last_departed_manual_time = now
         self.command_handler.set_departed_manual(self.list_manager.usv_departed_list)
     
-    def set_departed_arco_command(self):
-        """离群设置ARCO模式"""
-        self.command_handler.set_departed_arco(self.list_manager.usv_departed_list)
+    def set_departed_hold_command(self):
+        """设置离群HOLD模式 (原 ARCO 按钮)"""
+        self.command_handler.set_departed_hold(self.list_manager.usv_departed_list)
     
-    def set_departed_steering_command(self):
-        """离群设置Steering模式"""
-        self.command_handler.set_departed_steering(self.list_manager.usv_departed_list)
+    def set_departed_rtl_command(self):
+        """设置离群RTL模式 (原 Steering 按钮)"""
+        self.command_handler.set_departed_rtl(self.list_manager.usv_departed_list)
     
     # ============== 集群任务控制 ==============
     def toggle_cluster_task(self):
@@ -1177,8 +1216,8 @@ limitations under the License.
     def set_area_offset_command(self):
         """设置任务坐标系偏移量（Area Center）"""
         try:
-            # 获取当前的偏移量（从参数文件或默认值）
-            current_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            # 获取当前的偏移量（优先使用已保存的值）
+            current_offset = getattr(self, 'current_area_offset', {'x': 0.0, 'y': 0.0, 'z': 0.0, 'angle': 0})
             
             # 显示对话框
             dialog = AreaOffsetDialog(self, current_offset)
@@ -1188,7 +1227,8 @@ limitations under the License.
                 self.ros_signal.update_area_center.emit(new_offset)
                 self.ui_utils.append_info(
                     f"已更新任务坐标系偏移量: X={new_offset['x']:.2f}m, "
-                    f"Y={new_offset['y']:.2f}m, Z={new_offset['z']:.2f}m"
+                    f"Y={new_offset['y']:.2f}m, Z={new_offset['z']:.2f}m, "
+                    f"Angle={new_offset['angle']}°"
                 )
         except Exception as e:
             self.ui_utils.append_info(f"设置坐标偏移量时发生错误: {e}")
@@ -1314,12 +1354,14 @@ limitations under the License.
             status_item.setForeground(QColor("#00f2ff")) # 青色
             
         # 2. 目标ID (TARGET)
-        # 优先显示 Step 数值（T-xx），如果是单点导航则显示 Goal ID
+        # 优先显示 Step 数值（S-xx），如果是单点导航则显示 Goal ID (T-xx)
         target_val = getattr(feedback, 'step', 0)
-        if target_val <= 0:
-            target_val = feedback.goal_id
+        if target_val > 0:
+            display_str = f"S-{target_val:02d}"
+        else:
+            display_str = f"T-{feedback.goal_id:02d}"
             
-        goal_item = QTableWidgetItem(f"T-{target_val:02d}")
+        goal_item = QTableWidgetItem(display_str)
         goal_item.setTextAlignment(Qt.AlignCenter)
         self.nav_feedback_table.setItem(row, 2, goal_item)
         
@@ -1789,6 +1831,7 @@ def main(argv=None):
     ros_signal.disarm_command.connect(node.set_disarming_callback)
     ros_signal.arco_command.connect(node.set_arco_callback)
     ros_signal.steering_command.connect(node.set_steering_callback)  # ✅ 修复：callback不是command
+    ros_signal.rtl_command.connect(node.set_rtl_callback)
     ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
     ros_signal.cluster_pause_request.connect(node.pause_cluster_task_callback)

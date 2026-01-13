@@ -244,7 +244,7 @@ class UsvFleetLauncher(QDialog):
         
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setMaximumHeight(120)
+        self.log_text.setMinimumHeight(100)
         self.log_text.setStyleSheet("""
             QTextEdit {
                 background-color: #1e1e1e;

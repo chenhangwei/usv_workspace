@@ -8,9 +8,9 @@ from PyQt5.QtGui import QStandardItemModel, QStandardItem
 class TableManager:
     """表格管理器，负责USV表格的创建和更新"""
     
-    # 表格列标题
-    TABLE_HEADERS = ["编号", "当前模式", "连接状态", "武装状态", "引导模式状态", '电压V', '电量%', 
-                     '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
+    # 表格列标题 (新增 '信号')
+    TABLE_HEADERS = ["编号", "模式", "连接", "信号", "武装", "引导", '电压', '电量', 
+                     '电源', '坐标', '速度', '偏角', '导航', '温度']
     
     # 导航状态常量
     NAV_STATUS_UNKNOWN = "未知"
@@ -282,20 +282,33 @@ class TableManager:
         power_status = state.get('power_supply_status', 0)
         power_status_text = self.map_power_supply_status(power_status)
 
+        # 信号强度模拟 (基于连接状态和数据延迟)
+        # 这里使用 'connected' 字段。未来可从 state 扩展字段读取 real RSSI
+        is_connected = state.get('connected', False)
+        if is_connected:
+            # 这里简单模拟：如果在线则显示满格，后续可结合延迟/丢包率
+            signal_text = "▂▃▄▅" # 4格信号
+            # 或者使用 data_age 来降级信号
+            # latency = state.get('latency', 0.0) 
+            # if latency > 1.0: signal_text = "▂▃▄_"
+        else:
+            signal_text = "____" # 无信号
+
         cells = [
-            ns,
-            state.get('mode', 'Unknown'),
-            str(state.get('connected', 'Unknown')),
-            str(state.get('armed', 'Unknown')),
-            str(state.get('guided', 'Unknown')),  # 引导模式状态
-            voltage_text,  # 电压V
-            bp_text,  # 电量%
-            power_status_text,  # 电池状态
-            pos_text,  # 坐标
-            vel_text,  # 速度
-            yaw_text,  # 偏角
-            nav_text,  # 导航状态
-            temp_text,  # 温度
+            ns,                             # 编号
+            state.get('mode', 'Unknown'),   # 模式
+            str(state.get('connected', 'Unknown')), # 连接
+            signal_text,                    # 信号 (新增)
+            str(state.get('armed', 'Unknown')),     # 武装
+            str(state.get('guided', 'Unknown')),    # 引导
+            voltage_text,                           # 电压
+            bp_text,                                # 电量
+            power_status_text,                      # 电源
+            pos_text,                               # 坐标
+            vel_text,                               # 速度
+            yaw_text,                               # 偏角
+            nav_text,                               # 导航
+            temp_text,                              # 温度
         ]
         
         return cells

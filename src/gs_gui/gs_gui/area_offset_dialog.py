@@ -4,7 +4,7 @@ Area Center 偏移量设置对话框
 """
 
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
-                              QDoubleSpinBox, QPushButton, QGroupBox, QMessageBox)
+                              QDoubleSpinBox, QSpinBox, QPushButton, QGroupBox, QMessageBox)
 from PyQt5.QtCore import Qt
 
 
@@ -17,21 +17,22 @@ class AreaOffsetDialog(QDialog):
         
         Args:
             parent: 父窗口
-            current_offset: 当前偏移量 {'x': float, 'y': float, 'z': float}
+            current_offset: 当前偏移量 {'x': float, 'y': float, 'z': float, 'angle': int}
         """
         super().__init__(parent)
         self.parent_window = parent  # 保存父窗口引用，用于获取USV位置
-        self.setWindowTitle("设置任务坐标系原点偏移量")
+        self.setWindowTitle("设置任务坐标系原点偏移量及偏转")
         self.setModal(True)
-        self.resize(400, 280)
+        self.resize(400, 320)
         
         # 初始化偏移量
         if current_offset is None:
-            current_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+            current_offset = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'angle': 0}
         
         self.offset_x = current_offset.get('x', 0.0)
         self.offset_y = current_offset.get('y', 0.0)
         self.offset_z = current_offset.get('z', 0.0)
+        self.offset_angle = int(current_offset.get('angle', 0))
         
         # 创建UI
         self._setup_ui()
@@ -45,9 +46,10 @@ class AreaOffsetDialog(QDialog):
         
         # 说明标签
         info_label = QLabel(
-            "设置任务坐标系原点（Area Center）在全局地图坐标系中的位置：\n"
+            "设置任务坐标系原点（Area Center）在全局地图坐标系中的位置及偏转：\n"
             "• 任务文件中的坐标是相对于Area Center的\n"
-            "• 该偏移量将Area坐标转换为全局Map坐标\n"
+            "• 该偏移量和角度将Area坐标转换为全局Map坐标\n"
+            "• 旋转基于Area Center原点\n"
             "• USV会自动转换为本地坐标执行"
         )
         info_label.setWordWrap(True)
@@ -55,7 +57,7 @@ class AreaOffsetDialog(QDialog):
         layout.addWidget(info_label)
         
         # 坐标输入组
-        coord_group = QGroupBox("偏移量坐标 (单位: 米)")
+        coord_group = QGroupBox("偏移量坐标 (单位: 米) 与 旋转")
         coord_layout = QVBoxLayout()
         
         # X坐标
@@ -97,6 +99,19 @@ class AreaOffsetDialog(QDialog):
         z_layout.addWidget(self.z_spinbox)
         coord_layout.addLayout(z_layout)
         
+        # 旋转角度 (Angle)
+        angle_layout = QHBoxLayout()
+        angle_label = QLabel("偏转角度:")
+        angle_label.setMinimumWidth(80)
+        self.angle_spinbox = QSpinBox()
+        self.angle_spinbox.setRange(0, 359)
+        self.angle_spinbox.setValue(self.offset_angle)
+        self.angle_spinbox.setSuffix(" °")
+        self.angle_spinbox.setToolTip("围绕任务坐标系原点旋转的角度 (0-359)")
+        angle_layout.addWidget(angle_label)
+        angle_layout.addWidget(self.angle_spinbox)
+        coord_layout.addLayout(angle_layout)
+        
         coord_group.setLayout(coord_layout)
         layout.addWidget(coord_group)
         
@@ -134,6 +149,7 @@ class AreaOffsetDialog(QDialog):
         self.x_spinbox.setValue(0.0)
         self.y_spinbox.setValue(0.0)
         self.z_spinbox.setValue(0.0)
+        self.angle_spinbox.setValue(0)
     
     def _get_usv_position(self):
         """从父窗口获取当前选中USV的位置并填充到坐标栏"""
@@ -174,12 +190,13 @@ class AreaOffsetDialog(QDialog):
         获取用户设置的偏移量
         
         Returns:
-            dict: {'x': float, 'y': float, 'z': float}
+            dict: {'x': float, 'y': float, 'z': float, 'angle': int}
         """
         return {
             'x': self.x_spinbox.value(),
             'y': self.y_spinbox.value(),
-            'z': self.z_spinbox.value()
+            'z': self.z_spinbox.value(),
+            'angle': self.angle_spinbox.value()
         }
 
 

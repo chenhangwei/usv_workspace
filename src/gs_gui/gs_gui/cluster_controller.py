@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Optional, Tuple
+import math
 
 import rclpy
 
@@ -64,6 +65,14 @@ class ClusterController:
                 self._action_timeout = float(action_timeout)
             except (TypeError, ValueError):
                 self.node.get_logger().warn(f"cluster_action_timeout 参数非法: {action_timeout}, 使用 {self._action_timeout}")
+
+    def set_area_context(self, area_center_dict):
+        """
+        更新区域中心上下文（主要用于日志或触发重新计算）
+        注意：实际计算直接使用 self.node._area_center，此处仅作通知接口
+        """
+        # self.node.get_logger().info(f"ClusterController 区域中心更新通知: {area_center_dict}")
+        pass
 
     def _set_state(self, new_state: ClusterTaskState, reason: Optional[str] = None) -> None:
         """切换集群任务状态并通知 UI。"""
@@ -407,7 +416,8 @@ class ClusterController:
                     use_yaw,
                     self._action_timeout,
                     maneuver_type=maneuver_type,
-                    maneuver_param=maneuver_param
+                    maneuver_param=maneuver_param,
+                    step=state.step
                 )
         else:
             if state.retry >= self.node._max_retries:
@@ -562,16 +572,41 @@ class ClusterController:
     def _area_to_global(self, p_area):
         """
         将相对于 area_center 的点转换为全局坐标（使用 self.node._area_center）。
-        p_area: dict 包含 x,y,z
-        返回 dict {'x','y','z'}
+        p_area: dict 包含 x,y,z (局部任务坐标)
+        返回 dict {'x','y','z'} (全局坐标)
+        计算：Global = Rotate(Local) + Offset
         """
         try:
+            # 1. 获取中心点参数 (Offset)
             ax = float(self.node._area_center.get('x', 0.0))
             ay = float(self.node._area_center.get('y', 0.0))
             az = float(self.node._area_center.get('z', 0.0))
-            gx = ax + float(p_area.get('x', 0.0))
-            gy = ay + float(p_area.get('y', 0.0))
-            gz = az + float(p_area.get('z', 0.0))
+            angle = float(self.node._area_center.get('angle', 0.0)) # 偏转角(度)
+            
+            # 2. 获取任务点局部坐标 (Local)
+            lx = float(p_area.get('x', 0.0))
+            ly = float(p_area.get('y', 0.0))
+            lz = float(p_area.get('z', 0.0))
+            
+            # 3. 如果有角度偏转，先进行旋转 (绕局部原点)
+            # 旋转公式 (CCW):
+            # x' = x*cos - y*sin
+            # y' = x*sin + y*cos
+            if angle != 0.0:
+                rad = math.radians(angle)
+                cos_a = math.cos(rad)
+                sin_a = math.sin(rad)
+                
+                rotated_x = lx * cos_a - ly * sin_a
+                rotated_y = lx * sin_a + ly * cos_a
+                
+                lx = rotated_x
+                ly = rotated_y
+            
+            # 4. 平移 (Offset)
+            gx = ax + lx
+            gy = ay + ly
+            gz = az + lz
             
             result = {'x': gx, 'y': gy, 'z': gz}
             

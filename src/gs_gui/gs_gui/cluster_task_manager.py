@@ -404,8 +404,8 @@ class ClusterTaskManager:
             self.append_info("集群任务已停止！")
             self._update_status("⏹ 任务已停止", "stopped")
             
-            # 清空集群位置列表
-            self.cluster_position_list = []
+            # 保留集群位置列表以便重启
+            # self.cluster_position_list = []
             
             # 通知 UI 清理任务反馈列表
             if self.parent_widget and hasattr(self.parent_widget, 'clear_navigation_feedback_table'):
@@ -436,6 +436,17 @@ class ClusterTaskManager:
         else:
             return "cluster pause"
     
+
+    # 状态对应的样式表（背景色 + 圆角）
+    STATUS_STYLES = {
+        'running': "QLabel { background-color: #2e7d32; color: white; border-radius: 4px; padding: 2px; }", # 深绿色
+        'paused': "QLabel { background-color: #f9a825; color: black; border-radius: 4px; padding: 2px; }", # 黄色
+        'completed': "QLabel { background-color: #1565c0; color: white; border-radius: 4px; padding: 2px; }", # 深蓝色
+        'idle': "QLabel { background-color: #424242; color: #bdbdbd; border-radius: 4px; padding: 2px; }", # 灰色
+        'ready': "QLabel { background-color: #00838f; color: white; border-radius: 4px; padding: 2px; }", # 青色
+        'stopped': "QLabel { background-color: #c62828; color: white; border-radius: 4px; padding: 2px; }", # 红色
+    }
+
     def update_progress(self, progress_info):
         """
         处理集群任务进度更新
@@ -460,16 +471,31 @@ class ClusterTaskManager:
             'completed': '已完成',
             'idle': '空闲',
         }
-        state_label = state_label_map.get(state, '未知')
+        state_label_cn = state_label_map.get(state, state)
         
-        # 更新标签显示
+        # 构造详细日志文本
         progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
                         f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
-                        f"耗时 {elapsed_time:.1f}s, 状态 {state_label}")
+                        f"耗时 {elapsed_time:.1f}s, 状态 {state_label_cn}")
         
         self.append_info(progress_text)
         
+        # ============ 更新 UI 状态标签 ============
+        label_text = f"🚀 {state_label_cn}: 第 {current_step} / {total_steps} 步 | {acked_usvs}/{total_usvs} 艘"
+        if state == 'completed':
+            label_text = f"🏁 任务已完成 (共{total_steps}步)"
+        elif state == 'idle':
+            label_text = "⏹ 任务未运行"
+        elif state == 'paused':
+            label_text = f"⏸️ 已暂停: 第 {current_step} / {total_steps} 步"
+
+        # 获取对应的样式并更新标签
+        style_css = self.STATUS_STYLES.get(state, self.STATUS_STYLES.get('idle'))
+        self._update_status(label_text, style_css)
+        # ===============================================
+
         if state == 'running':
+
             self.cluster_task_running = True
             self.cluster_task_paused = False
         elif state == 'paused':

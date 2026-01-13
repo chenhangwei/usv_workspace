@@ -20,8 +20,8 @@
             <usv led="color_select|255,0,0">
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>5</x>
-                    <y>3</y>
+                    <x>5.0</x>
+                    <y>5.0</y>
                     <z>0.0</z>
                 </position>
                 <!-- mode="auto": 不采用yaw, 飞控自动决定朝向 (推荐新写法) -->
@@ -34,8 +34,8 @@
             <usv led="color_select|0,0,255">
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>5</x>
-                    <y>3</y>
+                    <x>6.0</x>
+                    <y>6.0</y>
                     <z>0.0</z>
                 </position>
                 <!-- 兼容旧写法 -->
@@ -48,8 +48,54 @@
             <usv led="color_select|255,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>5</x>
-                    <y>3</y>
+                    <x>7.0</x>
+                    <y>7.0</y>
+                    <z>0.0</z>
+                </position>
+                <yaw mode="auto" />
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+        </usvs>
+    </step>
+
+      <step number="2" sync="false">
+        <usvs>
+            <!-- USV_01: 红色 (255,0,0) -->
+            <usv led="color_select|255,0,0">
+                <usv_id>usv_01</usv_id>
+                <position>
+                    <x>-5.0</x>
+                    <y>-5.0</y>
+                    <z>0.0</z>
+                </position>
+                <!-- mode="auto": 不采用yaw, 飞控自动决定朝向 (推荐新写法) -->
+                <yaw mode="auto" />
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <!-- USV_02: 蓝色 (0,0,255) -->
+            <usv led="color_select|0,0,255">
+                <usv_id>usv_02</usv_id>
+                <position>
+                    <x>-6.0</x>
+                    <y>-6.0</y>
+                    <z>0.0</z>
+                </position>
+                <!-- 兼容旧写法 -->
+                <yaw use="false">0</yaw>
+                <velocity>
+                    <value>0.5</value>
+                </velocity>
+            </usv>
+            <!-- USV_03: 黄色 (255,255,0) -->
+            <usv led="color_select|255,255,0">
+                <usv_id>usv_03</usv_id>
+                <position>
+                    <x>-7.0</x>
+                    <y>-7.0</y>
                     <z>0.0</z>
                 </position>
                 <yaw mode="auto" />
@@ -61,13 +107,13 @@
     </step>
 
     <!-- 步骤 2: 目标点到达 & 原地旋转 (同步, 绿色完成色) -->
-    <step number="2" sync="true">
+    <step number="3" sync="true">
         <usvs>
             <usv led="color_select|0,255,0">
                 <usv_id>usv_01</usv_id>
                 <position>
-                    <x>3</x>
-                    <y>3</y>
+                    <x>5.0</x>
+                    <y>0.0</y>
                     <z>0.0</z>
                 </position>
                 <!-- 强制指定朝向 -->
@@ -79,8 +125,8 @@
             <usv led="color_select|0,255,0">
                 <usv_id>usv_02</usv_id>
                 <position>
-                    <x>3</x>
-                    <y>3</y>
+                    <x>0.0</x>
+                    <y>6.0</y>
                     <z>0.0</z>
                 </position>
                 
@@ -101,8 +147,8 @@
             <usv led="color_select|0,255,0">
                 <usv_id>usv_03</usv_id>
                 <position>
-                    <x>3</x>
-                    <y>3</y>
+                    <x>-5.0</x>
+                    <y>0</y>
                     <z>0.0</z>
                 </position>
                 <yaw mode="fixed">0.5</yaw>

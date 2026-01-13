@@ -34,17 +34,14 @@ class UsvControlNode(Node):
         param_loader = ParamLoader(self)
         
         # 声明参数
-        self.declare_parameter('enable_local_control', False) # 默认使用全局控制模式
         self.declare_parameter('publish_rate', 20.0)
         self.declare_parameter('frame_id', 'map')
-        self.declare_parameter('coordinate_frame', PositionTarget.FRAME_LOCAL_NED)
+        # 默认不发送Z轴高度（水面船）
         
         # 获取参数值
-        self.enable_local_control = self.get_parameter('enable_local_control').value
         publish_rate_param = self.get_parameter('publish_rate').value
         publish_rate = 20.0 if publish_rate_param is None else float(publish_rate_param)
         self.frame_id = self.get_parameter('frame_id').value
-        self.coordinate_frame = self.get_parameter('coordinate_frame').value
 
         # 加载 GPS 原点参数（用于 Global 模式转换）
         gps_origin = param_loader.load_gps_origin()
@@ -63,18 +60,16 @@ class UsvControlNode(Node):
             reliability=QoSReliabilityPolicy.RELIABLE
         )
         
-        # 始终创建发布器: 发布 PositionTarget 到 setpoint_raw/local (用于局部控制模式或特殊机动如旋转)
+        # 创建发布器: 
+        # 1. setpoint_raw/local: 仅用于特殊机动（如原地旋转 yaw_rate 控制）
         self.target_point_pub = self.create_publisher(PositionTarget, 'setpoint_raw/local', qos_best_effort)
+        
+        # 2. setpoint_raw/global: 主要导航控制（GlobalPositionTarget）
+        self.global_target_pub = self.create_publisher(GlobalPositionTarget, 'setpoint_raw/global', qos_best_effort)
+        
+        self.get_logger().info('✅ USV 控制节点启动 (全局GPS导航模式)')
+        self.get_logger().info(f'📍 GPS 原点: ({self.origin_lat:.7f}, {self.origin_lon:.7f}, {self.origin_alt:.2f})')
 
-        if self.enable_local_control:
-            self.get_logger().info('✅ 局部坐标控制模式已启用')
-            self.get_logger().info('📤 发布: setpoint_raw/local (PositionTarget)')
-        else:
-            # 创建发布器: 发布 GlobalPositionTarget 到 setpoint_raw/global
-            self.global_target_pub = self.create_publisher(GlobalPositionTarget, 'setpoint_raw/global', qos_best_effort)
-            self.get_logger().info('✅ 全局GPS控制模式已启用 (主要模式)')
-            self.get_logger().info(f'📍 GPS 原点: ({self.origin_lat:.7f}, {self.origin_lon:.7f}, {self.origin_alt:.2f})')
-            self.get_logger().info('📤 发布: setpoint_raw/global (GlobalPositionTarget)')
         self.state_sub = self.create_subscription(
             State, 'state', self.state_callback, qos_best_effort)
         
@@ -234,11 +229,19 @@ class UsvControlNode(Node):
                 self.rotating = False
 
         # 只有当目标点发生变化时才更新
+        # 优化日志：无论是否变化，只要收到新指令都打印调试信息，并在变化时打印INFO
+        log_msg = (f'接收目标 [ID={msg.goal_id}]: XY({new_position.x:.1f}, {new_position.y:.1f}), '
+                   f'Yaw({math.degrees(self.current_target_position.pose.orientation.z):.1f}°), '
+                   f'Maneuver({new_maneuver_type}, {new_maneuver_param:.1f})')
+
         if (old_position.x != new_position.x or 
             old_position.y != new_position.y or 
-            old_position.z != new_position.z):
+            old_position.z != new_position.z or
+            self.current_goal_id != msg.goal_id):
             
-            self.get_logger().info(f'更新常规目标点: ({new_position.x:.2f}, {new_position.y:.2f}, {new_position.z:.2f}), Use Yaw: {self.use_yaw}')
+            self.get_logger().info(f'🆕 {log_msg}')
+        else:
+            self.get_logger().debug(f'♻️ {log_msg} (无变化)')
 
     def set_avoidance_target_position_callback(self, msg):
         """
@@ -305,15 +308,8 @@ class UsvControlNode(Node):
                 self.get_logger().debug(f'当前模式: {self.current_state.mode}，需要GUIDED模式')
                 return
             
-            # 局部控制模式需要 EKF 原点就绪
-            if self.enable_local_control and not self.ekf_origin_ready:
-                if not self.home_position_set:
-                    self.get_logger().debug('⏳ 等待 Home Position 设置...')
-                elif not self.local_position_valid:
-                    self.get_logger().debug('⏳ 等待 Local Position 生效...')
-                else:
-                    self.get_logger().debug('⏳ EKF Origin 未完全就绪...')
-                return
+            # 移除 EKF Origin 强制检查 (全局导航模式下主要依赖 GPS Fix)
+            # 但仍需 local_pose 存在才能计算距离进行模式切换
             
             # 根据避障标志选择目标点
             if not self.avoidance_flag.data:    
@@ -333,15 +329,6 @@ class UsvControlNode(Node):
             if any(coord is None for coord in [px, py, pz]):
                 self.get_logger().warn(f'{source}目标点坐标无效，忽略')
                 return
-                
-            # 检查是否需要发布新目标点（避免重复发布相同位置）
-            current_position = (round(px, 3), round(py, 3), round(pz, 3))
-            if self.last_published_position == current_position:
-                return  # 目标点未改变，跳过发布
-                
-            # 更新最后发布的坐标 (如果不是旋转模式)
-            if not self.rotating:
-                self.last_published_position = current_position
             
             # 计算距离目标的距离 (2D)
             dist_to_target = 0.0
@@ -443,81 +430,49 @@ class UsvControlNode(Node):
                 self.target_point_pub.publish(msg)
                 return
 
-            if self.enable_local_control:
-                # ========== 局部坐标模式: PositionTarget ==========
-                self.point_msg.header.stamp = self.get_clock().now().to_msg()
-                self.point_msg.header.frame_id = self.frame_id
-                self.point_msg.coordinate_frame = self.coordinate_frame
-                self.point_msg.type_mask = (
-                    PositionTarget.IGNORE_VX |
-                    PositionTarget.IGNORE_VY |
-                    PositionTarget.IGNORE_VZ |
-                    PositionTarget.IGNORE_AFX |
-                    PositionTarget.IGNORE_AFY |
-                    PositionTarget.IGNORE_AFZ |
-                    PositionTarget.FORCE |
-                    PositionTarget.IGNORE_YAW_RATE
-                )
-                
-                if self.use_yaw and not self.avoidance_flag.data:
-                    # 仅在非避障模式下使用Yaw控制
-                    q = self.current_target_position.pose.orientation
-                    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-                    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-                    self.point_msg.yaw = math.atan2(siny_cosp, cosy_cosp)
-                else:
-                    self.point_msg.type_mask |= PositionTarget.IGNORE_YAW
+            # ========== 全局GPS模式: GlobalPositionTarget ==========
+            # 使用 GeoUtils 进行高精度 WGS84 转换 (XYZ -> GPS)
+            gps_coord = GeoUtils.xyz_to_gps(
+                px, py, pz, 
+                self.origin_lat, self.origin_lon, self.origin_alt
+            )
+            
+            global_msg = GlobalPositionTarget()
+            global_msg.header.stamp = self.get_clock().now().to_msg()
+            global_msg.header.frame_id = 'map'
+            global_msg.coordinate_frame = GlobalPositionTarget.FRAME_GLOBAL_INT
+            global_msg.type_mask = (
+                GlobalPositionTarget.IGNORE_VX |
+                GlobalPositionTarget.IGNORE_VY |
+                GlobalPositionTarget.IGNORE_VZ |
+                GlobalPositionTarget.IGNORE_AFX |
+                GlobalPositionTarget.IGNORE_AFY |
+                GlobalPositionTarget.IGNORE_AFZ |
+                GlobalPositionTarget.IGNORE_YAW_RATE |
+                GlobalPositionTarget.IGNORE_ALTITUDE # 忽略高度控制 (水面船)
+            )
 
-                self.point_msg.position.x = px
-                self.point_msg.position.y = py
-                self.point_msg.position.z = pz  
-
-                self.target_point_pub.publish(self.point_msg)
-                self.get_logger().debug(f'发布{source}目标点(局部): ({px:.2f}, {py:.2f}, {pz:.2f})')
-                
+            if self.use_yaw and not self.avoidance_flag.data:
+                # 仅在非避障模式下使用Yaw控制
+                q = self.current_target_position.pose.orientation
+                siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+                cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+                global_msg.yaw = math.atan2(siny_cosp, cosy_cosp)
             else:
-                # ========== 全局GPS模式: GlobalPositionTarget (默认) ==========
-                # 使用 GeoUtils 进行高精度 WGS84 转换 (XYZ -> GPS)
-                gps_coord = GeoUtils.xyz_to_gps(
-                    px, py, pz, 
-                    self.origin_lat, self.origin_lon, self.origin_alt
-                )
-                
-                global_msg = GlobalPositionTarget()
-                global_msg.header.stamp = self.get_clock().now().to_msg()
-                global_msg.header.frame_id = 'map'
-                global_msg.coordinate_frame = GlobalPositionTarget.FRAME_GLOBAL_INT
-                global_msg.type_mask = (
-                    GlobalPositionTarget.IGNORE_VX |
-                    GlobalPositionTarget.IGNORE_VY |
-                    GlobalPositionTarget.IGNORE_VZ |
-                    GlobalPositionTarget.IGNORE_AFX |
-                    GlobalPositionTarget.IGNORE_AFY |
-                    GlobalPositionTarget.IGNORE_AFZ |
-                    GlobalPositionTarget.FORCE |
-                    GlobalPositionTarget.IGNORE_YAW_RATE
-                )
-
-                if self.use_yaw and not self.avoidance_flag.data:
-                    # 仅在非避障模式下使用Yaw控制
-                    q = self.current_target_position.pose.orientation
-                    siny_cosp = 2 * (q.w * q.z + q.x * q.y)
-                    cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
-                    global_msg.yaw = math.atan2(siny_cosp, cosy_cosp)
-                else:
-                    global_msg.type_mask |= GlobalPositionTarget.IGNORE_YAW
-                
-                # 设置GPS坐标
-                global_msg.latitude = gps_coord['lat']
-                global_msg.longitude = gps_coord['lon']
-                global_msg.altitude = gps_coord['alt']
-                
-                self.global_target_pub.publish(global_msg)
-                self.get_logger().debug(
-                    f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
-                    f'GPS({gps_coord["lat"]:.7f}°, {gps_coord["lon"]:.7f}°, {gps_coord["alt"]:.2f}m)')
+                global_msg.type_mask |= GlobalPositionTarget.IGNORE_YAW
+            
+            # 设置GPS坐标
+            global_msg.latitude = gps_coord['lat']
+            global_msg.longitude = gps_coord['lon']
+            global_msg.altitude = gps_coord['alt'] # 虽然设置了值，但 mask 已忽略之
+            
+            self.global_target_pub.publish(global_msg)
+            self.get_logger().debug(
+                f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
+                f'GPS({gps_coord["lat"]:.7f}°, {gps_coord["lon"]:.7f}°, {gps_coord["alt"]:.2f}m)')
 
         except Exception as e:
+
             self.get_logger().error(f'发布目标点时发生异常: {str(e)}')
 
     def destroy_node(self):

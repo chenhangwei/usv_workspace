@@ -239,7 +239,7 @@ class UsvManager:
                 'position': {
                     'x': round(msg.position.x, 2),  # 保留两位小数减少数据量
                     'y': round(msg.position.y, 2),
-                    'z': round(msg.position.z, 2)
+                    'z': 0.0
                 },  # 位置信息
                 'velocity': {
                     'linear': {
