@@ -95,7 +95,7 @@ gps_to_local_node:
   ros__parameters:
     gps_origin_lat: 22.5180977              # 北纬（度）
     gps_origin_lon: 113.9007239             # 东经（度）
-    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
+    gps_origin_alt: 0                   # 海拔（米，A0 基站实测值）
     publish_rate: 10.0                      # 发布频率（Hz），推荐 10-20 Hz
     enable_gps_to_local: true               # 启用 GPS→本地坐标转换
 
@@ -103,7 +103,7 @@ coord_transform_node:
   ros__parameters:
     gps_origin_lat: 22.5180977              # 北纬（度）
     gps_origin_lon: 113.9007239             # 东经（度）
-    gps_origin_alt: -5.17                   # 海拔（米，A0 基站实测值）
+    gps_origin_alt: 0                  # 海拔（米，A0 基站实测值）
     enable_coord_transform: true            # 启用 XYZ→GPS 坐标转换（接收地面站+避障目标点）
     use_global_position_target: true        # true=GlobalPositionTarget (推荐), false=GeoPoseStamped
 

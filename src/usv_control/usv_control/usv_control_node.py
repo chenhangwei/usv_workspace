@@ -342,7 +342,8 @@ class UsvControlNode(Node):
                 dist_to_target = math.sqrt(dx*dx + dy*dy)
             
             # 设定开始机动的距离阈值 (米)
-            MANEUVER_Is_CLOSE_ENOUGH = 1.0 
+            # 增大阈值以匹配 NavigateToPointNode 的到达判定，确保在任务完成判定前能触发机动
+            MANEUVER_Is_CLOSE_ENOUGH = 3.0 
 
             # ============================================================
             # 根据模式发布不同类型的消息

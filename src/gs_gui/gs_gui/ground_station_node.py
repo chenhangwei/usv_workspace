@@ -76,6 +76,9 @@ class GroundStationNode(Node):
         self.declare_parameter('area_center_z', 0.0)
         self.declare_parameter('area_center_angle', 0.0)
         self.declare_parameter('area_center_frame', 'map')
+        # 导航看门狗：导航执行中若意外切到HOLD，自动补发GUIDED（限频）
+        self.declare_parameter('guided_watchdog_enabled', True)
+        self.declare_parameter('guided_watchdog_cooldown_sec', 2.0)
 
         # 初始化子模块
         self.usv_manager = UsvManager(self)
@@ -93,6 +96,17 @@ class GroundStationNode(Node):
         self._heartbeat_status_cache = ThreadSafeDict()
         # 导航目标信息缓存（用于导航面板显示）
         self._usv_nav_target_cache = ThreadSafeDict()
+
+        # 导航看门狗配置
+        try:
+            self._guided_watchdog_enabled = bool(self.get_parameter('guided_watchdog_enabled').get_parameter_value().bool_value)
+        except Exception:
+            self._guided_watchdog_enabled = True
+        try:
+            self._guided_watchdog_cooldown_sec = float(self.get_parameter('guided_watchdog_cooldown_sec').get_parameter_value().double_value)
+        except Exception:
+            self._guided_watchdog_cooldown_sec = 2.0
+        self._guided_watchdog_last_sent = ThreadSafeDict()
         
         # 新增: 基于话题的导航管理
         self._next_goal_id = 1  # 目标ID生成器
@@ -1582,6 +1596,10 @@ class GroundStationNode(Node):
             
             # 只更新有变化的 USV
             for usv_id in list(self.usv_states.keys()):
+                # 导航执行中若意外切到HOLD，自动补发GUIDED（不依赖状态是否变化）
+                state = self.usv_states.get(usv_id) or {}
+                self._maybe_force_guided_during_nav(usv_id, state, now_sec)
+
                 # 检查是否需要更新（有新消息、PreArm 警告变化、传感器状态变化）
                 if self._should_update_augmented_state(usv_id, now_sec):
                     self.augment_state_payload(usv_id)
@@ -1593,6 +1611,75 @@ class GroundStationNode(Node):
         except Exception as exc:
             # 使用 debug 级别避免刷屏，因为这是高频调用
             pass  # 静默失败，避免日志刷屏
+
+    def _maybe_force_guided_during_nav(self, usv_id: str, state: dict, now_sec: float) -> None:
+        """导航执行中若意外变为HOLD，则限频补发GUIDED。
+
+        设计原则：
+        - 仅当该USV仍有活动导航目标缓存（_usv_nav_target_cache）才认为任务在执行
+        - 只纠正 HOLD，不强行覆盖 RTL/MANUAL 等更高优先级安全模式
+        - 限频发送，避免模式抖动与刷屏
+        """
+        try:
+            if not getattr(self, '_guided_watchdog_enabled', True):
+                return
+
+            # 仅当该USV仍有活动导航目标缓存，才认为任务在执行中
+            if not self._usv_nav_target_cache.get(usv_id):
+                return
+
+            mode = str((state or {}).get('mode', '')).upper()
+            if not mode:
+                return
+
+            # 已在GUIDED则无需处理
+            if 'GUIDED' in mode:
+                return
+
+            # 只纠正 HOLD（不强行覆盖 RTL/MANUAL 等）
+            if 'HOLD' not in mode:
+                return
+
+            last = self._guided_watchdog_last_sent.get(usv_id)
+            try:
+                last_sec = float(last) if last is not None else 0.0
+            except Exception:
+                last_sec = 0.0
+            if (now_sec - last_sec) < float(getattr(self, '_guided_watchdog_cooldown_sec', 2.0)):
+                return
+
+            pub = self.usv_manager.set_usv_mode_pubs.get(usv_id)
+            if pub is None:
+                return
+
+            msg = String()
+            msg.data = 'GUIDED'
+
+            # 使用发布队列，避免阻塞与线程问题
+            try:
+                self.publish_queue.put_nowait((pub, msg))
+            except queue.Full:
+                # 队列满则尽力丢弃一条旧消息再重试一次
+                try:
+                    self.publish_queue.get_nowait()
+                    self.publish_queue.task_done()
+                except Exception:
+                    pass
+                try:
+                    self.publish_queue.put_nowait((pub, msg))
+                except Exception:
+                    return
+
+            self._guided_watchdog_last_sent[usv_id] = now_sec
+            self.get_logger().warning(f"🛡️ {usv_id} 导航中检测到HOLD，已限频补发GUIDED以恢复")
+            try:
+                # 保持UI显示为“执行中”
+                self.ros_signal.nav_status_update.emit(usv_id, '执行中')
+            except Exception:
+                pass
+        except Exception:
+            # 高频调用：避免刷屏
+            return
     
     def augment_state_payload(self, usv_id, state_data=None):
         """

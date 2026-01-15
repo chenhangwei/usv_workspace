@@ -91,7 +91,7 @@ class NavigateToPointNode(Node):
         # 使用ParamLoader统一加载导航参数
         from common_utils import ParamLoader
         loader = ParamLoader(self)
-        self.nav_arrival_threshold = loader.load_param('nav_arrival_threshold', 1.0)  # 到达阈值(米)
+        self.nav_arrival_threshold = loader.load_param('nav_arrival_threshold', 3.0)  # 到达阈值(米) - 增大阈值避免过冲回头
         self.nav_feedback_period = loader.load_param('nav_feedback_period', 0.5)      # 反馈周期(秒)
         self.distance_mode = loader.load_param(
             'distance_mode', '2d',
