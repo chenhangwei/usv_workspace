@@ -36,12 +36,29 @@ class UsvControlNode(Node):
         # 声明参数
         self.declare_parameter('publish_rate', 20.0)
         self.declare_parameter('frame_id', 'map')
+        # 日志控制：避免发布循环刷屏
+        self.declare_parameter('log_publish_setpoint', True)
+        self.declare_parameter('log_publish_setpoint_on_change_only', True)
+        self.declare_parameter('log_publish_setpoint_throttle_sec', 2.0)
+        self.declare_parameter('log_publish_setpoint_epsilon', 0.01)
         # 默认不发送Z轴高度（水面船）
         
         # 获取参数值
         publish_rate_param = self.get_parameter('publish_rate').value
         publish_rate = 20.0 if publish_rate_param is None else float(publish_rate_param)
         self.frame_id = self.get_parameter('frame_id').value
+
+        # 日志参数
+        self._log_publish_setpoint = bool(self.get_parameter('log_publish_setpoint').value)
+        self._log_publish_setpoint_on_change_only = bool(
+            self.get_parameter('log_publish_setpoint_on_change_only').value
+        )
+        self._log_publish_setpoint_throttle_sec = float(
+            self.get_parameter('log_publish_setpoint_throttle_sec').value
+        )
+        self._log_publish_setpoint_epsilon = float(
+            self.get_parameter('log_publish_setpoint_epsilon').value
+        )
 
         # 加载 GPS 原点参数（用于 Global 模式转换）
         gps_origin = param_loader.load_gps_origin(
@@ -126,6 +143,11 @@ class UsvControlNode(Node):
         # 初始化消息对象和状态跟踪
         self.point_msg = PositionTarget()         # 目标点消息
         self.last_published_position = None       # 跟踪最后发布的坐标，避免重复发布
+
+        # 发布循环日志节流/去重状态
+        self._last_publish_log_time_sec = None
+        self._last_publish_log_key = None
+        self._publish_log_suppressed_count = 0
         
         # 日志记录
         self.get_logger().info(f'USV 控制节点已启动')
@@ -343,7 +365,7 @@ class UsvControlNode(Node):
             
             # 设定开始机动的距离阈值 (米)
             # 增大阈值以匹配 NavigateToPointNode 的到达判定，确保在任务完成判定前能触发机动
-            MANEUVER_Is_CLOSE_ENOUGH = 3.0 
+            MANEUVER_Is_CLOSE_ENOUGH =1.0 
 
             # ============================================================
             # 根据模式发布不同类型的消息
@@ -429,7 +451,7 @@ class UsvControlNode(Node):
                 else:
                     msg.yaw_rate = target_yaw_rate
                     # 调试进度
-                    # self.get_logger().info(f"旋转中: {self.rotation_accumulated_yaw:.2f}/{self.rotation_target_yaw:.2f}")
+                    self.get_logger().info(f"旋转中: {self.rotation_accumulated_yaw:.2f}/{self.rotation_target_yaw:.2f}")
 
                 # 发布到本地控制 (Rotation usually local)
                 self.target_point_pub.publish(msg)
@@ -457,6 +479,10 @@ class UsvControlNode(Node):
                 GlobalPositionTarget.IGNORE_ALTITUDE # 忽略高度控制 (水面船)
             )
 
+            #测试使用
+            yaw_active = self.use_yaw and not self.avoidance_flag.data
+
+
             if self.use_yaw and not self.avoidance_flag.data:
                 # 仅在非避障模式下使用Yaw控制
                 q = self.current_target_position.pose.orientation
@@ -472,14 +498,64 @@ class UsvControlNode(Node):
             global_msg.altitude = gps_coord['alt'] # 虽然设置了值，但 mask 已忽略之
             
             self.global_target_pub.publish(global_msg)
-            # 修改为INFO级别并在日志中显示更高精度的经纬度，以便调试厘米级误差
-            self.get_logger().info(
-                f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
-                f'GPS({gps_coord["lat"]:.9f}°, {gps_coord["lon"]:.9f}°, {gps_coord["alt"]:.3f}m)')
+            self._maybe_log_publish_setpoint(source=source, px=px, py=py, pz=pz, yaw_active=yaw_active)
 
         except Exception as e:
 
             self.get_logger().error(f'发布目标点时发生异常: {str(e)}')
+
+    def _maybe_log_publish_setpoint(
+        self,
+        *,
+        source: str,
+        px: float,
+        py: float,
+        pz: float,
+        yaw_active: bool,
+    ) -> None:
+        if not self._log_publish_setpoint:
+            return
+
+        now_sec = self.get_clock().now().nanoseconds * 1e-9
+        eps = max(0.0, float(self._log_publish_setpoint_epsilon))
+
+        if eps > 0.0:
+            qx = int(round(px / eps))
+            qy = int(round(py / eps))
+            qz = int(round(pz / eps))
+        else:
+            qx, qy, qz = px, py, pz
+
+        key = (source, qx, qy, qz, yaw_active)
+
+        unchanged = (self._last_publish_log_key == key)
+        if self._log_publish_setpoint_on_change_only and unchanged:
+            self._publish_log_suppressed_count += 1
+            return
+
+        if (
+            self._last_publish_log_time_sec is not None
+            and self._log_publish_setpoint_throttle_sec > 0.0
+        ):
+            if (
+                (now_sec - self._last_publish_log_time_sec)
+                < self._log_publish_setpoint_throttle_sec
+            ):
+                self._publish_log_suppressed_count += 1
+                return
+
+        suppressed_suffix = ''
+        if self._publish_log_suppressed_count > 0:
+            suppressed_suffix = f' (已抑制{self._publish_log_suppressed_count}条重复日志)'
+
+        self.get_logger().info(
+            f'发布{source}目标点(GPS): XYZ({px:.2f}, {py:.2f}, {pz:.2f}) → '
+            f'Yaw{"启用" if yaw_active else "忽略"}{suppressed_suffix}'
+        )
+
+        self._last_publish_log_time_sec = now_sec
+        self._last_publish_log_key = key
+        self._publish_log_suppressed_count = 0
 
     def destroy_node(self):
         """节点销毁时的资源清理"""

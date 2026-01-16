@@ -65,6 +65,7 @@ class UsvStatusNode(Node):
             self.target_reach_threshold = float(self.get_parameter('target_reach_threshold').get_parameter_value().double_value)
         except Exception:
             self.target_reach_threshold = 1.0
+            self.get_logger().warn(f"目标到达阈值 参数读取失败，使用默认值 {self.target_reach_threshold}")
         try:
             self.distance_mode = str(self.get_parameter('distance_mode').get_parameter_value().string_value).lower()
         except Exception:

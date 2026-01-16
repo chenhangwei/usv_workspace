@@ -40,7 +40,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_03',
+        default_value='usv_02',
         description='无人船节点的命名空间'
     )
     
@@ -89,10 +89,10 @@ def generate_launch_description():
         'gcs_url',
         #default_value='udp://192.168.68.55:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
         #default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
-        default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
+        #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
 
-         #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
-        #default_value='udp://192.168.68.54:14552@192.168.68.53:14560',  # usv_02 → 地面站端口14560
+        #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
+        default_value='udp://192.168.68.54:14552@192.168.68.53:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
     )
@@ -308,16 +308,7 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
-    # 优雅关闭服务节点（新增） - 已禁用，代码缺失
-    # 提供ROS 2服务接口，允许地面站远程优雅关闭USV节点
-    # shutdown_service_node = Node(
-    #     package='usv_comm',
-    #     executable='shutdown_service_node',
-    #     name='shutdown_service',
-    #     namespace=namespace,
-    #     output='screen',
-    #     parameters=[param_file]
-    # )
+
 
     # =============================================================================
     # 飞控通信节点
@@ -337,9 +328,9 @@ def generate_launch_description():
                 'gcs_url': gcs_url,
                 
                 # MAVLink 身份配置 (直接在启动文件设置,优先级最高)
-                'system_id': 103,           # MAVROS 自身系统 ID
+                'system_id': 102,           # MAVROS 自身系统 ID
                 'component_id': 191,        # MAVROS 自身组件 ID
-                'target_system_id': 3,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
+                'target_system_id':2,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
                 'target_component_id': 1,   # 目标飞控组件 ID (固定为1)
                 
                 # ==================== 插件黑名单（加速启动，关键优化！）====================

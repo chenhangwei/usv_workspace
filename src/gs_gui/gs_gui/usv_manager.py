@@ -7,7 +7,7 @@ import rclpy
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from common_interfaces.msg import UsvStatus, NavigationGoal, NavigationFeedback, NavigationResult
 from mavros_msgs.msg import StatusText, SysStatus
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 
 
 class UsvManager:
@@ -28,6 +28,9 @@ class UsvManager:
         self.navigation_goal_pubs = {}      # 导航目标发布者
         self.navigation_feedback_subs = {}  # 导航反馈订阅者
         self.navigation_result_subs = {}    # 导航结果订阅者
+
+        # 导航参数下发（基于话题，便于跨 Domain Bridge）
+        self.nav_arrival_threshold_pubs = {}  # {usv_id: Publisher(Float32)}
         
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
         # MAVROS 的 statustext 和 sys_status 使用 BEST_EFFORT QoS
@@ -51,6 +54,7 @@ class UsvManager:
         topic_led_state = f"{ns}/led_state"  # LED状态回传主题
         topic_sound = f"{ns}/gs_sound_command"  # 声音控制主题
         topic_action = f"{ns}/gs_action_command"  # 动作控制主题
+        topic_nav_arrival_threshold = f"{ns}/set_nav_arrival_threshold"  # 导航到达阈值下发
         action_server_name = f"{ns}/navigate_to_point"  # 导航动作服务器名称
         topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本 (MAVROS直接发布到ns下)
 
@@ -97,6 +101,10 @@ class UsvManager:
         # 创建动作控制发布者
         self.action_pubs[usv_id] = self.node.create_publisher(
             String, topic_action, self.qos_a)
+
+        # 创建导航参数下发发布者
+        self.nav_arrival_threshold_pubs[usv_id] = self.node.create_publisher(
+            Float32, topic_nav_arrival_threshold, self.qos_a)
         
         # ==================== 基于话题的导航通信 ====================
         # 创建导航目标发布者
@@ -169,6 +177,11 @@ class UsvManager:
         if usv_id in self.action_pubs:
             self.node.destroy_publisher(self.action_pubs[usv_id])
             del self.action_pubs[usv_id]
+
+        # 销毁并删除导航参数下发发布者
+        if usv_id in self.nav_arrival_threshold_pubs:
+            self.node.destroy_publisher(self.nav_arrival_threshold_pubs[usv_id])
+            del self.nav_arrival_threshold_pubs[usv_id]
         
         # 移除基于话题的导航通信
         if usv_id in self.navigation_goal_pubs:

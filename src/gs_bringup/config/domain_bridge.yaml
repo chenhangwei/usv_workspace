@@ -89,6 +89,11 @@ topics:
   usv_01/set_usv_arming:
     type: std_msgs/msg/String
     reversed: True
+
+  # 导航参数下发 (从地面站到USV)
+  usv_01/set_nav_arrival_threshold:
+    type: std_msgs/msg/Float32
+    reversed: True
   
   # LED/声音/动作命令 (从地面站到USV)
   usv_01/gs_led_command:
@@ -204,6 +209,12 @@ topics:
     
   usv_02/set_usv_arming:
     type: std_msgs/msg/String
+    from_domain: 12
+    reversed: True
+
+  # 导航参数下发 (从地面站到USV)
+  usv_02/set_nav_arrival_threshold:
+    type: std_msgs/msg/Float32
     from_domain: 12
     reversed: True
   
@@ -324,6 +335,12 @@ topics:
     
   usv_03/set_usv_arming:
     type: std_msgs/msg/String
+    from_domain: 13
+    reversed: True
+
+  # 导航参数下发 (从地面站到USV)
+  usv_03/set_nav_arrival_threshold:
+    type: std_msgs/msg/Float32
     from_domain: 13
     reversed: True
   

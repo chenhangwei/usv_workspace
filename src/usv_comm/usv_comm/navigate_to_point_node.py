@@ -23,6 +23,7 @@ from geometry_msgs.msg import PoseStamped
 from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import math
+from std_msgs.msg import Float32
 
 
 class NavigateToPointNode(Node):
@@ -78,6 +79,15 @@ class NavigateToPointNode(Node):
             NavigationGoal,
             'set_usv_nav_goal',
             qos_reliable)
+
+        # 订阅导航参数下发：到达阈值（米）
+        # 说明：跨 Domain Bridge 时，参数服务不可用，改为话题下发
+        self.nav_threshold_sub = self.create_subscription(
+            Float32,
+            'set_nav_arrival_threshold',
+            self._nav_arrival_threshold_callback,
+            qos_reliable,
+            callback_group=self.callback_group)
         
         # 订阅当前位置 (使用 GPS 转换的统一坐标系)
         self.current_pose = None
@@ -91,16 +101,25 @@ class NavigateToPointNode(Node):
         # 使用ParamLoader统一加载导航参数
         from common_utils import ParamLoader
         loader = ParamLoader(self)
-        self.nav_arrival_threshold = loader.load_param('nav_arrival_threshold', 3.0)  # 到达阈值(米) - 增大阈值避免过冲回头
+        self.nav_arrival_threshold = loader.load_param('nav_arrival_threshold', 2.0)  # 到达阈值(米)
         self.nav_feedback_period = loader.load_param('nav_feedback_period', 0.5)      # 反馈周期(秒)
         self.distance_mode = loader.load_param(
             'distance_mode', '2d',
             validator=lambda x: x in ['2d', '3d'])  # 距离模式: 2d/3d
+
+        # 重复目标去重：防止同一目标被重复发送导致任务状态机重置
+        self.declare_parameter('dedup_goal_enabled', True)
+        self.declare_parameter('dedup_goal_pos_epsilon', 0.01)
+        self.declare_parameter('dedup_goal_yaw_epsilon_deg', 2.0)
+        self.declare_parameter('dedup_goal_maneuver_param_epsilon', 1e-3)
         
         # 当前任务状态
         self.current_goal = None
         self.current_goal_id = None
         self.goal_start_time = None
+
+        # 记录上一次被合并的重复goal_id，避免刷屏
+        self._last_dedup_goal_id = None
         
         # 创建导航循环定时器
         self.nav_timer = self.create_timer(
@@ -112,6 +131,28 @@ class NavigateToPointNode(Node):
         self.get_logger().info(f'到达阈值: {self.nav_arrival_threshold}m')
         self.get_logger().info(f'距离模式: {self.distance_mode.upper()}')
         self.get_logger().info(f'反馈周期: {self.nav_feedback_period}s')
+
+    def _nav_arrival_threshold_callback(self, msg: Float32):
+        """运行时更新到达阈值（米）。"""
+        try:
+            value = float(msg.data)
+        except Exception:
+            self.get_logger().warn(f"收到非法 nav_arrival_threshold: {msg.data}")
+            return
+
+        if value <= 0.0:
+            self.get_logger().warn(f"忽略 nav_arrival_threshold<=0: {value}")
+            return
+
+        old = getattr(self, 'nav_arrival_threshold', None)
+        self.nav_arrival_threshold = value
+        try:
+            if old is None:
+                self.get_logger().info(f"nav_arrival_threshold 已设置为 {value:.2f}m")
+            else:
+                self.get_logger().info(f"nav_arrival_threshold 更新: {float(old):.2f}m -> {value:.2f}m")
+        except Exception:
+            self.get_logger().info(f"nav_arrival_threshold 更新为 {value:.2f}m")
     
     def pose_callback(self, msg):
         """更新当前位置"""
@@ -130,15 +171,104 @@ class NavigateToPointNode(Node):
             f'{msg.target_pose.pose.position.y:.2f}, '
             f'{msg.target_pose.pose.position.z:.2f}), '
             f'超时={msg.timeout:.0f}s')
-        
+
+        # 如果与当前任务目标重复，则不覆盖 current_goal / 不重置计时
+        if self._is_duplicate_goal(msg):
+            if self._last_dedup_goal_id != msg.goal_id:
+                self.get_logger().info(
+                    f'♻️ 重复目标已合并: new_id={msg.goal_id} -> keep_id={self.current_goal_id}'
+                )
+                self._last_dedup_goal_id = msg.goal_id
+            # 仅更新对外反馈的 goal_id，避免地面站等待“新ID”的反馈/结果
+            self.current_goal_id = msg.goal_id
+            return
+
         # 保存当前任务
         self.current_goal = msg
         self.current_goal_id = msg.goal_id
         self.goal_start_time = self.get_clock().now()
-        
+        self._last_dedup_goal_id = None
+
         # 立即转发目标到控制节点
         self.target_pub.publish(msg)
-        self.get_logger().info(f'✓ 目标点已转发到控制节点')
+        self.get_logger().info('✓ 目标点已转发到控制节点')
+
+    def _is_duplicate_goal(self, msg: NavigationGoal) -> bool:
+        """判断新 goal 是否与当前 goal 等价（位置/航向/机动一致）。"""
+        try:
+            enabled_val = self.get_parameter('dedup_goal_enabled').value
+            if enabled_val is None:
+                return False
+            if not bool(enabled_val):
+                return False
+        except Exception:
+            return False
+
+        if self.current_goal is None:
+            return False
+
+        def _param_float(name: str, default: float) -> float:
+            try:
+                v = self.get_parameter(name).value
+                if v is None:
+                    return default
+                return float(v)
+            except Exception:
+                return default
+
+        pos_eps = _param_float('dedup_goal_pos_epsilon', 0.01)
+        yaw_eps_deg = _param_float('dedup_goal_yaw_epsilon_deg', 2.0)
+        man_eps = _param_float('dedup_goal_maneuver_param_epsilon', 1e-3)
+
+        pos_eps = max(0.0, pos_eps)
+        yaw_eps = math.radians(max(0.0, yaw_eps_deg))
+        man_eps = max(0.0, man_eps)
+
+        a = self.current_goal
+        b = msg
+
+        ap = a.target_pose.pose.position
+        bp = b.target_pose.pose.position
+        dx = float(ap.x) - float(bp.x)
+        dy = float(ap.y) - float(bp.y)
+        dz = float(ap.z) - float(bp.z)
+        if math.sqrt(dx * dx + dy * dy + dz * dz) > pos_eps:
+            return False
+
+        if bool(getattr(a, 'enable_yaw', False)) != bool(getattr(b, 'enable_yaw', False)):
+            return False
+
+        if bool(getattr(b, 'enable_yaw', False)):
+            ay = self._yaw_from_quat(a.target_pose.pose.orientation)
+            by = self._yaw_from_quat(b.target_pose.pose.orientation)
+            if abs(self._wrap_pi(ay - by)) > yaw_eps:
+                return False
+
+        if int(getattr(a, 'maneuver_type', 0)) != int(getattr(b, 'maneuver_type', 0)):
+            return False
+        if abs(float(getattr(a, 'maneuver_param', 0.0)) - float(getattr(b, 'maneuver_param', 0.0))) > man_eps:
+            return False
+
+        # timeout 允许不同：如果你希望 timeout 不同也当新任务，可把下面打开
+        # if abs(float(getattr(a, 'timeout', 0.0)) - float(getattr(b, 'timeout', 0.0))) > 1e-6:
+        #     return False
+
+        return True
+
+    @staticmethod
+    def _wrap_pi(angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    @staticmethod
+    def _yaw_from_quat(q) -> float:
+        """从四元数计算 yaw (rad)，与常见 ENU 公式一致。"""
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        return math.atan2(siny_cosp, cosy_cosp)
     
     def navigation_loop(self):
         """
@@ -207,6 +337,8 @@ class NavigateToPointNode(Node):
             return
         
         # 检查是否超时
+        if self.goal_start_time is None:
+            self.goal_start_time = self.get_clock().now()
         elapsed = (self.get_clock().now() - self.goal_start_time).nanoseconds / 1e9
         if elapsed > self.current_goal.timeout:
             self.get_logger().warn(

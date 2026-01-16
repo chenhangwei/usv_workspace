@@ -17,7 +17,7 @@ from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog, QMenu,
     QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup
+    QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup, QInputDialog
 )
 from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush
 from gs_gui.ros_signal import ROSSignal
@@ -388,6 +388,7 @@ class MainWindow(QMainWindow):
         self.action_geofence_settings.triggered.connect(self.open_geofence_dialog)
         self.action_geofence_toggle.toggled.connect(self.toggle_geofence_from_menu)
         self.action_param_config.triggered.connect(self.open_param_config_window)
+        self.action_set_nav_arrival_threshold.triggered.connect(self.open_nav_arrival_threshold_dialog)
 
     def _init_custom_menu(self):
         """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
@@ -430,6 +431,13 @@ class MainWindow(QMainWindow):
         self.action_geofence_toggle.setChecked(False)
         self.action_geofence_toggle.setToolTip("快速开启/关闭电子围栏监控")
         tools_menu.addAction(self.action_geofence_toggle)
+
+        # 导航到达阈值设置
+        self.action_set_nav_arrival_threshold = QAction("🎯 设置到达阈值...", self)
+        self.action_set_nav_arrival_threshold.setToolTip(
+            "设置 USV 端导航到达判定阈值（米），可对选中 USV 或全部在线 USV 生效"
+        )
+        tools_menu.addAction(self.action_set_nav_arrival_threshold)
         
         # 分隔线
         tools_menu.addSeparator()
@@ -1620,6 +1628,85 @@ limitations under the License.
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.critical(self, "错误", f"打开设置 Home Position 对话框失败: {e}")
             self.ui_utils.append_info(f"❌ 打开设置 Home Position 对话框失败: {e}")
+
+    def open_nav_arrival_threshold_dialog(self):
+        """打开“到达阈值”设置对话框，并下发到 USV 端导航节点。"""
+        try:
+            if not hasattr(self, 'ros_node') or self.ros_node is None:
+                QMessageBox.warning(self, "ROS 未就绪", "ROS 节点尚未初始化，无法下发到达阈值")
+                return
+
+            # 默认值：上次设置值（持久化），否则 2.0m
+            try:
+                default_val = float(self.settings.value('nav_arrival_threshold_last', 2.0))
+            except Exception:
+                default_val = 2.0
+
+            value, ok = QInputDialog.getDouble(
+                self,
+                "设置到达阈值",
+                "请输入到达阈值（米）\n说明：距离 < 阈值 即判定到达。",
+                value=default_val,
+                min=0.1,
+                max=100.0,
+                decimals=2,
+            )
+            if not ok:
+                return
+
+            # 保存默认值
+            try:
+                self.settings.setValue('nav_arrival_threshold_last', float(value))
+            except Exception:
+                pass
+
+            # 选中 USV 优先；否则对全部在线 USV 生效
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
+            if usv_info is None:
+                usv_info = self.table_manager.get_selected_usv_info(is_cluster=False)
+            selected_ns = usv_info.get('namespace') if isinstance(usv_info, dict) else None
+
+            online_usvs = self.list_manager.usv_online_list
+            online_ids = [u.get('namespace') for u in online_usvs if isinstance(u, dict) and u.get('namespace')]
+            if not online_ids:
+                QMessageBox.warning(self, "无在线 USV", "当前没有在线 USV，无法下发到达阈值")
+                return
+
+            if selected_ns:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("选择应用范围")
+                msg.setText(f"检测到已选中：{selected_ns}\n请选择将到达阈值应用到哪里：")
+                btn_selected = msg.addButton(f"仅 {selected_ns}", QMessageBox.AcceptRole)
+                btn_all = msg.addButton("全部在线 USV", QMessageBox.AcceptRole)
+                btn_cancel = msg.addButton(QMessageBox.Cancel)
+                msg.exec_()
+                clicked = msg.clickedButton()
+                if clicked is None or clicked == btn_cancel:
+                    return
+
+                if clicked == btn_selected:
+                    target_ids = [selected_ns]
+                elif clicked == btn_all:
+                    target_ids = online_ids
+                else:
+                    return
+            else:
+                target_ids = online_ids
+
+            ok_send = self.ros_node.set_nav_arrival_threshold(target_ids, float(value))
+            if ok_send:
+                self.ui_utils.append_info(
+                    f"✅ 已下发到达阈值 {float(value):.2f}m → {len(target_ids)} 艘 USV: {', '.join(target_ids)}"
+                )
+            else:
+                self.ui_utils.append_warning("❌ 下发到达阈值失败（请检查 USV 是否已注册/桥接是否正常）")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"设置到达阈值失败: {e}")
+            try:
+                self.ui_utils.append_warning(f"❌ 设置到达阈值失败: {e}")
+            except Exception:
+                pass
     
     def open_param_config_window(self):
         """

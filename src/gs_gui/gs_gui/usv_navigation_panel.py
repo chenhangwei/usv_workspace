@@ -315,6 +315,12 @@ class UsvNavigationPanel(QWidget):
         layout.addWidget(self._create_key_label("目标 Z:"), 3, 0)
         layout.addWidget(self.target_z_label, 3, 1)
         layout.addWidget(QLabel("m"), 3, 2)
+
+        # 到达阈值（米）
+        self.arrival_threshold_label = self._create_value_label("--")
+        layout.addWidget(self._create_key_label("到达阈值(设定):"), 4, 0)
+        layout.addWidget(self.arrival_threshold_label, 4, 1)
+        layout.addWidget(QLabel("m"), 4, 2)
         
         layout.setColumnStretch(1, 1)
         group.setLayout(layout)
@@ -537,6 +543,20 @@ class UsvNavigationPanel(QWidget):
                 self.target_x_label.setText("--")
                 self.target_y_label.setText("--")
                 self.target_z_label.setText("--")
+
+            # 到达阈值（从 state 中获取）
+            try:
+                threshold = state.get('nav_arrival_threshold', None)
+                if threshold is None:
+                    self.arrival_threshold_label.setText("--")
+                else:
+                    threshold_f = float(threshold)
+                    if threshold_f > 0.0:
+                        self.arrival_threshold_label.setText(self._format_float(threshold_f, precision=2))
+                    else:
+                        self.arrival_threshold_label.setText("--")
+            except Exception:
+                self.arrival_threshold_label.setText("--")
             
             # ==================== 更新导航反馈 ====================
             if feedback is not None:
@@ -591,6 +611,7 @@ class UsvNavigationPanel(QWidget):
         self.target_x_label.setText("--")
         self.target_y_label.setText("--")
         self.target_z_label.setText("--")
+        self.arrival_threshold_label.setText("--")
         
         # 导航反馈
         self.distance_to_goal_label.setText("--")

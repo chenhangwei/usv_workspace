@@ -69,9 +69,16 @@ usv_status_node:
 # NavigateToPoint Action Server 参数（统一的导航到达阈值配置）
 navigate_to_point_server:
   ros__parameters:
-    nav_arrival_threshold: 1.0              # 到达目标点的距离阈值（米）- 统一使用此参数
+    nav_arrival_threshold: 2.0              # 到达目标点的距离阈值（米）- 统一使用此参数
     nav_timeout_check_period: 1.0           # 超时检查周期（秒）
-    nav_feedback_period: 0.5                # 反馈发布周期（秒）
+    nav_feedback_period: 0.2                # 反馈发布周期（秒）
+    distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
+
+# NavigateToPoint 话题版本节点参数（launch 实际启动的节点名为 navigate_to_point_node）
+navigate_to_point_node:
+  ros__parameters:
+    nav_arrival_threshold: 2.0              # 到达目标点的距离阈值（米）
+    nav_feedback_period: 0.2                # 反馈发布周期（秒）
     distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
 
 # Auto Set Home 参数（关键：延长 GPS 初始化时间，避免 z 坐标误差）

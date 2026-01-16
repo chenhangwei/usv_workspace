@@ -17,7 +17,7 @@ from common_interfaces.msg import UsvStatus  # 从common_interfaces.msg模块导
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy  # 从rclpy.qos模块导入QoSProfile和QoSReliabilityPolicy，用于设置服务质量
 import queue  # 导入queue模块，用于创建消息队列
 import threading  # 导入threading模块，用于多线程处理
-from std_msgs.msg import String # 导入 String 消息类型
+from std_msgs.msg import String, Float32 # 导入 String/Float32 消息类型
 import weakref  # 导入weakref模块，用于弱引用
 import tf2_ros
 from geometry_msgs.msg import TransformStamped
@@ -96,6 +96,8 @@ class GroundStationNode(Node):
         self._heartbeat_status_cache = ThreadSafeDict()
         # 导航目标信息缓存（用于导航面板显示）
         self._usv_nav_target_cache = ThreadSafeDict()
+        # 导航到达阈值缓存（用于导航面板显示，按 USV 保存最后一次下发值）
+        self._nav_arrival_threshold_cache = ThreadSafeDict()
 
         # 导航看门狗配置
         try:
@@ -112,6 +114,12 @@ class GroundStationNode(Node):
         self._next_goal_id = 1  # 目标ID生成器
         self._goal_id_lock = threading.Lock()  # 目标ID锁
         self._goal_to_usv = ThreadSafeDict()  # 目标ID到USV的映射 {goal_id: usv_id} (线程安全)
+
+        # 发送前去重：同目标重发时复用 goal_id，避免 ID 无意义增长
+        self.declare_parameter('dedup_goal_id_reuse_enabled', True)
+        self.declare_parameter('dedup_goal_pos_epsilon', 0.01)
+        self.declare_parameter('dedup_goal_yaw_epsilon', 0.05)
+        self.declare_parameter('dedup_goal_maneuver_param_epsilon', 1e-3)
 
         # 初始化USV状态和目标管理相关变量
         self.usv_states = ThreadSafeDict()  # USV状态字典 (线程安全)
@@ -243,6 +251,62 @@ class GroundStationNode(Node):
             return
         self.get_logger().info("接收到集群恢复请求")
         self.cluster_controller.resume_cluster_task()
+
+    def set_nav_arrival_threshold(self, usv_id_list, threshold_m):
+        """设置 USV 导航到达阈值（米）。
+
+        设计目标：跨 Domain 场景不依赖参数服务，使用话题下发。
+
+        Args:
+            usv_id_list (list[str]): USV 命名空间列表，例如 ['usv_02', 'usv_03']
+            threshold_m (float): 到达阈值（米），必须 > 0
+        """
+        try:
+            threshold = float(threshold_m)
+        except Exception:
+            self.get_logger().warn(f"nav_arrival_threshold 非法: {threshold_m}")
+            return False
+
+        if threshold <= 0.0:
+            self.get_logger().warn(f"nav_arrival_threshold 必须>0: {threshold}")
+            return False
+
+        if not usv_id_list:
+            self.get_logger().warn("未提供 USV 列表，忽略设置 nav_arrival_threshold")
+            return False
+
+        sent = 0
+        updated_any_state = False
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_arrival_threshold_pubs.get(usv_id)
+            if pub is None:
+                self.get_logger().warn(f"USV {usv_id} 未注册 set_nav_arrival_threshold 发布者")
+                continue
+
+            msg = Float32()
+            msg.data = threshold
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+                # 记录缓存并更新状态字典，便于 UI 直接显示
+                self._nav_arrival_threshold_cache[usv_id] = threshold
+                if usv_id in self.usv_states:
+                    try:
+                        self.usv_states[usv_id]['nav_arrival_threshold'] = threshold
+                        updated_any_state = True
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.get_logger().warn(f"下发 nav_arrival_threshold 到 {usv_id} 失败: {e}")
+
+        self.get_logger().info(f"已下发 nav_arrival_threshold={threshold:.2f}m 到 {sent}/{len(usv_id_list)} 艘 USV")
+        # 主动触发一次 UI 刷新，让阈值修改即时可见
+        if updated_any_state:
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception:
+                pass
+        return sent > 0
 
     def stop_cluster_task_callback(self):
         """处理来自 GUI 的集群停止请求。"""
@@ -443,11 +507,17 @@ class GroundStationNode(Node):
             
             # 如果USV还没有状态条目，创建初始状态
             if usv_id not in self.usv_states:
+                threshold = None
+                try:
+                    threshold = self._nav_arrival_threshold_cache.get(usv_id)
+                except Exception:
+                    threshold = None
                 self.usv_states[usv_id] = {
                     'namespace': usv_id,
                     'connected': False,  # 初始为离线，等待第一次数据
                     'mode': 'UNKNOWN',
                     'armed': False,
+                    'nav_arrival_threshold': threshold,
                 }
             
             # 更新状态字典中的连接状态
@@ -683,10 +753,67 @@ class GroundStationNode(Node):
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             return False
         
-        # 生成唯一的目标ID
-        with self._goal_id_lock:
-            goal_id = self._next_goal_id
-            self._next_goal_id += 1
+        # 发送前去重：若与该USV当前缓存目标一致，则复用旧 goal_id 直接重发
+        goal_id = None
+        reuse_goal_id = False
+        cached = self._usv_nav_target_cache.get(usv_id)
+        try:
+            reuse_enabled = bool(self.get_parameter('dedup_goal_id_reuse_enabled').value)
+        except Exception:
+            reuse_enabled = True
+
+        def _param_float(name: str, default: float) -> float:
+            try:
+                v = self.get_parameter(name).value
+                if v is None:
+                    return default
+                return float(v)
+            except Exception:
+                return default
+
+        pos_eps = max(0.0, _param_float('dedup_goal_pos_epsilon', 0.01))
+        yaw_eps = max(0.0, _param_float('dedup_goal_yaw_epsilon', 0.05))
+        man_eps = max(0.0, _param_float('dedup_goal_maneuver_param_epsilon', 1e-3))
+
+        if reuse_enabled and cached:
+            try:
+                dx = float(cached.get('x', 0.0)) - float(x)
+                dy = float(cached.get('y', 0.0)) - float(y)
+                dz = float(cached.get('z', 0.0)) - float(z)
+                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+                yaw_match = (not bool(use_yaw)) or (abs(float(cached.get('yaw', 0.0)) - float(yaw)) <= yaw_eps)
+                same_step = True
+                if step is not None:
+                    same_step = int(cached.get('step', step)) == int(step)
+                same_maneuver = (
+                    int(cached.get('maneuver_type', maneuver_type)) == int(maneuver_type)
+                    and abs(float(cached.get('maneuver_param', 0.0)) - float(maneuver_param)) <= man_eps
+                )
+                if (
+                    dist <= pos_eps
+                    and bool(use_yaw) == bool(cached.get('use_yaw', bool(use_yaw)))
+                    and yaw_match
+                    and same_maneuver
+                    and same_step
+                ):
+                    cached_goal_id = cached.get('goal_id')
+                    if cached_goal_id is not None:
+                        goal_id = int(cached_goal_id)
+                        reuse_goal_id = True
+            except Exception:
+                reuse_goal_id = False
+
+        if not reuse_goal_id:
+            # 生成唯一的目标ID
+            with self._goal_id_lock:
+                goal_id = self._next_goal_id
+                self._next_goal_id += 1
+
+        if goal_id is None:
+            # 防御：理论上不会发生
+            self.get_logger().warning('goal_id 生成失败，放弃发送')
+            self.ros_signal.nav_status_update.emit(usv_id, "失败")
+            return False
         
         # 记录目标ID到USV的映射
         self._goal_to_usv[goal_id] = usv_id
@@ -734,6 +861,9 @@ class GroundStationNode(Node):
             'y': float(y),
             'z': float(z),
             'yaw': float(yaw),
+            'use_yaw': bool(use_yaw),
+            'maneuver_type': int(maneuver_type),
+            'maneuver_param': float(maneuver_param),
             'step': current_step,
             'timestamp': self.get_clock().now().nanoseconds / 1e9
         }
@@ -741,8 +871,9 @@ class GroundStationNode(Node):
         # 更新导航状态为执行中
         self.ros_signal.nav_status_update.emit(usv_id, "执行中")
         
+        resend_tag = "(重发复用ID) " if reuse_goal_id else ""
         self.get_logger().info(
-            f"📤 {usv_id} 导航目标已发送 [ID={goal_id}]: "
+            f"📤 {usv_id} 导航目标已发送 {resend_tag}[ID={goal_id}]: "
             f"XY({x:.1f}, {y:.1f}), Yaw({yaw:.1f}°), "
             f"机动({maneuver_type}, {maneuver_param:.1f}), 超时={timeout:.0f}s")
         
