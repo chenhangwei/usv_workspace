@@ -92,7 +92,8 @@ def generate_launch_description():
         #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
 
         #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
-        default_value='udp://192.168.68.54:14552@192.168.68.53:14560',  # usv_02 → 地面站端口14560
+        # ⚠️ 优化配置：移除本地绑定(192.168.68.54:14552)，仅指定目标地址，提升重连鲁棒性
+        default_value='udp://@192.168.68.53:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
     )
@@ -368,7 +369,7 @@ def generate_launch_description():
                     'onboard_computer_status',  # 机载计算机（已用 ROS）
                     'open_drone_id',         # 无人机远程识别（水面船不需要）
                     'optical_flow',          # 光流（无光流传感器）
-                    'param',                 # ⚠️ 参数同步（加速启动，需修改参数请用 QGC）
+                    'param',                 # ⚠️ 已启用：参数同步（解决 QGC 参数加载失败问题）
                     'play_tune',             # 播放音调（无蜂鸣器）
                     'px4flow',               # PX4 光流（无光流）
                     'rangefinder',           # 测距仪（已有 GPS 高度）
@@ -415,7 +416,7 @@ def generate_launch_description():
                 # 'geofence.pull_after_gcs': False,
                 
                 # 连接参数
-                'conn.timeout': 10.0,               # 连接超时 10 秒
+                'conn.timeout': 30.0,               # 连接超时 30 秒 (增加超时时间，提升断连容忍度)
                 'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
                 'conn.heartbeat_rate': 1.0,         # 心跳频率 1 Hz
             },
