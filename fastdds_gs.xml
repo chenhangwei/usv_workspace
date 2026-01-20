@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <participant profile_name="gs_unicast_profile" is_default_profile="true">
+        <rtps>
+            <builtin>
+                <discovery_config>
+                    <discoveryProtocol>SIMPLE</discoveryProtocol>
+                </discovery_config>
+                <initialPeersList>
+                    <!-- 指向 USV_02 的 IP -->
+                    <locator>
+                        <udpv4>
+                            <address>192.168.68.54</address>
+                        </udpv4>
+                    </locator>
+                    <!-- 指向 USV_01 的 IP -->
+                    <locator>
+                        <udpv4>
+                            <address>192.168.68.55</address>
+                        </udpv4>
+                    </locator>
+                    <!-- 指向 USV_03 的 IP -->
+                    <locator>
+                        <udpv4>
+                            <address>192.168.68.52</address>
+                        </udpv4>
+                    </locator>
+                </initialPeersList>
+            </builtin>
+        </rtps>
+    </participant>
+</profiles>
