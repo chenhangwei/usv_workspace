@@ -1,114 +1,211 @@
-# Domain Bridge 完整配置文件 - 支持 3 个 USV
-# 地面站 Domain: 99
-# USV_01 Domain: 11, USV_02 Domain: 12, USV_03 Domain: 13
+# =============================================================================
+# Domain Bridge 配置文件
+# =============================================================================
+# 
+# 版本: 2.0
+# 更新日期: 2026-01-21
+# 
+# 功能说明:
+#   实现跨 ROS Domain 的话题桥接，连接多个 USV 与地面站
+#
+# 架构:
+#   地面站 (Domain 99) <---> Domain Bridge <---> USV_01 (Domain 11)
+#                                           <---> USV_02 (Domain 12)
+#                                           <---> USV_03 (Domain 13)
+#
+# 话题方向:
+#   - 默认: USV -> 地面站 (传感器数据、状态信息)
+#   - reversed: true 表示 地面站 -> USV (控制指令)
+#
+# 新增 USV 步骤:
+#   1. 复制文件末尾的配置模板
+#   2. 修改命名空间 (usv_XX) 和 from_domain (YY)
+#   3. 更新 usv_fleet.yaml 添加新 USV 信息
+#   4. 更新 fastdds_gs.xml 添加新 USV 的 IP 到 Peer List
+#
+# =============================================================================
 
 name: usv_multi_bridge
 
-# 默认从所有 USV 域转发到地面站
+# 默认桥接方向 (仅作为 fallback，建议每个话题显式指定 from_domain)
 from_domain: 11
 to_domain: 99
 
+# =============================================================================
+# 话题定义
+# =============================================================================
+# 
+# 每个话题的属性说明:
+#   type:        消息类型 (必填)
+#   from_domain: 源 Domain ID (强烈建议显式指定)
+#   to_domain:   目标 Domain ID (可选，默认 99)
+#   reversed:    是否反向桥接 (可选，默认 false)
+#   qos:         QoS 配置 (可选)
+#     reliability: reliable | best_effort
+#     durability:  volatile | transient_local
+#
+# =============================================================================
+
 topics:
-  # ==================== USV_01 话题 (Domain 11) ====================
+
+  # ===========================================================================
+  #                              USV_01 (Domain 11)
+  # ===========================================================================
+
+  # ------------------------- 状态信息 (USV -> GS) ----------------------------
+  
   usv_01/usv_state:
     type: common_interfaces/msg/UsvStatus
+    from_domain: 11
     
   usv_01/usv_temperature:
     type: std_msgs/msg/Float32
+    from_domain: 11
     
   usv_01/low_voltage_mode:
     type: std_msgs/msg/Bool
+    from_domain: 11
 
+  # ------------------------- MAVROS 状态 -------------------------------------
+  
   usv_01/mavros/state:
     type: mavros_msgs/msg/State
+    from_domain: 11
     
   usv_01/mavros/extended_state:
     type: mavros_msgs/msg/ExtendedState
+    from_domain: 11
     
   usv_01/battery:
     type: sensor_msgs/msg/BatteryState
+    from_domain: 11
+    
+  usv_01/mavros/sys_status:
+    type: mavros_msgs/msg/SysStatus
+    from_domain: 11
+    qos:
+      reliability: best_effort
 
+  usv_01/statustext/recv:
+    type: mavros_msgs/msg/StatusText
+    from_domain: 11
+    qos:
+      reliability: best_effort
+
+  # ------------------------- 位置信息 ----------------------------------------
+  
   usv_01/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
+    from_domain: 11
     
   usv_01/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
-    
-  usv_01/global_position/global:
-    type: sensor_msgs/msg/NavSatFix
+    from_domain: 11
     
   usv_01/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
+    from_domain: 11
+    
+  usv_01/global_position/global:
+    type: sensor_msgs/msg/NavSatFix
+    from_domain: 11
     
   usv_01/global_position/compass_hdg:
     type: std_msgs/msg/Float64
+    from_domain: 11
 
   usv_01/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
+    from_domain: 11
     
   usv_01/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
+    from_domain: 11
 
   usv_01/home_position/home:
     type: mavros_msgs/msg/HomePosition
+    from_domain: 11
 
-  usv_01/led_state:
-    type: std_msgs/msg/String
-
+  # ------------------------- 传感器数据 --------------------------------------
+  
   usv_01/laserscan:
     type: sensor_msgs/msg/LaserScan
+    from_domain: 11
     qos:
       reliability: best_effort
     
   usv_01/ultrasonic_data:
     type: sensor_msgs/msg/Range
+    from_domain: 11
     
   usv_01/uwb_position:
     type: geometry_msgs/msg/PointStamped
-    
-  # 飞控状态消息
-  usv_01/statustext/recv:
-    type: mavros_msgs/msg/StatusText
-    qos:
-      reliability: best_effort
-      
-  usv_01/mavros/sys_status:
-    type: mavros_msgs/msg/SysStatus
-    qos:
-      reliability: best_effort
+    from_domain: 11
 
-  # 控制命令 (双向)
+  # ------------------------- 设备状态 ----------------------------------------
+  
+  usv_01/led_state:
+    type: std_msgs/msg/String
+    from_domain: 11
+
+  # ------------------------- 控制指令 (GS -> USV) ----------------------------
+  
   usv_01/set_usv_target_position:
     type: common_interfaces/msg/UsvSetPoint
-    reversed: True
+    from_domain: 11
+    reversed: true
     
   usv_01/set_usv_mode:
     type: std_msgs/msg/String
-    reversed: True
+    from_domain: 11
+    reversed: true
     
   usv_01/set_usv_arming:
     type: std_msgs/msg/String
-    reversed: True
+    from_domain: 11
+    reversed: true
 
-  # 导航参数下发 (从地面站到USV)
   usv_01/set_nav_arrival_threshold:
     type: std_msgs/msg/Float32
-    reversed: True
+    from_domain: 11
+    reversed: true
   
-  # LED/声音/动作命令 (从地面站到USV)
   usv_01/gs_led_command:
     type: std_msgs/msg/String
-    reversed: True
+    from_domain: 11
+    reversed: true
     
   usv_01/gs_sound_command:
     type: std_msgs/msg/String
-    reversed: True
+    from_domain: 11
+    reversed: true
     
   usv_01/gs_action_command:
     type: std_msgs/msg/String
-    reversed: True
+    from_domain: 11
+    reversed: true
 
-  # ==================== USV_02 话题 (Domain 12) ====================
+  # ------------------------- 导航话题 ----------------------------------------
+  
+  usv_01/navigation_goal:
+    type: common_interfaces/msg/NavigationGoal
+    from_domain: 11
+    reversed: true
+    
+  usv_01/navigation_feedback:
+    type: common_interfaces/msg/NavigationFeedback
+    from_domain: 11
+    
+  usv_01/navigation_result:
+    type: common_interfaces/msg/NavigationResult
+    from_domain: 11
+
+  # ===========================================================================
+  #                              USV_02 (Domain 12)
+  # ===========================================================================
+
+  # ------------------------- 状态信息 (USV -> GS) ----------------------------
+  
   usv_02/usv_state:
     type: common_interfaces/msg/UsvStatus
     from_domain: 12
@@ -121,6 +218,8 @@ topics:
     type: std_msgs/msg/Bool
     from_domain: 12
 
+  # ------------------------- MAVROS 状态 -------------------------------------
+  
   usv_02/mavros/state:
     type: mavros_msgs/msg/State
     from_domain: 12
@@ -132,7 +231,21 @@ topics:
   usv_02/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 12
+    
+  usv_02/mavros/sys_status:
+    type: mavros_msgs/msg/SysStatus
+    from_domain: 12
+    qos:
+      reliability: best_effort
 
+  usv_02/statustext/recv:
+    type: mavros_msgs/msg/StatusText
+    from_domain: 12
+    qos:
+      reliability: best_effort
+
+  # ------------------------- 位置信息 ----------------------------------------
+  
   usv_02/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 12
@@ -141,12 +254,12 @@ topics:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 12
     
-  usv_02/global_position/global:
-    type: sensor_msgs/msg/NavSatFix
-    from_domain: 12
-    
   usv_02/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
+    from_domain: 12
+    
+  usv_02/global_position/global:
+    type: sensor_msgs/msg/NavSatFix
     from_domain: 12
     
   usv_02/global_position/compass_hdg:
@@ -165,10 +278,8 @@ topics:
     type: mavros_msgs/msg/HomePosition
     from_domain: 12
 
-  usv_02/led_state:
-    type: std_msgs/msg/String
-    from_domain: 12
-
+  # ------------------------- 传感器数据 --------------------------------------
+  
   usv_02/laserscan:
     type: sensor_msgs/msg/LaserScan
     from_domain: 12
@@ -182,59 +293,71 @@ topics:
   usv_02/uwb_position:
     type: geometry_msgs/msg/PointStamped
     from_domain: 12
-    
-  # 飞控状态消息
-  usv_02/statustext/recv:
-    type: mavros_msgs/msg/StatusText
-    from_domain: 12
-    qos:
-      reliability: best_effort
-      
-  usv_02/mavros/sys_status:
-    type: mavros_msgs/msg/SysStatus
-    from_domain: 12
-    qos:
-      reliability: best_effort
 
-  # 控制命令 (双向)
+  # ------------------------- 设备状态 ----------------------------------------
+  
+  usv_02/led_state:
+    type: std_msgs/msg/String
+    from_domain: 12
+
+  # ------------------------- 控制指令 (GS -> USV) ----------------------------
+  
   usv_02/set_usv_target_position:
     type: common_interfaces/msg/UsvSetPoint
     from_domain: 12
-    reversed: True
+    reversed: true
     
   usv_02/set_usv_mode:
     type: std_msgs/msg/String
     from_domain: 12
-    reversed: True
+    reversed: true
     
   usv_02/set_usv_arming:
     type: std_msgs/msg/String
     from_domain: 12
-    reversed: True
+    reversed: true
 
-  # 导航参数下发 (从地面站到USV)
   usv_02/set_nav_arrival_threshold:
     type: std_msgs/msg/Float32
     from_domain: 12
-    reversed: True
+    reversed: true
   
-  # LED/声音/动作命令 (从地面站到USV)
   usv_02/gs_led_command:
     type: std_msgs/msg/String
     from_domain: 12
-    reversed: True
+    reversed: true
     
   usv_02/gs_sound_command:
     type: std_msgs/msg/String
     from_domain: 12
-    reversed: True
+    reversed: true
     
   usv_02/gs_action_command:
     type: std_msgs/msg/String
     from_domain: 12
-    reversed: True
+    reversed: true
 
-  # ==================== USV_03 话题 (Domain 13) ====================
+  # ------------------------- 导航话题 ----------------------------------------
+  
+  usv_02/navigation_goal:
+    type: common_interfaces/msg/NavigationGoal
+    from_domain: 12
+    reversed: true
+    
+  usv_02/navigation_feedback:
+    type: common_interfaces/msg/NavigationFeedback
+    from_domain: 12
+    
+  usv_02/navigation_result:
+    type: common_interfaces/msg/NavigationResult
+    from_domain: 12
+
+  # ===========================================================================
+  #                              USV_03 (Domain 13)
+  # ===========================================================================
+
+  # ------------------------- 状态信息 (USV -> GS) ----------------------------
+  
   usv_03/usv_state:
     type: common_interfaces/msg/UsvStatus
     from_domain: 13
@@ -247,6 +370,8 @@ topics:
     type: std_msgs/msg/Bool
     from_domain: 13
 
+  # ------------------------- MAVROS 状态 -------------------------------------
+  
   usv_03/mavros/state:
     type: mavros_msgs/msg/State
     from_domain: 13
@@ -258,7 +383,21 @@ topics:
   usv_03/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 13
+    
+  usv_03/mavros/sys_status:
+    type: mavros_msgs/msg/SysStatus
+    from_domain: 13
+    qos:
+      reliability: best_effort
 
+  usv_03/statustext/recv:
+    type: mavros_msgs/msg/StatusText
+    from_domain: 13
+    qos:
+      reliability: best_effort
+
+  # ------------------------- 位置信息 ----------------------------------------
+  
   usv_03/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 13
@@ -267,12 +406,12 @@ topics:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 13
     
-  usv_03/global_position/global:
-    type: sensor_msgs/msg/NavSatFix
-    from_domain: 13
-    
   usv_03/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
+    from_domain: 13
+    
+  usv_03/global_position/global:
+    type: sensor_msgs/msg/NavSatFix
     from_domain: 13
     
   usv_03/global_position/compass_hdg:
@@ -291,10 +430,8 @@ topics:
     type: mavros_msgs/msg/HomePosition
     from_domain: 13
 
-  usv_03/led_state:
-    type: std_msgs/msg/String
-    from_domain: 13
-
+  # ------------------------- 传感器数据 --------------------------------------
+  
   usv_03/laserscan:
     type: sensor_msgs/msg/LaserScan
     from_domain: 13
@@ -308,133 +445,56 @@ topics:
   usv_03/uwb_position:
     type: geometry_msgs/msg/PointStamped
     from_domain: 13
-    
-  # 飞控状态消息
-  usv_03/statustext/recv:
-    type: mavros_msgs/msg/StatusText
-    from_domain: 13
-    qos:
-      reliability: best_effort
-      
-  usv_03/mavros/sys_status:
-    type: mavros_msgs/msg/SysStatus
-    from_domain: 13
-    qos:
-      reliability: best_effort
 
-  # 控制命令 (双向)
+  # ------------------------- 设备状态 ----------------------------------------
+  
+  usv_03/led_state:
+    type: std_msgs/msg/String
+    from_domain: 13
+
+  # ------------------------- 控制指令 (GS -> USV) ----------------------------
+  
   usv_03/set_usv_target_position:
     type: common_interfaces/msg/UsvSetPoint
     from_domain: 13
-    reversed: True
+    reversed: true
     
   usv_03/set_usv_mode:
     type: std_msgs/msg/String
     from_domain: 13
-    reversed: True
+    reversed: true
     
   usv_03/set_usv_arming:
     type: std_msgs/msg/String
     from_domain: 13
-    reversed: True
+    reversed: true
 
-  # 导航参数下发 (从地面站到USV)
   usv_03/set_nav_arrival_threshold:
     type: std_msgs/msg/Float32
     from_domain: 13
-    reversed: True
+    reversed: true
   
-  # LED/声音/动作命令 (从地面站到USV)
   usv_03/gs_led_command:
     type: std_msgs/msg/String
     from_domain: 13
-    reversed: True
+    reversed: true
     
   usv_03/gs_sound_command:
     type: std_msgs/msg/String
     from_domain: 13
-    reversed: True
+    reversed: true
     
   usv_03/gs_action_command:
     type: std_msgs/msg/String
     from_domain: 13
-    reversed: True
+    reversed: true
 
-  # ==================== TF 数据 ====================
-  # 注意：不要桥接 /tf 到地面站，因为会导致QoS不匹配
-  # 地面站使用各USV的 pose 话题已足够进行坐标转换
+  # ------------------------- 导航话题 ----------------------------------------
   
-  tf_static:
-    type: tf2_msgs/msg/TFMessage
-    from_domain: 11
-    qos:
-      reliability: reliable
-      durability: transient_local
-    
-  tf_static:
-    type: tf2_msgs/msg/TFMessage
-    from_domain: 12
-    qos:
-      reliability: reliable
-      durability: transient_local
-    
-  tf_static:
-    type: tf2_msgs/msg/TFMessage
-    from_domain: 13
-    qos:
-      reliability: reliable
-      durability: transient_local
-
-  # ==================== 诊断信息 ====================
-  diagnostics:
-    type: diagnostic_msgs/msg/DiagnosticArray
-    from_domain: 11
-    qos:
-      reliability: best_effort
-    
-  diagnostics:
-    type: diagnostic_msgs/msg/DiagnosticArray
-    from_domain: 12
-    qos:
-      reliability: best_effort
-    
-  diagnostics:
-    type: diagnostic_msgs/msg/DiagnosticArray
-    from_domain: 13
-    qos:
-      reliability: best_effort
-
-  # ==================== 导航话题 (基于Topic的新实现) ====================
-  # USV_01 导航话题
-  usv_01/navigation_goal:
-    type: common_interfaces/msg/NavigationGoal
-    reversed: True
-    
-  usv_01/navigation_feedback:
-    type: common_interfaces/msg/NavigationFeedback
-    
-  usv_01/navigation_result:
-    type: common_interfaces/msg/NavigationResult
-
-  # USV_02 导航话题
-  usv_02/navigation_goal:
-    type: common_interfaces/msg/NavigationGoal
-    from_domain: 12
-    reversed: True
-    
-  usv_02/navigation_feedback:
-    type: common_interfaces/msg/NavigationFeedback
-    from_domain: 12
-    
-  usv_02/navigation_result:
-    type: common_interfaces/msg/NavigationResult
-    from_domain: 12
-
-  # USV_03 导航话题
   usv_03/navigation_goal:
     type: common_interfaces/msg/NavigationGoal
     from_domain: 13
-    reversed: True
+    reversed: true
     
   usv_03/navigation_feedback:
     type: common_interfaces/msg/NavigationFeedback
@@ -443,3 +503,156 @@ topics:
   usv_03/navigation_result:
     type: common_interfaces/msg/NavigationResult
     from_domain: 13
+
+
+# =============================================================================
+# 新增 USV 配置模板
+# =============================================================================
+# 
+# 复制以下模板，将 usv_XX 替换为实际编号，YY 替换为 Domain ID
+# 例如: usv_04, Domain 14
+#
+# ===========================================================================
+#                              USV_XX (Domain YY)
+# ===========================================================================
+#
+# # 状态信息
+# usv_XX/usv_state:
+#   type: common_interfaces/msg/UsvStatus
+#   from_domain: YY
+#
+# usv_XX/usv_temperature:
+#   type: std_msgs/msg/Float32
+#   from_domain: YY
+#
+# usv_XX/low_voltage_mode:
+#   type: std_msgs/msg/Bool
+#   from_domain: YY
+#
+# # MAVROS 状态
+# usv_XX/mavros/state:
+#   type: mavros_msgs/msg/State
+#   from_domain: YY
+#
+# usv_XX/mavros/extended_state:
+#   type: mavros_msgs/msg/ExtendedState
+#   from_domain: YY
+#
+# usv_XX/battery:
+#   type: sensor_msgs/msg/BatteryState
+#   from_domain: YY
+#
+# usv_XX/mavros/sys_status:
+#   type: mavros_msgs/msg/SysStatus
+#   from_domain: YY
+#   qos:
+#     reliability: best_effort
+#
+# usv_XX/statustext/recv:
+#   type: mavros_msgs/msg/StatusText
+#   from_domain: YY
+#   qos:
+#     reliability: best_effort
+#
+# # 位置信息
+# usv_XX/local_position/pose:
+#   type: geometry_msgs/msg/PoseStamped
+#   from_domain: YY
+#
+# usv_XX/local_position/velocity_local:
+#   type: geometry_msgs/msg/TwistStamped
+#   from_domain: YY
+#
+# usv_XX/local_position/pose_from_gps:
+#   type: geometry_msgs/msg/PoseStamped
+#   from_domain: YY
+#
+# usv_XX/global_position/global:
+#   type: sensor_msgs/msg/NavSatFix
+#   from_domain: YY
+#
+# usv_XX/global_position/compass_hdg:
+#   type: std_msgs/msg/Float64
+#   from_domain: YY
+#
+# usv_XX/global_position/raw/fix:
+#   type: sensor_msgs/msg/NavSatFix
+#   from_domain: YY
+#
+# usv_XX/global_position/raw/gps_vel:
+#   type: geometry_msgs/msg/TwistStamped
+#   from_domain: YY
+#
+# usv_XX/home_position/home:
+#   type: mavros_msgs/msg/HomePosition
+#   from_domain: YY
+#
+# # 传感器数据
+# usv_XX/laserscan:
+#   type: sensor_msgs/msg/LaserScan
+#   from_domain: YY
+#   qos:
+#     reliability: best_effort
+#
+# usv_XX/ultrasonic_data:
+#   type: sensor_msgs/msg/Range
+#   from_domain: YY
+#
+# usv_XX/uwb_position:
+#   type: geometry_msgs/msg/PointStamped
+#   from_domain: YY
+#
+# # 设备状态
+# usv_XX/led_state:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#
+# # 控制指令 (GS -> USV)
+# usv_XX/set_usv_target_position:
+#   type: common_interfaces/msg/UsvSetPoint
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/set_usv_mode:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/set_usv_arming:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/set_nav_arrival_threshold:
+#   type: std_msgs/msg/Float32
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/gs_led_command:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/gs_sound_command:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/gs_action_command:
+#   type: std_msgs/msg/String
+#   from_domain: YY
+#   reversed: true
+#
+# # 导航话题
+# usv_XX/navigation_goal:
+#   type: common_interfaces/msg/NavigationGoal
+#   from_domain: YY
+#   reversed: true
+#
+# usv_XX/navigation_feedback:
+#   type: common_interfaces/msg/NavigationFeedback
+#   from_domain: YY
+#
+# usv_XX/navigation_result:
+#   type: common_interfaces/msg/NavigationResult
+#   from_domain: YY
