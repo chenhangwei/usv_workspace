@@ -847,9 +847,13 @@ class UsvFleetLauncher(QDialog):
             gcs_url = config.get('gcs_url', '')
             domain_id = config.get('domain_id', '0')
             
+            # FastDDS 单播配置文件路径（USV端）
+            fastdds_config = config.get('fastdds_config', '/home/chenhangwei/fastdds_usv.xml')
+            
             remote_cmd = (
                 f"bash -c '"
-                f"export ROS_DOMAIN_ID={domain_id}; " 
+                f"export ROS_DOMAIN_ID={domain_id}; "
+                f"export FASTDDS_DEFAULT_PROFILES_FILE={fastdds_config}; "
                 f"source /opt/ros/*/setup.bash 2>/dev/null || source /opt/ros/jazzy/setup.bash; "
                 f"source {workspace}/install/setup.bash; "
                 f"ros2 launch usv_bringup usv_launch.py "

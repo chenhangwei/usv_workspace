@@ -16,6 +16,7 @@
 # - fcu_url: 飞控串口配置（格式：serial://<device>:<baudrate>）
 # - system_id: MAVLink 系统 ID（与 namespace 后缀对应）
 # - gcs_url: 地面站通信地址（可选，用于 MAVLink 转发）
+# - fastdds_config: FastDDS 单播配置文件路径（可选，默认 /home/chenhangwei/fastdds_usv.xml）
 
 usv_fleet:
   # ==================== USV 01 ====================
@@ -30,6 +31,7 @@ usv_fleet:
     fcu_url: "udp://192.168.10.1:14550@192.168.10.2:14550"          # 飞控串口
     system_id: 1                                     # MAVLink 系统 ID
     gcs_url: "udp://192.168.68.55:14551@192.168.68.50:14550"      # 地面站通信地址（可选）
+    fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 02 ====================
   usv_02:
@@ -43,6 +45,7 @@ usv_fleet:
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 2
     gcs_url: "udp://192.168.68.54:14552@192.168.68.53:14560"
+    fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 03 ====================
   usv_03:
@@ -56,6 +59,7 @@ usv_fleet:
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 3
     gcs_url: "udp://192.168.68.52:14553@192.168.68.53:14570"
+    fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
 
 # ==================== 启动选项 ====================
 launch_options:
