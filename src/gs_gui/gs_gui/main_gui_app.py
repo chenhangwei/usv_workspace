@@ -68,6 +68,17 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         
+        # 设置离群目标点输入框允许负数（默认最小值为0，改为-9999）
+        try:
+            self.ui.set_departed_x_doubleSpinBox.setMinimum(-9999.0)
+            self.ui.set_departed_x_doubleSpinBox.setMaximum(9999.0)
+            self.ui.set_departed_y_doubleSpinBox.setMinimum(-9999.0)
+            self.ui.set_departed_y_doubleSpinBox.setMaximum(9999.0)
+            self.ui.set_departed_z_doubleSpinBox.setMinimum(-9999.0)
+            self.ui.set_departed_z_doubleSpinBox.setMaximum(9999.0)
+        except Exception:
+            pass
+        
         self.ros_signal = ros_signal
         
         # 优雅关闭标志：避免重复发送关闭命令

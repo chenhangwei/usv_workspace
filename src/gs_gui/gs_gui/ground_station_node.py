@@ -205,6 +205,8 @@ class GroundStationNode(Node):
         self._ns_detection_history = []  # 用于存储命名空间检测历史记录的列表
         # 记录每个 USV 最后一次收到状态消息的时间戳（秒）(线程安全)
         self._ns_last_seen = ThreadSafeDict()
+        # 记录每个 USV 最后一次离线时间（用于防抖，避免短时间内反复切换状态）
+        self._ns_last_offline_time = ThreadSafeDict()
 
         # 创建定时器
         # 注意：在Domain隔离架构下，不再使用动态节点发现，而是从配置文件读取USV列表
@@ -498,11 +500,12 @@ class GroundStationNode(Node):
             now_sec = 0.0
         
         # 检查每个USV的最后接收时间
-        offline_threshold = 10.0  # 10秒未收到数据认为离线
+        offline_threshold = 15.0  # 15秒未收到数据认为离线（增加容忍度以应对网络抖动）
+        online_debounce = 5.0  # 上线后5秒内不输出离线警告（防抖）
         state_changed = False  # 标记是否有状态变化
         
         for usv_id in self._static_usv_list:
-            last_seen = self._ns_last_seen.get(usv_id, 0.0)
+            last_seen = self._ns_last_seen.get(usv_id, 0.0) or 0.0
             elapsed = now_sec - last_seen
             
             # 如果USV还没有状态条目，创建初始状态
@@ -524,11 +527,18 @@ class GroundStationNode(Node):
             if elapsed > offline_threshold:
                 # 标记为离线
                 if self.usv_states[usv_id].get('connected', True):
+                    # 检查防抖：如果距离上次离线不足一定时间，只更新状态不输出日志
+                    last_offline = self._ns_last_offline_time.get(usv_id, 0.0) or 0.0
+                    should_warn = (now_sec - last_offline) > 30.0  # 30秒内不重复警告
+                    
                     self.usv_states[usv_id]['connected'] = False
+                    self._ns_last_offline_time[usv_id] = now_sec
                     state_changed = True
-                    warning_msg = f"⚠️ {usv_id} 已离线 ({elapsed:.1f}s未收到数据)"
-                    self.get_logger().warn(warning_msg)
-                    self.append_warning(f"[{datetime.now().strftime('%H:%M:%S')}] {warning_msg}")
+                    
+                    if should_warn:
+                        warning_msg = f"⚠️ {usv_id} 已离线 ({elapsed:.1f}s未收到数据)"
+                        self.get_logger().warn(warning_msg)
+                        self.append_warning(f"[{datetime.now().strftime('%H:%M:%S')}] {warning_msg}")
             else:
                 # 标记为在线
                 if not self.usv_states[usv_id].get('connected', False):
