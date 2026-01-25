@@ -39,6 +39,7 @@ from common_interfaces.msg import NavigationGoal, NavigationFeedback, Navigation
 
 import math
 from typing import Optional
+from enum import Enum, auto
 
 from .velocity_path_tracker import (
     VelocityPathTracker, 
@@ -47,6 +48,20 @@ from .velocity_path_tracker import (
     VelocityCommand,
     ControllerType
 )
+
+
+class NavigationState(Enum):
+    """
+    导航任务状态枚举
+    
+    用于精确控制导航任务的生命周期，支持更灵活的模式保护策略。
+    """
+    IDLE = auto()        # 空闲 - 无任务，等待新目标
+    ACTIVE = auto()      # 进行中 - 正在执行导航
+    PAUSED = auto()      # 暂停 - 被遥控器/HOLD模式打断，可自动恢复GUIDED
+    COMPLETED = auto()   # 已完成 - 正常到达目标，不恢复GUIDED
+    CANCELLED = auto()   # 用户取消 - 用户主动取消(点击HOLD/MANUAL)，不恢复GUIDED
+    FAILED = auto()      # 失败 - 超时或异常，不恢复GUIDED
 
 
 class VelocityControllerNode(Node):
@@ -173,6 +188,16 @@ class VelocityControllerNode(Node):
         self._state_timeout: float = 3.0  # 飞控状态超时 (秒)
         self._consecutive_timeout_count: int = 0
         self._max_timeout_before_stop: int = 5  # 连续超时次数阈值
+        
+        # ==================== 模式保护 ====================
+        self._mode_protection_enabled: bool = True  # 导航中自动恢复 GUIDED 模式
+        self._last_mode_restore_time: float = 0.0   # 上次恢复模式的时间
+        self._mode_restore_cooldown: float = 2.0    # 恢复模式冷却时间 (秒)
+        
+        # 导航状态管理 (使用枚举替代简单布尔值)
+        self._navigation_state: NavigationState = NavigationState.IDLE
+        self._navigation_active: bool = False       # 兼容性：是否有活跃的导航任务
+        
         self._last_valid_pose: Optional[Pose2D] = None  # 用于跳变检测
         self._pose_jump_threshold: float = 3.0  # 位姿跳变阈值 (m) - 降低以检测小幅漂移
         self._recovery_enabled: bool = True  # 启用自动恢复
@@ -228,6 +253,15 @@ class VelocityControllerNode(Node):
             NavigationResult,
             'navigation_result',
             self._nav_result_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 取消导航订阅 (来自地面站的强制取消请求)
+        self.cancel_nav_sub = self.create_subscription(
+            Bool,
+            'cancel_navigation',
+            self._cancel_navigation_callback,
             qos_reliable,
             callback_group=self.callback_group
         )
@@ -339,6 +373,13 @@ class VelocityControllerNode(Node):
             NavigationFeedback,
             'velocity_controller/feedback',
             qos_best_effort
+        )
+        
+        # 模式切换发布 (用于自动恢复 GUIDED 和任务完成后切换 HOLD)
+        self.mode_pub = self.create_publisher(
+            String,
+            'set_usv_mode',
+            qos_reliable
         )
         
         # ==================== 控制循环 ====================
@@ -474,10 +515,17 @@ class VelocityControllerNode(Node):
         当 navigate_to_point_node 判定到达目标后，会发送 NavigationResult。
         注意：平滑切换时也会发送 result（message 包含"已通过"），此时不应停止。
         只有最终到达时（message 包含"成功到达"）才停止追踪。
+        
+        状态转换: ACTIVE → COMPLETED
         """
         goal_id = getattr(msg, 'goal_id', 0)
         success = getattr(msg, 'success', False)
         message = getattr(msg, 'message', '')
+        
+        self.get_logger().debug(
+            f'收到导航结果: goal_id={goal_id}, success={success}, message={message}, '
+            f'当前追踪ID={self._current_goal_id}, nav_state={self._navigation_state.name}'
+        )
         
         if success:
             # 区分"通过航点"和"最终到达"
@@ -490,19 +538,58 @@ class VelocityControllerNode(Node):
                     f'收到通过通知 [ID={goal_id}], 继续导航')
                 return
             
-            # 检查是否是当前正在追踪的目标
-            if self._current_goal_id is not None and goal_id == self._current_goal_id:
+            # 检查是否是最终到达（包含"成功到达"且导航任务激活）
+            is_final_arrival = '成功到达' in message
+            is_nav_active = self._navigation_state in (NavigationState.ACTIVE, NavigationState.PAUSED)
+            
+            if is_final_arrival and is_nav_active:
                 self.get_logger().info(
-                    f'✅ 收到最终到达通知 [ID={goal_id}], 停止追踪')
+                    f'✅ 收到最终到达通知 [ID={goal_id}], 停止追踪 (当前追踪ID={self._current_goal_id})')
                 
-                # 清除当前目标，停止控制
-                self.tracker.clear_waypoints()
-                self._current_goal_id = None
-                self._control_active = False
-                self.stop_usv()
+                # 使用统一的结束方法，设置为 COMPLETED 状态
+                self._end_navigation(NavigationState.COMPLETED, "成功到达目标")
+                
+                # 导航完成后自动切换到 HOLD 模式
+                self._switch_to_hold_mode()
+                
+            elif self._current_goal_id is not None and goal_id == self._current_goal_id:
+                # 兼容旧逻辑：ID 匹配也停止
+                self.get_logger().info(
+                    f'✅ 收到到达通知 [ID={goal_id}], 停止追踪')
+                
+                self._end_navigation(NavigationState.COMPLETED, "成功到达目标")
+                self._switch_to_hold_mode()
             else:
                 self.get_logger().debug(
-                    f'收到到达通知 [ID={goal_id}], 但当前追踪 ID={self._current_goal_id}, 忽略')
+                    f'收到到达通知 [ID={goal_id}], message="{message}", 忽略'
+                )
+    
+    def _cancel_navigation_callback(self, msg: Bool):
+        """
+        取消导航回调 - 来自地面站的强制取消请求
+        
+        当用户在地面站点击 HOLD 或 MANUAL 按钮时，会发送此消息。
+        无论导航状态如何，都会强制结束当前导航任务，并设置为 CANCELLED 状态。
+        
+        状态转换: ANY → CANCELLED
+        - CANCELLED 状态不会触发自动恢复 GUIDED
+        """
+        if not msg.data:
+            return
+        
+        self.get_logger().warn('🛑 收到取消导航请求，强制结束导航任务')
+        
+        # 使用统一的结束方法，设置为 CANCELLED 状态
+        self._end_navigation(NavigationState.CANCELLED, "用户主动取消")
+        
+        # 发布取消结果通知
+        result_msg = NavigationResult()
+        result_msg.goal_id = self._current_goal_id or -1
+        result_msg.success = False
+        result_msg.message = '导航任务被用户取消'
+        self.result_pub.publish(result_msg)
+        
+        self.get_logger().info('✅ 导航任务已取消')
     
     def _nav_goal_callback(self, msg: NavigationGoal):
         """
@@ -513,27 +600,30 @@ class VelocityControllerNode(Node):
         
         注意：NAV_MODE_TERMINAL (离群单点导航) 由 usv_control_node 的位置模式处理
         """
+        target = msg.target_pose.pose.position
+        goal_id = getattr(msg, 'goal_id', 0)
+        nav_mode = getattr(msg, 'nav_mode', 0)
+        
+        self.get_logger().info(
+            f'📨 velocity_controller 收到目标 [ID={goal_id}]: '
+            f'({target.x:.2f}, {target.y:.2f}), nav_mode={nav_mode}, control_mode={self.control_mode}')
+        
         # 仅在速度模式下处理
         if self.control_mode != 'velocity':
+            self.get_logger().warn(f'⚠️ 非速度模式，忽略目标 [ID={goal_id}]')
             return
         
-        # 获取导航模式
-        nav_mode = getattr(msg, 'nav_mode', 0)
         NAV_MODE_TERMINAL = 3  # 定义在 NavigationGoal.msg
         
         # NAV_MODE_TERMINAL (离群单点导航) 跳过，让 usv_control_node 位置模式处理
         # 位置模式更适合精确定点停留，而非连续路径跟踪
         if nav_mode == NAV_MODE_TERMINAL:
-            goal_id = getattr(msg, 'goal_id', 0)
-            target = msg.target_pose.pose.position
             self.get_logger().info(
                 f'⏭️ 离群目标 [ID={goal_id}] ({target.x:.2f}, {target.y:.2f}) '
                 f'使用位置模式处理 (NAV_MODE_TERMINAL)'
             )
             return
         
-        target = msg.target_pose.pose.position
-        goal_id = getattr(msg, 'goal_id', 0)
         maneuver_type = getattr(msg, 'maneuver_type', 0)
         maneuver_param = getattr(msg, 'maneuver_param', 0.0)
         
@@ -567,6 +657,7 @@ class VelocityControllerNode(Node):
                 self.tracker.set_waypoint(waypoint)
                 self._control_active = True
                 self._current_goal_id = goal_id
+                self._set_navigation_state(NavigationState.ACTIVE, "旋转机动目标")
                 
                 self.get_logger().info(
                     f'🔄 旋转机动目标 [ID={goal_id}]: '
@@ -602,12 +693,18 @@ class VelocityControllerNode(Node):
             self._current_goal_id = goal_id
             self.tracker.set_waypoint(waypoint)
             self._control_active = True
+            self._set_navigation_state(NavigationState.ACTIVE, f"新导航目标[ID={goal_id}]")
             
             self.get_logger().info(
                 f'🎯 新导航目标 [ID={goal_id}]: '
                 f'({target.x:.2f}, {target.y:.2f}), 速度={speed:.2f} m/s'
             )
         else:
+            # 相同目标ID的更新，也要更新 _current_goal_id（确保同步）
+            self._current_goal_id = goal_id
+            # 确保导航状态为 ACTIVE (从 PAUSED 恢复的情况)
+            if self._navigation_state != NavigationState.ACTIVE:
+                self._set_navigation_state(NavigationState.ACTIVE, "继续导航")
             self.tracker.add_waypoint(waypoint)
             self.get_logger().debug(
                 f'📥 添加航点到队列: ({target.x:.2f}, {target.y:.2f})'
@@ -966,8 +1063,49 @@ class VelocityControllerNode(Node):
         
         # ==================== 检查模式 ====================
         if self.require_guided_mode and self.current_state.mode != 'GUIDED':
-            self.get_logger().debug(f'需要 GUIDED 模式，当前: {self.current_state.mode}')
+            current_mode = self.current_state.mode
+            
+            # MANUAL 模式: 用户明确要求手动控制，尊重用户意图，结束导航
+            if current_mode == 'MANUAL':
+                if self._navigation_state == NavigationState.ACTIVE:
+                    self.get_logger().warn(
+                        f'⚠️ 检测到切换为 MANUAL 模式，尊重用户意图，结束导航任务'
+                    )
+                    # 强制结束导航，设置为 CANCELLED 状态，不自动恢复 GUIDED
+                    self._end_navigation(NavigationState.CANCELLED, "用户切换到MANUAL模式")
+                else:
+                    self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+                return False
+            
+            # HOLD 模式: 根据导航状态决定是否恢复 GUIDED
+            if current_mode == 'HOLD':
+                if self._navigation_state == NavigationState.ACTIVE:
+                    # 导航进行中被意外切换到 HOLD，设置为 PAUSED 并尝试恢复
+                    if self._should_protect_navigation():
+                        self._set_navigation_state(NavigationState.PAUSED, "被HOLD模式打断")
+                        self._restore_guided_mode()
+                    else:
+                        self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+                elif self._navigation_state == NavigationState.PAUSED:
+                    # 已经是 PAUSED 状态，继续尝试恢复
+                    if self._mode_protection_enabled:
+                        self._restore_guided_mode()
+                else:
+                    # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
+                    self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+                return False
+            
+            # 其他模式 (RTL, AUTO 等): 导航进行中尝试恢复 GUIDED
+            if self._should_protect_navigation():
+                self._set_navigation_state(NavigationState.PAUSED, f"被{current_mode}模式打断")
+                self._restore_guided_mode()
+            else:
+                self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
             return False
+        
+        # 模式正确 (GUIDED)，如果之前是 PAUSED 则恢复为 ACTIVE
+        if self._navigation_state == NavigationState.PAUSED:
+            self._set_navigation_state(NavigationState.ACTIVE, "GUIDED模式已恢复")
         
         return True
     
@@ -1067,6 +1205,80 @@ class VelocityControllerNode(Node):
         result.message = 'Goal reached'
         self.result_pub.publish(result)
     
+    # ==================== 导航状态管理 ====================
+    
+    def _set_navigation_state(self, new_state: NavigationState, reason: str = ""):
+        """
+        设置导航状态并同步更新兼容性变量
+        
+        Args:
+            new_state: 新的导航状态
+            reason: 状态变更原因 (用于日志)
+        """
+        old_state = self._navigation_state
+        if old_state == new_state:
+            return  # 状态未变化
+        
+        self._navigation_state = new_state
+        
+        # 同步更新兼容性变量
+        self._navigation_active = new_state == NavigationState.ACTIVE
+        
+        # 记录状态变化
+        reason_str = f" ({reason})" if reason else ""
+        self.get_logger().info(
+            f'📊 导航状态: {old_state.name} → {new_state.name}{reason_str}'
+        )
+    
+    def _is_navigation_resumable(self) -> bool:
+        """
+        检查当前导航状态是否可恢复
+        
+        只有 ACTIVE 或 PAUSED 状态才需要自动恢复 GUIDED 模式。
+        CANCELLED, COMPLETED, FAILED 状态不应自动恢复。
+        
+        Returns:
+            bool: 是否应该尝试恢复导航
+        """
+        return self._navigation_state in (NavigationState.ACTIVE, NavigationState.PAUSED)
+    
+    def _should_protect_navigation(self) -> bool:
+        """
+        检查是否应该保护导航（自动恢复 GUIDED）
+        
+        Returns:
+            bool: 是否应该自动恢复 GUIDED 模式
+        """
+        if not self._mode_protection_enabled:
+            return False
+        
+        # 只有 ACTIVE 状态才保护（被意外切换模式时恢复）
+        # PAUSED 状态表示已经被打断一次，如果再次被打断可能是用户意图
+        return self._navigation_state == NavigationState.ACTIVE
+    
+    def _end_navigation(self, end_state: NavigationState, reason: str = ""):
+        """
+        结束当前导航任务
+        
+        统一处理导航结束的所有清理工作。
+        
+        Args:
+            end_state: 结束状态 (COMPLETED, CANCELLED, FAILED)
+            reason: 结束原因 (用于日志)
+        """
+        # 清除航点和控制状态
+        self.tracker.clear_waypoints()
+        self._current_goal_id = None
+        self._control_active = False
+        self._rotation_active = False
+        self._rotation_goal_id = None
+        
+        # 更新导航状态
+        self._set_navigation_state(end_state, reason)
+        
+        # 停止 USV
+        self.stop_usv()
+    
     def _publish_status(self):
         """
         发布控制器状态
@@ -1121,6 +1333,44 @@ class VelocityControllerNode(Node):
         status_msg = String()
         status_msg.data = ','.join(status_parts)
         self.status_pub.publish(status_msg)
+    
+    # ==================== 模式切换 ====================
+    
+    def _switch_to_hold_mode(self):
+        """
+        导航任务完成后切换到 HOLD 模式
+        """
+        if self.current_state is None:
+            return
+        
+        if self.current_state.mode == 'HOLD':
+            return  # 已经是 HOLD 模式
+        
+        self.get_logger().info('🛑 导航完成，自动切换到 HOLD 模式')
+        mode_msg = String()
+        mode_msg.data = 'HOLD'
+        self.mode_pub.publish(mode_msg)
+    
+    def _restore_guided_mode(self):
+        """
+        导航进行中检测到非 GUIDED 模式时，自动恢复到 GUIDED 模式
+        """
+        import time
+        current_time = time.time()
+        
+        # 冷却时间检查，避免频繁切换
+        if current_time - self._last_mode_restore_time < self._mode_restore_cooldown:
+            return
+        
+        self._last_mode_restore_time = current_time
+        
+        current_mode = self.current_state.mode if self.current_state else 'UNKNOWN'
+        self.get_logger().warn(
+            f'⚠️ 导航进行中检测到模式切换为 {current_mode}，自动恢复 GUIDED 模式'
+        )
+        mode_msg = String()
+        mode_msg.data = 'GUIDED'
+        self.mode_pub.publish(mode_msg)
     
     # ==================== 安全关闭 ====================
     

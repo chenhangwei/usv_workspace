@@ -4,7 +4,7 @@
 """
 
 import queue
-from std_msgs.msg import String
+from std_msgs.msg import String, Bool
 
 
 class CommandProcessor:
@@ -26,6 +26,11 @@ class CommandProcessor:
         for ns in usv_list:
             # 提取USV ID
             usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            
+            # 发送取消导航消息，通知 USV 端结束导航任务
+            # 这会让 velocity_controller_node 进入 CANCELLED 状态，不会自动恢复 GUIDED
+            self._send_cancel_navigation(usv_id)
+            
             # 如果该USV有正在执行的导航任务，取消它
             if usv_id in self.node._usv_nav_target_cache:
                 self.node.get_logger().info(f"🛑 手动切换MANUAL模式，取消 {usv_id} 的导航任务")
@@ -51,6 +56,11 @@ class CommandProcessor:
         for ns in usv_list:
             # 提取USV ID
             usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            
+            # 发送取消导航消息，通知 USV 端结束导航任务
+            # 这会让 velocity_controller_node 进入 CANCELLED 状态，不会自动恢复 GUIDED
+            self._send_cancel_navigation(usv_id)
+            
             # 如果该USV有正在执行的导航任务，取消它
             if usv_id in self.node._usv_nav_target_cache:
                 self.node.get_logger().info(f"🛑 切换HOLD模式，取消 {usv_id} 的导航任务")
@@ -63,6 +73,27 @@ class CommandProcessor:
         
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "HOLD")
+    
+    def _send_cancel_navigation(self, usv_id: str):
+        """
+        发送取消导航消息给指定的USV
+        
+        这会通知 USV 端的 velocity_controller_node 进入 CANCELLED 状态，
+        从而不会自动恢复 GUIDED 模式。
+        
+        Args:
+            usv_id: USV标识符
+        """
+        if usv_id in self.node.usv_manager.cancel_navigation_pubs:
+            cancel_msg = Bool()
+            cancel_msg.data = True
+            try:
+                self.node.publish_queue.put_nowait(
+                    (self.node.usv_manager.cancel_navigation_pubs[usv_id], cancel_msg)
+                )
+                self.node.get_logger().info(f"📤 向 {usv_id} 发送取消导航消息")
+            except Exception as e:
+                self.node.get_logger().warn(f"发送取消导航消息失败: {e}")
 
     def set_guided_callback(self, msg):
         """

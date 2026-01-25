@@ -158,6 +158,14 @@ class NavigateToPointNode(Node):
             qos_reliable,
             callback_group=self.callback_group)
         
+        # 订阅取消导航请求 (来自地面站)
+        self.cancel_nav_sub = self.create_subscription(
+            Bool,
+            'cancel_navigation',
+            self._cancel_navigation_callback,
+            qos_reliable,
+            callback_group=self.callback_group)
+        
         # 订阅当前位置 (使用 GPS 转换的统一坐标系)
         self.current_pose: Optional[PoseStamped] = None
         self.pose_sub = self.create_subscription(
@@ -264,6 +272,44 @@ class NavigateToPointNode(Node):
         new_str = "启用" if value else "禁用"
         self.get_logger().info(f"smooth_navigation 更新: {old_str} -> {new_str}")
     
+    def _cancel_navigation_callback(self, msg):
+        """
+        取消导航回调 - 来自地面站的强制取消请求
+        
+        当用户在地面站点击 HOLD 或 MANUAL 按钮时，会发送此消息。
+        清空当前任务和航点队列。
+        """
+        from std_msgs.msg import Bool
+        if not isinstance(msg, Bool) or not msg.data:
+            return
+        
+        self.get_logger().warn('🛑 收到取消导航请求，清空航点队列')
+        
+        # 清空航点队列
+        queue_len = len(self.waypoint_queue)
+        self.waypoint_queue.clear()
+        
+        # 清除当前任务
+        old_goal_id = self.current_goal_id
+        self.current_goal = None
+        self.current_goal_id = None
+        self.goal_start_time = None
+        
+        # 重置同步模式和旋转模式状态
+        self._sync_mode_start_time = None
+        self._arrival_check_samples = []
+        self._rotate_in_progress = False
+        self._rotate_start_yaw = None
+        
+        # 发布取消结果
+        result = NavigationResult()
+        result.goal_id = old_goal_id if old_goal_id is not None else -1
+        result.success = False
+        result.message = '导航任务被用户取消'
+        self.result_pub.publish(result)
+        
+        self.get_logger().info(f'✅ 导航任务已取消 (清空 {queue_len} 个排队航点)')
+    
     def pose_callback(self, msg):
         """更新当前位置"""
         self.current_pose = msg
@@ -283,24 +329,52 @@ class NavigateToPointNode(Node):
         self._last_goal_received_time = self.get_clock().now()
         self._idle_warning_logged = False  # 重置警告标志
         
+        # 详细诊断日志
+        current_goal_info = f"current_goal={'有' if self.current_goal else '无'}"
+        if self.current_goal:
+            current_goal_info += f"(ID={self.current_goal_id})"
+        
         self.get_logger().info(
             f'📥 收到目标 [ID={msg.goal_id}]: '
             f'({msg.target_pose.pose.position.x:.2f}, '
-            f'{msg.target_pose.pose.position.y:.2f})')
+            f'{msg.target_pose.pose.position.y:.2f}) '
+            f'| 状态: {current_goal_info}, 队列={len(self.waypoint_queue)}')
 
-        # ========== 新任务检测: goal_id=1 表示新任务开始，清空队列 ==========
+        # ========== 新任务检测: goal_id=1 表示新任务开始 ==========
         # GS 每次开始新集群任务时会重置 goal_id 从 1 开始
-        # 如果收到 goal_id=1，说明是新任务的第一个目标，应该清空之前的残留
-        if msg.goal_id == 1 and self.waypoint_queue:
-            old_queue_len = len(self.waypoint_queue)
-            self.waypoint_queue.clear()
-            self.get_logger().info(
-                f'🗑️ 新任务开始 [ID=1], 清空残留队列 (原队列长度={old_queue_len})')
+        # 如果收到 goal_id=1，说明是新任务的第一个目标
+        # 必须清空之前的残留任务和队列，确保新任务能正确开始
+        if msg.goal_id == 1:
+            had_current = self.current_goal is not None
+            had_queue = len(self.waypoint_queue) > 0
+            
+            if had_current or had_queue:
+                old_goal_id = self.current_goal_id
+                old_queue_len = len(self.waypoint_queue)
+                
+                # 清除当前任务
+                self.current_goal = None
+                self.current_goal_id = None
+                self.goal_start_time = None
+                self._last_dedup_goal_id = None
+                
+                # 清空队列
+                self.waypoint_queue.clear()
+                
+                # 重置状态
+                self._sync_mode_start_time = None
+                self._arrival_check_samples = []
+                self._rotate_in_progress = False
+                
+                self.get_logger().info(
+                    f'🗑️ 新任务开始 [ID=1], 清空残留: '
+                    f'旧任务ID={old_goal_id}, 队列长度={old_queue_len}')
 
         # 检查是否与当前目标重复
-        if self._is_duplicate_goal(msg):
+        is_dup = self._is_duplicate_goal(msg)
+        if is_dup:
             if self._last_dedup_goal_id != msg.goal_id:
-                self.get_logger().debug(
+                self.get_logger().warn(
                     f'♻️ 重复目标已合并: new_id={msg.goal_id} -> keep_id={self.current_goal_id}'
                 )
                 self._last_dedup_goal_id = msg.goal_id

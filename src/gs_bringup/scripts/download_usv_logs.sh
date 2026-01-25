@@ -20,8 +20,8 @@
 #
 
 # ==================== 配置 ====================
-#USV_HOST="192.168.68.54"      # USV 的 IP 地址
-USV_HOST="192.168.68.52"      # USV 的 IP 地址
+USV_HOST="192.168.68.54"      # USV 的 IP 地址
+#USV_HOST="192.168.68.52"      # USV 的 IP 地址
 USV_USER="chenhangwei"         # USV 的用户名
 USV_LOG_DIR="~/usv_logs"       # USV 上的日志目录
 LOCAL_LOG_DIR="$HOME/usv_logs" # 本地保存目录
