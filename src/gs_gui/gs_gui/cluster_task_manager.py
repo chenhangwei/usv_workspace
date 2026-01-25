@@ -95,6 +95,21 @@ class ClusterTaskManager:
                         sync_attr = step.get("sync", "true").lower()
                         sync_val = (sync_attr == "true")
                         
+                        # ========== 导航模式解析 ==========
+                        # 支持的导航模式: async(0), sync(1), rotate(2), terminal(3)
+                        NAV_MODE_MAP = {
+                            'async': 0, '0': 0,
+                            'sync': 1, '1': 1,
+                            'rotate': 2, '2': 2,
+                            'terminal': 3, '3': 3
+                        }
+                        nav_mode_attr = step.get("nav_mode", "async").lower()
+                        step_nav_mode = NAV_MODE_MAP.get(nav_mode_attr, 0)
+                        
+                        # 同步模式参数
+                        step_sync_timeout = float(step.get("sync_timeout", "10.0"))
+                        step_arrival_quality = float(step.get("arrival_quality", "0.8"))
+                        
                         usvs_elem = step.find("usvs")
                         if usvs_elem is None:
                             self.append_warning(f"step {step_number} 缺少 usvs 节点，已跳过")
@@ -166,6 +181,11 @@ class ClusterTaskManager:
                             # 获取 led 属性
                             led_val = usv.get("led", "")
 
+                            # 如果有旋转机动，自动设置为旋转模式
+                            effective_nav_mode = step_nav_mode
+                            if maneuver_type == 1:  # ROTATE maneuver
+                                effective_nav_mode = 2  # NAV_MODE_ROTATE
+                            
                             usv_data = {
                                 "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
                                 "position": {
@@ -180,14 +200,18 @@ class ClusterTaskManager:
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
                                 "step": step_number,
                                 "sync": sync_val,
+                                "nav_mode": effective_nav_mode,
+                                "sync_timeout": step_sync_timeout,
+                                "arrival_quality_threshold": step_arrival_quality,
                                 "led": led_val
                             }
                             combined_list.append(usv_data)
                             step_usv_count += 1
 
                         if step_usv_count:
-                            sync_str = "同步" if sync_val else "异步"
-                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{sync_str}]")
+                            nav_mode_names = {0: '异步', 1: '同步', 2: '旋转', 3: '终止'}
+                            mode_str = nav_mode_names.get(step_nav_mode, '异步')
+                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{mode_str}]")
 
                     if combined_list:
                         combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))

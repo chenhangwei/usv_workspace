@@ -80,7 +80,8 @@ class UsvFleetLauncher(QDialog):
         self.executor = ThreadPoolExecutor(max_workers=10)
         
         # 日志级别控制（减少冗余输出）
-        self.verbose_logging = False
+        # 临时开启调试：诊断 state_handler 检测问题
+        self.verbose_logging = True
         
         # 初始化 UI
         self._init_ui()
@@ -619,15 +620,26 @@ class UsvFleetLauncher(QDialog):
                 self._log("🔍 开始状态检测...")
             
             # 步骤 1: 获取所有 ROS 节点（单次检测）
-            # 增加超时时间到 5 秒，确保在网络复杂时能获取完整列表
-            result = subprocess.run(
-                ['ros2', 'node', 'list'],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            online_nodes = result.stdout.strip().split('\n') if result.returncode == 0 else []
+            # 使用 Domain ID 99（地面站域），确保能发现通过 domain_bridge 桥接的节点
+            online_nodes = []
+            try:
+                env = os.environ.copy()
+                env['ROS_DOMAIN_ID'] = '99'  # 地面站域
+                result = subprocess.run(
+                    ['ros2', 'node', 'list'],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    env=env
+                )
+                if result.returncode == 0:
+                    online_nodes = result.stdout.strip().split('\n')
+                    if self.verbose_logging:
+                        self._log(f"📋 检测到 {len(online_nodes)} 个 ROS 节点")
+            except subprocess.TimeoutExpired:
+                self._log("⚠️ ROS 节点检测超时，将依赖 state_handler 和 ping")
+            except Exception as e:
+                self._log(f"⚠️ ROS 节点检测失败: {e}")
             
             # 步骤 2: 并行检测所有主机的在线状态
             host_status = {}  # {hostname: is_online}
@@ -685,13 +697,27 @@ class UsvFleetLauncher(QDialog):
                 
                 # 双重检查：
                 # 1. 尝试从 main_app 获取实时连接状态（最准）
-                if self.parent() and hasattr(self.parent(), 'state_handler'):
+                #    优先使用 Cluster List 中的真实连接状态
+                main_window = self.parent()
+                
+                # 调试信息
+                if self.verbose_logging:
+                    has_parent = main_window is not None
+                    has_handler = hasattr(main_window, 'state_handler') if main_window else False
+                    self._log(f"  🔍 {usv_id}: parent={has_parent}, state_handler={has_handler}")
+                
+                if main_window and hasattr(main_window, 'state_handler'):
                     try:
-                       state = self.parent().state_handler.get_usv_state(usv_id)
-                       if state and state.get('connected'):
-                           has_nodes = True
-                    except Exception:
-                        pass
+                        state = main_window.state_handler.get_usv_state(usv_id)
+                        if self.verbose_logging:
+                            self._log(f"  🔍 {usv_id}: state={state is not None}, connected={state.get('connected') if state else 'N/A'}")
+                        if state and state.get('connected'):
+                            has_nodes = True
+                            if self.verbose_logging:
+                                self._log(f"  ✅ {usv_id} 从 state_handler 检测到连接状态")
+                    except Exception as e:
+                        if self.verbose_logging:
+                            self._log(f"  ⚠️ {usv_id} state_handler 检测异常: {e}")
                 
                 # 2. 如果方法1没结果，再查 ros2 node list
                 if not has_nodes:

@@ -1,0 +1,1159 @@
+#!/usr/bin/env python3
+"""
+USV 速度模式控制节点
+
+基于 Pure Pursuit + Stanley 混合控制器的速度模式导航节点。
+直接发送速度指令给飞控，绕过飞控的减速逻辑，实现平滑连续导航。
+
+订阅:
+- /{ns}/set_usv_nav_goal: 导航目标 (NavigationGoal)
+- /{ns}/local_position/pose_from_gps: 当前位姿 (PoseStamped)
+- /{ns}/mavros/state: 飞控状态 (State)
+
+发布:
+- /{ns}/setpoint_raw/local: 速度指令 (PositionTarget)
+- /{ns}/velocity_controller/status: 控制器状态 (String)
+
+参数:
+- control_mode: 控制模式 ('velocity' 或 'position')
+- controller_type: 控制器类型 ('pure_pursuit', 'stanley', 'hybrid')
+- cruise_speed: 巡航速度 (m/s)
+- max_angular_velocity: 最大角速度 (rad/s)
+- goal_tolerance: 到达阈值 (m)
+- switch_tolerance: 切换阈值 (m)
+
+作者: Auto-generated
+日期: 2026-01-22
+"""
+
+import rclpy
+from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+
+from geometry_msgs.msg import PoseStamped, TwistStamped
+from mavros_msgs.msg import PositionTarget, State
+from std_msgs.msg import String, Float32, Bool
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
+
+import math
+from typing import Optional
+
+from .velocity_path_tracker import (
+    VelocityPathTracker, 
+    Pose2D, 
+    Waypoint,
+    VelocityCommand,
+    ControllerType
+)
+
+
+class VelocityControllerNode(Node):
+    """
+    USV 速度模式控制节点
+    
+    使用 Pure Pursuit + Stanley 混合控制器计算速度指令，
+    直接发送给飞控，避免飞控的位置模式减速逻辑。
+    """
+    
+    def __init__(self):
+        super().__init__('velocity_controller_node')
+        
+        # 回调组
+        self.callback_group = ReentrantCallbackGroup()
+        
+        # ==================== 参数声明 ====================
+        # 控制模式
+        self.declare_parameter('control_mode', 'velocity')  # 'position' 或 'velocity'
+        self.declare_parameter('controller_type', 'hybrid')  # 'pure_pursuit', 'stanley', 'hybrid'
+        
+        # Pure Pursuit 参数
+        self.declare_parameter('lookahead_distance', 2.0)
+        self.declare_parameter('min_lookahead', 1.0)
+        self.declare_parameter('max_lookahead', 5.0)
+        self.declare_parameter('lookahead_gain', 0.5)
+        
+        # Stanley 参数
+        self.declare_parameter('stanley_gain', 2.5)
+        self.declare_parameter('stanley_softening', 0.1)
+        
+        # 混合控制参数
+        self.declare_parameter('hybrid_switch_distance', 2.0)
+        
+        # 速度参数
+        self.declare_parameter('cruise_speed', 0.5)
+        self.declare_parameter('max_angular_velocity', 0.5)
+        self.declare_parameter('min_speed', 0.05)
+        
+        # 到达判断
+        self.declare_parameter('goal_tolerance', 0.5)
+        self.declare_parameter('switch_tolerance', 1.5)
+        
+        # 控制参数
+        self.declare_parameter('control_rate', 20.0)  # Hz
+        self.declare_parameter('angular_velocity_filter', 0.3)
+        
+        # 安全参数
+        self.declare_parameter('require_guided_mode', True)
+        self.declare_parameter('require_armed', True)
+        
+        # L1 风格航向估计参数
+        self.declare_parameter('use_velocity_based_heading', True)  # 使用速度方向估计航向
+        self.declare_parameter('min_speed_for_velocity_heading', 0.20)  # 使用速度航向的最小速度 (m/s)
+        self.declare_parameter('heading_fusion_speed_range', 0.15)  # 航向融合过渡速度范围 (m/s)
+        
+        # ==================== 获取参数 ====================
+        self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
+        controller_type_str = str(self.get_parameter('controller_type').value or 'hybrid')
+        
+        # 控制器类型映射
+        controller_type_map = {
+            'pure_pursuit': ControllerType.PURE_PURSUIT,
+            'stanley': ControllerType.STANLEY,
+            'hybrid': ControllerType.HYBRID
+        }
+        controller_type = controller_type_map.get(controller_type_str, ControllerType.HYBRID)
+        
+        self.require_guided_mode = bool(self.get_parameter('require_guided_mode').value)
+        self.require_armed = bool(self.get_parameter('require_armed').value)
+        
+        # ==================== 初始化路径跟踪器 ====================
+        self.tracker = VelocityPathTracker(
+            lookahead_distance=float(self.get_parameter('lookahead_distance').value or 2.0),
+            min_lookahead=float(self.get_parameter('min_lookahead').value or 1.0),
+            max_lookahead=float(self.get_parameter('max_lookahead').value or 5.0),
+            lookahead_gain=float(self.get_parameter('lookahead_gain').value or 0.5),
+            stanley_gain=float(self.get_parameter('stanley_gain').value or 2.5),
+            stanley_softening=float(self.get_parameter('stanley_softening').value or 0.1),
+            controller_type=controller_type,
+            hybrid_switch_distance=float(self.get_parameter('hybrid_switch_distance').value or 2.0),
+            cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
+            max_angular_velocity=float(self.get_parameter('max_angular_velocity').value or 0.5),
+            min_speed=float(self.get_parameter('min_speed').value or 0.05),
+            goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
+            switch_tolerance=float(self.get_parameter('switch_tolerance').value or 1.5),
+            angular_velocity_filter=float(self.get_parameter('angular_velocity_filter').value or 0.3),
+        )
+        
+        # ==================== QoS 配置 ====================
+        qos_best_effort = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT
+        )
+        qos_reliable = QoSProfile(
+            depth=10,
+            reliability=QoSReliabilityPolicy.RELIABLE
+        )
+        
+        # ==================== 状态变量 ====================
+        self.current_pose: Optional[Pose2D] = None
+        self.current_state: Optional[State] = None
+        self._current_goal_id: Optional[int] = None
+        self._last_velocity_cmd: Optional[VelocityCommand] = None
+        self._control_active = False
+        
+        # ==================== 避障状态 ====================
+        self._avoidance_active = False           # 避障模式是否激活
+        self._avoidance_position: Optional[Pose2D] = None  # 避障目标位置
+        
+        # ==================== 旋转机动状态 ====================
+        self._rotation_active = False            # 是否正在执行旋转
+        self._rotation_target_yaw = 0.0          # 目标旋转总角度 (rad)
+        self._rotation_accumulated = 0.0         # 累计旋转角度 (rad)
+        self._rotation_last_yaw = 0.0            # 上一次记录的航向
+        self._rotation_initialized = False       # 是否已初始化旋转
+        self._rotation_yaw_rate = 0.5            # 旋转角速度 (rad/s)
+        self._rotation_goal_id: Optional[int] = None  # 旋转任务的 goal_id
+        
+        # ==================== 健壮性增强 ====================
+        self._last_pose_time: float = 0.0
+        self._last_state_time: float = 0.0
+        self._pose_timeout: float = 2.0   # 位姿超时 (秒)
+        self._state_timeout: float = 3.0  # 飞控状态超时 (秒)
+        self._consecutive_timeout_count: int = 0
+        self._max_timeout_before_stop: int = 5  # 连续超时次数阈值
+        self._last_valid_pose: Optional[Pose2D] = None  # 用于跳变检测
+        self._pose_jump_threshold: float = 3.0  # 位姿跳变阈值 (m) - 降低以检测小幅漂移
+        self._recovery_enabled: bool = True  # 启用自动恢复
+        self._was_timed_out: bool = False  # 是否曾经超时
+        
+        # ==================== L1 风格航向估计 ====================
+        # 使用飞控 EKF 融合的速度向量计算实际航向（类似 L1 算法）
+        self._use_velocity_heading = bool(self.get_parameter('use_velocity_based_heading').value)
+        self._min_speed_for_velocity_yaw = float(self.get_parameter('min_speed_for_velocity_heading').value)
+        self._velocity_based_yaw: float = 0.0  # 基于速度向量的航向
+        self._velocity_yaw_valid: bool = False  # 速度航向是否有效
+        self._current_speed: float = 0.0  # 当前速度 (m/s)
+        
+        # ==================== 订阅者 ====================
+        # 位姿订阅
+        self.pose_sub = self.create_subscription(
+            PoseStamped,
+            'local_position/pose_from_gps',
+            self._pose_callback,
+            qos_best_effort,
+            callback_group=self.callback_group
+        )
+        
+        # 飞控状态订阅
+        self.state_sub = self.create_subscription(
+            State,
+            'state',
+            self._state_callback,
+            qos_best_effort,
+            callback_group=self.callback_group
+        )
+        
+        # 速度订阅 (MAVROS EKF 融合后的速度向量，用于 L1 风格航向估计)
+        self.velocity_sub = self.create_subscription(
+            TwistStamped,
+            'local_position/velocity_local',
+            self._velocity_callback,
+            qos_best_effort,
+            callback_group=self.callback_group
+        )
+        
+        # 导航目标订阅
+        self.nav_goal_sub = self.create_subscription(
+            NavigationGoal,
+            'set_usv_nav_goal',
+            self._nav_goal_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 导航结果订阅 (来自 navigate_to_point_node 的到达通知)
+        self.nav_result_sub = self.create_subscription(
+            NavigationResult,
+            'navigation_result',
+            self._nav_result_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 参数更新订阅
+        self.cruise_speed_sub = self.create_subscription(
+            Float32,
+            'set_velocity_cruise_speed',
+            self._cruise_speed_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        self.goal_tolerance_sub = self.create_subscription(
+            Float32,
+            'set_velocity_goal_tolerance',
+            self._goal_tolerance_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        self.switch_tolerance_sub = self.create_subscription(
+            Float32,
+            'set_velocity_switch_tolerance',
+            self._switch_tolerance_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 前视距离
+        self.lookahead_sub = self.create_subscription(
+            Float32,
+            'set_velocity_lookahead',
+            self._lookahead_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # Stanley 增益
+        self.stanley_gain_sub = self.create_subscription(
+            Float32,
+            'set_velocity_stanley_gain',
+            self._stanley_gain_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 混合切换距离
+        self.hybrid_switch_sub = self.create_subscription(
+            Float32,
+            'set_velocity_hybrid_switch',
+            self._hybrid_switch_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # 最大角速度
+        self.max_angular_sub = self.create_subscription(
+            Float32,
+            'set_velocity_max_angular',
+            self._max_angular_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # ==================== 避障订阅 ====================
+        # 避障目标位置
+        self.avoidance_position_sub = self.create_subscription(
+            PositionTarget,
+            'avoidance_position',
+            self._avoidance_position_callback,
+            qos_best_effort,
+            callback_group=self.callback_group
+        )
+        
+        # 避障标志
+        self.avoidance_flag_sub = self.create_subscription(
+            Bool,
+            'avoidance_flag',
+            self._avoidance_flag_callback,
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        # ==================== 发布者 ====================
+        # 速度指令发布
+        self.velocity_pub = self.create_publisher(
+            PositionTarget,
+            'setpoint_raw/local',
+            qos_best_effort
+        )
+        
+        # 状态发布
+        self.status_pub = self.create_publisher(
+            String,
+            'velocity_controller/status',
+            qos_reliable
+        )
+        
+        # 导航结果发布 (用于通知上层节点)
+        self.result_pub = self.create_publisher(
+            NavigationResult,
+            'velocity_controller/result',
+            qos_reliable
+        )
+        
+        # 导航反馈发布 (实时状态)
+        self.feedback_pub = self.create_publisher(
+            NavigationFeedback,
+            'velocity_controller/feedback',
+            qos_best_effort
+        )
+        
+        # ==================== 控制循环 ====================
+        control_rate = float(self.get_parameter('control_rate').value or 20.0)
+        control_period = 1.0 / control_rate
+        self.control_timer = self.create_timer(
+            control_period, 
+            self._control_loop,
+            callback_group=self.callback_group
+        )
+        
+        # 状态发布定时器 (1Hz)
+        self.status_timer = self.create_timer(
+            1.0,
+            self._publish_status,
+            callback_group=self.callback_group
+        )
+        
+        # 日志计数器
+        self._log_counter = 0
+        
+        # 启动日志
+        self.get_logger().info('='*60)
+        self.get_logger().info('USV 速度控制器节点已启动')
+        self.get_logger().info(f'  控制模式: {self.control_mode}')
+        if self.control_mode == 'velocity':
+            self.get_logger().info('  功能: 常规导航 + 避障 + 旋转机动')
+            self.get_logger().info('  输出: 速度指令 → setpoint_raw/local')
+            if self._use_velocity_heading:
+                self.get_logger().info('  航向估计: L1风格（飞控EKF速度向量优先，低速回退磁力计）')
+            else:
+                self.get_logger().info('  航向估计: 磁力计')
+        else:
+            self.get_logger().info('  功能: 待机 (由 usv_control_node 处理)')
+        self.get_logger().info(f'  控制器类型: {controller_type_str}')
+        self.get_logger().info(f'  巡航速度: {self.tracker.cruise_speed} m/s')
+        self.get_logger().info(f'  最大角速度: {self.tracker.max_angular_velocity} rad/s')
+        self.get_logger().info(f'  到达阈值: {self.tracker.goal_tolerance} m')
+        self.get_logger().info(f'  切换阈值: {self.tracker.switch_tolerance} m')
+        self.get_logger().info(f'  前视距离: {self.tracker.lookahead_distance} m')
+        self.get_logger().info(f'  Stanley 增益: {self.tracker.stanley_gain}')
+        self.get_logger().info('='*60)
+    
+    # ==================== 回调函数 ====================
+    
+    def _velocity_callback(self, msg: TwistStamped):
+        """
+        速度回调 - L1 风格航向估计
+        
+        使用飞控 EKF 融合后的速度向量计算实际航向，
+        类似飞控 L1 算法，自动适应坐标系偏移。
+        """
+        vx = msg.twist.linear.x
+        vy = msg.twist.linear.y
+        speed = math.sqrt(vx * vx + vy * vy)
+        self._current_speed = speed
+        
+        # 只有速度足够时才使用速度方向估计航向
+        if speed > self._min_speed_for_velocity_yaw:
+            self._velocity_based_yaw = math.atan2(vy, vx)
+            self._velocity_yaw_valid = True
+        else:
+            # 速度太低，速度航向不可靠
+            self._velocity_yaw_valid = False
+    
+    def _pose_callback(self, msg: PoseStamped):
+        """位姿回调 - 包含数据验证、跳变检测和航向选择"""
+        import time
+        
+        current_time = time.time()
+        
+        # 从四元数提取 yaw（磁力计航向，仅作为初始回退）
+        q = msg.pose.orientation
+        siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+        magnetometer_yaw = math.atan2(siny_cosp, cosy_cosp)
+        
+        # ==================== 航向选择（优先速度向量） ====================
+        # 使用飞控 EKF 速度向量，低速时保持最后有效航向
+        # 只有在完全没有历史数据时才回退到磁力计
+        if self._use_velocity_heading:
+            if self._velocity_yaw_valid:
+                # 速度足够，使用速度航向
+                yaw = self._velocity_based_yaw
+                self._last_valid_velocity_yaw = yaw  # 保存有效航向
+            elif hasattr(self, '_last_valid_velocity_yaw'):
+                # 速度太低，保持最后一个有效的速度航向
+                yaw = self._last_valid_velocity_yaw
+            else:
+                # 首次启动且无有效速度数据，使用磁力计作为初始值
+                yaw = magnetometer_yaw
+                self._last_valid_velocity_yaw = yaw
+        else:
+            # 禁用速度航向估计，使用磁力计
+            yaw = magnetometer_yaw
+        
+        new_pose = Pose2D(
+            x=msg.pose.position.x,
+            y=msg.pose.position.y,
+            yaw=yaw
+        )
+        
+        # 数据有效性检查
+        if not new_pose.is_valid():
+            self.get_logger().warn('收到无效位姿数据，已忽略')
+            return
+        
+        # 位姿跳变检测 (GPS 跳变保护)
+        if self._last_valid_pose is not None:
+            jump_distance = new_pose.distance_to(self._last_valid_pose)
+            if jump_distance > self._pose_jump_threshold:
+                self.get_logger().warn(
+                    f'位姿跳变检测: {jump_distance:.2f}m > {self._pose_jump_threshold}m，暂停更新'
+                )
+                # 不更新位姿，等待稳定
+                return
+        
+        self.current_pose = new_pose
+        self._last_valid_pose = new_pose
+        self._last_pose_time = current_time
+        self._consecutive_timeout_count = 0  # 重置超时计数
+    
+    def _state_callback(self, msg: State):
+        """飞控状态回调"""
+        import time
+        self.current_state = msg
+        self._last_state_time = time.time()
+    
+    def _nav_result_callback(self, msg: NavigationResult):
+        """
+        导航结果回调 - 来自 navigate_to_point_node 的到达通知
+        
+        当 navigate_to_point_node 判定到达目标后，会发送 NavigationResult。
+        注意：平滑切换时也会发送 result（message 包含"已通过"），此时不应停止。
+        只有最终到达时（message 包含"成功到达"）才停止追踪。
+        """
+        goal_id = getattr(msg, 'goal_id', 0)
+        success = getattr(msg, 'success', False)
+        message = getattr(msg, 'message', '')
+        
+        if success:
+            # 区分"通过航点"和"最终到达"
+            # 平滑切换时 message 包含 "已通过航点"，不应停止
+            # 最终到达时 message 包含 "成功到达目标"
+            is_pass_through = '已通过' in message or '通过航点' in message
+            
+            if is_pass_through:
+                self.get_logger().debug(
+                    f'收到通过通知 [ID={goal_id}], 继续导航')
+                return
+            
+            # 检查是否是当前正在追踪的目标
+            if self._current_goal_id is not None and goal_id == self._current_goal_id:
+                self.get_logger().info(
+                    f'✅ 收到最终到达通知 [ID={goal_id}], 停止追踪')
+                
+                # 清除当前目标，停止控制
+                self.tracker.clear_waypoints()
+                self._current_goal_id = None
+                self._control_active = False
+                self.stop_usv()
+            else:
+                self.get_logger().debug(
+                    f'收到到达通知 [ID={goal_id}], 但当前追踪 ID={self._current_goal_id}, 忽略')
+    
+    def _nav_goal_callback(self, msg: NavigationGoal):
+        """
+        导航目标回调
+        
+        接收来自 navigate_to_point_node 或地面站的导航目标
+        处理常规导航和旋转机动
+        
+        注意：NAV_MODE_TERMINAL (离群单点导航) 由 usv_control_node 的位置模式处理
+        """
+        # 仅在速度模式下处理
+        if self.control_mode != 'velocity':
+            return
+        
+        # 获取导航模式
+        nav_mode = getattr(msg, 'nav_mode', 0)
+        NAV_MODE_TERMINAL = 3  # 定义在 NavigationGoal.msg
+        
+        # NAV_MODE_TERMINAL (离群单点导航) 跳过，让 usv_control_node 位置模式处理
+        # 位置模式更适合精确定点停留，而非连续路径跟踪
+        if nav_mode == NAV_MODE_TERMINAL:
+            goal_id = getattr(msg, 'goal_id', 0)
+            target = msg.target_pose.pose.position
+            self.get_logger().info(
+                f'⏭️ 离群目标 [ID={goal_id}] ({target.x:.2f}, {target.y:.2f}) '
+                f'使用位置模式处理 (NAV_MODE_TERMINAL)'
+            )
+            return
+        
+        target = msg.target_pose.pose.position
+        goal_id = getattr(msg, 'goal_id', 0)
+        maneuver_type = getattr(msg, 'maneuver_type', 0)
+        maneuver_param = getattr(msg, 'maneuver_param', 0.0)
+        
+        # MANEUVER_TYPE_ROTATE = 1 (定义在 NavigationGoal.msg)
+        MANEUVER_TYPE_ROTATE = 1
+        
+        # ==================== 旋转机动处理 ====================
+        if maneuver_type == MANEUVER_TYPE_ROTATE:
+            # 检查是否是新的旋转任务
+            if goal_id != self._rotation_goal_id:
+                self._rotation_goal_id = goal_id
+                self._rotation_active = True
+                self._rotation_initialized = False
+                self._rotation_accumulated = 0.0
+                self._rotation_target_yaw = maneuver_param * 2 * math.pi  # 圈数转弧度
+                
+                # 设置旋转方向
+                if maneuver_param >= 0:
+                    self._rotation_yaw_rate = 0.5  # 顺时针
+                else:
+                    self._rotation_yaw_rate = -0.5  # 逆时针
+                
+                # 同时设置导航目标（先导航到位置再旋转）
+                waypoint = Waypoint(
+                    x=target.x,
+                    y=target.y,
+                    speed=self.tracker.cruise_speed,
+                    goal_id=goal_id,
+                    is_final=True
+                )
+                self.tracker.set_waypoint(waypoint)
+                self._control_active = True
+                self._current_goal_id = goal_id
+                
+                self.get_logger().info(
+                    f'🔄 旋转机动目标 [ID={goal_id}]: '
+                    f'位置=({target.x:.2f}, {target.y:.2f}), 圈数={maneuver_param:.1f}'
+                )
+            return
+        
+        # ==================== 常规导航处理 ====================
+        # 如果之前在旋转，取消旋转
+        if self._rotation_active:
+            self._rotation_active = False
+            self._rotation_initialized = False
+        
+        speed = self.tracker.cruise_speed
+        is_new_goal = (goal_id != self._current_goal_id)
+        
+        # 根据 nav_mode 判断是否是最终航点
+        # NAV_MODE_ASYNC (0) = 异步模式，可能还有后续航点，不是最终点
+        # NAV_MODE_TERMINAL (3) 已在上面跳过，不会到这里
+        # 默认情况下，由 navigate_to_point_node 统一管理到达判断
+        # 这里设置 is_final=False，让 tracker 使用 switch_tolerance 而非 goal_tolerance
+        is_final = (nav_mode == 3)  # NAV_MODE_TERMINAL
+        
+        waypoint = Waypoint(
+            x=target.x,
+            y=target.y,
+            speed=speed,
+            goal_id=goal_id,
+            is_final=is_final
+        )
+        
+        if is_new_goal:
+            self._current_goal_id = goal_id
+            self.tracker.set_waypoint(waypoint)
+            self._control_active = True
+            
+            self.get_logger().info(
+                f'🎯 新导航目标 [ID={goal_id}]: '
+                f'({target.x:.2f}, {target.y:.2f}), 速度={speed:.2f} m/s'
+            )
+        else:
+            self.tracker.add_waypoint(waypoint)
+            self.get_logger().debug(
+                f'📥 添加航点到队列: ({target.x:.2f}, {target.y:.2f})'
+            )
+    
+    def _avoidance_position_callback(self, msg: PositionTarget):
+        """避障目标位置回调"""
+        if self.control_mode != 'velocity':
+            return
+        
+        new_pos = Pose2D(
+            x=msg.position.x,
+            y=msg.position.y,
+            yaw=0.0
+        )
+        
+        if new_pos.is_valid():
+            old_pos = self._avoidance_position
+            self._avoidance_position = new_pos
+            
+            # 只在位置变化时记录日志
+            if old_pos is None or old_pos.distance_to(new_pos) > 0.1:
+                self.get_logger().debug(
+                    f'避障目标更新: ({new_pos.x:.2f}, {new_pos.y:.2f})'
+                )
+    
+    def _avoidance_flag_callback(self, msg: Bool):
+        """避障标志回调"""
+        if self.control_mode != 'velocity':
+            return
+        
+        old_state = self._avoidance_active
+        self._avoidance_active = msg.data
+        
+        if old_state != msg.data:
+            mode = "避障模式" if msg.data else "常规导航"
+            self.get_logger().info(f'⚠️ 切换到: {mode}')
+
+    
+    def _cruise_speed_callback(self, msg: Float32):
+        """更新巡航速度"""
+        if msg.data > 0:
+            old_speed = self.tracker.cruise_speed
+            self.tracker.set_cruise_speed(msg.data)
+            self.get_logger().info(f'巡航速度更新: {old_speed:.2f} → {msg.data:.2f} m/s')
+    
+    def _goal_tolerance_callback(self, msg: Float32):
+        """更新到达阈值"""
+        if msg.data > 0:
+            old_tol = self.tracker.goal_tolerance
+            self.tracker.set_goal_tolerance(msg.data)
+            self.get_logger().info(f'到达阈值更新: {old_tol:.2f} → {msg.data:.2f} m')
+    
+    def _switch_tolerance_callback(self, msg: Float32):
+        """更新切换阈值"""
+        if msg.data > 0:
+            old_tol = self.tracker.switch_tolerance
+            self.tracker.set_switch_tolerance(msg.data)
+            self.get_logger().info(f'切换阈值更新: {old_tol:.2f} → {msg.data:.2f} m')
+    
+    def _lookahead_callback(self, msg: Float32):
+        """更新前视距离"""
+        if msg.data > 0:
+            old_val = self.tracker.lookahead_distance
+            self.tracker.set_lookahead_distance(msg.data)
+            self.get_logger().info(f'前视距离更新: {old_val:.2f} → {msg.data:.2f} m')
+    
+    def _stanley_gain_callback(self, msg: Float32):
+        """更新 Stanley 增益"""
+        if msg.data > 0:
+            old_val = self.tracker.stanley_gain
+            self.tracker.set_stanley_gain(msg.data)
+            self.get_logger().info(f'Stanley 增益更新: {old_val:.2f} → {msg.data:.2f}')
+    
+    def _hybrid_switch_callback(self, msg: Float32):
+        """更新混合切换距离"""
+        if msg.data > 0:
+            old_val = self.tracker.hybrid_switch_distance
+            self.tracker.hybrid_switch_distance = msg.data
+            self.get_logger().info(f'混合切换距离更新: {old_val:.2f} → {msg.data:.2f} m')
+    
+    def _max_angular_callback(self, msg: Float32):
+        """更新最大角速度"""
+        if msg.data > 0:
+            old_val = self.tracker.max_angular_velocity
+            self.tracker.max_angular_velocity = msg.data
+            self.get_logger().info(f'最大角速度更新: {old_val:.2f} → {msg.data:.2f} rad/s')
+    
+    # ==================== 控制循环 ====================
+    
+    def _control_loop(self):
+        """
+        主控制循环
+        
+        处理优先级: 避障 > 旋转机动 > 常规导航
+        """
+        # 仅在速度模式下运行
+        if self.control_mode != 'velocity':
+            return
+        
+        # 检查前置条件
+        if not self._check_preconditions():
+            return
+        
+        # 确保 current_pose 不为 None
+        if self.current_pose is None:
+            return
+        
+        # ==================== 优先级 1: 避障模式 ====================
+        if self._avoidance_active and self._avoidance_position is not None:
+            self._handle_avoidance_control()
+            return
+        
+        # ==================== 优先级 2: 旋转机动 ====================
+        if self._rotation_active:
+            # 检查是否已到达旋转位置
+            dist_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
+            rotation_start_threshold = 1.0  # 开始旋转的距离阈值
+            
+            if dist_to_goal <= rotation_start_threshold or self.tracker.is_goal_reached():
+                # 已到达位置，开始/继续旋转
+                self._handle_rotation_control()
+                return
+            # 否则继续导航到目标位置
+        
+        # ==================== 优先级 3: 常规导航 ====================
+        # 注意：不在这里判断到达，由 navigate_to_point_node 通过 navigation_result 通知
+        # 这样可以避免两个节点判断标准不一致导致的问题
+        # tracker.is_goal_reached() 仅用于防止无目标时的空转
+        if self.tracker.is_goal_reached() and not self._control_active:
+            # 没有活跃目标，不需要控制
+            return
+        
+        # 计算速度指令
+        cmd = self.tracker.compute_velocity(self.current_pose)
+        self._last_velocity_cmd = cmd
+        
+        # 发布速度指令
+        self._publish_velocity_command(cmd)
+        
+        # 发布导航反馈 (每 5 个周期一次，约 4Hz)
+        if self._log_counter % 5 == 0:
+            self._publish_navigation_feedback(cmd)
+        
+        # 定期日志
+        self._log_counter += 1
+        if self._log_counter % 40 == 0:  # 约 2 秒一次 (20Hz)
+            dist = self.tracker.get_distance_to_goal(self.current_pose)
+            queue_len = self.tracker.get_queue_length()
+            
+            self.get_logger().info(
+                f'🚀 导航中: vx={cmd.linear_x:.2f} m/s, ω={cmd.angular_z:.2f} rad/s, '
+                f'距离={dist:.2f}m, 队列={queue_len}'
+            )
+    
+    def _handle_avoidance_control(self):
+        """
+        处理避障控制
+        
+        使用 Pure Pursuit 追踪避障目标点
+        """
+        if self._avoidance_position is None or self.current_pose is None:
+            return
+        
+        # 创建临时航点追踪避障目标
+        avoidance_waypoint = Waypoint(
+            x=self._avoidance_position.x,
+            y=self._avoidance_position.y,
+            speed=self.tracker.cruise_speed,
+            goal_id=0,
+            is_final=True
+        )
+        
+        # 计算到避障点的距离
+        dist = math.hypot(
+            self._avoidance_position.x - self.current_pose.x,
+            self._avoidance_position.y - self.current_pose.y
+        )
+        
+        # 使用 Pure Pursuit 计算速度指令
+        # 简化版：直接朝向目标
+        dx = self._avoidance_position.x - self.current_pose.x
+        dy = self._avoidance_position.y - self.current_pose.y
+        target_yaw = math.atan2(dy, dx)
+        
+        # 计算航向误差
+        yaw_error = target_yaw - self.current_pose.yaw
+        while yaw_error > math.pi:
+            yaw_error -= 2 * math.pi
+        while yaw_error < -math.pi:
+            yaw_error += 2 * math.pi
+        
+        # P 控制角速度
+        angular_z = 2.0 * yaw_error  # 增益 2.0
+        angular_z = max(-self.tracker.max_angular_velocity, 
+                       min(self.tracker.max_angular_velocity, angular_z))
+        
+        # 根据航向误差调整线速度（误差大时减速）
+        speed_factor = max(0.3, 1.0 - abs(yaw_error) / math.pi)
+        linear_x = self.tracker.cruise_speed * speed_factor
+        
+        cmd = VelocityCommand(linear_x=linear_x, linear_y=0.0, angular_z=angular_z)
+        self._last_velocity_cmd = cmd
+        self._publish_velocity_command(cmd)
+        
+        # 定期日志
+        self._log_counter += 1
+        if self._log_counter % 40 == 0:
+            self.get_logger().info(
+                f'⚠️ 避障中: vx={linear_x:.2f} m/s, ω={angular_z:.2f} rad/s, 距离={dist:.2f}m'
+            )
+    
+    def _handle_rotation_control(self):
+        """
+        处理旋转机动控制
+        
+        原地旋转指定圈数
+        """
+        if self.current_pose is None:
+            return
+        
+        current_yaw = self.current_pose.yaw
+        
+        # 初始化旋转
+        if not self._rotation_initialized:
+            self._rotation_last_yaw = current_yaw
+            self._rotation_accumulated = 0.0
+            self._rotation_initialized = True
+            self.get_logger().info(f'🔄 开始旋转: 目标角度={math.degrees(self._rotation_target_yaw):.1f}°')
+            return
+        
+        # 计算角度变化
+        delta_yaw = current_yaw - self._rotation_last_yaw
+        # 处理角度跳变 (-π ↔ π)
+        if delta_yaw > math.pi:
+            delta_yaw -= 2 * math.pi
+        elif delta_yaw < -math.pi:
+            delta_yaw += 2 * math.pi
+        
+        self._rotation_accumulated += delta_yaw
+        self._rotation_last_yaw = current_yaw
+        
+        # 检查是否完成旋转
+        rotation_done = False
+        if self._rotation_target_yaw > 0:
+            rotation_done = self._rotation_accumulated >= self._rotation_target_yaw
+        else:
+            rotation_done = self._rotation_accumulated <= self._rotation_target_yaw
+        
+        if rotation_done:
+            # 旋转完成，发送停止指令
+            self._publish_velocity_command(VelocityCommand.stop())
+            self._rotation_active = False
+            self._rotation_initialized = False
+            self.get_logger().info(
+                f'✅ 旋转完成: 累计={math.degrees(self._rotation_accumulated):.1f}°'
+            )
+            
+            # 发布完成结果
+            result = NavigationResult()
+            result.goal_id = self._rotation_goal_id or 0
+            result.success = True
+            result.message = f'Rotation completed: {self._rotation_accumulated:.2f} rad'
+            self.result_pub.publish(result)
+            return
+        
+        # 继续旋转 - 发布 yaw_rate 指令
+        msg = PositionTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+        
+        # 只使用 yaw_rate，忽略其他
+        msg.type_mask = (
+            PositionTarget.IGNORE_PX |
+            PositionTarget.IGNORE_PY |
+            PositionTarget.IGNORE_PZ |
+            PositionTarget.IGNORE_VX |
+            PositionTarget.IGNORE_VY |
+            PositionTarget.IGNORE_VZ |
+            PositionTarget.IGNORE_AFX |
+            PositionTarget.IGNORE_AFY |
+            PositionTarget.IGNORE_AFZ |
+            PositionTarget.IGNORE_YAW
+        )
+        msg.yaw_rate = self._rotation_yaw_rate
+        
+        self.velocity_pub.publish(msg)
+        
+        # 定期日志
+        self._log_counter += 1
+        if self._log_counter % 20 == 0:
+            progress = abs(self._rotation_accumulated / self._rotation_target_yaw) * 100 if self._rotation_target_yaw != 0 else 0
+            self.get_logger().info(
+                f'🔄 旋转中: {math.degrees(self._rotation_accumulated):.1f}°/'
+                f'{math.degrees(self._rotation_target_yaw):.1f}° ({progress:.0f}%)'
+            )
+    
+    def _check_preconditions(self) -> bool:
+        """
+        检查控制前置条件
+        
+        包含超时检测和连续异常处理
+        """
+        import time
+        current_time = time.time()
+        
+        # ==================== 检查位姿 ====================
+        if self.current_pose is None:
+            self.get_logger().debug('等待位姿数据...')
+            return False
+        
+        # 位姿超时检测
+        if self._last_pose_time > 0:
+            pose_age = current_time - self._last_pose_time
+            if pose_age > self._pose_timeout:
+                self._consecutive_timeout_count += 1
+                if self._consecutive_timeout_count >= self._max_timeout_before_stop:
+                    if not self._was_timed_out:
+                        self.get_logger().warn(
+                            f'位姿数据超时 {pose_age:.1f}s，连续 {self._consecutive_timeout_count} 次，停止导航'
+                        )
+                        self.stop_usv()
+                        self._was_timed_out = True
+                else:
+                    self.get_logger().warn(f'位姿数据超时 {pose_age:.1f}s')
+                return False
+            else:
+                # 位姿恢复正常，自动恢复导航
+                if self._was_timed_out and self._recovery_enabled:
+                    self.get_logger().info('✅ 位姿数据恢复，自动继续导航')
+                    self._was_timed_out = False
+                    self._consecutive_timeout_count = 0
+        
+        # ==================== 检查飞控状态 ====================
+        if self.current_state is None:
+            self.get_logger().debug('等待飞控状态...')
+            return False
+        
+        # 状态超时检测
+        if self._last_state_time > 0:
+            state_age = current_time - self._last_state_time
+            if state_age > self._state_timeout:
+                self.get_logger().warn(f'飞控状态超时 {state_age:.1f}s')
+                return False
+        
+        # ==================== 检查连接 ====================
+        if not self.current_state.connected:
+            self.get_logger().debug('飞控未连接...')
+            return False
+        
+        # ==================== 检查解锁 ====================
+        if self.require_armed and not self.current_state.armed:
+            self.get_logger().debug('飞控未解锁...')
+            return False
+        
+        # ==================== 检查模式 ====================
+        if self.require_guided_mode and self.current_state.mode != 'GUIDED':
+            self.get_logger().debug(f'需要 GUIDED 模式，当前: {self.current_state.mode}')
+            return False
+        
+        return True
+    
+    def _publish_velocity_command(self, cmd: VelocityCommand):
+        """
+        发布速度指令到 MAVROS
+        
+        包含指令安全校验，确保不会发送无效值
+        """
+        # ==================== 指令校验 ====================
+        # 确保指令有效 (已在 tracker 中 sanitize，这里再次确认)
+        if not cmd.is_valid():
+            self.get_logger().warn('检测到无效速度指令，使用停止指令')
+            cmd = VelocityCommand.stop()
+        
+        # 限幅保护
+        cmd = cmd.sanitize()
+        
+        # ==================== 构建消息 ====================
+        msg = PositionTarget()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        msg.coordinate_frame = PositionTarget.FRAME_BODY_NED
+        
+        # 忽略位置和加速度，只使用速度
+        msg.type_mask = (
+            PositionTarget.IGNORE_PX |
+            PositionTarget.IGNORE_PY |
+            PositionTarget.IGNORE_PZ |
+            PositionTarget.IGNORE_AFX |
+            PositionTarget.IGNORE_AFY |
+            PositionTarget.IGNORE_AFZ |
+            PositionTarget.IGNORE_YAW  # 使用 yaw_rate 而非 yaw
+        )
+        
+        msg.velocity.x = cmd.linear_x
+        msg.velocity.y = cmd.linear_y
+        msg.velocity.z = 0.0
+        msg.yaw_rate = cmd.angular_z
+        
+        self.velocity_pub.publish(msg)
+    
+    def _publish_navigation_feedback(self, cmd: VelocityCommand):
+        """
+        发布导航反馈
+        
+        提供实时导航状态，便于地面站或其他节点监控
+        """
+        if self.current_pose is None:
+            return
+        
+        feedback = NavigationFeedback()
+        feedback.goal_id = self._current_goal_id or 0
+        feedback.distance_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
+        feedback.timestamp = self.get_clock().now().to_msg()
+        
+        # 航向误差 (弧度)
+        wp = self.tracker.get_current_waypoint()
+        if wp:
+            dx = wp.x - self.current_pose.x
+            dy = wp.y - self.current_pose.y
+            target_yaw = math.atan2(dy, dx)
+            heading_error = target_yaw - self.current_pose.yaw
+            # 归一化到 [-π, π]
+            while heading_error > math.pi:
+                heading_error -= 2 * math.pi
+            while heading_error < -math.pi:
+                heading_error += 2 * math.pi
+            feedback.heading_error = heading_error  # 弧度
+        
+        # 预计剩余时间
+        if cmd.linear_x > 0.01:
+            feedback.estimated_time = feedback.distance_to_goal / cmd.linear_x
+        else:
+            feedback.estimated_time = 0.0
+        
+        # 队列状态
+        feedback.queue_length = self.tracker.get_queue_length()
+        feedback.queue_capacity = 10  # 默认队列大小
+        feedback.smooth_navigation = True  # 速度模式本身就是平滑导航
+        
+        self.feedback_pub.publish(feedback)
+    
+    def _on_goal_reached(self):
+        """目标到达处理"""
+        self._control_active = False
+        
+        # 发送停止指令
+        self._publish_velocity_command(VelocityCommand.stop())
+        
+        self.get_logger().info(f'✅ 目标到达 [ID={self._current_goal_id}]')
+        
+        # 发布导航结果
+        result = NavigationResult()
+        result.goal_id = self._current_goal_id or 0
+        result.success = True
+        result.message = 'Goal reached'
+        self.result_pub.publish(result)
+    
+    def _publish_status(self):
+        """
+        发布控制器状态
+        
+        提供详细的诊断信息，便于监控和调试
+        """
+        import time
+        
+        if self.control_mode != 'velocity':
+            return
+        
+        status_parts = []
+        current_time = time.time()
+        
+        # 位姿状态
+        if self.current_pose:
+            pose_age = current_time - self._last_pose_time if self._last_pose_time > 0 else 0
+            if pose_age < self._pose_timeout:
+                status_parts.append(f'pose:ok({pose_age:.1f}s)')
+            else:
+                status_parts.append(f'pose:stale({pose_age:.1f}s)')
+        else:
+            status_parts.append('pose:waiting')
+        
+        # 飞控状态
+        if self.current_state:
+            status_parts.append(f'mode:{self.current_state.mode}')
+            armed_str = 'armed' if self.current_state.armed else 'disarmed'
+            status_parts.append(armed_str)
+        else:
+            status_parts.append('fcu:waiting')
+        
+        # 导航状态
+        if self._control_active:
+            dist = self.tracker.get_distance_to_goal(self.current_pose) if self.current_pose else 0
+            queue_len = self.tracker.get_queue_length()
+            status_parts.append(f'nav:active,dist:{dist:.2f}m,queue:{queue_len}')
+            
+            # 速度信息
+            if self._last_velocity_cmd:
+                status_parts.append(
+                    f'v:{self._last_velocity_cmd.linear_x:.2f}m/s,'
+                    f'ω:{self._last_velocity_cmd.angular_z:.2f}rad/s'
+                )
+        else:
+            status_parts.append('nav:idle')
+        
+        # 健康状态
+        if self._consecutive_timeout_count > 0:
+            status_parts.append(f'timeouts:{self._consecutive_timeout_count}')
+        
+        status_msg = String()
+        status_msg.data = ','.join(status_parts)
+        self.status_pub.publish(status_msg)
+    
+    # ==================== 安全关闭 ====================
+    
+    def stop_usv(self):
+        """紧急停止 USV"""
+        self.get_logger().warn('发送紧急停止指令')
+        self._publish_velocity_command(VelocityCommand.stop())
+        self.tracker.clear_waypoints()
+        self._control_active = False
+    
+    def destroy_node(self):
+        """节点销毁时确保停止"""
+        self.stop_usv()
+        super().destroy_node()
+
+
+def main(args=None):
+    """主函数"""
+    rclpy.init(args=args)
+    node = VelocityControllerNode()
+    
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
+    
+    try:
+        executor.spin()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.stop_usv()  # 确保退出时停止
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

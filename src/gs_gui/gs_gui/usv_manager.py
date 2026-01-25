@@ -31,6 +31,17 @@ class UsvManager:
 
         # 导航参数下发（基于话题，便于跨 Domain Bridge）
         self.nav_arrival_threshold_pubs = {}  # {usv_id: Publisher(Float32)}
+        self.nav_switch_threshold_pubs = {}   # {usv_id: Publisher(Float32)} 切换阈值
+        self.nav_smooth_navigation_pubs = {}  # {usv_id: Publisher(Bool)} 平滑导航开关
+        
+        # 速度控制器参数下发
+        self.velocity_cruise_speed_pubs = {}        # 巡航速度
+        self.velocity_max_angular_pubs = {}         # 最大角速度
+        self.velocity_lookahead_pubs = {}           # 前视距离
+        self.velocity_stanley_gain_pubs = {}        # Stanley 增益
+        self.velocity_hybrid_switch_pubs = {}       # 混合切换距离
+        self.velocity_goal_tolerance_pubs = {}      # 到达阈值
+        self.velocity_switch_tolerance_pubs = {}    # 切换阈值
         
         self.qos_a = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
         # MAVROS 的 statustext 和 sys_status 使用 BEST_EFFORT QoS
@@ -55,6 +66,8 @@ class UsvManager:
         topic_sound = f"{ns}/gs_sound_command"  # 声音控制主题
         topic_action = f"{ns}/gs_action_command"  # 动作控制主题
         topic_nav_arrival_threshold = f"{ns}/set_nav_arrival_threshold"  # 导航到达阈值下发
+        topic_nav_switch_threshold = f"{ns}/set_nav_switch_threshold"    # 导航切换阈值下发
+        topic_nav_smooth_navigation = f"{ns}/set_nav_smooth_navigation"  # 平滑导航开关下发
         action_server_name = f"{ns}/navigate_to_point"  # 导航动作服务器名称
         topic_status_text = f"{ns}/statustext/recv"  # 飞控状态文本 (MAVROS直接发布到ns下)
 
@@ -105,6 +118,27 @@ class UsvManager:
         # 创建导航参数下发发布者
         self.nav_arrival_threshold_pubs[usv_id] = self.node.create_publisher(
             Float32, topic_nav_arrival_threshold, self.qos_a)
+        self.nav_switch_threshold_pubs[usv_id] = self.node.create_publisher(
+            Float32, topic_nav_switch_threshold, self.qos_a)
+        from std_msgs.msg import Bool
+        self.nav_smooth_navigation_pubs[usv_id] = self.node.create_publisher(
+            Bool, topic_nav_smooth_navigation, self.qos_a)
+        
+        # 创建速度控制器参数下发发布者
+        self.velocity_cruise_speed_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_cruise_speed", self.qos_a)
+        self.velocity_max_angular_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_max_angular", self.qos_a)
+        self.velocity_lookahead_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_lookahead", self.qos_a)
+        self.velocity_stanley_gain_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_stanley_gain", self.qos_a)
+        self.velocity_hybrid_switch_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_hybrid_switch", self.qos_a)
+        self.velocity_goal_tolerance_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_goal_tolerance", self.qos_a)
+        self.velocity_switch_tolerance_pubs[usv_id] = self.node.create_publisher(
+            Float32, f"{ns}/set_velocity_switch_tolerance", self.qos_a)
         
         # ==================== 基于话题的导航通信 ====================
         # 创建导航目标发布者
@@ -182,6 +216,30 @@ class UsvManager:
         if usv_id in self.nav_arrival_threshold_pubs:
             self.node.destroy_publisher(self.nav_arrival_threshold_pubs[usv_id])
             del self.nav_arrival_threshold_pubs[usv_id]
+        if usv_id in self.nav_switch_threshold_pubs:
+            self.node.destroy_publisher(self.nav_switch_threshold_pubs[usv_id])
+            del self.nav_switch_threshold_pubs[usv_id]
+        if usv_id in self.nav_smooth_navigation_pubs:
+            self.node.destroy_publisher(self.nav_smooth_navigation_pubs[usv_id])
+            del self.nav_smooth_navigation_pubs[usv_id]
+        
+        # 销毁并删除速度控制器参数下发发布者
+        velocity_pubs_dict = {
+            'cruise_speed': self.velocity_cruise_speed_pubs,
+            'max_angular': self.velocity_max_angular_pubs,
+            'lookahead': self.velocity_lookahead_pubs,
+            'stanley_gain': self.velocity_stanley_gain_pubs,
+            'hybrid_switch': self.velocity_hybrid_switch_pubs,
+            'goal_tolerance': self.velocity_goal_tolerance_pubs,
+            'switch_tolerance': self.velocity_switch_tolerance_pubs,
+        }
+        for name, pubs in velocity_pubs_dict.items():
+            if usv_id in pubs:
+                try:
+                    self.node.destroy_publisher(pubs[usv_id])
+                except Exception:
+                    pass
+                del pubs[usv_id]
         
         # 移除基于话题的导航通信
         if usv_id in self.navigation_goal_pubs:

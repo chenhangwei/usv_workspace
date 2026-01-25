@@ -1,6 +1,22 @@
 """
 无人船(Ultra Short Wave Vehicle, USV)启动文件
 该文件用于启动完整的USV系统，包括飞控通信、传感器驱动、控制逻辑等模块
+
+用法:
+    # 普通启动
+    ros2 launch usv_bringup usv_launch.py
+    
+    # 指定命名空间
+    ros2 launch usv_bringup usv_launch.py namespace:=usv_01
+    
+    # 启用导航日志收集（用于调试）
+    ros2 launch usv_bringup usv_launch.py enable_log_collector:=true
+    
+    # 组合使用
+    ros2 launch usv_bringup usv_launch.py namespace:=usv_01 enable_log_collector:=true
+
+日志文件保存位置: ~/usv_logs/nav_log_YYYYMMDD_HHMMSS.csv
+分析脚本: python3 usv_control/scripts/analyze_nav_log.py
 """
 
 from launch import LaunchDescription
@@ -9,6 +25,7 @@ from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAct
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
+from launch.conditions import IfCondition
 
 
 def generate_launch_description():
@@ -42,6 +59,13 @@ def generate_launch_description():
         'namespace',
         default_value='usv_02',
         description='无人船节点的命名空间'
+    )
+    
+    # 日志收集开关参数
+    enable_log_collector_arg = DeclareLaunchArgument(
+        'enable_log_collector',
+        default_value='false',
+        description='是否启用导航日志收集 (true/false)'
     )
     
     # 参数文件路径参数
@@ -88,11 +112,11 @@ def generate_launch_description():
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
         #default_value='udp://192.168.68.55:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
-        #default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
+        default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
 
         #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
-        default_value='udp://192.168.68.54:14551@192.168.68.53:14560',  # usv_02 → 地面站端口14560
+        #default_value='udp://192.168.68.54:14551@192.168.68.53:14560',  # usv_02 → 地面站端口14560
         #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
     )
@@ -113,6 +137,7 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
+    enable_log_collector = LaunchConfiguration('enable_log_collector')
     #lidar_port = LaunchConfiguration('lidar_port')
 
     # =============================================================================
@@ -189,6 +214,18 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
+    # 速度控制器节点 (Pure Pursuit + Stanley 混合控制)
+    # 仅在 usv_params.yaml 中 control_mode='velocity' 时需要启动
+    # 可实现无减速的平滑航点跟踪
+    velocity_controller_node = Node(
+        package='usv_control',
+        executable='velocity_controller_node',
+        name='velocity_controller_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file]
+    )
+
     # 坐标转换节点（XYZ → GPS）（新增）
     coord_transform_node = Node(
         package='usv_control',
@@ -197,6 +234,16 @@ def generate_launch_description():
         namespace=namespace,
         output='screen',
         parameters=[param_file]
+    )
+    
+    # 日志收集节点（可选，用于调试导航）
+    log_collector_node = Node(
+        package='usv_control',
+        executable='log_collector',
+        name='log_collector',
+        namespace=namespace,
+        output='screen',
+        condition=IfCondition(enable_log_collector)
     )
 
     # =============================================================================
@@ -495,6 +542,7 @@ def generate_launch_description():
             usv_status_node,          # 状态管理（依赖 MAVROS）
             usv_control_node,         # 核心控制器（依赖 MAVROS 和 EKF 原点）
             usv_command_node,         # 命令处理（依赖 MAVROS）
+            velocity_controller_node, # 速度控制器（Pure Pursuit + Stanley，速度模式下使用）
             # usv_avoidance_node,     # 避障功能（已注释）
         ]
     )
@@ -515,6 +563,7 @@ def generate_launch_description():
         param_file_arg,
         fcu_url_arg,
         gcs_url_arg,
+        enable_log_collector_arg,
         #lidar_port_arg,
         
         # 阶段 1：立即启动 MAVROS 和关键服务
@@ -534,6 +583,7 @@ def generate_launch_description():
         usv_fan_node,          # 风扇控制
         #usv_ultrasonic_radar_node,  # 超声波雷达
         usv_head_action_node,       # 鸭头动作控制
+        log_collector_node,         # 导航日志收集（通过 enable_log_collector 参数控制）
         
         # 可选节点（根据硬件配置启用）
         # usv_uwb_node,             # UWB定位

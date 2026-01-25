@@ -37,6 +37,8 @@ from gs_gui.usv_navigation_panel import UsvNavigationPanel
 from gs_gui.style_manager import StyleManager
 from gs_gui.geofence_manager import GeofenceManager
 from gs_gui.geofence_dialog import GeofenceDialog
+from gs_gui.nav_settings_dialog import NavSettingsDialog
+from gs_gui.velocity_settings_dialog import VelocitySettingsDialog
 # 使用性能优化版本的集群启动器（异步检测 + 并行 ping）
 from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
 
@@ -394,6 +396,7 @@ class MainWindow(QMainWindow):
         # self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_launch_usv_fleet.triggered.connect(self.launch_usv_fleet)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
+        # self.action_set_uwb_offset.triggered.connect(self.open_uwb_offset_dialog)  # 已弃用
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
         self.action_set_home.triggered.connect(self.open_set_home_dialog)
         self.action_geofence_settings.triggered.connect(self.open_geofence_dialog)
@@ -414,6 +417,12 @@ class MainWindow(QMainWindow):
         coord_menu = self.ui.menubar.addMenu("坐标系设置")
         self.action_set_area_offset = QAction("设置任务坐标系偏移量", self)
         coord_menu.addAction(self.action_set_area_offset)
+        
+        # UWB 坐标系偏移角设置 - 已弃用
+        # 说明：使用飞控 EKF 速度向量估计航向后，坐标系自动对齐，不再需要手动设置偏移角
+        # self.action_set_uwb_offset = QAction("🧭 UWB坐标系偏移角...", self)
+        # self.action_set_uwb_offset.setToolTip("设置 UWB/伪卫星坐标系与地磁坐标系的偏移角")
+        # coord_menu.addAction(self.action_set_uwb_offset)
         
         # LED设置菜单
         led_menu = self.ui.menubar.addMenu("LED设置")
@@ -449,6 +458,22 @@ class MainWindow(QMainWindow):
             "设置 USV 端导航到达判定阈值（米），可对选中 USV 或全部在线 USV 生效"
         )
         tools_menu.addAction(self.action_set_nav_arrival_threshold)
+        
+        # 导航参数设置（平滑导航）
+        self.action_nav_settings = QAction("⚙️ 导航参数设置...", self)
+        self.action_nav_settings.setToolTip(
+            "设置平滑导航参数：到达阈值、切换阈值、平滑导航开关"
+        )
+        self.action_nav_settings.triggered.connect(self.open_nav_settings_dialog)
+        tools_menu.addAction(self.action_nav_settings)
+        
+        # 速度控制器参数设置
+        self.action_velocity_settings = QAction("🚀 速度控制器设置...", self)
+        self.action_velocity_settings.setToolTip(
+            "设置速度控制器参数：巡航速度、前视距离、Stanley 增益等"
+        )
+        self.action_velocity_settings.triggered.connect(self.open_velocity_settings_dialog)
+        tools_menu.addAction(self.action_velocity_settings)
         
         # 分隔线
         tools_menu.addSeparator()
@@ -1593,6 +1618,41 @@ limitations under the License.
             self.geofence_checkbox.setChecked(enabled)
             self.geofence_checkbox.blockSignals(False)
 
+    # 已弃用：使用飞控 EKF 速度向量估计航向后，坐标系自动对齐，不再需要手动设置偏移角
+    # def open_uwb_offset_dialog(self):
+    #     """打开 UWB 坐标系偏移角设置对话框"""
+    #     try:
+    #         from .uwb_offset_dialog import UwbOffsetDialog
+    #         from PyQt5.QtWidgets import QMessageBox
+    #         
+    #         # 获取在线 USV 列表
+    #         online_usvs = self.list_manager.usv_online_list
+    #         
+    #         if not online_usvs:
+    #             QMessageBox.warning(
+    #                 self,
+    #                 "无在线 USV",
+    #                 "当前没有在线的 USV。\n"
+    #                 "此功能需要连接到 USV 才能实时设置参数。\n\n"
+    #                 "如需永久设置，请修改 usv_params.yaml 中的\n"
+    #                 "coordinate_yaw_offset_deg 参数。"
+    #             )
+    #             return
+    #         
+    #         # 创建并显示对话框
+    #         dialog = UwbOffsetDialog(online_usvs, self.ros_node, self)
+    #         
+    #         if dialog.exec_() == QDialog.Accepted:
+    #             result = dialog.get_result()
+    #             self.ui_utils.append_info(
+    #                 f"🧭 UWB坐标系偏移角已设置: {result['offset_deg']:.1f}°"
+    #             )
+    #     
+    #     except Exception as e:
+    #         from PyQt5.QtWidgets import QMessageBox
+    #         QMessageBox.critical(self, "错误", f"打开 UWB 偏移角设置对话框失败: {e}")
+    #         self.ui_utils.append_info(f"❌ 打开 UWB 偏移角设置对话框失败: {e}")
+
     def open_set_home_dialog(self):
         """打开设置 Home Position 对话框"""
         try:
@@ -1716,6 +1776,202 @@ limitations under the License.
             QMessageBox.critical(self, "错误", f"设置到达阈值失败: {e}")
             try:
                 self.ui_utils.append_warning(f"❌ 设置到达阈值失败: {e}")
+            except Exception:
+                pass
+
+    def open_nav_settings_dialog(self):
+        """打开导航参数设置对话框（平滑导航）"""
+        try:
+            if not hasattr(self, 'ros_node') or self.ros_node is None:
+                QMessageBox.warning(self, "ROS 未就绪", "ROS 节点尚未初始化，无法下发导航参数")
+                return
+
+            # 获取上次的设置
+            try:
+                last_arrival = float(self.settings.value('nav_arrival_threshold_last', 2.0))
+                last_switch = float(self.settings.value('nav_switch_threshold_last', 1.0))
+                last_smooth = self.settings.value('nav_smooth_navigation_last', True)
+                if isinstance(last_smooth, str):
+                    last_smooth = last_smooth.lower() == 'true'
+            except Exception:
+                last_arrival = 2.0
+                last_switch = 1.0
+                last_smooth = True
+
+            current_settings = {
+                'nav_arrival_threshold': last_arrival,
+                'switch_threshold': last_switch,
+                'smooth_navigation': last_smooth
+            }
+
+            # 打开对话框
+            dialog = NavSettingsDialog(self, current_settings)
+            if dialog.exec_() != QDialog.Accepted:
+                return
+
+            settings = dialog.get_settings()
+
+            # 保存设置
+            try:
+                self.settings.setValue('nav_arrival_threshold_last', settings['nav_arrival_threshold'])
+                self.settings.setValue('nav_switch_threshold_last', settings['switch_threshold'])
+                self.settings.setValue('nav_smooth_navigation_last', settings['smooth_navigation'])
+            except Exception:
+                pass
+
+            # 获取目标 USV 列表
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
+            if usv_info is None:
+                usv_info = self.table_manager.get_selected_usv_info(is_cluster=False)
+            selected_ns = usv_info.get('namespace') if isinstance(usv_info, dict) else None
+
+            online_usvs = self.list_manager.usv_online_list
+            online_ids = [u.get('namespace') for u in online_usvs if isinstance(u, dict) and u.get('namespace')]
+            if not online_ids:
+                QMessageBox.warning(self, "无在线 USV", "当前没有在线 USV，无法下发导航参数")
+                return
+
+            # 选择应用范围
+            if selected_ns:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("选择应用范围")
+                msg.setText(f"检测到已选中：{selected_ns}\n请选择将导航参数应用到哪里：")
+                btn_selected = msg.addButton(f"仅 {selected_ns}", QMessageBox.AcceptRole)
+                btn_all = msg.addButton("全部在线 USV", QMessageBox.AcceptRole)
+                btn_cancel = msg.addButton(QMessageBox.Cancel)
+                msg.exec_()
+                clicked = msg.clickedButton()
+                if clicked is None or clicked == btn_cancel:
+                    return
+
+                if clicked == btn_selected:
+                    target_ids = [selected_ns]
+                elif clicked == btn_all:
+                    target_ids = online_ids
+                else:
+                    return
+            else:
+                target_ids = online_ids
+
+            # 下发设置
+            ok_send = self.ros_node.set_nav_settings(target_ids, settings)
+            
+            # 构建日志信息
+            smooth_status = "启用" if settings['smooth_navigation'] else "禁用"
+            info_msg = (
+                f"✅ 已下发导航参数 → {len(target_ids)} 艘 USV\n"
+                f"   到达阈值: {settings['nav_arrival_threshold']:.2f}m\n"
+                f"   切换阈值: {settings['switch_threshold']:.2f}m\n"
+                f"   平滑导航: {smooth_status}"
+            )
+            
+            if ok_send:
+                self.ui_utils.append_info(info_msg)
+            else:
+                self.ui_utils.append_warning("⚠️ 部分参数下发失败（请检查 USV 是否已注册/桥接是否正常）")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"设置导航参数失败: {e}")
+            try:
+                self.ui_utils.append_warning(f"❌ 设置导航参数失败: {e}")
+            except Exception:
+                pass
+    
+    def open_velocity_settings_dialog(self):
+        """打开速度控制器参数设置对话框"""
+        try:
+            if not hasattr(self, 'ros_node') or self.ros_node is None:
+                QMessageBox.warning(self, "ROS 未就绪", "ROS 节点尚未初始化，无法下发速度控制器参数")
+                return
+
+            # 获取上次的设置
+            try:
+                last_settings = {
+                    'cruise_speed': float(self.settings.value('velocity_cruise_speed_last', 0.5)),
+                    'max_angular_velocity': float(self.settings.value('velocity_max_angular_last', 0.5)),
+                    'lookahead_distance': float(self.settings.value('velocity_lookahead_last', 2.0)),
+                    'stanley_gain': float(self.settings.value('velocity_stanley_gain_last', 2.5)),
+                    'hybrid_switch_distance': float(self.settings.value('velocity_hybrid_switch_last', 2.0)),
+                    'goal_tolerance': float(self.settings.value('velocity_goal_tolerance_last', 0.5)),
+                    'switch_tolerance': float(self.settings.value('velocity_switch_tolerance_last', 1.5)),
+                }
+            except Exception:
+                last_settings = None
+
+            # 打开对话框
+            dialog = VelocitySettingsDialog(self, last_settings)
+            if dialog.exec_() != QDialog.Accepted:
+                return
+
+            settings = dialog.get_settings()
+
+            # 保存设置
+            try:
+                self.settings.setValue('velocity_cruise_speed_last', settings['cruise_speed'])
+                self.settings.setValue('velocity_max_angular_last', settings['max_angular_velocity'])
+                self.settings.setValue('velocity_lookahead_last', settings['lookahead_distance'])
+                self.settings.setValue('velocity_stanley_gain_last', settings['stanley_gain'])
+                self.settings.setValue('velocity_hybrid_switch_last', settings['hybrid_switch_distance'])
+                self.settings.setValue('velocity_goal_tolerance_last', settings['goal_tolerance'])
+                self.settings.setValue('velocity_switch_tolerance_last', settings['switch_tolerance'])
+            except Exception:
+                pass
+
+            # 获取目标 USV 列表
+            usv_info = self.table_manager.get_selected_usv_info(is_cluster=True)
+            if usv_info is None:
+                usv_info = self.table_manager.get_selected_usv_info(is_cluster=False)
+            selected_ns = usv_info.get('namespace') if isinstance(usv_info, dict) else None
+
+            online_usvs = self.list_manager.usv_online_list
+            online_ids = [u.get('namespace') for u in online_usvs if isinstance(u, dict) and u.get('namespace')]
+            if not online_ids:
+                QMessageBox.warning(self, "无在线 USV", "当前没有在线 USV，无法下发速度控制器参数")
+                return
+
+            # 选择应用范围
+            if selected_ns:
+                msg = QMessageBox(self)
+                msg.setWindowTitle("选择应用范围")
+                msg.setText(f"检测到已选中：{selected_ns}\n请选择将速度控制器参数应用到哪里：")
+                btn_selected = msg.addButton(f"仅 {selected_ns}", QMessageBox.AcceptRole)
+                btn_all = msg.addButton("全部在线 USV", QMessageBox.AcceptRole)
+                btn_cancel = msg.addButton(QMessageBox.Cancel)
+                msg.exec_()
+                clicked = msg.clickedButton()
+                if clicked is None or clicked == btn_cancel:
+                    return
+
+                if clicked == btn_selected:
+                    target_ids = [selected_ns]
+                elif clicked == btn_all:
+                    target_ids = online_ids
+                else:
+                    return
+            else:
+                target_ids = online_ids
+
+            # 下发设置
+            ok_send = self.ros_node.set_velocity_settings(target_ids, settings)
+            
+            # 构建日志信息
+            info_msg = (
+                f"✅ 已下发速度控制器参数 → {len(target_ids)} 艘 USV\n"
+                f"   巡航速度: {settings['cruise_speed']:.2f} m/s\n"
+                f"   前视距离: {settings['lookahead_distance']:.2f} m\n"
+                f"   Stanley增益: {settings['stanley_gain']:.2f}\n"
+                f"   到达阈值: {settings['goal_tolerance']:.2f} m"
+            )
+            
+            if ok_send:
+                self.ui_utils.append_info(info_msg)
+            else:
+                self.ui_utils.append_warning("⚠️ 部分参数下发失败（请检查 USV 是否已注册/桥接是否正常）")
+
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"设置速度控制器参数失败: {e}")
+            try:
+                self.ui_utils.append_warning(f"❌ 设置速度控制器参数失败: {e}")
             except Exception:
                 pass
     

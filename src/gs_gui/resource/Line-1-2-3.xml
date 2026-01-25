@@ -1,8 +1,8 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
-<cluster type="home">
-  <step number="1" sync="false">
+<cluster type="formation">
+  <step number="1" nav_mode="async">
     <usvs>
-      <usv led="led_off">
+      <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
           <x>0.000</x>
@@ -16,9 +16,9 @@
       </usv>
     </usvs>
   </step>
-  <step number="2" sync="false">
+  <step number="2" nav_mode="async">
     <usvs>
-      <usv led="led_off">
+      <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
           <x>-3.000</x>
@@ -32,9 +32,9 @@
       </usv>
     </usvs>
   </step>
-  <step number="3" sync="false">
+  <step number="3" nav_mode="async">
     <usvs>
-      <usv led="led_off">
+      <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
           <x>-6.000</x>

@@ -4,6 +4,8 @@ from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtCore import Qt as QtCore
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas, NavigationToolbar2QT
 from matplotlib.figure import Figure
+from matplotlib.markers import MarkerStyle
+from matplotlib.path import Path as MplPath
 from math import cos, sin, pi, atan2, sqrt, radians
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -84,7 +86,7 @@ class UsvPlotWindow(QWidget):
         self.ax.callbacks.connect('ylim_changed', self.on_limits_changed)
         
         self.artists = {
-            'usv_polys': {},    # {usv_id: Polygon}
+            'usv_polys': {},    # {usv_id: PathCollection (scatter)}
             'usv_labels': {},   # {usv_id: Text}
             'usv_trails': {},   # {usv_id: Line2D}
             'nav_lines': {},    # {usv_id: Line2D}
@@ -99,6 +101,18 @@ class UsvPlotWindow(QWidget):
             'home_marker': None, # Home marker aritst
             'area_center_marker': None # Area Center marker (Red Cross)
         }
+        
+        # 创建自定义USV箭头标记 (固定像素大小)
+        # 箭头形状: 指向右侧的船形
+        arrow_verts = [
+            (1.0, 0.0),    # 船头
+            (-0.8, 0.6),   # 左后角
+            (-0.4, 0.0),   # 中心凹陷
+            (-0.8, -0.6),  # 右后角
+            (1.0, 0.0),    # 闭合回船头
+        ]
+        arrow_codes = [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY]
+        self._usv_arrow_path = MplPath(arrow_verts, arrow_codes)
         
         # Apply theme to axes
         self.set_theme('modern_dark')
@@ -579,24 +593,26 @@ class UsvPlotWindow(QWidget):
             is_moving = speed > 0.1
             display_alpha = 1.0 if (not is_moving or blink_on) else 0.4
             
-            # --- 3. Update/Create USV Polygon ---
-            radius = 0.6
-            pts = np.array([[1.0, 0.0], [-0.8, 0.6], [-0.4, 0.0], [-0.8, -0.6]]) * radius
-            R = np.array([[cos(yaw), -sin(yaw)], [sin(yaw), cos(yaw)]])
-            pts_final = np.dot(pts, R.T) + np.array([x, y])
-
+            # --- 3. Update/Create USV Marker (固定像素大小，不随缩放变化) ---
+            # 创建旋转后的箭头标记
+            rotated_marker = MarkerStyle(self._usv_arrow_path).rotated(rad=yaw)
+            
             if usv_id not in self.artists['usv_polys']:
-                # 视觉优化：在深色背景下使用亮色边框 + 加粗线条，确保黑色USV也能看到轮廓
-                poly = patches.Polygon(pts_final, closed=True, facecolor=color_hex, 
-                                      edgecolor='#ecf0f1', alpha=display_alpha, lw=1.2, zorder=10)
-                self.ax.add_patch(poly)
-                self.artists['usv_polys'][usv_id] = poly
+                # 使用 scatter 创建固定像素大小的标记 (s=400 约等于 20x20 像素)
+                scatter = self.ax.scatter([x], [y], s=400, c=[color_hex], 
+                                         marker=rotated_marker, 
+                                         edgecolors='#ecf0f1', linewidths=1.2,
+                                         alpha=display_alpha, zorder=10)
+                self.artists['usv_polys'][usv_id] = scatter
             else:
-                poly = self.artists['usv_polys'][usv_id]
-                poly.set_xy(pts_final)
-                poly.set_facecolor(color_hex)
-                poly.set_alpha(display_alpha)
-                poly.set_visible(True)
+                scatter = self.artists['usv_polys'][usv_id]
+                # 更新位置和外观
+                scatter.set_offsets([[x, y]])
+                scatter.set_facecolors([color_hex])
+                scatter.set_alpha(display_alpha)
+                # 更新旋转标记 - 需要重新设置 paths
+                scatter.set_paths([rotated_marker.get_path().transformed(rotated_marker.get_transform())])
+                scatter.set_visible(True)
 
             # --- 4. Update/Create Trail ---
             if usv_id not in self.usv_trails:
@@ -622,6 +638,9 @@ class UsvPlotWindow(QWidget):
             nav_target = usv.get('nav_target_cache')
             if self.show_nav_task and nav_target:
                 tx, ty = nav_target.get('x'), nav_target.get('y')
+                target_reached = nav_target.get('reached', False)
+                # 根据是否到达选择颜色：未到达用红色，已到达用绿色
+                marker_color = '#2ecc71' if target_reached else '#e74c3c'  # 绿色 / 红色
                 if tx is not None and ty is not None:
                      # Line
                      if usv_id not in self.artists['nav_lines']:
@@ -632,14 +651,14 @@ class UsvPlotWindow(QWidget):
                          line.set_data([x, tx], [y, ty])
                          line.set_color(color_hex)
                          line.set_visible(True)
-                     # Marker
+                     # Marker - 使用红色X（未到达）或绿色X（已到达）
                      if usv_id not in self.artists['nav_markers']:
-                         mark, = self.ax.plot(tx, ty, marker='x', markersize=8, color=color_hex, markeredgewidth=2, linestyle='None')
+                         mark, = self.ax.plot(tx, ty, marker='x', markersize=8, color=marker_color, markeredgewidth=2, linestyle='None')
                          self.artists['nav_markers'][usv_id] = mark
                      else:
                          mark = self.artists['nav_markers'][usv_id]
                          mark.set_data([tx], [ty])
-                         mark.set_color(color_hex)
+                         mark.set_color(marker_color)
                          mark.set_visible(True)
                      
                      # Nav Target Label (XY Coordinates)

@@ -239,3 +239,15 @@
 2026-01-16 16:30:57,800 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
 2026-01-16 17:01:03,413 INFO common_utils.process_tracker: 接收到信号 2,清理子进程...
 2026-01-16 17:01:08,413 INFO common_utils.process_tracker: 接收到信号 15,清理子进程...
+2026-01-21 17:45:16,272 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-21 18:01:41,869 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-21 18:04:48,880 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-21 18:07:57,498 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-23 10:33:29,689 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-23 14:45:37,037 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-23 14:57:45,727 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-23 15:27:24,680 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-24 19:15:15,631 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-25 09:52:06,135 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-25 10:43:35,656 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log
+2026-01-25 11:57:03,901 INFO root: gs_gui 启动，日志记录到 /home/chenhangwei/usv_workspace/.logs/gs_gui.log

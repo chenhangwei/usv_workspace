@@ -200,6 +200,22 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 11
 
+  # ------------------------- 速度控制器状态 (velocity_controller_node) -------
+  
+  usv_01/velocity_controller/status:
+    type: std_msgs/msg/String
+    from_domain: 11
+    
+  usv_01/velocity_controller/feedback:
+    type: common_interfaces/msg/NavigationFeedback
+    from_domain: 11
+    qos:
+      reliability: best_effort
+    
+  usv_01/velocity_controller/result:
+    type: common_interfaces/msg/NavigationResult
+    from_domain: 11
+
   # ===========================================================================
   #                              USV_02 (Domain 12)
   # ===========================================================================
@@ -352,6 +368,22 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 12
 
+  # ------------------------- 速度控制器状态 (velocity_controller_node) -------
+  
+  usv_02/velocity_controller/status:
+    type: std_msgs/msg/String
+    from_domain: 12
+    
+  usv_02/velocity_controller/feedback:
+    type: common_interfaces/msg/NavigationFeedback
+    from_domain: 12
+    qos:
+      reliability: best_effort
+    
+  usv_02/velocity_controller/result:
+    type: common_interfaces/msg/NavigationResult
+    from_domain: 12
+
   # ===========================================================================
   #                              USV_03 (Domain 13)
   # ===========================================================================
@@ -501,6 +533,22 @@ topics:
     from_domain: 13
     
   usv_03/navigation_result:
+    type: common_interfaces/msg/NavigationResult
+    from_domain: 13
+
+  # ------------------------- 速度控制器状态 (velocity_controller_node) -------
+  
+  usv_03/velocity_controller/status:
+    type: std_msgs/msg/String
+    from_domain: 13
+    
+  usv_03/velocity_controller/feedback:
+    type: common_interfaces/msg/NavigationFeedback
+    from_domain: 13
+    qos:
+      reliability: best_effort
+    
+  usv_03/velocity_controller/result:
     type: common_interfaces/msg/NavigationResult
     from_domain: 13
 

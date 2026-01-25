@@ -45,6 +45,12 @@ class ClusterController:
         # 新增：用于跟踪每个 USV 当前执行到的步骤 (usv_id -> step_number)
         self._usv_step_progress: Dict[str, int] = ThreadSafeDict()
 
+        # ==================== 航点预发送 (Lookahead) ====================
+        self._lookahead_enabled = True        # 是否启用预发送
+        self._lookahead_steps = 1             # 预发送步数 (当前步+N个后续步)
+        self._lookahead_queue_threshold = 2   # 当 USV 队列剩余 < 此值时预发送
+        self._lookahead_sent: Dict[str, set] = ThreadSafeDict()  # 已预发送的 (usv_id -> set of steps)
+
         # 初始化状态变量
         self._state = ClusterTaskState.IDLE
         self._cluster_start_time = None
@@ -213,10 +219,16 @@ class ClusterController:
             # 计算最大步骤数，遍历所有目标点获取step值的最大值，若列表为空则默认为1
             self.node.max_step = max(target.get('step', 1) for target in temp_list) if temp_list else 0
 
+            # ========== 重置 goal_id 计数器 ==========
+            # 新任务开始时重置 goal_id 为 1，这样 USV 端收到 ID=1 时会清空残留队列
+            self.node._next_goal_id = 1
+            self.node.get_logger().info("🔄 新任务开始，重置 goal_id 计数器为 1")
+
             # 初始化每艇 ack 状态，为每个USV设备初始化确认状态
             # 清空之前的确认状态映射表，准备记录新的状态
             self._ack_states.clear()
             self._usv_step_progress.clear()  # 清空步骤进度
+            self._lookahead_sent.clear()     # 清空预发送记录
             
             # 根据当前步骤获取相关的USV列表
             # cluster_usv_list = self._get_usvs_by_step(self.node.current_targets, self.node.run_step)
@@ -405,6 +417,11 @@ class ClusterController:
                 maneuver_type = target_data.get('maneuver_type', 0)
                 maneuver_param = target_data.get('maneuver_param', 0.0)
                 
+                # 获取导航模式参数
+                nav_mode = target_data.get('nav_mode', 0)
+                sync_timeout = target_data.get('sync_timeout', 10.0)
+                arrival_quality = target_data.get('arrival_quality_threshold', 0.8)
+                
                 self.node.get_logger().info(
                     f"📤执行 Step {state.step} {usv_id}: Pos=({p_local['x']:.1f}, {p_local['y']:.1f})"
                 )
@@ -417,8 +434,15 @@ class ClusterController:
                     self._action_timeout,
                     maneuver_type=maneuver_type,
                     maneuver_param=maneuver_param,
-                    step=state.step
+                    step=state.step,
+                    nav_mode=nav_mode,
+                    sync_timeout=sync_timeout,
+                    arrival_quality_threshold=arrival_quality
                 )
+                
+                # ========== 航点预发送 (Lookahead) ==========
+                if self._lookahead_enabled:
+                    self._send_lookahead_goals(usv_id, state.step)
         else:
             if state.retry >= self.node._max_retries:
                  state.acked = False
@@ -427,6 +451,81 @@ class ClusterController:
     def _old_publish_cluster_targets_callback(self):
         """保留原方法占位，避免接口问题 (已被新方法替代)"""
         pass
+
+    def _send_lookahead_goals(self, usv_id: str, current_step: int):
+        """
+        预发送后续航点到 USV 队列 (Lookahead)
+        
+        当 USV 正在执行 current_step 时，提前发送 current_step+1 ~ current_step+N 的航点
+        这样 USV 可以在完成当前航点时立即切换到下一个，无需等待 GS 发送
+        
+        Args:
+            usv_id: USV 标识符
+            current_step: 当前正在执行的步骤号
+        """
+        max_step = getattr(self.node, 'max_step', 1)
+        
+        # 初始化该 USV 的预发送记录
+        if usv_id not in self._lookahead_sent:
+            self._lookahead_sent[usv_id] = set()
+        
+        sent_steps = self._lookahead_sent[usv_id]
+        
+        # 预发送后续 N 个步骤
+        for i in range(1, self._lookahead_steps + 1):
+            next_step = current_step + i
+            
+            # 超出任务范围
+            if next_step > max_step:
+                break
+            
+            # 已经预发送过
+            if next_step in sent_steps:
+                continue
+            
+            # 获取下一步的目标数据
+            target_data = self._get_target_data(usv_id, next_step)
+            if not target_data:
+                continue
+            
+            pos = target_data.get('position', {})
+            if not all(k in pos for k in ('x', 'y')):
+                continue
+            
+            # 转换坐标
+            p_global = self._area_to_global(pos)
+            p_local = self._global_to_usv_local(usv_id, p_global)
+            
+            yaw = float(target_data.get('yaw', 0.0))
+            use_yaw = target_data.get('use_yaw', False)
+            maneuver_type = target_data.get('maneuver_type', 0)
+            maneuver_param = target_data.get('maneuver_param', 0.0)
+            nav_mode = target_data.get('nav_mode', 0)
+            sync_timeout = target_data.get('sync_timeout', 10.0)
+            arrival_quality = target_data.get('arrival_quality_threshold', 0.8)
+            
+            # 预发送航点 (标记为预发送，不更新缓存)
+            self.node.get_logger().info(
+                f"📤预发送 Step {next_step} → {usv_id}: Pos=({p_local['x']:.1f}, {p_local['y']:.1f})"
+            )
+            
+            self.node.send_nav_goal_via_topic(
+                usv_id,
+                p_local['x'], p_local['y'], p_local.get('z', 0.0),
+                yaw,
+                use_yaw,
+                self._action_timeout,
+                maneuver_type=maneuver_type,
+                maneuver_param=maneuver_param,
+                step=next_step,
+                nav_mode=nav_mode,
+                sync_timeout=sync_timeout,
+                arrival_quality_threshold=arrival_quality,
+                is_lookahead=True  # 预发送标记，不更新目标缓存
+            )
+            
+            # 记录已预发送
+            sent_steps.add(next_step)
 
 
     def _initialize_ack_map_for_step(self, cluster_usv_list):

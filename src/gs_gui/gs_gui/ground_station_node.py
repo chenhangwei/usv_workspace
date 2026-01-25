@@ -5,6 +5,7 @@
 """
 
 import json
+import math
 from collections import defaultdict, deque
 from datetime import datetime
 import yaml
@@ -309,6 +310,168 @@ class GroundStationNode(Node):
             except Exception:
                 pass
         return sent > 0
+
+    def set_nav_switch_threshold(self, usv_id_list, threshold_m):
+        """设置 USV 导航切换阈值（米）- 用于平滑导航模式。
+
+        设计目标：跨 Domain 场景不依赖参数服务，使用话题下发。
+
+        Args:
+            usv_id_list (list[str]): USV 命名空间列表
+            threshold_m (float): 切换阈值（米），必须 > 0
+        """
+        try:
+            threshold = float(threshold_m)
+        except Exception:
+            self.get_logger().warn(f"nav_switch_threshold 非法: {threshold_m}")
+            return False
+
+        if threshold <= 0.0:
+            self.get_logger().warn(f"nav_switch_threshold 必须>0: {threshold}")
+            return False
+
+        if not usv_id_list:
+            self.get_logger().warn("未提供 USV 列表，忽略设置 nav_switch_threshold")
+            return False
+
+        sent = 0
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_switch_threshold_pubs.get(usv_id)
+            if pub is None:
+                self.get_logger().warn(f"USV {usv_id} 未注册 set_nav_switch_threshold 发布者")
+                continue
+
+            msg = Float32()
+            msg.data = threshold
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+            except Exception as e:
+                self.get_logger().warn(f"下发 nav_switch_threshold 到 {usv_id} 失败: {e}")
+
+        self.get_logger().info(f"已下发 nav_switch_threshold={threshold:.2f}m 到 {sent}/{len(usv_id_list)} 艘 USV")
+        return sent > 0
+
+    def set_nav_smooth_navigation(self, usv_id_list, enabled: bool):
+        """设置 USV 平滑导航开关。
+
+        Args:
+            usv_id_list (list[str]): USV 命名空间列表
+            enabled (bool): 是否启用平滑导航
+        """
+        if not usv_id_list:
+            self.get_logger().warn("未提供 USV 列表，忽略设置 smooth_navigation")
+            return False
+
+        from std_msgs.msg import Bool
+        sent = 0
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_smooth_navigation_pubs.get(usv_id)
+            if pub is None:
+                self.get_logger().warn(f"USV {usv_id} 未注册 set_nav_smooth_navigation 发布者")
+                continue
+
+            msg = Bool()
+            msg.data = enabled
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+            except Exception as e:
+                self.get_logger().warn(f"下发 smooth_navigation 到 {usv_id} 失败: {e}")
+
+        status = "启用" if enabled else "禁用"
+        self.get_logger().info(f"已下发 smooth_navigation={status} 到 {sent}/{len(usv_id_list)} 艘 USV")
+        return sent > 0
+
+    def set_nav_settings(self, usv_id_list, settings: dict):
+        """批量设置导航参数。
+
+        Args:
+            usv_id_list (list[str]): USV 命名空间列表
+            settings (dict): 设置字典，包含:
+                - nav_arrival_threshold: 到达阈值
+                - switch_threshold: 切换阈值
+                - smooth_navigation: 平滑导航开关
+        """
+        results = {}
+        
+        if 'nav_arrival_threshold' in settings:
+            results['arrival'] = self.set_nav_arrival_threshold(
+                usv_id_list, settings['nav_arrival_threshold'])
+        
+        if 'switch_threshold' in settings:
+            results['switch'] = self.set_nav_switch_threshold(
+                usv_id_list, settings['switch_threshold'])
+        
+        if 'smooth_navigation' in settings:
+            results['smooth'] = self.set_nav_smooth_navigation(
+                usv_id_list, settings['smooth_navigation'])
+        
+        return all(results.values()) if results else False
+
+    def set_velocity_settings(self, usv_id_list, settings: dict):
+        """批量设置速度控制器参数。
+
+        Args:
+            usv_id_list (list[str]): USV 命名空间列表
+            settings (dict): 设置字典，包含:
+                - cruise_speed: 巡航速度 (m/s)
+                - max_angular_velocity: 最大角速度 (rad/s)
+                - lookahead_distance: 前视距离 (m)
+                - stanley_gain: Stanley 增益
+                - hybrid_switch_distance: 混合切换距离 (m)
+                - goal_tolerance: 到达阈值 (m)
+                - switch_tolerance: 切换阈值 (m)
+        """
+        if not usv_id_list:
+            self.get_logger().warn("未提供 USV 列表，忽略设置速度控制器参数")
+            return False
+
+        # 参数名称 -> (发布者字典, 设置字典中的键)
+        param_mapping = {
+            'cruise_speed': (self.usv_manager.velocity_cruise_speed_pubs, 'cruise_speed'),
+            'max_angular_velocity': (self.usv_manager.velocity_max_angular_pubs, 'max_angular_velocity'),
+            'lookahead_distance': (self.usv_manager.velocity_lookahead_pubs, 'lookahead_distance'),
+            'stanley_gain': (self.usv_manager.velocity_stanley_gain_pubs, 'stanley_gain'),
+            'hybrid_switch_distance': (self.usv_manager.velocity_hybrid_switch_pubs, 'hybrid_switch_distance'),
+            'goal_tolerance': (self.usv_manager.velocity_goal_tolerance_pubs, 'goal_tolerance'),
+            'switch_tolerance': (self.usv_manager.velocity_switch_tolerance_pubs, 'switch_tolerance'),
+        }
+
+        total_sent = 0
+        for param_name, (pubs_dict, settings_key) in param_mapping.items():
+            if settings_key not in settings:
+                continue
+            
+            try:
+                value = float(settings[settings_key])
+            except (ValueError, TypeError):
+                self.get_logger().warn(f"速度控制器参数 {param_name} 非法值: {settings.get(settings_key)}")
+                continue
+
+            if value <= 0.0:
+                self.get_logger().warn(f"速度控制器参数 {param_name} 必须>0: {value}")
+                continue
+
+            sent = 0
+            for usv_id in usv_id_list:
+                pub = pubs_dict.get(usv_id)
+                if pub is None:
+                    continue
+
+                msg = Float32()
+                msg.data = value
+                try:
+                    self.publish_queue.put((pub, msg))
+                    sent += 1
+                except Exception as e:
+                    self.get_logger().warn(f"下发 {param_name} 到 {usv_id} 失败: {e}")
+
+            if sent > 0:
+                self.get_logger().info(f"已下发 {param_name}={value:.2f} 到 {sent}/{len(usv_id_list)} 艘 USV")
+                total_sent += sent
+
+        return total_sent > 0
 
     def stop_cluster_task_callback(self):
         """处理来自 GUI 的集群停止请求。"""
@@ -722,7 +885,10 @@ class GroundStationNode(Node):
 
     # ==================== 基于话题的导航方法 ====================
     
-    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, maneuver_type=0, maneuver_param=0.0, step=None):
+    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, 
+                                 maneuver_type=0, maneuver_param=0.0, step=None,
+                                 nav_mode=0, sync_timeout=10.0, arrival_quality_threshold=0.8,
+                                 is_lookahead=False):
         """
         通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
         
@@ -742,6 +908,10 @@ class GroundStationNode(Node):
             maneuver_type (int): 机动类型
             maneuver_param (float): 机动参数
             step (int, optional): 任务步骤号. 如果为None,则使用self.run_step.
+            nav_mode (int): 导航模式 (0=异步, 1=同步, 2=旋转, 3=终止)
+            sync_timeout (float): 同步模式超时时间(秒)
+            arrival_quality_threshold (float): 到达质量阈值(0.0-1.0)
+            is_lookahead (bool): 是否是预发送(lookahead). 如果为True,不更新目标缓存,避免覆盖当前执行步骤的ID
 
         Returns:
             bool: 发送是否成功
@@ -856,6 +1026,11 @@ class GroundStationNode(Node):
         goal_msg.maneuver_type = maneuver_type
         goal_msg.maneuver_param = maneuver_param
         
+        # 设置导航模式
+        goal_msg.nav_mode = nav_mode
+        goal_msg.sync_timeout = sync_timeout
+        goal_msg.arrival_quality_threshold = arrival_quality_threshold
+        
         goal_msg.timeout = timeout
         goal_msg.timestamp = self.get_clock().now().to_msg()
         
@@ -863,29 +1038,35 @@ class GroundStationNode(Node):
         pub = self.usv_manager.navigation_goal_pubs[usv_id]
         pub.publish(goal_msg)
         
-        # 更新缓存和状态
+        # 更新缓存和状态 (预发送时跳过，避免覆盖当前执行步骤的goal_id)
         current_step = step if step is not None else self.run_step
-        self._usv_nav_target_cache[usv_id] = {
-            'goal_id': goal_id,
-            'x': float(x),
-            'y': float(y),
-            'z': float(z),
-            'yaw': float(yaw),
-            'use_yaw': bool(use_yaw),
-            'maneuver_type': int(maneuver_type),
-            'maneuver_param': float(maneuver_param),
-            'step': current_step,
-            'timestamp': self.get_clock().now().nanoseconds / 1e9
-        }
+        if not is_lookahead:
+            self._usv_nav_target_cache[usv_id] = {
+                'goal_id': goal_id,
+                'x': float(x),
+                'y': float(y),
+                'z': float(z),
+                'yaw': float(yaw),
+                'use_yaw': bool(use_yaw),
+                'maneuver_type': int(maneuver_type),
+                'maneuver_param': float(maneuver_param),
+                'nav_mode': int(nav_mode),
+                'sync_timeout': float(sync_timeout),
+                'arrival_quality_threshold': float(arrival_quality_threshold),
+                'step': current_step,
+                'timestamp': self.get_clock().now().nanoseconds / 1e9
+            }
+            # 更新导航状态为执行中
+            self.ros_signal.nav_status_update.emit(usv_id, "执行中")
         
-        # 更新导航状态为执行中
-        self.ros_signal.nav_status_update.emit(usv_id, "执行中")
-        
+        nav_mode_names = {0: '异步', 1: '同步', 2: '旋转', 3: '终止'}
+        mode_str = nav_mode_names.get(nav_mode, '异步')
         resend_tag = "(重发复用ID) " if reuse_goal_id else ""
+        lookahead_tag = "📤预发送 " if is_lookahead else "📤 "
         self.get_logger().info(
-            f"📤 {usv_id} 导航目标已发送 {resend_tag}[ID={goal_id}]: "
+            f"{lookahead_tag}{usv_id} 导航目标已发送 {resend_tag}[ID={goal_id}]: "
             f"XY({x:.1f}, {y:.1f}), Yaw({yaw:.1f}°), "
-            f"机动({maneuver_type}, {maneuver_param:.1f}), 超时={timeout:.0f}s")
+            f"机动({maneuver_type}, {maneuver_param:.1f}), 模式={mode_str}, 超时={timeout:.0f}s")
         
         return True
     
@@ -911,17 +1092,17 @@ class GroundStationNode(Node):
         # 简化日志输出
         self.get_logger().debug(
             f"{usv_id}: 距离={msg.distance_to_goal:.2f}m, "
-            f"航向误差={msg.heading_error:.1f}°, "
+            f"航向误差={math.degrees(msg.heading_error):.1f}°, "
             f"预计={msg.estimated_time:.0f}s")
         
         # 发射信号更新GUI
-        # 转换为兼容格式
+        # 转换为兼容格式，heading_error 转换为度数用于 UI 显示
         step_val = cached.get('step', 0) if cached else 0
         feedback_obj = type('Feedback', (), {
             'goal_id': msg.goal_id,
             'step': step_val,
             'distance_to_goal': msg.distance_to_goal,
-            'heading_error': msg.heading_error,
+            'heading_error': math.degrees(msg.heading_error),  # 弧度转度数
             'estimated_time': msg.estimated_time
         })()
         self.ros_signal.navigation_feedback.emit(usv_id, feedback_obj)
@@ -972,9 +1153,9 @@ class GroundStationNode(Node):
             self.ros_signal.nav_status_update.emit(usv_id, "成功")
             self.cluster_controller.mark_usv_goal_result(usv_id, True, goal_step)
             
-            # 清除导航目标缓存，取消UI显示
+            # 标记目标已到达（用于UI显示绿色X），而不是删除缓存
             if usv_id in self._usv_nav_target_cache:
-                del self._usv_nav_target_cache[usv_id]
+                self._usv_nav_target_cache[usv_id]['reached'] = True
             
             # ✅ 修复：不在每个目标点完成时切换HOLD，让USV保持GUIDED模式继续执行后续步骤
             # 集群任务完成后会统一切换到HOLD（在_reset_cluster_task中处理）
@@ -1045,6 +1226,9 @@ class GroundStationNode(Node):
                 
                 # 支持z坐标
                 # 修复BUG：调用 send_nav_goal_via_topic 时显式传递 step=0 (单点导航)，防止内部访问 step 出错
+                # 离群单点导航使用 NAV_MODE_TERMINAL，使其使用位置模式（GPS定点）而非速度模式
+                # 这样可以更精确地定位到目标点
+                from common_interfaces.msg import NavigationGoal
                 self.send_nav_goal_via_topic(
                     usv_id, 
                     p_local.get('x', 0.0), 
@@ -1053,7 +1237,8 @@ class GroundStationNode(Node):
                     yaw, 
                     use_yaw=False, # 明确 use_yaw
                     timeout=300.0,
-                    step=0 # 单点导航强制step=0
+                    step=0, # 单点导航强制step=0
+                    nav_mode=NavigationGoal.NAV_MODE_TERMINAL  # 使用TERMINAL模式触发位置控制
                 )
         # 捕获异常并记录错误日志
         except Exception as e:
