@@ -1,3 +1,13 @@
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Message definition for NavigationGoal.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # 导航目标消息
 # 用于发送导航目标到 USV
 

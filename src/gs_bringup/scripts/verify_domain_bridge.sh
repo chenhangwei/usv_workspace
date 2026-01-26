@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of verify domain bridge.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # Domain Bridge 验证脚本
 # 用于验证 domain_bridge 是否正常转发话题
 

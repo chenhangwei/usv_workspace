@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of style manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 样式管理器 - 支持多种主题快速切换
 提供现代化UI主题，增强视觉体验

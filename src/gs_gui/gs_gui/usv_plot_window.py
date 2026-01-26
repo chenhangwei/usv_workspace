@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv plot window.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QCheckBox, QHBoxLayout, 
                              QPushButton, QLabel, QSlider, QGroupBox, QMessageBox, QWidget, QMenu, QAction)
 from PyQt5.QtCore import QTimer, Qt

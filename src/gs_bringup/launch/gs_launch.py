@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Launch script for gs_launch.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration, IncludeLaunchDescription, SetEnvironmentVariable

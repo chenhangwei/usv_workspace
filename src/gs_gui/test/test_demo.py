@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Unit tests for demo.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 演示测试文件 - 教学用例
 这个文件展示了如何为ROS2包编写单元测试

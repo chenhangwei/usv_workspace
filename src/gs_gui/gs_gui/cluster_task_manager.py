@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of cluster task manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 集群任务管理模块
 负责集群任务的创建、执行、暂停和停止

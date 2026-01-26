@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of ui utils.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 UI工具模块
 负责UI辅助功能，包括信息显示、绘图窗口等

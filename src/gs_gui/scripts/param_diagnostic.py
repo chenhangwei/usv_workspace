@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of param diagnostic.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 MAVROS 参数服务诊断脚本
 用于检查 param 插件的状态和可用性

@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# ROS 2 Node implementation: Navigate To Point Node.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 NavigateToPoint 导航节点 (基于话题通信) - 支持平滑航点切换
 

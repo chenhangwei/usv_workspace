@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of error handler.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 统一错误处理模块
 提供分类错误处理、自动恢复和日志记录功能

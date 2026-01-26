@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of start log collector.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 #
 # USV 日志收集启动脚本
 # 

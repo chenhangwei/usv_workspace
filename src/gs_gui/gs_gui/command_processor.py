@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of command processor.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 命令处理器模块
 处理各种命令的发送和处理

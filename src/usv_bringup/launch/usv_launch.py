@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Launch script for usv_launch.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 无人船(Ultra Short Wave Vehicle, USV)启动文件
 该文件用于启动完整的USV系统，包括飞控通信、传感器驱动、控制逻辑等模块

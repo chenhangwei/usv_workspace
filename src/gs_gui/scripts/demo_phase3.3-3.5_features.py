@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of demo phase3.3-3.5 features.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 Phase 3.3-3.5 综合功能演示
 

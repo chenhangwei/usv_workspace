@@ -1,3 +1,13 @@
+<!--
+  Copyright (c) 2026 chenhangwei
+  
+  This file is part of the USV Workspace project.
+  
+  Implementation of AX-2-20260123001.
+  
+  Author: chenhangwei
+  Date: 2026-01-26
+-->
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <cluster type="formation">
   <step number="1" nav_mode="async">

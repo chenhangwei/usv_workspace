@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of download ardupilot metadata.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 从 ArduPilot 官方下载参数元数据并转换为我们的格式
 

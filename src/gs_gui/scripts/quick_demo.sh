@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of quick demo.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # USV 信息面板 - 快速演示脚本
 
 echo "========================================"

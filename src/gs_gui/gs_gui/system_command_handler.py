@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of system command handler.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 System Command Handler for Remote USV Management
 Handles SSH command execution including password-protected sudo operations.

@@ -1,3 +1,13 @@
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Message definition for NavigationFeedback.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # 导航反馈消息
 # USV 定期发送的导航进度反馈
 

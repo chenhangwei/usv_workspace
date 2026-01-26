@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of demo usv info panel.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV 信息面板快速演示
 独立运行，无需完整 ROS 环境

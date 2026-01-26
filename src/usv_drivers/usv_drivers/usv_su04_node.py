@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# ROS 2 Node implementation: Usv Su04 Node.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 无人船SU04超声波传感器节点
 

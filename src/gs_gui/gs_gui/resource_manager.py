@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of resource manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 资源管理模块
 提供统一的资源生命周期管理、自动清理和泄漏检测

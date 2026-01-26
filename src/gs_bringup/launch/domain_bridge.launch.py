@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Launch script for domain_bridge.launch.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 Domain Bridge 启动文件 - 地面站端
 用于实现跨 ROS Domain 通信，连接不同 Domain ID 的 USV 和地面站

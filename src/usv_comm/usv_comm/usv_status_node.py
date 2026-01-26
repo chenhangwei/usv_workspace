@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# ROS 2 Node implementation: Usv Status Node.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 from math import sqrt, degrees, atan2
 import rclpy
 from rclpy.node import Node

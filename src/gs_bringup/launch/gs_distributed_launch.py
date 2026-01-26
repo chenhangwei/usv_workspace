@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Launch script for gs_distributed_launch.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 ROS 2 分布式启动文件 - 地面站端
 该文件实现从地面站通过 SSH 远程启动多艘 USV 的机载节点

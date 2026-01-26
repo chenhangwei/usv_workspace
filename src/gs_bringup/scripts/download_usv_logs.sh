@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of download usv logs.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 #
 # USV 导航日志下载脚本
 # 从远程 USV 下载日志文件到本地

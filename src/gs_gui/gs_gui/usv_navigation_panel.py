@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv navigation panel.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV 导航信息面板模块
 提供美观、信息丰富的 USV 导航详细信息显示界面

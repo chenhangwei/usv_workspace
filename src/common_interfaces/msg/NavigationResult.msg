@@ -1,3 +1,13 @@
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Message definition for NavigationResult.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # 导航结果消息
 # USV 完成导航任务后发送的结果
 

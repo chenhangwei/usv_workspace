@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of quick start.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 
 # ROS 2 分布式启动 - 快速测试脚本
 # 该脚本演示如何使用 ROS 2 原生分布式 launch 系统启动 USV 集群

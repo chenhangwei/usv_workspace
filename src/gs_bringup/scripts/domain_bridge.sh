@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of domain bridge.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # Domain Bridge 快速启动脚本
 # 用于在地面站后台运行 domain_bridge
 

@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Unit tests for led_infection_mode.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 LED传染模式功能测试
 测试LED传染模式的开关控制和状态管理

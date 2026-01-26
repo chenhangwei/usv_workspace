@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Unit tests for coordinate_transform.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 坐标系偏移量设置 - 快速测试
 用于验证Area Center偏移量设置功能是否正常工作

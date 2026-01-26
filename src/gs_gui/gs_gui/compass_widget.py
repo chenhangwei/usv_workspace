@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of compass widget.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 罗盘/航向指示器 Widget
 类似 QGroundControl 的圆形航向显示

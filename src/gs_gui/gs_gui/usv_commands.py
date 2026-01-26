@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv commands.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV命令模块
 负责处理所有USV控制命令的发送

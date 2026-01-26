@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of verify cross domain.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 
 # 跨域通信验证脚本
 # 用途: 验证 gauss01 (Domain 11) 与地面站 (Domain 99) 之间的话题转发

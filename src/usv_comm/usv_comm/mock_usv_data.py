@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of mock usv data.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 虚拟数据发布节点 - 模拟实际USV运行数据
 

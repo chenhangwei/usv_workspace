@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Python setup script for gs_bringup.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 地面站启动包(gs_bringup)的Python打包配置文件
 该文件定义了ROS 2包的元数据和安装要求

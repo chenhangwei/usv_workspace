@@ -1,3 +1,13 @@
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Message definition for UsvStatus.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # UsvStatus.msg
 # 该消息用于表示无人水面艇（USV）的状态信息
 # 包含命名空间、飞控模式、连接状态、解锁状态、引导状态、电池电量、位置、速度和偏航角等信息

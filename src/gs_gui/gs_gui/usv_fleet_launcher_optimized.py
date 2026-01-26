@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv fleet launcher optimized.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV 集群启动器对话框（性能优化版）
 提供图形化界面管理 USV 集群的启动、停止和监控

@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of area offset dialog.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 Area Center 偏移量设置对话框
 用于设置任务坐标系原点（area_center）在全局地图坐标系中的位置

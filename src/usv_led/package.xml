@@ -1,4 +1,14 @@
 <?xml version="1.0"?>
+<!--
+  Copyright (c) 2026 chenhangwei
+  
+  This file is part of the USV Workspace project.
+  
+  ROS 2 package configuration for src.
+  
+  Author: chenhangwei
+  Date: 2026-01-26
+-->
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>usv_led</name>

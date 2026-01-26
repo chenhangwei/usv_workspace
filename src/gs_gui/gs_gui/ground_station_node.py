@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# ROS 2 Node implementation: Ground Station Node.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 地面站GUI ROS2节点实现文件
 该文件实现了地面站GUI与USV系统通信的核心功能

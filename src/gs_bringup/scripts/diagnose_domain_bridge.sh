@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of diagnose domain bridge.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 
 # Domain Bridge 诊断脚本
 # 用途: 诊断地面站与 USV 之间的跨域通信问题

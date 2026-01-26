@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of main gui app.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 Ground Station主窗口应用
 重构后的版本,使用模块化设计

@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# ROS 2 Node implementation: Usv Sound Node.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 无人船声音播放节点
 

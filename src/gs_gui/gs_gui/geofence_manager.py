@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of geofence manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 电子围栏管理器
 负责监控USV位置,当越界时触发动作

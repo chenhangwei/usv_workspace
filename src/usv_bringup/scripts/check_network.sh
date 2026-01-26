@@ -1,4 +1,14 @@
 #!/bin/bash
+# =============================================================================
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of check network.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
+# =============================================================================
 # USV网络配置诊断脚本
 # 用于检查MAVLink和DDS端口配置是否正确
 
