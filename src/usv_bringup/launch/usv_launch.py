@@ -75,7 +75,7 @@ def generate_launch_description():
     # 日志收集开关参数
     enable_log_collector_arg = DeclareLaunchArgument(
         'enable_log_collector',
-        default_value='false',
+        default_value='true',
         description='是否启用导航日志收集 (true/false)'
     )
     
