@@ -210,6 +210,18 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 11
 
+  # 取消导航话题 (地面站 -> USV，用于手动暂停导航)
+  usv_01/cancel_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 11
+    reversed: true
+
+  # 停止导航话题 (地面站 -> USV，用于集群STOP完全停止)
+  usv_01/stop_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 11
+    reversed: true
+
   # ------------------------- 速度控制器状态 (velocity_controller_node) -------
   
   usv_01/velocity_controller/status:
@@ -378,6 +390,18 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 12
 
+  # 取消导航话题 (地面站 -> USV，用于手动暂停导航)
+  usv_02/cancel_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 12
+    reversed: true
+
+  # 停止导航话题 (地面站 -> USV，用于集群STOP完全停止)
+  usv_02/stop_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 12
+    reversed: true
+
   # ------------------------- 速度控制器状态 (velocity_controller_node) -------
   
   usv_02/velocity_controller/status:
@@ -545,6 +569,18 @@ topics:
   usv_03/navigation_result:
     type: common_interfaces/msg/NavigationResult
     from_domain: 13
+
+  # 取消导航话题 (地面站 -> USV，用于手动暂停导航)
+  usv_03/cancel_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 13
+    reversed: true
+
+  # 停止导航话题 (地面站 -> USV，用于集群STOP完全停止)
+  usv_03/stop_navigation:
+    type: std_msgs/msg/Bool
+    from_domain: 13
+    reversed: true
 
   # ------------------------- 速度控制器状态 (velocity_controller_node) -------
   

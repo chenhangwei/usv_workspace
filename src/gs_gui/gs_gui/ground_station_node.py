@@ -1065,7 +1065,8 @@ class GroundStationNode(Node):
                 'sync_timeout': float(sync_timeout),
                 'arrival_quality_threshold': float(arrival_quality_threshold),
                 'step': current_step,
-                'timestamp': self.get_clock().now().nanoseconds / 1e9
+                'timestamp': self.get_clock().now().nanoseconds / 1e9,
+                'paused': False,  # 新任务清除暂停状态
             }
             # 更新导航状态为执行中
             self.ros_signal.nav_status_update.emit(usv_id, "执行中")
@@ -1962,7 +1963,12 @@ class GroundStationNode(Node):
                 return
 
             # 仅当该USV仍有活动导航目标缓存，才认为任务在执行中
-            if not self._usv_nav_target_cache.get(usv_id):
+            nav_cache = self._usv_nav_target_cache.get(usv_id)
+            if not nav_cache:
+                return
+            
+            # 如果任务被暂停（用户点击HOLD），不自动恢复GUIDED
+            if nav_cache.get('paused', False):
                 return
 
             mode = str((state or {}).get('mode', '')).upper()

@@ -167,13 +167,13 @@ class ClusterController:
 
     def _reset_cluster_task(self, target_state: ClusterTaskState, reason: str, cancel_active: bool = True) -> None:
         """统一重置集群任务状态。"""
-        usv_ids_to_manual = []
+        usv_ids_to_hold = []
         
         if cancel_active:
-            # 清理所有 USV 的导航目标缓存
+            # 清理所有 USV 的导航目标缓存，并发送 stop_navigation 消息
             for usv_id in list(self.node._usv_nav_target_cache.keys()):
                 self._cancel_active_goal(usv_id)
-                usv_ids_to_manual.append(usv_id)
+                usv_ids_to_hold.append(usv_id)
 
         self.node.current_targets = []
         self.node.run_step = 0
@@ -185,12 +185,16 @@ class ClusterController:
         self._emit_current_progress([])
         
         # 任务停止或完成后，将所有参与的USV设置为HOLD模式
-        if usv_ids_to_manual and target_state in (ClusterTaskState.IDLE, ClusterTaskState.COMPLETED):
-            self.node.get_logger().info(f"集群任务{target_state.value}，将 {len(usv_ids_to_manual)} 个USV设置为HOLD模式")
-            self.node.ros_signal.hold_command.emit(usv_ids_to_manual)
-            # 更新导航状态显示为"待命"
-            for usv_id in usv_ids_to_manual:
-                self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
+        # 注意：这里直接调用模式切换，不通过 hold_command 信号，
+        # 因为 _cancel_active_goal 已经发送了 stop_navigation 消息，
+        # 不需要再发送 cancel_navigation (暂停) 消息
+        if usv_ids_to_hold and target_state in (ClusterTaskState.IDLE, ClusterTaskState.COMPLETED):
+            self.node.get_logger().info(f"集群任务{target_state.value}，将 {len(usv_ids_to_hold)} 个USV设置为HOLD模式")
+            # 直接调用模式切换，不发送额外的取消导航消息
+            self.node.command_processor._set_mode_for_usvs(usv_ids_to_hold, "HOLD")
+            # 更新导航状态显示为"已停止"
+            for usv_id in usv_ids_to_hold:
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
 
     def stop_cluster_task(self, reason: str = "手动停止") -> None:
         """外部请求停止集群任务。"""
@@ -1023,12 +1027,28 @@ class ClusterController:
 
     def _cancel_active_goal(self, usv_id):
         """
-        取消指定 USV 当前活动的导航任务 (Topic 版本)
+        停止指定 USV 当前活动的导航任务 (Topic 版本)
+        
+        发送 stop_navigation 消息，完全清空 USV 的任务和队列。
+        用于集群 STOP 操作。
         """
         # 清理目标缓存 (USV 端会自动超时)
         if usv_id in self.node._usv_nav_target_cache:
             self.node.get_logger().warn(f"⚠️  清除 {usv_id} 导航目标缓存...")
             del self.node._usv_nav_target_cache[usv_id]
+        
+        # 发送 stop_navigation 消息到 USV
+        from std_msgs.msg import Bool
+        if usv_id in self.node.usv_manager.stop_navigation_pubs:
+            stop_msg = Bool()
+            stop_msg.data = True
+            try:
+                self.node.publish_queue.put_nowait(
+                    (self.node.usv_manager.stop_navigation_pubs[usv_id], stop_msg)
+                )
+                self.node.get_logger().info(f"🛑 发送停止导航请求到 {usv_id}")
+            except Exception as e:
+                self.node.get_logger().error(f"发送停止导航请求失败 {usv_id}: {e}")
 
     def mark_usv_goal_result(self, usv_id: str, success: bool, goal_step: Optional[int] = None) -> None:
         """根据导航结果更新指定 USV 的 ack 状态。"""

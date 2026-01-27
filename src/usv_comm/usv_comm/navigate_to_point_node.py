@@ -168,12 +168,32 @@ class NavigateToPointNode(Node):
             qos_reliable,
             callback_group=self.callback_group)
         
-        # 订阅取消导航请求 (来自地面站)
+        # 订阅暂停导航请求 (来自地面站 HOLD 按钮)
+        # 暂停：保留当前任务和队列，点击 GUIDED 可恢复
         self.cancel_nav_sub = self.create_subscription(
             Bool,
             'cancel_navigation',
             self._cancel_navigation_callback,
             qos_reliable,
+            callback_group=self.callback_group)
+        
+        # 订阅停止导航请求 (来自地面站 STOP 按钮)
+        # 停止：清空当前任务和队列，需要重新发送新任务
+        self.stop_nav_sub = self.create_subscription(
+            Bool,
+            'stop_navigation',
+            self._stop_navigation_callback,
+            qos_reliable,
+            callback_group=self.callback_group)
+        
+        # 订阅飞控模式变化 (用于检测 GUIDED 恢复)
+        from mavros_msgs.msg import State
+        self._current_mode = None
+        self.state_sub = self.create_subscription(
+            State,
+            'state',
+            self._state_callback,
+            qos_best_effort,
             callback_group=self.callback_group)
         
         # 订阅当前位置 (使用 GPS 转换的统一坐标系)
@@ -213,6 +233,9 @@ class NavigateToPointNode(Node):
         self.current_goal_id: Optional[int] = None
         self.goal_start_time = None
         self._last_dedup_goal_id = None
+        self._is_paused = False  # 暂停标志（HOLD时暂停，GUIDED时恢复）
+        self._manual_pause_requested = False  # 手动暂停标志（来自地面站的暂停请求）
+        self._manual_pause_time = 0.0  # 手动暂停请求时间戳
         
         # 创建导航循环定时器
         self.nav_timer = self.create_timer(
@@ -284,16 +307,63 @@ class NavigateToPointNode(Node):
     
     def _cancel_navigation_callback(self, msg):
         """
-        取消导航回调 - 来自地面站的强制取消请求
+        取消导航回调 - 来自地面站的暂停/取消请求
         
-        当用户在地面站点击 HOLD 或 MANUAL 按钮时，会发送此消息。
-        清空当前任务和航点队列。
+        当用户在地面站点击 HOLD 按钮时，会发送此消息。
+        任务进入暂停状态，但**保留当前任务和队列**。
+        需要用户发送新任务才能恢复（不会因为 GUIDED 模式自动恢复）。
+        
+        行为：
+        - 暂停导航（设置 _is_paused 标志）
+        - 设置手动暂停标志（防止 GUIDED 模式时自动恢复）
+        - 保留当前目标和航点队列（不清空）
+        - 只有收到新任务时才恢复，GUIDED 模式不再自动恢复
+        """
+        from std_msgs.msg import Bool
+        import time
+        if not isinstance(msg, Bool) or not msg.data:
+            return
+        
+        self.get_logger().warn('🛑 收到暂停导航请求（手动暂停），任务进入暂停状态')
+        
+        # 设置暂停标志，而不是清空任务
+        self._is_paused = True
+        
+        # 设置手动暂停标志 - 防止 GUIDED 模式时自动恢复
+        self._manual_pause_requested = True
+        self._manual_pause_time = time.time()
+        
+        # 发布暂停结果（但不是取消结果）
+        result = NavigationResult()
+        # goal_id 是 uint32，不能为负数，用 0 表示无有效目标
+        result.goal_id = self.current_goal_id if self.current_goal_id is not None else 0
+        result.success = False
+        result.error_code = 2  # 2 = 暂停（区别于 0=成功, 1=超时）
+        result.message = '导航任务已暂停（等待恢复）'
+        self.result_pub.publish(result)
+        
+        queue_len = len(self.waypoint_queue)
+        current_info = f'当前目标ID={self.current_goal_id}' if self.current_goal else '无当前目标'
+        self.get_logger().info(f'✅ 导航已暂停 ({current_info}, 队列={queue_len}), 手动暂停不会自动恢复')
+    
+    def _stop_navigation_callback(self, msg):
+        """
+        停止导航回调 - 来自地面站的完全停止请求
+        
+        当用户在地面站点击集群 STOP 按钮时，会发送此消息。
+        任务完全停止，**清空当前任务和队列**。
+        需要发送新任务才能重新开始导航。
+        
+        行为：
+        - 清空当前目标和航点队列
+        - 重置所有导航状态
+        - 发布停止结果
         """
         from std_msgs.msg import Bool
         if not isinstance(msg, Bool) or not msg.data:
             return
         
-        self.get_logger().warn('🛑 收到取消导航请求，清空航点队列')
+        self.get_logger().warn('🛑 收到停止导航请求，清空所有任务')
         
         # 清空航点队列
         queue_len = len(self.waypoint_queue)
@@ -305,20 +375,57 @@ class NavigateToPointNode(Node):
         self.current_goal_id = None
         self.goal_start_time = None
         
+        # 重置暂停状态
+        self._is_paused = False
+        
         # 重置同步模式和旋转模式状态
         self._sync_mode_start_time = None
         self._arrival_check_samples = []
         self._rotate_in_progress = False
         self._rotate_start_yaw = None
         
-        # 发布取消结果
+        # 发布停止结果
         result = NavigationResult()
-        result.goal_id = old_goal_id if old_goal_id is not None else -1
+        # goal_id 是 uint32，不能为负数，用 0 表示无有效目标
+        result.goal_id = old_goal_id if old_goal_id is not None else 0
         result.success = False
-        result.message = '导航任务被用户取消'
+        result.error_code = 3  # 3 = 停止（区别于 0=成功, 1=超时, 2=暂停）
+        result.message = '导航任务已停止（需重新发送任务）'
         self.result_pub.publish(result)
         
-        self.get_logger().info(f'✅ 导航任务已取消 (清空 {queue_len} 个排队航点)')
+        self.get_logger().info(f'✅ 导航已停止 (清空 {queue_len} 个排队航点), 等待新任务')
+    
+    def _state_callback(self, msg):
+        """
+        飞控模式状态回调 - 检测 GUIDED 模式恢复
+        
+        当暂停状态下检测到 GUIDED 模式时：
+        - 用户明确点击 GUIDED 按钮，清除手动暂停状态并恢复导航
+        - 这允许用户通过点击 GUIDED 按钮来恢复被暂停的任务
+        """
+        new_mode = msg.mode
+        old_mode = self._current_mode
+        self._current_mode = new_mode
+        
+        # 如果模式变化为 GUIDED 且当前处于暂停状态，恢复导航
+        if self._is_paused and new_mode == 'GUIDED' and old_mode != 'GUIDED':
+            # 用户明确切换到 GUIDED 模式，清除手动暂停状态并恢复导航
+            if self._manual_pause_requested:
+                self.get_logger().info(
+                    '▶️ 用户切换到 GUIDED 模式，清除手动暂停状态'
+                )
+                self._manual_pause_requested = False
+            
+            self._is_paused = False
+            current_info = f'目标ID={self.current_goal_id}' if self.current_goal else '无目标'
+            queue_len = len(self.waypoint_queue)
+            self.get_logger().info(
+                f'▶️ 检测到 GUIDED 模式，导航已恢复 ({current_info}, 队列={queue_len})')
+            
+            # 如果有当前目标，重新转发到控制节点
+            if self.current_goal is not None:
+                self.target_pub.publish(self.current_goal)
+                self.get_logger().info(f'🔄 重新转发目标 [ID={self.current_goal_id}] 到控制节点')
     
     def pose_callback(self, msg):
         """更新当前位置"""
@@ -338,6 +445,12 @@ class NavigateToPointNode(Node):
         # 记录收到航点的时间 (用于空闲保护)
         self._last_goal_received_time = self.get_clock().now()
         self._idle_warning_logged = False  # 重置警告标志
+        
+        # 收到新任务时，自动解除暂停状态和手动暂停标志
+        if self._is_paused or self._manual_pause_requested:
+            self._is_paused = False
+            self._manual_pause_requested = False
+            self.get_logger().info('▶️ 收到新目标，自动解除暂停状态（包括手动暂停）')
         
         # 详细诊断日志
         current_goal_info = f"current_goal={'有' if self.current_goal else '无'}"
@@ -516,6 +629,10 @@ class NavigateToPointNode(Node):
         """
         # ========== 空闲保护检测 ==========
         self._check_idle_protection()
+        
+        # 如果处于暂停状态，跳过导航逻辑
+        if self._is_paused:
+            return
         
         # 如果没有活动任务,跳过
         if self.current_goal is None:
@@ -835,7 +952,8 @@ class NavigateToPointNode(Node):
     def _publish_feedback(self, distance: float, heading_error: float, estimated_time: float):
         """发布导航反馈 (包含航点队列状态和导航模式状态)"""
         feedback = NavigationFeedback()
-        feedback.goal_id = self.current_goal_id
+        # goal_id 是 uint32，确保不为负数或 None
+        feedback.goal_id = self.current_goal_id if self.current_goal_id is not None and self.current_goal_id >= 0 else 0
         feedback.distance_to_goal = distance
         feedback.heading_error = heading_error
         feedback.estimated_time = estimated_time
@@ -875,9 +993,11 @@ class NavigateToPointNode(Node):
                         message: str, error_code: int = 0):
         """发布导航结果"""
         result = NavigationResult()
-        result.goal_id = goal_id
+        # goal_id 是 uint32，确保不为负数或 None
+        result.goal_id = goal_id if goal_id is not None and goal_id >= 0 else 0
         result.success = success
-        result.error_code = error_code
+        # error_code 是 uint8，确保在有效范围内
+        result.error_code = max(0, min(255, error_code))
         result.message = message
         result.timestamp = self.get_clock().now().to_msg()
         self.result_pub.publish(result)

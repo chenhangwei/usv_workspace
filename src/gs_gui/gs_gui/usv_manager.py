@@ -39,7 +39,8 @@ class UsvManager:
         self.navigation_goal_pubs = {}      # 导航目标发布者
         self.navigation_feedback_subs = {}  # 导航反馈订阅者
         self.navigation_result_subs = {}    # 导航结果订阅者
-        self.cancel_navigation_pubs = {}    # 取消导航发布者
+        self.cancel_navigation_pubs = {}    # 暂停导航发布者 (HOLD 按钮)
+        self.stop_navigation_pubs = {}      # 停止导航发布者 (集群 STOP 按钮)
 
         # 导航参数下发（基于话题，便于跨 Domain Bridge）
         self.nav_arrival_threshold_pubs = {}  # {usv_id: Publisher(Float32)}
@@ -176,7 +177,7 @@ class UsvManager:
             lambda msg, uid=usv_id: self.node.navigation_result_callback(msg, uid),
             self.qos_a)
         
-        # 创建取消导航发布者
+        # 创建取消导航发布者 (暂停)
         from std_msgs.msg import Bool
         cancel_navigation_topic = f"{ns}/cancel_navigation"
         self.cancel_navigation_pubs[usv_id] = self.node.create_publisher(
@@ -184,9 +185,16 @@ class UsvManager:
             cancel_navigation_topic,
             self.qos_a)
         
+        # 创建停止导航发布者 (完全停止)
+        stop_navigation_topic = f"{ns}/stop_navigation"
+        self.stop_navigation_pubs[usv_id] = self.node.create_publisher(
+            Bool,
+            stop_navigation_topic,
+            self.qos_a)
+        
         # 记录日志信息
         self.node.get_logger().info(f"为USV {usv_id} 添加订阅者和发布者")
-        self.node.get_logger().info(f"  ✓ 导航话题已注册: {navigation_goal_topic}, {navigation_feedback_topic}, {navigation_result_topic}, {cancel_navigation_topic}")
+        self.node.get_logger().info(f"  ✓ 导航话题已注册: {navigation_goal_topic}, {navigation_feedback_topic}, {navigation_result_topic}, {cancel_navigation_topic}, {stop_navigation_topic}")
 
     # 移除USV命名空间
     def remove_usv_namespace(self, ns):
@@ -274,6 +282,9 @@ class UsvManager:
         if usv_id in self.cancel_navigation_pubs:
             self.node.destroy_publisher(self.cancel_navigation_pubs[usv_id])
             del self.cancel_navigation_pubs[usv_id]
+        if usv_id in self.stop_navigation_pubs:
+            self.node.destroy_publisher(self.stop_navigation_pubs[usv_id])
+            del self.stop_navigation_pubs[usv_id]
         
         # 记录日志信息
         self.node.get_logger().info(f"移除USV {usv_id} 的订阅者和发布者")

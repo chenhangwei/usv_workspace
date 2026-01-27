@@ -297,6 +297,8 @@ class MainWindow(QMainWindow):
         
         # 导航状态更新信号
         self.ros_signal.nav_status_update.connect(self.state_handler.update_nav_status)
+        # 导航状态更新时，如果是 "已停止"，从反馈表格中移除该 USV
+        self.ros_signal.nav_status_update.connect(self._handle_nav_status_for_feedback_table)
         
         # 导航反馈信号（连接到 StateHandler 进行缓存）
         self.ros_signal.navigation_feedback.connect(self.state_handler.update_navigation_feedback)
@@ -1369,6 +1371,35 @@ limitations under the License.
         """清空导航反馈列表"""
         self.nav_feedback_table.setRowCount(0)
         self._nav_feedback_row_map.clear()
+    
+    def remove_usv_from_feedback_table(self, usv_id):
+        """
+        从导航反馈列表中移除指定 USV 的行
+        
+        Args:
+            usv_id: 要移除的 USV 标识符
+        """
+        if usv_id in self._nav_feedback_row_map:
+            row = self._nav_feedback_row_map[usv_id]
+            self.nav_feedback_table.removeRow(row)
+            del self._nav_feedback_row_map[usv_id]
+            # 更新其他 USV 的行索引
+            for uid, r in self._nav_feedback_row_map.items():
+                if r > row:
+                    self._nav_feedback_row_map[uid] = r - 1
+    
+    def _handle_nav_status_for_feedback_table(self, usv_id, status):
+        """
+        根据导航状态更新反馈表格
+        
+        当导航状态变为 "已停止" 时，从反馈表格中移除该 USV
+        
+        Args:
+            usv_id: USV 标识符
+            status: 导航状态字符串
+        """
+        if status == "已停止":
+            self.remove_usv_from_feedback_table(usv_id)
         
     def handle_navigation_feedback(self, usv_id, feedback):
         """

@@ -62,22 +62,27 @@ class CommandProcessor:
         # 记录日志信息
         self.node.get_logger().info("接收到HOLD模式命令")
         
-        # 切换到HOLD模式时，应该停止所有导航任务
+        # 切换到HOLD模式时，应该暂停所有导航任务（不是完全停止）
+        # 注意：集群 STOP 操作会先调用 _cancel_active_goal 发送 stop_navigation
+        # 这里只发送 cancel_navigation（暂停），让单独的 HOLD 按钮具有暂停语义
         usv_list = msg if isinstance(msg, list) else [msg]
         for ns in usv_list:
             # 提取USV ID
             usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
             
-            # 发送取消导航消息，通知 USV 端结束导航任务
-            # 这会让 velocity_controller_node 进入 CANCELLED 状态，不会自动恢复 GUIDED
+            # 发送取消导航消息，通知 USV 端暂停导航任务
+            # 注意：如果是集群 STOP 操作，_cancel_active_goal 已经发送了 stop_navigation
+            # 这里再发送 cancel_navigation 会有一定的覆盖效果，但不会破坏已清空的队列
             self._send_cancel_navigation(usv_id)
             
-            # 如果该USV有正在执行的导航任务，取消它
+            # 如果该USV有正在执行的导航任务，更新状态
             if usv_id in self.node._usv_nav_target_cache:
-                self.node.get_logger().info(f"🛑 切换HOLD模式，取消 {usv_id} 的导航任务")
-                del self.node._usv_nav_target_cache[usv_id]
-                # 更新导航状态显示为"已停止"
-                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
+                self.node.get_logger().info(f"🛑 切换HOLD模式，暂停 {usv_id} 的导航任务")
+                # 设置暂停标志，让 GUIDED 看门狗跳过此 USV
+                # 不删除缓存，因为这是暂停而不是停止
+                self.node._usv_nav_target_cache[usv_id]['paused'] = True
+                # 更新导航状态显示为"已暂停"
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已暂停")
             else:
                 # 如果没有活动的导航任务，显示为"待命"
                 self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
@@ -115,6 +120,15 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到导航模式命令")
+        
+        # 清除暂停标志，允许 GUIDED 看门狗恢复工作
+        usv_list = msg if isinstance(msg, list) else [msg]
+        for ns in usv_list:
+            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
+            if usv_id in self.node._usv_nav_target_cache:
+                self.node._usv_nav_target_cache[usv_id]['paused'] = False
+                self.node.get_logger().info(f"▶️ 清除 {usv_id} 的暂停标志，恢复导航")
+        
         # 调用通用设置模式方法
         self._set_mode_for_usvs(msg, "GUIDED")
 
