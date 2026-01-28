@@ -50,7 +50,9 @@ class Pose2D:
     """2D 位姿"""
     x: float
     y: float
-    yaw: float  # 弧度
+    yaw: float  # 船头朝向 (Heading), 弧度
+    course: Optional[float] = None  # 航迹角 (Course over Ground), 弧度
+    speed: Optional[float] = None   # 对地速度 (m/s)
     
     def distance_to(self, other: 'Pose2D') -> float:
         """计算到另一个位置的距离"""
@@ -464,12 +466,20 @@ class VelocityPathTracker:
         self._last_angular_velocity = angular_velocity
         
         # 计算自适应线速度
-        linear_speed = self._compute_adaptive_speed(
+        # 修改：拆分为基础逻辑 + 过弯减速逻辑
+        # 1. 基础速度（考虑转弯曲率和距离终点减速）
+        base_speed = self._compute_adaptive_speed(
             target.speed, 
             angular_velocity, 
             distance_to_target,
             target.is_final
         )
+        
+        # 2. 过弯前瞻减速（根据下一个航点的角度提前减速）
+        corning_limit = self._calculate_corner_speed_limit(pose, target)
+        
+        # 取最小值
+        linear_speed = min(base_speed, corning_limit)
         
         # 构建并清理指令
         cmd = VelocityCommand(
@@ -482,6 +492,97 @@ class VelocityPathTracker:
         return cmd.sanitize()
     
     # ==================== 内部方法 ====================
+
+    def _calculate_corner_speed_limit(self, current_pose: Pose2D, current_wp: Waypoint) -> float:
+        """
+        计算过弯限速
+        
+        逻辑：
+        1. 检查队列里有没有下一个航点。如果没有，说明是终点，不限制（由距离逻辑控制）。
+        2. 如果有，计算当前航段和下一航段的夹角。
+        3. 夹角越尖锐（急弯），允许通过的速度越低。
+        """
+        # 1. 终点判断 (队列为空)
+        if not self._waypoint_queue:
+            # 没有下一个点，说明是最终终点。返回最大许可速度，让 _compute_adaptive_speed 处理减速
+            return self.max_valid_speed_limit()
+        
+        next_wp = self._waypoint_queue[0]
+        
+        # 2. 计算向量
+        # vec1: 船 -> 当前点
+        dx1 = current_wp.x - current_pose.x
+        dy1 = current_wp.y - current_pose.y
+        
+        # vec2: 当前点 -> 下一点
+        dx2 = next_wp.x - current_wp.x
+        dy2 = next_wp.y - current_wp.y
+        
+        len1 = math.hypot(dx1, dy1)
+        len2 = math.hypot(dx2, dy2)
+        
+        if len1 < 0.1 or len2 < 0.1:
+            return self.max_valid_speed_limit()
+
+        # 3. 计算夹角 (0~180度, 0=掉头, 180=直行)
+        # 使用 atan2 计算每个向量的绝对角度
+        angle1 = math.atan2(dy1, dx1)
+        angle2 = math.atan2(dy2, dx2)
+        
+        # 转向角 delta (0: 直行, pi: 掉头) 
+        # 我们定义 turn_angle 为偏转角度，0表示直行，pi表示反向
+        delta = abs(self._normalize_angle(angle2 - angle1))
+        
+        # 4. 映射到速度因子
+        # Turn 0 (0度) -> Factor 1.0
+        # Turn pi/2 (90度) -> Factor 0.5
+        # Turn pi (180度) -> Factor 0.2
+        
+        # 余弦映射: cos(0)=1, cos(pi/2)=0. 这有点激进。
+        # 使用简单的线性或平滑映射
+        # corner_factor = max(0.2, math.cos(delta / 2.0)) # 0->1, pi->0
+        
+        # 线性插值更可控
+        # 允许最大转弯速度比例
+        MIN_CORNER_RATIO = 0.3
+        corner_factor = max(MIN_CORNER_RATIO, 1.0 - (delta / math.pi))
+        
+        # 计算距离影响: 离当前拐点越近，限速越严格
+        # 定义一个影响半径，比如 5米
+        INFLUENCE_RADIUS = 5.0
+        dist_factor = min(1.0, len1 / INFLUENCE_RADIUS)
+        
+        # 最终速度 = 最小限速 + (巡航-最小)*因子
+        # 但是我们希望还没到拐点就开始减速，离得远时不用减
+        # 所以应该是: limit = cruise * (1 - (1-corner_factor) * (1-dist_factor) ) ??? 不太直观
+        
+        # 简单逻辑：
+        # 目标速度 target_v = cruise_speed * corner_factor
+        # 实际限速 = target_v + (cruise - target_v) * dist_factor
+        # 当 dist_factor=1 (很远)，限速 = cruise
+        # 当 dist_factor=0 (很近)，限速 = target_v
+        
+        target_corner_speed = self.cruise_speed * corner_factor
+        current_limit = target_corner_speed + (self.cruise_speed - target_corner_speed) * dist_factor
+        
+        return max(current_limit, self.min_speed)
+
+    def max_valid_speed_limit(self):
+        return 10.0 # 足够大的数，不做限制
+
+    def _get_control_heading(self, pose: Pose2D) -> float:
+        """
+        获取用于控制的航向 (Course vs Heading)
+        
+        借鉴 L1 导航算法：
+        当有足够速度时，优先使用航迹角(Course)代替船头朝向(Heading)，
+        以此抵抗风流干扰，实现"蟹行"走直线。
+        """
+        if (pose.course is not None and 
+            pose.speed is not None and 
+            pose.speed > 0.3):  # 0.3 m/s 阈值，防止低速时GPS航向乱跳
+            return pose.course
+        return pose.yaw
     
     def _update_final_waypoint_flags(self):
         """更新所有航点的 is_final 标记"""
@@ -584,8 +685,10 @@ class VelocityPathTracker:
         dy = lookahead_y - pose.y
         
         # 转换到车身坐标系
-        cos_yaw = math.cos(pose.yaw)
-        sin_yaw = math.sin(pose.yaw)
+        # L1 改进：如果使用航迹角，local_x aligned with velocity vector
+        effective_yaw = self._get_control_heading(pose)
+        cos_yaw = math.cos(effective_yaw)
+        sin_yaw = math.sin(effective_yaw)
         local_x = dx * cos_yaw + dy * sin_yaw
         local_y = -dx * sin_yaw + dy * cos_yaw
         
@@ -628,8 +731,9 @@ class VelocityPathTracker:
         # 目标航向（从当前位置指向目标）
         target_yaw = math.atan2(dy, dx)
         
-        # 航向误差
-        heading_error = self._normalize_angle(target_yaw - pose.yaw)
+        # 航向误差 (L1 改进：使用有效航向/航迹)
+        effective_yaw = self._get_control_heading(pose)
+        heading_error = self._normalize_angle(target_yaw - effective_yaw)
         
         # 如果有路径历史，计算横向误差
         cross_track_error = 0.0
@@ -662,16 +766,25 @@ class VelocityPathTracker:
         distance_to_target: float
     ) -> float:
         """
-        混合控制: 远距离用 Pure Pursuit，近距离用 Stanley
+        混合控制: 远距离用 Pure Pursuit (航线跟踪)，近距离用 Stanley
         
-        过渡区使用加权混合，避免控制指令跳变
+        改进：在有前序航点时，Pure Pursuit 使用航线上的前视点，
+        实现真正的直线跟踪，类似飞控 L1 算法。
+        
+        过渡区使用加权混合，避免控制指令跳变。
         """
-        pure_pursuit_omega = self._pure_pursuit(pose, target)
+        # 尝试使用航线跟踪版 Pure Pursuit
+        pure_pursuit_omega, used_path_tracking = self._pure_pursuit_on_path(pose, target)
+        
+        # Stanley 始终基于航线计算（如果有历史）
         stanley_omega = self._stanley(pose, target)
+        
+        # 定义安全切换距离：接近目标时必须用航点跟踪模式
+        SAFE_DISTANCE = 3.0  # 距离目标 3m 内回退到航点跟踪
         
         # 计算混合权重 (alpha: Pure Pursuit 权重)
         if distance_to_target > self.hybrid_switch_distance:
-            # 远距离: 主要使用 Pure Pursuit (90%)
+            # 远距离: 主要使用 Pure Pursuit (航线跟踪模式)
             alpha = 0.9
         elif distance_to_target < self.hybrid_switch_distance / 2:
             # 近距离: 主要使用 Stanley (20% Pure Pursuit)
@@ -681,6 +794,11 @@ class VelocityPathTracker:
             ratio = (distance_to_target - self.hybrid_switch_distance / 2) / \
                     (self.hybrid_switch_distance / 2)
             alpha = 0.2 + 0.7 * ratio  # 从 0.2 到 0.9
+        
+        # 如果接近目标 (< 3m) 且未使用航线跟踪，完全切换到 Stanley
+        # 确保能精确到达目标点
+        if distance_to_target < SAFE_DISTANCE and not used_path_tracking:
+            alpha = min(alpha, 0.3)  # 限制 PP 权重
         
         return alpha * pure_pursuit_omega + (1 - alpha) * stanley_omega
     
@@ -711,6 +829,160 @@ class VelocityPathTracker:
             return 0.0
         
         return cross / path_length
+    
+    def _project_to_path(self, pose: Pose2D, wp1: Waypoint, wp2: Waypoint) -> Tuple[float, float, float]:
+        """
+        计算船在航线上的投影点
+        
+        Args:
+            pose: 当前位姿
+            wp1: 航线起点 (前序航点)
+            wp2: 航线终点 (当前目标)
+            
+        Returns:
+            (proj_x, proj_y, t): 投影点坐标和参数 t
+            t < 0: 投影点在 wp1 之前
+            t > 1: 投影点在 wp2 之后
+            0 <= t <= 1: 投影点在航线段上
+        """
+        # 航线向量
+        dx = wp2.x - wp1.x
+        dy = wp2.y - wp1.y
+        path_len_sq = dx * dx + dy * dy
+        
+        if path_len_sq < 0.001:
+            # 两点重合，返回 wp2
+            return wp2.x, wp2.y, 1.0
+        
+        # 计算投影参数 t (0~1 表示在航线段上)
+        t = ((pose.x - wp1.x) * dx + (pose.y - wp1.y) * dy) / path_len_sq
+        
+        # 投影点坐标
+        proj_x = wp1.x + t * dx
+        proj_y = wp1.y + t * dy
+        
+        return proj_x, proj_y, t
+    
+    def _get_lookahead_on_path(
+        self, 
+        pose: Pose2D, 
+        wp1: Waypoint, 
+        wp2: Waypoint,
+        lookahead_dist: float
+    ) -> Tuple[float, float, bool]:
+        """
+        在航线上计算前视点 (L1 风格)
+        
+        Args:
+            pose: 当前位姿
+            wp1: 航线起点
+            wp2: 航线终点
+            lookahead_dist: 前视距离
+            
+        Returns:
+            (lh_x, lh_y, valid): 前视点坐标和是否有效
+        """
+        # 1. 计算投影点
+        proj_x, proj_y, t = self._project_to_path(pose, wp1, wp2)
+        
+        # 2. 检查投影是否在有效范围
+        # 如果 t > 1 (船过了目标点)，不使用航线跟踪
+        if t > 1.0:
+            return wp2.x, wp2.y, False
+        
+        # 如果 t < -0.5 (船在航线起点后方太远)，不使用航线跟踪
+        if t < -0.5:
+            return wp2.x, wp2.y, False
+        
+        # 3. 计算到投影点的横向距离
+        cross_track = math.hypot(pose.x - proj_x, pose.y - proj_y)
+        
+        # 如果横向误差太大 (>5m)，先回归航线
+        if cross_track > 5.0:
+            return wp2.x, wp2.y, False
+        
+        # 4. 沿航线方向前进 lookahead_dist
+        path_dx = wp2.x - wp1.x
+        path_dy = wp2.y - wp1.y
+        path_len = math.hypot(path_dx, path_dy)
+        
+        if path_len < 0.1:
+            return wp2.x, wp2.y, False
+        
+        # 单位方向向量
+        dir_x = path_dx / path_len
+        dir_y = path_dy / path_len
+        
+        # 前视点 = 投影点 + 前视距离 * 方向
+        lh_x = proj_x + lookahead_dist * dir_x
+        lh_y = proj_y + lookahead_dist * dir_y
+        
+        # 5. 检查前视点是否超出航线终点
+        # 计算前视点到起点的距离比例
+        lh_t = ((lh_x - wp1.x) * path_dx + (lh_y - wp1.y) * path_dy) / (path_len * path_len)
+        
+        if lh_t > 1.0:
+            # 前视点超出终点，限制在终点
+            lh_x = wp2.x
+            lh_y = wp2.y
+        
+        return lh_x, lh_y, True
+    
+    def _pure_pursuit_on_path(self, pose: Pose2D, target: Waypoint) -> Tuple[float, bool]:
+        """
+        航线跟踪版 Pure Pursuit
+        
+        前视点在航线上，而不是直接指向目标航点。
+        这样可以让船先回到航线再沿线行驶，实现真正的直线。
+        
+        Args:
+            pose: 当前位姿
+            target: 目标航点
+            
+        Returns:
+            (angular_velocity, used_path_tracking): 角速度和是否使用了航线跟踪
+        """
+        # 检查是否有前序航点
+        if not self._path_history:
+            # 没有历史航点，无法构成航线
+            return self._pure_pursuit(pose, target), False
+        
+        prev_wp = self._path_history[-1]
+        
+        # 计算自适应前视距离
+        L = self.lookahead_gain * self.cruise_speed + self.min_lookahead
+        L = np.clip(L, self.min_lookahead, self.max_lookahead)
+        
+        # 获取航线上的前视点
+        lh_x, lh_y, valid = self._get_lookahead_on_path(pose, prev_wp, target, L)
+        
+        if not valid:
+            # 无法使用航线跟踪，回退到普通模式
+            return self._pure_pursuit(pose, target), False
+        
+        # 使用航线上的前视点计算曲率
+        dx = lh_x - pose.x
+        dy = lh_y - pose.y
+        
+        # 转换到车身坐标系
+        effective_yaw = self._get_control_heading(pose)
+        cos_yaw = math.cos(effective_yaw)
+        sin_yaw = math.sin(effective_yaw)
+        local_x = dx * cos_yaw + dy * sin_yaw
+        local_y = -dx * sin_yaw + dy * cos_yaw
+        
+        # 计算到前视点的距离
+        ld = math.hypot(local_x, local_y)
+        if ld < 0.1:
+            return 0.0, True
+        
+        # 计算曲率
+        curvature = 2.0 * local_y / (ld * ld)
+        
+        # 角速度 = 速度 * 曲率
+        angular_velocity = target.speed * curvature
+        
+        return angular_velocity, True
     
     def _compute_adaptive_speed(
         self, 

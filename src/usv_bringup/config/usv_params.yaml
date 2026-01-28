@@ -79,7 +79,7 @@ mavros:
 # NavigateToPoint 话题版本节点参数（launch 实际启动的节点名为 navigate_to_point_node）
 /**/navigate_to_point_node:
   ros__parameters:
-    nav_arrival_threshold: 0.8              # 最终到达目标点的距离阈值（米）- 与 velocity_controller 一致
+    nav_arrival_threshold: 1.5              # 最终到达目标点的距离阈值（米）- [优化] 0.8->1.5: 保持与velocity_controller.goal_tolerance一致
     nav_switch_threshold: 2.0               # 平滑导航时切换下一个航点的距离阈值（米）
     nav_smooth_navigation: true             # 是否启用平滑导航模式（连续追踪不停顿）
     nav_feedback_period: 0.2                # 反馈发布周期（秒）
@@ -178,13 +178,13 @@ mavros:
     controller_type: 'hybrid'
     
     # ==================== Pure Pursuit 参数 ====================
-    lookahead_distance: 2.5                 # 前视距离（米）- 略增大提高稳定性
-    min_lookahead: 1.2                      # 最小前视距离（米）- 提高避免近距离振荡
+    lookahead_distance: 1.5                 # 前视距离（米） - [优化] 2.5->1.5: 减小前视距离，减少切角大弧线现象，使跟踪更紧密
+    min_lookahead: 1.0                      # 最小前视距离（米） - [优化] 1.2->1.0: 配合lookahead_distance减小
     max_lookahead: 6.0                      # 最大前视距离（米）
     lookahead_gain: 0.6                     # 前视距离增益 (L = gain * v + min)
     
     # ==================== Stanley 参数 ====================
-    stanley_gain: 2.0                       # Stanley 增益 k（略降低减少过冲）
+    stanley_gain: 3.5                       # Stanley 增益 k - [优化] 2.0->3.5: 大幅增大增益，提高对横向误差的修正灵敏度，解决"懒洋洋"回正慢的问题
     stanley_softening: 0.15                 # 软化系数，提高低速稳定性
     
     # ==================== 混合控制参数 ====================
@@ -193,11 +193,11 @@ mavros:
     # ==================== 速度参数 ====================
     cruise_speed: 0.4                       # 巡航速度（m/s）- 略降低提高精度
     max_angular_velocity: 0.4               # 最大角速度（rad/s）- 略降低减少急转
-    min_speed: 0.05                         # 最小速度（m/s）
+    min_speed: 0.15                         # 最小速度（m/s） - [优化] 0.05->0.15: 提高最小速度以维持低速下的舵效
     
     # ==================== 到达判断 ====================
     # 注意: goal_tolerance 应与 navigate_to_point_node.nav_arrival_threshold 一致
-    goal_tolerance: 0.8                     # 最终航点到达阈值（米）
+    goal_tolerance: 1.5                     # 最终航点到达阈值（米） - [优化] 0.8->1.5: 增大判定圈，避免因惯性冲过头后反复震荡调整
     switch_tolerance: 2.0                   # 中间航点切换阈值（米）
     
     # ==================== 控制参数 ====================

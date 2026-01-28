@@ -489,29 +489,26 @@ class VelocityControllerNode(Node):
         cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
         magnetometer_yaw = math.atan2(siny_cosp, cosy_cosp)
         
-        # ==================== 航向选择（优先速度向量） ====================
-        # 使用飞控 EKF 速度向量，低速时保持最后有效航向
-        # 只有在完全没有历史数据时才回退到磁力计
-        if self._use_velocity_heading:
-            if self._velocity_yaw_valid:
-                # 速度足够，使用速度航向
-                yaw = self._velocity_based_yaw
-                self._last_valid_velocity_yaw = yaw  # 保存有效航向
-            elif hasattr(self, '_last_valid_velocity_yaw'):
-                # 速度太低，保持最后一个有效的速度航向
-                yaw = self._last_valid_velocity_yaw
-            else:
-                # 首次启动且无有效速度数据，使用磁力计作为初始值
-                yaw = magnetometer_yaw
-                self._last_valid_velocity_yaw = yaw
-        else:
-            # 禁用速度航向估计，使用磁力计
-            yaw = magnetometer_yaw
+        # ==================== 航向选择 ====================
+        # L1 改进：分离航向(Heading)和航迹(Course)
+        # yaw 始终使用磁力计/EKF融合的船头朝向 (Heading)
+        # course 使用速度向量方向 (Course over Ground)
         
+        heading_yaw = magnetometer_yaw
+        course_yaw = None
+        current_speed = self._current_speed
+        
+        if self._use_velocity_heading and self._velocity_yaw_valid:
+            course_yaw = self._velocity_based_yaw
+            # 记录最后有效速度航向供调试
+            self._last_valid_velocity_yaw = course_yaw
+            
         new_pose = Pose2D(
             x=msg.pose.position.x,
             y=msg.pose.position.y,
-            yaw=yaw
+            yaw=heading_yaw,
+            course=course_yaw,
+            speed=current_speed
         )
         
         # 数据有效性检查
