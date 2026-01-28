@@ -226,6 +226,12 @@ class VelocityControllerNode(Node):
         self._recovery_enabled: bool = True  # 启用自动恢复
         self._was_timed_out: bool = False  # 是否曾经超时
         
+        # 位姿跳变恢复机制 - 用于处理定位源切换导致的稳定偏移
+        self._consecutive_jump_count: int = 0  # 连续检测到跳变的次数
+        self._jump_recovery_threshold: int = 5  # 连续N次跳变后接受新位姿（认为是定位源切换）
+        self._last_jump_pose: Optional[Pose2D] = None  # 上一次检测到跳变时的新位姿
+        self._jump_consistency_tolerance: float = 1.0  # 连续跳变位置一致性容差 (m)
+        
         # ==================== L1 风格航向估计 ====================
         # 使用飞控 EKF 融合的速度向量计算实际航向（类似 L1 算法）
         self._use_velocity_heading = bool(self.get_parameter('use_velocity_based_heading').value)
@@ -516,15 +522,46 @@ class VelocityControllerNode(Node):
             self.get_logger().warn('收到无效位姿数据，已忽略')
             return
         
-        # 位姿跳变检测 (GPS 跳变保护)
+        # 位姿跳变检测 (GPS 跳变保护) - 带恢复机制
         if self._last_valid_pose is not None:
             jump_distance = new_pose.distance_to(self._last_valid_pose)
             if jump_distance > self._pose_jump_threshold:
-                self.get_logger().warn(
-                    f'位姿跳变检测: {jump_distance:.2f}m > {self._pose_jump_threshold}m，暂停更新'
-                )
-                # 不更新位姿，等待稳定
-                return
+                # 检测到跳变，判断是否是持续性偏移（定位源切换）
+                if self._last_jump_pose is not None:
+                    # 检查新位姿与上次跳变位姿是否一致（说明是稳定的定位源切换）
+                    consistency_distance = new_pose.distance_to(self._last_jump_pose)
+                    if consistency_distance < self._jump_consistency_tolerance:
+                        # 新位姿与上次跳变位姿一致，累加计数
+                        self._consecutive_jump_count += 1
+                    else:
+                        # 新位姿与上次跳变位姿不一致，重置计数
+                        self._consecutive_jump_count = 1
+                else:
+                    self._consecutive_jump_count = 1
+                
+                self._last_jump_pose = new_pose
+                
+                # 检查是否达到恢复阈值
+                if self._consecutive_jump_count >= self._jump_recovery_threshold:
+                    self.get_logger().warn(
+                        f'⚠️ 定位源切换检测: 连续{self._consecutive_jump_count}次检测到稳定偏移 '
+                        f'({jump_distance:.2f}m)，接受新位姿作为新参考点'
+                    )
+                    # 重置跳变检测状态
+                    self._consecutive_jump_count = 0
+                    self._last_jump_pose = None
+                    # 继续执行，接受新位姿
+                else:
+                    self.get_logger().warn(
+                        f'位姿跳变检测: {jump_distance:.2f}m > {self._pose_jump_threshold}m，'
+                        f'暂停更新 (连续{self._consecutive_jump_count}/{self._jump_recovery_threshold})'
+                    )
+                    # 不更新位姿，等待稳定或达到恢复阈值
+                    return
+            else:
+                # 位姿正常，重置跳变检测状态
+                self._consecutive_jump_count = 0
+                self._last_jump_pose = None
         
         self.current_pose = new_pose
         self._last_valid_pose = new_pose
