@@ -399,22 +399,32 @@ class VelocityPathTracker:
         target_yaw = math.atan2(dy, dx)
         heading_error = self._normalize_angle(target_yaw - pose.yaw)
         
-        # 当航向误差 > 90° 时，Pure Pursuit 会失效（目标在后方）
-        # 此时应该原地转向而非前进
-        LARGE_HEADING_ERROR_THRESHOLD = math.pi / 2  # 90°
+        # ==================== 优先转向逻辑 (Pivot Turn) ====================
+        # 当航向误差 > 30° 时，优先进行原地或低速转向，减小转弯半径
+        # 这样可以避免在目标点附近绕大圈 (Orbiting)
+        LARGE_HEADING_ERROR_THRESHOLD = math.radians(30)  # 30°
         
         if abs(heading_error) > LARGE_HEADING_ERROR_THRESHOLD:
-            # 大航向误差模式：减速 + 最大角速度转向
+            # 大航向误差模式：急减速 + 最大角速度转向
             # 确定转向方向（正误差左转，负误差右转）
             if heading_error > 0:
                 angular_velocity = self.max_angular_velocity
             else:
                 angular_velocity = -self.max_angular_velocity
             
-            # 减速因子：航向误差越大，速度越慢
-            # 180° → 0.1 倍速, 90° → 0.5 倍速
-            heading_factor = 1.0 - (abs(heading_error) - LARGE_HEADING_ERROR_THRESHOLD) / LARGE_HEADING_ERROR_THRESHOLD
-            heading_factor = max(0.1, min(0.5, heading_factor))
+            # 减速策略：
+            # 误差 > 45°: 极低速/原地旋转 (0.05x 速度)
+            # 誤差 30°-45°: 线性过渡 (0.4x -> 0.05x)
+            
+            PIVOT_THRESHOLD = math.radians(45) # 45度以上视为需要大幅调整
+            
+            if abs(heading_error) > PIVOT_THRESHOLD:
+                heading_factor = 0.05 # 几乎停车，优先转向
+            else:
+                # 30~45度之间插值: 0.4 -> 0.05
+                ratio = (abs(heading_error) - LARGE_HEADING_ERROR_THRESHOLD) / (PIVOT_THRESHOLD - LARGE_HEADING_ERROR_THRESHOLD)
+                heading_factor = 0.4 - 0.35 * ratio
+            
             linear_speed = target.speed * heading_factor
             
             # 应用滤波
@@ -534,33 +544,34 @@ class VelocityPathTracker:
         delta = abs(self._normalize_angle(angle2 - angle1))
         
         # 4. 映射到速度因子
-        # Turn 0 (0度) -> Factor 1.0
-        # Turn pi/2 (90度) -> Factor 0.5
-        # Turn pi (180度) -> Factor 0.2
+        # 修改：采用更激进的减速策略，90度弯时即降至最低速
         
-        # 余弦映射: cos(0)=1, cos(pi/2)=0. 这有点激进。
-        # 使用简单的线性或平滑映射
-        # corner_factor = max(0.2, math.cos(delta / 2.0)) # 0->1, pi->0
+        # 允许最大转弯速度比例 (20% 巡航速度)
+        MIN_CORNER_RATIO = 0.2
         
-        # 线性插值更可控
-        # 允许最大转弯速度比例
-        MIN_CORNER_RATIO = 0.3
-        corner_factor = max(MIN_CORNER_RATIO, 1.0 - (delta / math.pi))
+        # 计算转弯因子 (turn_factor)
+        # 0度 -> 1.0 (全速)
+        # 90度 (pi/2) -> MIN_CORNER_RATIO (最低速)
+        # >90度 -> MIN_CORNER_RATIO
+        
+        if delta >= (math.pi / 2.0):
+            corner_factor = MIN_CORNER_RATIO
+        else:
+            # 线性插值: 1.0 -> MIN_CORNER_RATIO
+            ratio = delta / (math.pi / 2.0)
+            corner_factor = 1.0 - ratio * (1.0 - MIN_CORNER_RATIO)
         
         # 计算距离影响: 离当前拐点越近，限速越严格
-        # 定义一个影响半径，比如 5米
-        INFLUENCE_RADIUS = 5.0
-        dist_factor = min(1.0, len1 / INFLUENCE_RADIUS)
+        # 增大影响半径，提前减速
+        # 动态调整：基于当前巡航速度，预留至少 5秒 的减速时间/距离
+        # 如 2m/s -> 10m. 0.5m/s -> 2.5m. 最小 5.0m
+        influence_radius = max(8.0, self.cruise_speed * 5.0)
         
-        # 最终速度 = 最小限速 + (巡航-最小)*因子
-        # 但是我们希望还没到拐点就开始减速，离得远时不用减
-        # 所以应该是: limit = cruise * (1 - (1-corner_factor) * (1-dist_factor) ) ??? 不太直观
+        dist_factor = min(1.0, len1 / influence_radius)
         
-        # 简单逻辑：
-        # 目标速度 target_v = cruise_speed * corner_factor
-        # 实际限速 = target_v + (cruise - target_v) * dist_factor
-        # 当 dist_factor=1 (很远)，限速 = cruise
-        # 当 dist_factor=0 (很近)，限速 = target_v
+        # 使用幂函数平滑过渡，这会让减速更早发生
+        # dist_factor < 1 时，快速下降
+        dist_factor = math.pow(dist_factor, 0.7)
         
         target_corner_speed = self.cruise_speed * corner_factor
         current_limit = target_corner_speed + (self.cruise_speed - target_corner_speed) * dist_factor
@@ -996,22 +1007,43 @@ class VelocityPathTracker:
         
         - 曲率大时减速（急转弯时降速）
         - 仅在最终航点附近减速（中间航点不减速）
+        
+        修改：更早介入减速，更平滑的停车
         """
         speed = target_speed
         
         # 1. 曲率减速 (角速度大时减速)
-        if abs(angular_velocity) > self.max_angular_velocity * 0.5:
-            # 角速度超过最大值的一半时开始减速
-            curvature_factor = 1.0 - (abs(angular_velocity) - self.max_angular_velocity * 0.5) / self.max_angular_velocity
-            curvature_factor = np.clip(curvature_factor, 0.3, 1.0)
-            speed *= curvature_factor
+        # 修改：阈值降低到 20% (原 50%)，意味着只要开始转向就会减速
+        threshold = self.max_angular_velocity * 0.2
+        
+        if abs(angular_velocity) > threshold:
+            excess = abs(angular_velocity) - threshold
+            available_range = self.max_angular_velocity * 0.8
+            
+            if available_range > 1e-3:
+                ratio = excess / available_range
+                # 能够降低到 30% 速度
+                curvature_factor = 1.0 - ratio * 0.7
+                curvature_factor = np.clip(curvature_factor, 0.3, 1.0)
+                speed *= curvature_factor
         
         # 2. 接近减速 (仅对最终航点)
-        if is_final and distance_to_goal < self.goal_tolerance * 2:
-            # 在到达阈值 2 倍范围内开始减速
-            approach_factor = distance_to_goal / (self.goal_tolerance * 2)
-            approach_factor = np.clip(approach_factor, 0.2, 1.0)
-            speed *= approach_factor
+        if is_final:
+            # 用户需求：距离目标点越近速度越慢，例如8米时开始递减
+            # 取 8.0m 作为基础减速距离，高速时自动延长
+            stop_distance = max(8.0, speed * 4.0)
+            
+            if distance_to_goal < stop_distance:
+                # 归一化距离因子 (0.0 ~ 1.0)
+                ratio = distance_to_goal / stop_distance
+                
+                # 使用幂函数平滑减速响应
+                # 0.8 次幂：在减速初期(8m处)速度下降较缓，接近目标时下降较快，比较自然
+                approach_factor = math.pow(ratio, 0.8)
+                
+                # 限制最小因子，防止过早停转 (由 min_speed 兜底)
+                approach_factor = np.clip(approach_factor, 0.1, 1.0)
+                speed *= approach_factor
         
         # 确保不低于最小速度
         return max(speed, self.min_speed)
