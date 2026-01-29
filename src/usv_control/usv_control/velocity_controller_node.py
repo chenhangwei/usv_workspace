@@ -108,6 +108,12 @@ class VelocityControllerNode(Node):
         # 混合控制参数
         self.declare_parameter('hybrid_switch_distance', 2.0)
         
+        # MPC 参数
+        self.declare_parameter('mpc_prediction_steps', 20)
+        self.declare_parameter('mpc_weight_pos', 20.0)
+        self.declare_parameter('mpc_weight_heading', 5.0)
+        self.declare_parameter('mpc_weight_steering', 5.0)
+        
         # 速度参数
         self.declare_parameter('cruise_speed', 0.5)
         self.declare_parameter('max_angular_velocity', 0.5)
@@ -138,7 +144,8 @@ class VelocityControllerNode(Node):
         controller_type_map = {
             'pure_pursuit': ControllerType.PURE_PURSUIT,
             'stanley': ControllerType.STANLEY,
-            'hybrid': ControllerType.HYBRID
+            'hybrid': ControllerType.HYBRID,
+            'mpc': ControllerType.MPC
         }
         controller_type = controller_type_map.get(controller_type_str, ControllerType.HYBRID)
         
@@ -157,6 +164,15 @@ class VelocityControllerNode(Node):
             hybrid_switch_distance=float(self.get_parameter('hybrid_switch_distance').value or 2.0),
             cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
             max_angular_velocity=float(self.get_parameter('max_angular_velocity').value or 0.5),
+            
+            # MPC 参数传递
+            mpc_v_max=float(self.get_parameter('cruise_speed').value or 0.4), # 复用巡航速度作为最大速度
+            mpc_w_max=float(self.get_parameter('max_angular_velocity').value or 1.0),
+            mpc_q_pos=float(self.get_parameter('mpc_weight_pos').value or 20.0),
+            mpc_q_theta=float(self.get_parameter('mpc_weight_heading').value or 5.0),
+            mpc_r_w=float(self.get_parameter('mpc_weight_steering').value or 5.0),
+            mpc_prediction_steps=int(self.get_parameter('mpc_prediction_steps').value or 20),
+            
             min_speed=float(self.get_parameter('min_speed').value or 0.05),
             goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
             switch_tolerance=float(self.get_parameter('switch_tolerance').value or 1.5),
@@ -1204,8 +1220,8 @@ class VelocityControllerNode(Node):
                     self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
                 return False
             
-            # HOLD 模式: 根据导航状态和手动请求标志决定是否恢复 GUIDED
-            if current_mode == 'HOLD':
+            # HOLD/LOITER 模式: 根据导航状态和手动请求标志决定是否恢复 GUIDED
+            if current_mode in ['HOLD', 'LOITER']:
                 # 检查是否是手动请求的 HOLD（来自地面站的暂停请求）
                 current_time = self.get_clock().now().nanoseconds / 1e9
                 is_manual_hold = (
@@ -1224,13 +1240,13 @@ class VelocityControllerNode(Node):
                     # 手动请求的 HOLD，尊重用户意图，进入暂停状态，不恢复 GUIDED
                     if self._navigation_state == NavigationState.ACTIVE:
                         self.get_logger().warn(
-                            '⚠️ 检测到手动切换 HOLD 模式（来自地面站），任务进入暂停状态'
+                            f'⚠️ 检测到手动切换 {current_mode} 模式（来自地面站），任务进入暂停状态'
                         )
-                        self._set_navigation_state(NavigationState.PAUSED, "用户手动切换HOLD模式")
+                        self._set_navigation_state(NavigationState.PAUSED, f"用户手动切换{current_mode}模式")
                         # 停止当前运动
                         self._publish_velocity_command(VelocityCommand.stop())
                     # 手动暂停状态下不恢复 GUIDED，等待用户发送新任务或手动切换 GUIDED
-                    self.get_logger().debug(f'手动 HOLD 模式（暂停中），不自动恢复 GUIDED')
+                    self.get_logger().debug(f'手动 {current_mode} 模式（暂停中），不自动恢复 GUIDED')
                 elif in_paused_grace_period:
                     # 在 PAUSED 状态保护期内，不尝试恢复 GUIDED
                     # 等待 cancel_navigation 消息到达，以确定是手动暂停还是飞控自动切换
@@ -1241,23 +1257,28 @@ class VelocityControllerNode(Node):
                 elif self._navigation_state == NavigationState.ACTIVE:
                     # 导航进行中被切换到 HOLD（可能是飞控自动切换或手动切换）
                     # 先进入 PAUSED 状态并等待保护期，让 cancel_navigation 消息有时间到达
-                    self._set_navigation_state(NavigationState.PAUSED, "被HOLD模式打断，等待确认")
+                    self._set_navigation_state(NavigationState.PAUSED, f"被{current_mode}模式打断，等待确认")
                     self._publish_velocity_command(VelocityCommand.stop())
                     self.get_logger().info(
-                        f'⏸️ 检测到 HOLD 模式，进入保护期等待 ({self._paused_state_grace_period}s)，'
+                        f'⏸️ 检测到 {current_mode} 模式，进入保护期等待 ({self._paused_state_grace_period}s)，'
                         f'以确定是手动暂停还是飞控自动切换'
                     )
                     # 不立即恢复 GUIDED，等待下一个循环检查是否有 cancel_navigation 消息
                 elif self._navigation_state == NavigationState.PAUSED:
                     # 已经是 PAUSED 状态，且已过保护期
-                    # 【修复】一旦进入 PAUSED 状态，永远不自动恢复 GUIDED
-                    # 用户需要明确操作：发送新任务 或 手动切换 GUIDED 按钮
-                    # 这避免了 cancel_navigation 消息延迟导致的误恢复
-                    self.get_logger().debug(
-                        f'PAUSED 状态保持 HOLD，不自动恢复 GUIDED: '
-                        f'manual_hold_requested={self._manual_hold_requested}, '
-                        f'is_manual_hold={is_manual_hold}'
-                    )
+                    if not self._manual_hold_requested:
+                        # 核心修改：如果没有手动暂停标志，说明是意外进入HOLD（如飞控自动切换）
+                        # 此时看门狗应当起作用，自动恢复 GUIDED
+                        self.get_logger().warn(
+                            f'⚠️ 检测到 {current_mode} 模式且无手动暂停标志，判定为非预期切换，正在尝试恢复 GUIDED...'
+                        )
+                        self._restore_guided_mode()
+                    else:
+                        # 确实是手动请求的暂停（有标志位），保持 PAUSED 状态，不恢复
+                        self.get_logger().debug(
+                            f'PAUSED 状态保持 {current_mode}，不自动恢复 GUIDED: '
+                            f'is_manual_hold=True'
+                        )
                 else:
                     # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
                     self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')

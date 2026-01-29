@@ -33,6 +33,7 @@ from typing import List, Tuple, Optional, Deque
 from enum import Enum
 from collections import deque
 import time
+from .mpc_path_tracker import MpcPathTracker
 
 
 # ==================== 安全常量 ====================
@@ -144,6 +145,7 @@ class ControllerType(Enum):
     PURE_PURSUIT = 1   # 纯追踪
     STANLEY = 2        # Stanley 控制器
     HYBRID = 3         # 混合控制（推荐）
+    MPC = 4            # MPC 模型预测控制
 
 
 class VelocityPathTracker:
@@ -193,6 +195,29 @@ class VelocityPathTracker:
         # 平滑参数
         angular_velocity_filter: float = 0.3, # 角速度低通滤波系数 (0-1, 越小越平滑)
         
+        # MPC 参数 (推荐值)
+        # v_max: 最大速度 (m/s). 限制 MPC 输出的线速度上限.
+        mpc_v_max: float = 0.4,
+        
+        # w_max: 最大角速度 (rad/s). 限制 MPC 输出的旋转速度.
+        mpc_w_max: float = 1.0,
+        
+        # Q_pos: 位置权重 (推荐 10.0 ~ 50.0). 
+        # 越大越贴线，抗风流干扰强; 越小越平滑，允许适当偏离.
+        mpc_q_pos: float = 20.0,
+        
+        # Q_theta: 航向权重 (推荐 1.0 ~ 10.0).
+        # 保持船头朝向目标的意愿强度.
+        mpc_q_theta: float = 5.0,
+        
+        # R_w: 转向平滑度权重 (推荐 1.0 ~ 10.0). [核心参数]
+        # 越大越平滑(消除画龙)，越小反应越快.
+        mpc_r_w: float = 5.0,
+        
+        # N: 预测步数 (推荐 10 ~ 30).
+        # 20步 * 0.1s = 预测未来2秒. 太长增加计算量，太短容易短视.
+        mpc_prediction_steps: int = 20,
+        
         # 航点队列
         waypoint_queue_size: int = 10,        # 航点队列大小
     ):
@@ -223,10 +248,25 @@ class VelocityPathTracker:
         self.angular_velocity_filter = angular_velocity_filter
         self._last_angular_velocity = 0.0
         
+        # ==================== MPC 参数 ====================
+        self.mpc_params = {
+            'v_max': mpc_v_max,
+            'w_max': mpc_w_max,
+            'q_pos': mpc_q_pos,
+            'q_theta': mpc_q_theta,
+            'r_w': mpc_r_w,
+            'prediction_steps': mpc_prediction_steps
+        }
+
         # ==================== 航点队列 ====================
         self._waypoint_queue: Deque[Waypoint] = deque(maxlen=waypoint_queue_size)
         self._current_waypoint: Optional[Waypoint] = None
         self._goal_reached = True
+
+        # ==================== MPC 控制器 ====================
+        self.mpc_tracker = None
+        if self.controller_type == ControllerType.MPC:
+            self.mpc_tracker = MpcPathTracker(**self.mpc_params)
         
         # ==================== 安全与诊断 ====================
         self._last_pose_time: float = 0.0
@@ -374,7 +414,8 @@ class VelocityPathTracker:
         self._update_path_history(pose)
         
         # 检查是否需要切换航点或到达
-        if self._check_waypoint_transition(distance_to_waypoint):
+        # 传入 pose 用于支持过站检测逻辑，防止绕圈
+        if self._check_waypoint_transition(distance_to_waypoint, pose):
             # 已经到达最终目标
             if self._goal_reached:
                 return VelocityCommand.stop()
@@ -442,6 +483,23 @@ class VelocityPathTracker:
             return cmd.sanitize()
         
         # ==================== 计算控制指令 ====================
+        # MPC 模型预测控制
+        if self.controller_type == ControllerType.MPC:
+            if self.mpc_tracker is None:
+                self.mpc_tracker = MpcPathTracker(**self.mpc_params)
+            
+            # L1 改进：使用有效航向(可能基于速度向量)
+            # 当速度 > 0.3m/s 时使用 Course (航迹角)，否则使用 Heading (罗盘角)
+            effective_yaw = self._get_control_heading(pose)
+            
+            v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
+                [pose.x, pose.y, effective_yaw], 
+                [target.x, target.y], 
+                target_speed=target.speed
+            )
+            # MPC 自带平滑和限幅，直接返回
+            return VelocityCommand(v_cmd, 0.0, w_cmd).sanitize()
+
         # 根据控制器类型计算角速度
         if self.controller_type == ControllerType.PURE_PURSUIT:
             angular_velocity = self._pure_pursuit(pose, target)
@@ -586,12 +644,21 @@ class VelocityPathTracker:
         获取用于控制的航向 (Course vs Heading)
         
         借鉴 L1 导航算法：
-        当有足够速度时，优先使用航迹角(Course)代替船头朝向(Heading)，
-        以此抵抗风流干扰，实现"蟹行"走直线。
+        当有足够速度时，优先使用航迹角(Course)代替船头朝向(Heading)。
+        
+        关于 UWB 定位 (误差0.4m) 的特殊调整:
+        - UWB 绝对误差虽大(0.4m)，但相对抖动(Jitter)通常较小(5-10cm)。
+        - 对于最高速仅 0.4m/s 的船，如果阈值设太高，该功能永远无法激活。
+        - 这里设为 0.2 m/s (最高速的一半)，只要动起来就信任 UWB 计算出的航向。
         """
+        # 降低阈值以适配低速船 (0.4m/s max)
+        COURSE_VALID_SPEED = 0.2
+        
+        # 只要上层节点计算出了pose.course (说明已经过了Node层的校验)
+        # 且速度满足最低要求，就使用 Course
         if (pose.course is not None and 
             pose.speed is not None and 
-            pose.speed > 0.3):  # 0.3 m/s 阈值，防止低速时GPS航向乱跳
+            pose.speed > COURSE_VALID_SPEED):
             return pose.course
         return pose.yaw
     
@@ -621,9 +688,13 @@ class VelocityPathTracker:
                 if len(self._path_history) > self._max_path_history:
                     self._path_history.pop(0)
     
-    def _check_waypoint_transition(self, distance: float) -> bool:
+    def _check_waypoint_transition(self, distance: float, pose: Pose2D = None) -> bool:
         """
         检查是否需要切换航点或到达
+        
+        策略:
+        1. 距离圈检测: 进入目标点周围半径内
+        2. 过站检测: 即使未进入半径，如果已经越过目标点所在的法线面，也强制切换(防止回头绕圈)
         
         Returns:
             True 如果已到达最终目标
@@ -635,21 +706,112 @@ class VelocityPathTracker:
         if self._current_waypoint.is_final:
             # 最终航点：使用到达阈值
             threshold = self.goal_tolerance
+            # 最终点必须严格到达，不启用过站切换
+            allow_pass_by = False
         else:
-            # 中间航点：使用切换阈值（更大）
+            # 中间航点：使用切换阈值
             threshold = self.switch_tolerance
+            
+            # 针对 MPC 优化：智能调整切换半径
+            if self.controller_type == ControllerType.MPC:
+                # 默认保持 1.0m 宽松切换，追求丝滑
+                base_threshold = max(threshold, 1.0)
+                
+                # 智能判断：如果是急转弯（夹角 < 90度），强制缩小半径，防止绕大圈
+                # 获取下个航点检测拐角
+                if self._waypoint_queue and self._path_history:
+                    prev = self._path_history[-1]
+                    curr = self._current_waypoint
+                    next_wp = self._waypoint_queue[0]
+                    
+                    # 向量1: prev -> current
+                    v1_x, v1_y = curr.x - prev.x, curr.y - prev.y
+                    # 向量2: current -> next
+                    v2_x, v2_y = next_wp.x - curr.x, next_wp.y - curr.y
+                    
+                    # 计算夹角余弦
+                    dot_prod = v1_x*v2_x + v1_y*v2_y
+                    norm1 = math.hypot(v1_x, v1_y)
+                    norm2 = math.hypot(v2_x, v2_y)
+                    
+                    if norm1 > 0.1 and norm2 > 0.1:
+                        cos_angle = dot_prod / (norm1 * norm2)
+                        
+                        # cos_angle > 0 说明夹角 < 90度 (锐角/直角转向)
+                        # cos_angle < 0 说明夹角 > 90度 (钝角/平缓转向)
+                        # 注意：这里是向量夹角。
+                        # 直行: 向量角0度(cos=1); 掉头: 向量角180度(cos=-1)
+                        # 我们关心的是航线之间的折角？
+                        # 不，向量夹角 定义为: 前进方向的偏转.
+                        # 直行: v1, v2 同向 -> angle=0, cos=1
+                        # 90度右转: angle=90, cos=0
+                        # 掉头: angle=180, cos=-1
+                        
+                        # 修正: 上述逻辑反了。
+                        # 我们希望: 
+                        # - 偏转角小 (直行/缓弯): cos -> 1.0. 此时 threshold = 1.0m (大半径切弯)
+                        # - 偏转角大 (急弯/掉头): cos -> -1.0. 此时 threshold = 0.3m (小半径，逼近顶点)
+                        
+                        # 简单的线性映射:
+                        # cos = 1  (0度偏转) -> threshold = 1.0
+                        # cos = 0  (90度偏转) -> threshold = 0.5
+                        # cos = -1 (180度掉头) -> threshold = 0.2
+                        
+                        # 映射公式:
+                        # factor = (cos_angle + 1) / 2.0  # 0.0 ~ 1.0
+                        # threshold = 0.2 + 0.8 * factor
+                        
+                        factor = (cos_angle + 1.0) / 2.0 
+                        threshold = 0.2 + (base_threshold - 0.2) * factor
+                        
+                        # 再次保底，不小于 0.2m
+                        threshold = max(threshold, 0.2)
+                
+                else:
+                    threshold = base_threshold
+                    
+            # 中间点允许过站切换
+            allow_pass_by = True
         
+        # 1. 距离圈检测 (Circle Check)
         if distance < threshold:
-            if self._current_waypoint.is_final:
-                # 到达最终目标
-                self._goal_reached = True
-                return True
-            else:
-                # 切换到下一个航点
-                self._switch_to_next_waypoint()
-                return False
-        
+            return self._handle_arrival_or_switch()
+            
+        # 2. 过站检测 (Pass-by Check)
+        # 仅当允许过站、且位姿有效、且有历史路径时进行
+        if allow_pass_by and pose is not None and self._path_history:
+            prev_wp = self._path_history[-1]
+            
+            # 确保稍微有一点距离才算航线，防止重合点除零
+            path_len = math.hypot(self._current_waypoint.x - prev_wp.x, 
+                                self._current_waypoint.y - prev_wp.y)
+            
+            if path_len > 0.5:
+                # 投影计算进度 t
+                _, _, t = self._project_to_path(pose, prev_wp, self._current_waypoint)
+                
+                # t >= 1.0 表示已经越过了目标点
+                if t >= 1.0:
+                    # 为了安全，限制最大偏离距离。如果偏离太远(比如漏了20米)，可能还是应该回头或报错
+                    # 这里放宽阈值：只要横向距离在 2.5倍 阈值以内，就算“擦肩而过”成功
+                    # 比如阈值1m，只要在2.5m范围内路过，都算过
+                    pass_by_threshold = max(threshold * 2.5, 3.0)
+                    if distance < pass_by_threshold:
+                        # 记录日志或调试信息通常在这里，但在纯算法类通过返回值处理
+                        return self._handle_arrival_or_switch()
+
         return False
+
+    def _handle_arrival_or_switch(self) -> bool:
+        """执行到达或切换逻辑"""
+        if self._current_waypoint.is_final:
+            # 到达最终目标
+            self._goal_reached = True
+            return True
+        else:
+            # 切换到下一个航点
+            self._switch_to_next_waypoint()
+            return False
     
     def _switch_to_next_waypoint(self):
         """切换到下一个航点"""
@@ -1088,6 +1250,9 @@ class VelocityPathTracker:
         """更新巡航速度"""
         if speed > 0:
             self.cruise_speed = speed
+            # 同步更新 MPC 的最大速度约束
+            if self.mpc_tracker is not None:
+                self.mpc_tracker.set_max_speed(speed)
     
     def set_goal_tolerance(self, tolerance: float):
         """更新到达阈值"""
