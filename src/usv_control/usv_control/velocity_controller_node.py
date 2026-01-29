@@ -47,7 +47,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
 from std_msgs.msg import String, Float32, Bool
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug
 
 import math
 from typing import Optional
@@ -139,6 +139,7 @@ class VelocityControllerNode(Node):
         # ==================== 获取参数 ====================
         self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
         controller_type_str = str(self.get_parameter('controller_type').value or 'hybrid')
+        self.get_logger().info(f'🔍 正在初始化速度控制器... 模式: {controller_type_str}')
         
         # 控制器类型映射
         controller_type_map = {
@@ -153,31 +154,37 @@ class VelocityControllerNode(Node):
         self.require_armed = bool(self.get_parameter('require_armed').value)
         
         # ==================== 初始化路径跟踪器 ====================
-        self.tracker = VelocityPathTracker(
-            lookahead_distance=float(self.get_parameter('lookahead_distance').value or 2.0),
-            min_lookahead=float(self.get_parameter('min_lookahead').value or 1.0),
-            max_lookahead=float(self.get_parameter('max_lookahead').value or 5.0),
-            lookahead_gain=float(self.get_parameter('lookahead_gain').value or 0.5),
-            stanley_gain=float(self.get_parameter('stanley_gain').value or 2.5),
-            stanley_softening=float(self.get_parameter('stanley_softening').value or 0.1),
-            controller_type=controller_type,
-            hybrid_switch_distance=float(self.get_parameter('hybrid_switch_distance').value or 2.0),
-            cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
-            max_angular_velocity=float(self.get_parameter('max_angular_velocity').value or 0.5),
-            
-            # MPC 参数传递
-            mpc_v_max=float(self.get_parameter('cruise_speed').value or 0.4), # 复用巡航速度作为最大速度
-            mpc_w_max=float(self.get_parameter('max_angular_velocity').value or 1.0),
-            mpc_q_pos=float(self.get_parameter('mpc_weight_pos').value or 20.0),
-            mpc_q_theta=float(self.get_parameter('mpc_weight_heading').value or 5.0),
-            mpc_r_w=float(self.get_parameter('mpc_weight_steering').value or 5.0),
-            mpc_prediction_steps=int(self.get_parameter('mpc_prediction_steps').value or 20),
-            
-            min_speed=float(self.get_parameter('min_speed').value or 0.05),
-            goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
-            switch_tolerance=float(self.get_parameter('switch_tolerance').value or 1.5),
-            angular_velocity_filter=float(self.get_parameter('angular_velocity_filter').value or 0.3),
-        )
+        self.get_logger().info(f'🛠️ 正在创建 VelocityPathTracker ({controller_type_str})...')
+        try:
+            self.tracker = VelocityPathTracker(
+                lookahead_distance=float(self.get_parameter('lookahead_distance').value or 2.0),
+                min_lookahead=float(self.get_parameter('min_lookahead').value or 1.0),
+                max_lookahead=float(self.get_parameter('max_lookahead').value or 5.0),
+                lookahead_gain=float(self.get_parameter('lookahead_gain').value or 0.5),
+                stanley_gain=float(self.get_parameter('stanley_gain').value or 2.5),
+                stanley_softening=float(self.get_parameter('stanley_softening').value or 0.1),
+                controller_type=controller_type,
+                hybrid_switch_distance=float(self.get_parameter('hybrid_switch_distance').value or 2.0),
+                cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
+                max_angular_velocity=float(self.get_parameter('max_angular_velocity').value or 0.5),
+                
+                # MPC 参数传递
+                mpc_v_max=float(self.get_parameter('cruise_speed').value or 0.4),
+                mpc_w_max=float(self.get_parameter('max_angular_velocity').value or 1.0),
+                mpc_q_pos=float(self.get_parameter('mpc_weight_pos').value or 20.0),
+                mpc_q_theta=float(self.get_parameter('mpc_weight_heading').value or 5.0),
+                mpc_r_w=float(self.get_parameter('mpc_weight_steering').value or 5.0),
+                mpc_prediction_steps=int(self.get_parameter('mpc_prediction_steps').value or 20),
+                
+                min_speed=float(self.get_parameter('min_speed').value or 0.05),
+                goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
+                switch_tolerance=float(self.get_parameter('switch_tolerance').value or 1.5),
+                angular_velocity_filter=float(self.get_parameter('angular_velocity_filter').value or 0.3),
+            )
+            self.get_logger().info('✅ VelocityPathTracker 初始化成功')
+        except Exception as e:
+            self.get_logger().fatal(f'❌ VelocityPathTracker 初始化失败: {e}')
+            raise e
         
         # ==================== QoS 配置 ====================
         qos_best_effort = QoSProfile(
@@ -436,6 +443,13 @@ class VelocityControllerNode(Node):
             qos_reliable
         )
         
+        # 调试信息发布
+        self.debug_pub = self.create_publisher(
+            MpcDebug,
+            'velocity_controller/debug',
+            qos_best_effort
+        )
+
         # ==================== 控制循环 ====================
         control_rate = float(self.get_parameter('control_rate').value or 20.0)
         control_period = 1.0 / control_rate
@@ -1266,19 +1280,11 @@ class VelocityControllerNode(Node):
                     # 不立即恢复 GUIDED，等待下一个循环检查是否有 cancel_navigation 消息
                 elif self._navigation_state == NavigationState.PAUSED:
                     # 已经是 PAUSED 状态，且已过保护期
-                    if not self._manual_hold_requested:
-                        # 核心修改：如果没有手动暂停标志，说明是意外进入HOLD（如飞控自动切换）
-                        # 此时看门狗应当起作用，自动恢复 GUIDED
-                        self.get_logger().warn(
-                            f'⚠️ 检测到 {current_mode} 模式且无手动暂停标志，判定为非预期切换，正在尝试恢复 GUIDED...'
-                        )
-                        self._restore_guided_mode()
-                    else:
-                        # 确实是手动请求的暂停（有标志位），保持 PAUSED 状态，不恢复
-                        self.get_logger().debug(
-                            f'PAUSED 状态保持 {current_mode}，不自动恢复 GUIDED: '
-                            f'is_manual_hold=True'
-                        )
+                    # 修改逻辑：无论是手动请求还是意外切换，只要是 HOLD/LOITER，都应当尊重该状态
+                    # 这避免了与遥控器/地面站手动操作的冲突，也防止了覆盖电池/失联保护触发的 HOLD
+                    self.get_logger().debug(
+                        f'PAUSED 状态保持 {current_mode}，不自动恢复 GUIDED (尊重手动操作/Failsafe)'
+                    )
                 else:
                     # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
                     self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
@@ -1344,6 +1350,34 @@ class VelocityControllerNode(Node):
         msg.yaw_rate = cmd.angular_z
         
         self.velocity_pub.publish(msg)
+        
+        # 保存最后一次指令用于平滑处理
+        self._last_velocity_cmd = cmd
+        
+        # --- 发布调试信息 ---
+        try:
+            debug_info = self.tracker.debug_info
+            
+            # 使用更健壮的获取方式，因为 tracker.debug_info 可能是部分更新的
+            mpc_info = debug_info.get('mpc', {})
+            
+            debug_msg = MpcDebug()
+            debug_msg.timestamp = self.get_clock().now().to_msg()
+            
+            debug_msg.solve_time_ms = float(mpc_info.get('solve_time_ms', 0.0))
+            debug_msg.cost = float(mpc_info.get('cost', 0.0))
+            debug_msg.mpc_pred_x = float(mpc_info.get('pred_x', 0.0))
+            debug_msg.mpc_pred_y = float(mpc_info.get('pred_y', 0.0))
+            debug_msg.mpc_pred_theta = float(mpc_info.get('pred_theta', 0.0))
+            
+            debug_msg.solver_status = int(mpc_info.get('status', -1))
+            debug_msg.active_controller = str(debug_info.get('active_controller', 'none'))
+            debug_msg.ref_curvature = 0.0 # 暂未实现
+            
+            self.debug_pub.publish(debug_msg)
+        except Exception as e:
+            # 调试信息发布失败不影响主循环
+            pass
     
     def _publish_navigation_feedback(self, cmd: VelocityCommand):
         """

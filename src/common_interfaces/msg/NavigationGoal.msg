@@ -11,6 +11,7 @@
 # 导航目标消息
 # 用于发送导航目标到 USV
 
+string task_name                       # 任务名称 (可选,用于日志记录)
 uint32 goal_id                         # 目标唯一ID,用于匹配反馈和结果
 geometry_msgs/PoseStamped target_pose  # 目标位置和姿态
 

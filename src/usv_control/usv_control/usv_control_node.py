@@ -86,7 +86,7 @@ class UsvControlNode(Node):
         gps_origin = param_loader.load_gps_origin(
             default_lat=22.5180977,
             default_lon=113.9007239,
-            default_alt=-5.17
+            default_alt=0.0
         )
         self.origin_lat = gps_origin['lat']
         self.origin_lon = gps_origin['lon']

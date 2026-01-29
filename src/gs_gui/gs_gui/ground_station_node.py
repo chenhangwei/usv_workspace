@@ -1982,6 +1982,18 @@ class GroundStationNode(Node):
             # 只纠正 HOLD（不强行覆盖 RTL/MANUAL 等）
             if 'HOLD' not in mode:
                 return
+            
+            # 【修复】如果检测到 HOLD 模式，不再强行切回 GUIDED
+            # 理由：HOLD 通常是用户手动操作或 Failsafe 触发，地面站应尊重该状态
+            # 并同步更新本地任务缓存为 "已暂停"，避免看门狗反复触发
+            if not nav_cache.get('paused', False):
+                self.get_logger().info(f"🛡️ 检测到 {usv_id} 处于 HOLD 模式，自动标记任务为暂停，停止 GUIDED 看门狗")
+                nav_cache['paused'] = True
+                try:
+                    self.ros_signal.nav_status_update.emit(usv_id, '已暂停')
+                except Exception:
+                    pass
+                return
 
             last = self._guided_watchdog_last_sent.get(usv_id)
             try:

@@ -25,16 +25,19 @@ MPC 路径跟踪控制器
 import casadi as ca
 import numpy as np
 import math
+import time
+import sys
+import threading
 
 class MpcPathTracker:
-    def __init__(self, 
-                 v_max=0.4, w_max=1.0, 
-                 q_pos=20.0, q_theta=5.0, 
-                 r_vel=0.1, r_w=5.0, 
-                 r_acc=1.0, r_dw=10.0,
-                 dt=0.1, prediction_steps=20):
-        # --- 车辆(船)物理参数 (根据用户描述: 0.6m长, 0.4m/s最高速) ---
-        self.v_max = v_max      # (m/s) 最高航速
+    def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.4,
+                 q_pos=10.0, q_theta=1.0, r_vel=0.1, r_w=5.0, r_acc=1.0, r_dw=10.0):
+        """
+        初始化 MPC 控制器
+        """
+        self.lock = threading.Lock()
+        self.v_max = v_max      # (m/s) 最大速度
+
         self.w_max = w_max      # (rad/s) 最大转速 (0.6m小船转向很灵活，给大一点)
         self.dt = dt            # (s) 预测步长 (10Hz)
         self.N = prediction_steps # 预测步数
@@ -144,6 +147,12 @@ class MpcPathTracker:
             # 3. 输入惩罚
             obj += self.R_w * con[1]**2      # 惩罚大转向
             
+            # 使用 R_vel 激励速度 (Cost term for velocity reference)
+            # 这一项至关重要，防止求解器在局部极小值(v=0)处停滞
+            # 我们希望 v 接近 v_max (或者外部传入的 target_speed，这里简化使用 v_max 参数)
+            # 注意: 这里使用 self.v_max 作为静态参考，也可以扩展 P 向量动态传入
+            obj += self.R_vel * (con[0] - self.v_max)**2
+
             # 4. 变化率惩罚 (丝滑的关键)
             if k < self.N - 1:
                 con_next = U[:, k+1]
@@ -169,7 +178,7 @@ class MpcPathTracker:
             'ipopt.print_level': 0, 
             'ipopt.sb': 'yes', 
             'print_time': 0,
-            'ipopt.max_iter': 50,
+            'ipopt.max_iter': 100, # 增加迭代次数以应对更复杂的约束
             'ipopt.warm_start_init_point': 'yes'
         }
         self.solver = ca.nlpsol('solver', 'ipopt', nlp_prob, opts)
@@ -181,7 +190,12 @@ class MpcPathTracker:
         self.n_u_all = self.N * n_controls
 
         # 缓存上一次的解，用于热启动 (Warm Start)
-        self.last_sol_x = np.zeros(self.n_x_all + self.n_u_all)
+        # 初始化为 list (全0)
+        self.last_sol_x = [0.0] * (self.n_x_all + self.n_u_all)
+
+    def reset(self):
+        """重置 MPC 状态（清除热启动缓存）"""
+        self.last_sol_x = [0.0] * (self.n_x_all + self.n_u_all)
 
     def compute_velocity_command(self, current_pose, target_waypoint, target_speed=0.4):
         """
@@ -191,6 +205,21 @@ class MpcPathTracker:
         :param target_speed: 期望线速度 (m/s)
         :return: (v, w)
         """
+        # ==================== Data Safety Checks ====================
+        # Check for NaN/Inf in inputs
+        if any(math.isnan(x) or math.isinf(x) for x in current_pose):
+            print(f"MPC Error: Invalid current_pose: {current_pose}")
+            return 0.0, 0.0
+            
+        if any(math.isnan(x) or math.isinf(x) for x in target_waypoint):
+            print(f"MPC Error: Invalid target_waypoint: {target_waypoint}")
+            return 0.0, 0.0
+
+        # Type conversion to native Python float (robustness for CasADi interface)
+        current_pose = [float(current_pose[0]), float(current_pose[1]), float(current_pose[2])]
+        target_waypoint = [float(target_waypoint[0]), float(target_waypoint[1])]
+        target_speed = float(target_speed)
+        
         # 1. 计算期望航向 (指向目标点的方向)
         dx = target_waypoint[0] - current_pose[0]
         dy = target_waypoint[1] - current_pose[1]
@@ -202,30 +231,111 @@ class MpcPathTracker:
         while target_yaw - current_pose[2] < -math.pi: target_yaw += 2*math.pi
 
         # 2. 组装参数 P
-        p_val = np.array([
-            current_pose[0], current_pose[1], current_pose[2],
-            target_waypoint[0], target_waypoint[1], target_yaw
-        ])
+        p_val = [
+            float(current_pose[0]), float(current_pose[1]), float(current_pose[2]),
+            float(target_waypoint[0]), float(target_waypoint[1]), float(target_yaw)
+        ]
 
-        # 3. 求解
-        # 使用上一次的解作为初值 (Warm Start)，显著加快收敛
-        x0 = self.last_sol_x
+        # --- 增强特性: 检测是否发生"瞬移" (手动拖动或定位漂移) ---
+        # 如果当前位置与上一次解的起点偏差过大，说明 Warm Start 已经无效，
+        # 强制清除记忆，防止求解器在不可行区域死循环。
+        if isinstance(self.last_sol_x, list) and len(self.last_sol_x) > 3:
+            last_x = self.last_sol_x[0]
+            last_y = self.last_sol_x[1]
+            dist_jump = math.hypot(current_pose[0] - last_x, current_pose[1] - last_y)
+            
+            # 阈值设置为 1.0 米 (假设控制周期内不可能瞬移这么远)
+            if dist_jump > 1.0:
+                 # print(f"MPC Info: Detected jump ({dist_jump:.2f}m). Resetting warm start.")
+                 self.reset()
+
+        # 3. 构造约束边界 (使用纯 Python list，避免 numpy/CasADi 类型兼容问题)
+        # 状态变量 X: [-inf, +inf]
+        lbx_list = [-float('inf')] * self.n_x_all
+        ubx_list = [float('inf')] * self.n_x_all
         
+        # 控制变量 U: [0, v_max] 和 [-w_max, w_max]
+        for k in range(self.N):
+            # v limits
+            lbx_list.append(0.0)
+            ubx_list.append(max(float(self.v_max), 0.1))
+            # w limits
+            lbx_list.append(-float(self.w_max))
+            ubx_list.append(float(self.w_max))
+
         try:
-            # 调用求解器
-            res = self.solver(x0=x0, p=p_val, lbg=0.0, ubg=0.0)
+            # 准备 Warm Start 初值
+            if hasattr(self.last_sol_x, 'tolist'):
+                 x0_list = self.last_sol_x.flatten().tolist()
+            elif isinstance(self.last_sol_x, list):
+                 x0_list = self.last_sol_x
+            else:
+                 # Fallback
+                 x0_list = [0.0] * (self.n_x_all + self.n_u_all)
+            
+            # 维度安全检查
+            target_len = self.n_x_all + self.n_u_all
+            if len(x0_list) != target_len:
+                # print(f"MPC Warning: x0 length mismatch ({len(x0_list)} vs {target_len}), resetting.")
+                x0_list = [0.0] * target_len
+
+            t0 = time.time()
+            
+            # 强制刷新缓冲区，确保 Crash 前的日志能输出
+            try:
+                if 'sys' in globals(): sys.stdout.flush()
+            except:
+                pass
+
+            # 调用求解器 (全部使用 list 传参)
+            # 注意: CasADi 对于 lbg/ubg=0.0 会自动广播，这里保持原样
+            with self.lock:
+                res = self.solver(
+                    x0=x0_list, 
+                    p=p_val, 
+                    lbg=0.0, 
+                    ubg=0.0, 
+                    lbx=lbx_list, 
+                    ubx=ubx_list
+                )
+            t1 = time.time()
             
             # 保存解用于下一次热启动
-            self.last_sol_x = res['x'].full().flatten()
+            if res['x'].is_empty():
+                 raise RuntimeError("Solver returned empty solution")
+            
+            # 转换为 list 保存
+            res_full = res['x'].full().flatten().tolist()
+            
+            # Check for NaN
+            if any(math.isnan(x) for x in res_full):
+                 raise RuntimeError("Solver returned NaNs")
+                 
+            self.last_sol_x = res_full
+            
+            # 记录调试信息
+            solve_time = (t1 - t0) * 1000.0  # ms
+            status = self.solver.stats()['return_status']
+            cost = float(res['f']) if 'f' in res else 0.0
             
             # 解析结果: 取预测序列的第一个控制量
             # 解向量结构: X(0..N) followed by U(0..N-1)
             u_start_idx = self.n_x_all
-            u_opt = res['x'][u_start_idx : u_start_idx + 2] 
+            v_cmd = float(res_full[u_start_idx])
+            w_cmd = float(res_full[u_start_idx+1])
+
+            # 取第N步预测位置 (用于画图对比)
+            pred_final = res_full[self.n_x_all - self.n_states : self.n_x_all]
             
-            v_cmd = float(u_opt[0])
-            w_cmd = float(u_opt[1])
-            
+            self.debug_info = {
+                'solve_time_ms': solve_time,
+                'cost': cost,
+                'pred_x': float(pred_final[0]),
+                'pred_y': float(pred_final[1]),
+                'pred_theta': float(pred_final[2]),
+                'status': 0 if status == 'Solve_Succeeded' else 1
+            }
+
             # --- 后处理 ---
             
             # 1. 速度调度 (距离越近速度越慢，防止过冲)
@@ -244,14 +354,12 @@ class MpcPathTracker:
             
         except Exception as e:
             # 降级处理: 如果 MPC 挂了，简单的 P 控制兜底
-            # print(f"MPC Error: {e}")
-            angle_diff = target_yaw - current_pose[2]
-            w_cmd = 1.0 * angle_diff
-            return 0.0, w_cmd
+            print(f"MPC Crash/Exception: {e}")
+            self.reset()
+            self.debug_info['status'] = -1
+            return 0.0, 0.0
 
     def set_max_speed(self, v_max):
         """动态更新最大航速"""
         if v_max > 0:
             self.v_max = v_max
-            v_cmd = 0.0 # 安全停船或低速蠕动
-            return v_cmd, w_cmd

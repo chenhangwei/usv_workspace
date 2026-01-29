@@ -171,6 +171,7 @@ class VelocityPathTracker:
         self,
         # Pure Pursuit 参数
         lookahead_distance: float = 2.0,      # 前视距离 (m)
+        # ...
         min_lookahead: float = 1.0,           # 最小前视距离
         max_lookahead: float = 5.0,           # 最大前视距离
         lookahead_gain: float = 0.5,          # 前视距离增益 (L = gain * v + min)
@@ -262,6 +263,10 @@ class VelocityPathTracker:
         self._waypoint_queue: Deque[Waypoint] = deque(maxlen=waypoint_queue_size)
         self._current_waypoint: Optional[Waypoint] = None
         self._goal_reached = True
+        
+        # 路径历史 (用于计算航向误差和切换判断)
+        self._path_history: List[Waypoint] = []
+        self._max_path_history: int = 5
 
         # ==================== MPC 控制器 ====================
         self.mpc_tracker = None
@@ -280,10 +285,12 @@ class VelocityPathTracker:
         self._last_stall_check_time: float = 0.0
         self._last_stall_check_distance: float = 0.0
         
-        # ==================== 路径历史 (用于 Stanley) ====================
-        self._path_history: List[Waypoint] = []
-        self._max_path_history = 50
-    
+        # 调试信息
+        self.debug_info = {
+             'mpc': {},
+             'active_controller': 'none'
+        }
+        
     # ==================== 公共接口 ====================
     
     def set_waypoint(self, waypoint: Waypoint):
@@ -488,6 +495,8 @@ class VelocityPathTracker:
             if self.mpc_tracker is None:
                 self.mpc_tracker = MpcPathTracker(**self.mpc_params)
             
+            self.debug_info['active_controller'] = 'MPC'
+            
             # L1 改进：使用有效航向(可能基于速度向量)
             # 当速度 > 0.3m/s 时使用 Course (航迹角)，否则使用 Heading (罗盘角)
             effective_yaw = self._get_control_heading(pose)
@@ -497,15 +506,28 @@ class VelocityPathTracker:
                 [target.x, target.y], 
                 target_speed=target.speed
             )
-            # MPC 自带平滑和限幅，直接返回
-            return VelocityCommand(v_cmd, 0.0, w_cmd).sanitize()
+            # 调试打印 (临时)
+            # print(f"DEBUG: MPC Raw: v={v_cmd:.3f}, w={w_cmd:.3f}, TgtSpd={target.speed:.3f}, Dist={distance_to_target:.3f}")
 
-        # 根据控制器类型计算角速度
+            # 获取调试信息
+            self.debug_info['mpc'] = self.mpc_tracker.debug_info
+            
+            # 检查 NaN
+            if math.isnan(v_cmd) or math.isnan(w_cmd):
+                print(f"ERROR: MPC returned NaN! v={v_cmd}, w={w_cmd}")
+                return VelocityCommand.stop()
+
+            return VelocityCommand(v_cmd, 0.0, w_cmd).sanitize()
+        
+        # 其他控制器
         if self.controller_type == ControllerType.PURE_PURSUIT:
+            self.debug_info['active_controller'] = 'PurePursuit'
             angular_velocity = self._pure_pursuit(pose, target)
         elif self.controller_type == ControllerType.STANLEY:
+            self.debug_info['active_controller'] = 'Stanley'
             angular_velocity = self._stanley(pose, target)
         else:  # HYBRID
+            self.debug_info['active_controller'] = 'Hybrid'
             angular_velocity = self._hybrid_control(pose, target, distance_to_target)
         
         # ==================== 输出安全校验 ====================

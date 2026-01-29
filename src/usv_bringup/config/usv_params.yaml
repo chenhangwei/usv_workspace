@@ -175,7 +175,14 @@ mavros:
     # - 'pure_pursuit': 纯追踪算法，远距离快速收敛
     # - 'stanley': Stanley控制器，近距离精确跟踪
     # - 'hybrid': 混合控制（推荐），自动切换
-    controller_type: 'hybrid'
+    # - 'mpc': MPC模型预测控制（推荐），更平滑的轨迹和抗干扰能力
+    controller_type: 'mpc'
+    
+    # ==================== MPC 参数 (模型预测控制) ====================
+    mpc_prediction_steps: 30                # 预测步数 N (dt=0.1s, N=30 -> 预测3.0秒) - 推荐20~40
+    mpc_weight_pos: 30.0                    # 位置误差权重 Q_pos - 推荐20~50, 越大越贴线
+    mpc_weight_heading: 5.0                 # 航向误差权重 Q_theta - 推荐1~10
+    mpc_weight_steering: 8.0                # 转向平滑权重 R_w (消除画龙的关键) - 推荐5~20, 越大越平滑
     
     # ==================== Pure Pursuit 参数 ====================
     lookahead_distance: 1.5                 # 前视距离（米） - [优化] 2.5->1.5: 减小前视距离，减少切角大弧线现象，使跟踪更紧密

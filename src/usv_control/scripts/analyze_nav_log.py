@@ -104,6 +104,28 @@ def analyze_statistics(data: list):
     print(f"   平均: {avg_omega:.3f} rad/s ({math.degrees(avg_omega):.1f}°/s)")
     print(f"   最大: {max_omega:.3f} rad/s ({math.degrees(max_omega):.1f}°/s)")
 
+    # MPC 统计
+    if 'mpc_solve_time_ms' in data[0]:
+        print("\n🤖 MPC 性能分析")
+        solve_times = [d.get('mpc_solve_time_ms', 0) for d in data]
+        avg_time = sum(solve_times) / len(solve_times)
+        max_time = max(solve_times)
+        
+        print(f"   平均求解时间: {avg_time:.2f} ms")
+        print(f"   最大求解时间: {max_time:.2f} ms")
+        if max_time > 50:
+             print(f"   ⚠️  求解时间过长 (>50ms)")
+             
+        # 活跃控制器分布
+        controllers = {}
+        for d in data:
+            ctrl = d.get('active_ctrl', 'unknown')
+            controllers[ctrl] = controllers.get(ctrl, 0) + 1
+            
+        print(f"   控制器分布:")
+        for ctrl, count in controllers.items():
+            print(f"   - {ctrl}: {count} ({count/len(data)*100:.1f}%)")
+
 
 def find_yaw_offset(data: list) -> float:
     """查找稳定的航向偏移"""
@@ -286,6 +308,51 @@ def plot_control_commands(data: list, output_path: Path):
     print(f"   📈 控制指令图: {output_path / 'control_commands.png'}")
 
 
+def plot_mpc_debug(data: list, output_path: Path):
+    """绘制 MPC 调试信息"""
+    if 'mpc_solve_time_ms' not in data[0]:
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    
+    # 1. 求解时间
+    ax = axes[0]
+    times = [d.get('mpc_solve_time_ms', 0) for d in data]
+    ax.plot(t, times, 'b-', label='Solve Time')
+    ax.axhline(y=50, color='r', linestyle='--', label='Warning (50ms)')
+    ax.set_ylabel('Time (ms)')
+    ax.set_title('MPC Performance')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    # 2. 代价函数
+    ax = axes[1]
+    costs = [d.get('mpc_cost', 0) for d in data]
+    ax.plot(t, costs, 'g-', label='Optimization Cost')
+    ax.set_ylabel('Cost')
+    # ax.set_yscale('log') # 视情况开启
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    # 3. 预测航向 vs 实际航向
+    ax = axes[2]
+    pred_yaw = [d.get('mpc_pred_theta_deg', 0) for d in data]
+    real_yaw = [d['pose_yaw_deg'] for d in data]
+    
+    ax.plot(t, real_yaw, 'k-', label='Actual Yaw', alpha=0.5)
+    ax.plot(t, pred_yaw, 'r--', label='MPC Ref Yaw', alpha=0.8)
+    ax.set_ylabel('Yaw (deg)')
+    ax.set_xlabel('Time (s)')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'mpc_debug.png', dpi=150)
+    plt.close()
+    print(f"   📈 MPC 调试图: {output_path / 'mpc_debug.png'}")
+
+
 def main():
     # 确定日志文件路径
     if len(sys.argv) > 1:
@@ -332,6 +399,7 @@ def main():
         plot_velocity(data, output_path)
         plot_heading_comparison(data, output_path)
         plot_control_commands(data, output_path)
+        plot_mpc_debug(data, output_path)
         print(f"\n✅ 图表已保存到: {output_path}")
     
     print("\n" + "="*60)
