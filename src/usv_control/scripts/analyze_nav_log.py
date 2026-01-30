@@ -363,45 +363,46 @@ def main():
         if not log_dir.exists():
             print("❌ 未找到日志目录: ~/usv_logs")
             sys.exit(1)
-        
         log_files = sorted(log_dir.glob('nav_log_*.csv'))
         if not log_files:
             print("❌ 未找到日志文件")
             sys.exit(1)
-        
         log_file = log_files[-1]
         print(f"📂 使用最新日志: {log_file}")
-    
+
     if not log_file.exists():
         print(f"❌ 文件不存在: {log_file}")
         sys.exit(1)
-    
+
+    # 新建输出文件夹（与csv同名）
+    output_path = log_file.parent / log_file.stem
+    output_path.mkdir(parents=True, exist_ok=True)
+
     # 加载数据
     print(f"\n📖 加载日志: {log_file}")
     data = load_csv(str(log_file))
     print(f"   记录数: {len(data)}")
-    
+
     if len(data) < 10:
         print("⚠️  数据量太少，无法分析")
         sys.exit(1)
-    
+
     # 统计分析
     analyze_statistics(data)
-    
+
     # 航向偏移分析
     find_yaw_offset(data)
-    
+
     # 可视化
     if HAS_MATPLOTLIB:
         print("\n📊 生成图表...")
-        output_path = log_file.parent
         plot_trajectory(data, output_path)
         plot_velocity(data, output_path)
         plot_heading_comparison(data, output_path)
         plot_control_commands(data, output_path)
         plot_mpc_debug(data, output_path)
         print(f"\n✅ 图表已保存到: {output_path}")
-    
+
     print("\n" + "="*60)
     print("分析完成!")
     print("="*60)
