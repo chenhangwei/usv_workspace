@@ -56,7 +56,7 @@ class GroundStationNode(Node):
     DEFAULT_MAX_RETRIES = 3      # 默认最大重试次数 - 增加到3次，给USV更多机会
     INFECTION_CHECK_PERIOD = 2.0 # 传染检查周期(秒)，增加周期减少CPU占用
     NAMESPACE_UPDATE_PERIOD = 2.0 # 命名空间更新周期(秒)，从 5.0 减少到 2.0，加快离线检测
-    CLUSTER_TARGET_PUBLISH_PERIOD = 5 # 集群目标发布周期(秒)，增加周期减少CPU占用
+    CLUSTER_TARGET_PUBLISH_PERIOD =0.5 # 集群目标发布周期(秒)，增加周期减少CPU占用
     MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
     PREARM_WARNING_EXPIRY = 15.0  # PreArm 报警保留时长（秒）
     
