@@ -413,9 +413,8 @@ class MainWindow(QMainWindow):
         self.action_led_infection_mode.triggered.connect(self.toggle_led_infection_mode)
         self.action_set_home.triggered.connect(self.open_set_home_dialog)
         self.action_geofence_settings.triggered.connect(self.open_geofence_dialog)
-        self.action_geofence_toggle.toggled.connect(self.toggle_geofence_from_menu)
         self.action_param_config.triggered.connect(self.open_param_config_window)
-        self.action_set_nav_arrival_threshold.triggered.connect(self.open_nav_arrival_threshold_dialog)
+        # removed geofence toggle and nav arrival threshold menu items
 
     def _init_custom_menu(self):
         """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
@@ -457,36 +456,6 @@ class MainWindow(QMainWindow):
         self.action_geofence_settings = QAction("🚧 电子围栏设置...", self)
         self.action_geofence_settings.setToolTip("设置矩形活动区域，越界自动HOLD")
         tools_menu.addAction(self.action_geofence_settings)
-        
-        # 电子围栏快速开关
-        self.action_geofence_toggle = QAction("🛡️ 启用电子围栏", self)
-        self.action_geofence_toggle.setCheckable(True)
-        self.action_geofence_toggle.setChecked(False)
-        self.action_geofence_toggle.setToolTip("快速开启/关闭电子围栏监控")
-        tools_menu.addAction(self.action_geofence_toggle)
-
-        # 导航到达阈值设置
-        self.action_set_nav_arrival_threshold = QAction("🎯 设置到达阈值...", self)
-        self.action_set_nav_arrival_threshold.setToolTip(
-            "设置 USV 端导航到达判定阈值（米），可对选中 USV 或全部在线 USV 生效"
-        )
-        tools_menu.addAction(self.action_set_nav_arrival_threshold)
-        
-        # 导航参数设置（平滑导航）
-        self.action_nav_settings = QAction("⚙️ 导航参数设置...", self)
-        self.action_nav_settings.setToolTip(
-            "设置平滑导航参数：到达阈值、切换阈值、平滑导航开关"
-        )
-        self.action_nav_settings.triggered.connect(self.open_nav_settings_dialog)
-        tools_menu.addAction(self.action_nav_settings)
-        
-        # 速度控制器参数设置
-        self.action_velocity_settings = QAction("🚀 速度控制器设置...", self)
-        self.action_velocity_settings.setToolTip(
-            "设置速度控制器参数：巡航速度、前视距离、Stanley 增益等"
-        )
-        self.action_velocity_settings.triggered.connect(self.open_velocity_settings_dialog)
-        tools_menu.addAction(self.action_velocity_settings)
         
         # 分隔线
         tools_menu.addSeparator()

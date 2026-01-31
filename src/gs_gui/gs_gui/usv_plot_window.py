@@ -20,6 +20,7 @@ from matplotlib.path import Path as MplPath
 from math import cos, sin, pi, atan2, sqrt, radians
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.transforms import offset_copy
 import numpy as np
 import time
 import datetime
@@ -103,12 +104,14 @@ class UsvPlotWindow(QWidget):
             'nav_lines': {},    # {usv_id: Line2D}
             'nav_markers': {},  # {usv_id: Line2D (marker)}
             'nav_labels': {},   # {usv_id: Text (target coordinates)}
+            'nav_sync_markers': {}, # {usv_id: Text ('=' for sync/wait)}
             'preview_lines': {}, # {usv_id: Line2D}
             'preview_markers_start': {}, # {usv_id: PathCollection}
             'preview_markers_end': {},   # {usv_id: PathCollection}
             'preview_markers_mid': {},   # {usv_id: PathCollection}
             'preview_markers_maneuver': {}, # {usv_id: PathCollection} (Rings for maneuvers)
             'preview_labels_start': {},  # {usv_id: Text (USV ID at start)}
+            'preview_sync_texts': {},    # {usv_id: [Text, ...] for '=' at sync points}
             'home_marker': None, # Home marker aritst
             'area_center_marker': None # Area Center marker (Red Cross)
         }
@@ -354,10 +357,24 @@ class UsvPlotWindow(QWidget):
         # print(f"DEBUG: set_preview_path called with {len(task_data_list)} items, offset={offset}, angle={angle}")
         self.preview_trails = {}
         # Clear previous preview artists
-        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver', 'preview_labels_start']:
-            for artist in self.artists[key].values():
-                artist.remove()
-            self.artists[key].clear()
+        for key in ['preview_lines', 'preview_markers_start', 'preview_markers_end', 'preview_markers_mid', 'preview_markers_maneuver', 'preview_labels_start', 'preview_sync_texts']:
+            # preview_sync_texts may store lists
+            val = self.artists.get(key, {})
+            if isinstance(val, dict):
+                for artist in val.values():
+                    # some values may be lists of artists
+                    if isinstance(artist, list):
+                        for a in artist:
+                            try:
+                                a.remove()
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            artist.remove()
+                        except Exception:
+                            pass
+                val.clear()
             
         if not task_data_list:
             self.update_plot()
@@ -402,10 +419,14 @@ class UsvPlotWindow(QWidget):
             
             if uid not in temp:
                 temp[uid] = []
+            # Preserve relevant metadata such as led color and nav_mode for preview rendering
             temp[uid].append({
-                'step': step, 
-                'pos': (x_final, y_final), 
-                'maneuver_type': m_type
+                'step': step,
+                'pos': (x_final, y_final),
+                'maneuver_type': m_type,
+                'led': item.get('led') if isinstance(item, dict) else None,
+                'nav_mode': item.get('nav_mode') if isinstance(item, dict) else None,
+                'usv_id': uid
             })
             
         # Sort and store
@@ -442,6 +463,65 @@ class UsvPlotWindow(QWidget):
         except:
             pass
         return None
+
+    def _resolve_led_color(self, led_val):
+        """Resolve various LED value formats to a matplotlib-friendly color string.
+        Handles dict {'color':[r,g,b]}, '#rrggbb', 'r,g,b', 'color_select|r,g,b',
+        and treats 'off'/'black' as contrast color against axes background.
+        """
+        if not led_val:
+            return None
+
+        def _contrast_color_against_axes():
+            try:
+                rgba = self.ax.get_facecolor()
+                r, g, b = rgba[0], rgba[1], rgba[2]
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                return '#ffffff' if lum < 0.5 else '#000000'
+            except Exception:
+                return '#ffffff'
+
+        # dict format
+        if isinstance(led_val, dict) and 'color' in led_val:
+            parsed = self._get_led_color_hex(led_val)
+            if not parsed:
+                return _contrast_color_against_axes()
+            try:
+                rr = int(parsed[1:3], 16) / 255.0
+                gg = int(parsed[3:5], 16) / 255.0
+                bb = int(parsed[5:7], 16) / 255.0
+                lum = 0.299 * rr + 0.587 * gg + 0.114 * bb
+                if lum < 0.05:
+                    return _contrast_color_against_axes()
+            except Exception:
+                pass
+            return parsed
+
+        try:
+            s = str(led_val).strip()
+            if '|' in s:
+                s = s.split('|')[-1].strip()
+            if s.lower() in ('off', 'none', '0', 'false', 'disable', 'disabled'):
+                return _contrast_color_against_axes()
+            if s.startswith('#'):
+                if s.lower() in ('#000000', '#000'):
+                    return _contrast_color_against_axes()
+                return s
+            if ',' in s:
+                parts = [p.strip() for p in s.split(',') if p.strip()]
+                if len(parts) >= 3:
+                    try:
+                        r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                        if r == 0 and g == 0 and b == 0:
+                            return _contrast_color_against_axes()
+                        return '#{:02x}{:02x}{:02x}'.format(max(0,min(255,r)), max(0,min(255,g)), max(0,min(255,b)))
+                    except Exception:
+                        pass
+            if s.lower() == 'black':
+                return _contrast_color_against_axes()
+            return s
+        except Exception:
+            return None
 
     def on_limits_changed(self, event=None):
         """Callback for axis limit changes (zoom/pan)"""
@@ -507,20 +587,36 @@ class UsvPlotWindow(QWidget):
                         self.artists['preview_lines'][uid].set_visible(True)
                     
                     # 2. Start/End Points
+                    # If a led color is provided in the preview data, use it for the markers
+                    preview_led = points[0].get('led') if isinstance(points[0], dict) else None
+                    preview_color = self._resolve_led_color(preview_led) or '#2ecc71'
+                    end_color = preview_color or '#e74c3c'
+
                     if uid not in self.artists['preview_markers_start']:
                         # Zorder increased to 6
-                        start = self.ax.scatter([px[0]], [py[0]], c='#2ecc71', s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='Start')
-                        end = self.ax.scatter([px[-1]], [py[-1]], c='#e74c3c', s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='End')
+                        start = self.ax.scatter([px[0]], [py[0]], c=preview_color, s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='Start')
+                        end = self.ax.scatter([px[-1]], [py[-1]], c=preview_color, s=30, marker='o', zorder=6, edgecolors='white', linewidth=0.5, label='End')
                         self.artists['preview_markers_start'][uid] = start
                         self.artists['preview_markers_end'][uid] = end
                         
                         # Add USV ID Label at Start
-                        text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color='#2ecc71', verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
+                        text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color=preview_color, verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
                         self.artists['preview_labels_start'][uid] = text_artist
                         
                         if len(points) > 2:
-                            mid = self.ax.scatter(px[1:-1], py[1:-1], c='#bdc3c7', s=10, marker='.', zorder=6, edgecolors='none')
+                            mid = self.ax.scatter(px[1:-1], py[1:-1], c=preview_color, s=10, marker='.', zorder=6, edgecolors='none')
                             self.artists['preview_markers_mid'][uid] = mid
+                        # Create '=' markers for any sync nav_mode points in preview
+                        sync_points = [p for p in points if int(p.get('nav_mode', 0)) == 1]
+                        sync_texts = []
+                        # create transform with 3 pixel offset to the right-top
+                        base_transform = offset_copy(self.ax.transData, fig=self.figure, x=5, y=5, units='dots')
+                        for sp in sync_points:
+                            sx, sy = sp['pos']
+                            txt = self.ax.text(sx, sy, '=', fontsize=12, color=preview_color if preview_color else '#f1c40f', ha='center', va='center', zorder=8, fontweight='bold', transform=base_transform)
+                            sync_texts.append(txt)
+                        if sync_texts:
+                            self.artists['preview_sync_texts'][uid] = sync_texts
                     else:
                         self.artists['preview_markers_start'][uid].set_visible(True)
                         self.artists['preview_markers_end'][uid].set_visible(True)
@@ -531,9 +627,10 @@ class UsvPlotWindow(QWidget):
                         if uid in self.artists['preview_labels_start']:
                             self.artists['preview_labels_start'][uid].set_position((px[0], py[0]))
                             self.artists['preview_labels_start'][uid].set_visible(True)
+                            self.artists['preview_labels_start'][uid].set_color(preview_color)
                         else:
                             # Create if missing (defensive)
-                            text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color='#2ecc71', verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
+                            text_artist = self.ax.text(px[0], py[0], f" {uid}", fontsize=9, color=preview_color, verticalalignment='bottom', horizontalalignment='left', zorder=7, fontweight='bold')
                             self.artists['preview_labels_start'][uid] = text_artist
                         
                         if uid in self.artists['preview_markers_mid']:
@@ -542,12 +639,53 @@ class UsvPlotWindow(QWidget):
                             # Update mid points offsets
                             if len(points) > 2:
                                 self.artists['preview_markers_mid'][uid].set_offsets(np.c_[px[1:-1], py[1:-1]])
+                                try:
+                                    self.artists['preview_markers_mid'][uid].set_facecolor(preview_color)
+                                except Exception:
+                                    pass
                             else:
                                 self.artists['preview_markers_mid'][uid].set_visible(False)
+                        # Update or create sync texts for preview
+                        sync_points = [p for p in points if int(p.get('nav_mode', 0)) == 1]
+                        if sync_points:
+                            existing = self.artists.get('preview_sync_texts', {}).get(uid)
+                            if existing and isinstance(existing, list) and len(existing) == len(sync_points):
+                                # update positions
+                                for idx_sp, sp in enumerate(sync_points):
+                                    sx, sy = sp['pos']
+                                    existing[idx_sp].set_position((sx, sy))
+                                    existing[idx_sp].set_visible(True)
+                            else:
+                                # remove old if any
+                                if uid in self.artists['preview_sync_texts']:
+                                    old = self.artists['preview_sync_texts'].pop(uid)
+                                    for o in old:
+                                        try:
+                                            o.remove()
+                                        except Exception:
+                                            pass
+                                sync_texts = []
+                                base_transform = offset_copy(self.ax.transData, fig=self.figure, x=5, y=5, units='dots')
+                                for sp in sync_points:
+                                    sx, sy = sp['pos']
+                                    txt = self.ax.text(sx, sy, '=', fontsize=12, color=preview_color if preview_color else '#f1c40f', ha='center', va='center', zorder=8, fontweight='bold', transform=base_transform)
+                                    sync_texts.append(txt)
+                                if sync_texts:
+                                    self.artists['preview_sync_texts'][uid] = sync_texts
+                        else:
+                            # hide any existing
+                            if uid in self.artists.get('preview_sync_texts', {}):
+                                for t in self.artists['preview_sync_texts'][uid]:
+                                    t.set_visible(False)
                                 
-                        # Update start/end positions
+                        # Update start/end positions and colors
                         self.artists['preview_markers_start'][uid].set_offsets([[px[0], py[0]]])
                         self.artists['preview_markers_end'][uid].set_offsets([[px[-1], py[-1]]])
+                        try:
+                            self.artists['preview_markers_start'][uid].set_facecolor(preview_color)
+                            self.artists['preview_markers_end'][uid].set_facecolor(preview_color)
+                        except Exception:
+                            pass
 
                     # 3. Maneuver Rings
                     maneuver_points = [p['pos'] for p in points if p.get('maneuver_type', 0) == 1]
@@ -653,45 +791,73 @@ class UsvPlotWindow(QWidget):
                 # 根据是否到达选择颜色：未到达用红色，已到达用绿色
                 marker_color = '#2ecc71' if target_reached else '#e74c3c'  # 绿色 / 红色
                 if tx is not None and ty is not None:
-                     # Line
-                     if usv_id not in self.artists['nav_lines']:
-                         line, = self.ax.plot([x, tx], [y, ty], color=color_hex, linestyle=':', alpha=0.8, linewidth=1.5)
-                         self.artists['nav_lines'][usv_id] = line
-                     else:
-                         line = self.artists['nav_lines'][usv_id]
-                         line.set_data([x, tx], [y, ty])
-                         line.set_color(color_hex)
-                         line.set_visible(True)
-                     # Marker - 使用红色X（未到达）或绿色X（已到达）
-                     if usv_id not in self.artists['nav_markers']:
-                         mark, = self.ax.plot(tx, ty, marker='x', markersize=8, color=marker_color, markeredgewidth=2, linestyle='None')
-                         self.artists['nav_markers'][usv_id] = mark
-                     else:
-                         mark = self.artists['nav_markers'][usv_id]
-                         mark.set_data([tx], [ty])
-                         mark.set_color(marker_color)
-                         mark.set_visible(True)
-                     
-                     # Nav Target Label (XY Coordinates)
-                     label_text = f"({tx:.1f}, {ty:.1f})"
-                     if usv_id not in self.artists['nav_labels']:
-                         text = self.ax.text(tx, ty + 1.0, label_text, 
-                                            color=color_hex, fontsize=8, ha='center',
-                                            bbox=dict(facecolor='#2c3e50', alpha=0.3, edgecolor='none', pad=1))
-                         self.artists['nav_labels'][usv_id] = text
-                     else:
-                         text = self.artists['nav_labels'][usv_id]
-                         text.set_position((tx, ty + 1.0))
-                         text.set_text(label_text)
-                         text.set_color(color_hex)
-                         text.set_visible(True)
+                    # Line
+                    if usv_id not in self.artists['nav_lines']:
+                        line, = self.ax.plot([x, tx], [y, ty], color=color_hex, linestyle=':', alpha=0.8, linewidth=1.5)
+                        self.artists['nav_lines'][usv_id] = line
+                    else:
+                        line = self.artists['nav_lines'][usv_id]
+                        line.set_data([x, tx], [y, ty])
+                        line.set_color(color_hex)
+                        line.set_visible(True)
 
-                     all_x.append(tx)
-                     all_y.append(ty)
+                    # Marker - prefer using led color for target if provided
+                    nav_led_val = None
+                    if isinstance(nav_target, dict):
+                        nav_led_val = nav_target.get('led')
+                    # fall back to usv-level led fields
+                    if not nav_led_val:
+                        nav_led_val = usv.get('led') or usv.get('led_status')
+                    resolved_led = self._resolve_led_color(nav_led_val)
+                    marker_c = resolved_led or marker_color
+                    if usv_id not in self.artists['nav_markers']:
+                        mark, = self.ax.plot(tx, ty, marker='x', markersize=8, color=marker_c, markeredgewidth=2, linestyle='None')
+                        self.artists['nav_markers'][usv_id] = mark
+                    else:
+                        mark = self.artists['nav_markers'][usv_id]
+                        mark.set_data([tx], [ty])
+                        mark.set_color(marker_c)
+                        mark.set_visible(True)
+
+                    # 如果该目标为同步模式 (nav_mode == 1)，在目标点附近绘制“=”符号
+                    is_sync = bool(nav_target.get('nav_mode') == 1) if isinstance(nav_target, dict) else False
+                    if is_sync:
+                        sync_color = resolved_led or '#f1c40f'
+                        if usv_id not in self.artists['nav_sync_markers']:
+                            eq_transform = offset_copy(self.ax.transData, fig=self.figure, x=5, y=5, units='dots')
+                            eq = self.ax.text(tx, ty, '=', fontsize=18, color=sync_color, ha='center', va='center', zorder=12, fontweight='bold', transform=eq_transform)
+                            self.artists['nav_sync_markers'][usv_id] = eq
+                        else:
+                            eq = self.artists['nav_sync_markers'][usv_id]
+                            eq.set_position((tx, ty))
+                            eq.set_color(sync_color)
+                            eq.set_visible(True)
+                    else:
+                        # 隐藏可能存在的同步标记
+                        if usv_id in self.artists['nav_sync_markers']:
+                            self.artists['nav_sync_markers'][usv_id].set_visible(False)
+
+                    # Nav Target Label (XY Coordinates)
+                    label_text = f"({tx:.1f}, {ty:.1f})"
+                    if usv_id not in self.artists['nav_labels']:
+                        text = self.ax.text(tx, ty + 1.0, label_text,
+                                           color=color_hex, fontsize=8, ha='center',
+                                           bbox=dict(facecolor='#2c3e50', alpha=0.3, edgecolor='none', pad=1))
+                        self.artists['nav_labels'][usv_id] = text
+                    else:
+                        text = self.artists['nav_labels'][usv_id]
+                        text.set_position((tx, ty + 1.0))
+                        text.set_text(label_text)
+                        text.set_color(color_hex)
+                        text.set_visible(True)
+
+                    all_x.append(tx)
+                    all_y.append(ty)
             else:
-                 if usv_id in self.artists['nav_lines']: self.artists['nav_lines'][usv_id].set_visible(False)
-                 if usv_id in self.artists['nav_markers']: self.artists['nav_markers'][usv_id].set_visible(False)
-                 if usv_id in self.artists['nav_labels']: self.artists['nav_labels'][usv_id].set_visible(False)
+                if usv_id in self.artists['nav_lines']: self.artists['nav_lines'][usv_id].set_visible(False)
+                if usv_id in self.artists['nav_markers']: self.artists['nav_markers'][usv_id].set_visible(False)
+                if usv_id in self.artists['nav_labels']: self.artists['nav_labels'][usv_id].set_visible(False)
+                if usv_id in self.artists['nav_sync_markers']: self.artists['nav_sync_markers'][usv_id].set_visible(False)
 
             # --- 6. Label ---
             if self.show_labels:
@@ -718,6 +884,7 @@ class UsvPlotWindow(QWidget):
                 self.artists['usv_polys'][uid].set_visible(False)
                 if uid in self.artists['usv_labels']: self.artists['usv_labels'][uid].set_visible(False)
                 if uid in self.artists['nav_labels']: self.artists['nav_labels'][uid].set_visible(False)
+                if uid in self.artists['nav_sync_markers']: self.artists['nav_sync_markers'][uid].set_visible(False)
                 # Trails persist usually, but maybe hide them? Keeping them for now.
 
         # --- 7. Auto Scale ---

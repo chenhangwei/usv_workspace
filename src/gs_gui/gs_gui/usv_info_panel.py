@@ -81,6 +81,8 @@ class UsvInfoPanel(QWidget):
         self._update_timer = QTimer()
         self._update_timer.timeout.connect(self._update_dynamic_styles)
         self._update_timer.start(1000)  # 每秒更新一次
+        # 在线时长追踪（秒）
+        self._online_start_ts = None
     
     def _setup_ui(self):
         """设置UI布局（带滚动条）"""
@@ -396,6 +398,11 @@ class UsvInfoPanel(QWidget):
         
         info_layout.setColumnStretch(1, 1)
         layout.addLayout(info_layout)
+        # 在线时长显示（上线开始累积，离线清零）
+        self.online_time_label = self._create_value_label("0 h 0 m 0 s")
+        info_layout.addWidget(self._create_key_label("在线时间:"), 3, 0)
+        info_layout.addWidget(self.online_time_label, 3, 1)
+        info_layout.addWidget(QLabel(""), 3, 2)
         
         group.setLayout(layout)
         return group
@@ -565,6 +572,8 @@ class UsvInfoPanel(QWidget):
             self._clear_display()
             return
         
+        # 保留之前的连接状态用于判断上线/离线边沿
+        prev_connected = bool(self._current_state.get('connected')) if self._current_state else False
         self._current_state = state
         
         try:
@@ -656,6 +665,19 @@ class UsvInfoPanel(QWidget):
             self._update_satellite_style(sat_count)
 
             self.gps_accuracy_label.setText(self._format_float(state.get('gps_eph'), precision=1))
+
+            # 在线时长逻辑：连接时开始计时；断线时清零
+            import time as _time
+            if connected and not prev_connected:
+                # 刚上线，记录开始时间
+                self._online_start_ts = _time.time()
+            if not connected:
+                # 离线则清零
+                self._online_start_ts = None
+                try:
+                    self.online_time_label.setText("0 h 0 m 0 s")
+                except Exception:
+                    pass
             
         except Exception as e:
             print(f"更新 USV 信息面板失败: {e}")
@@ -1000,6 +1022,18 @@ class UsvInfoPanel(QWidget):
     
     def _update_dynamic_styles(self):
         """更新动态样式（由定时器调用）"""
-        # 可以在这里添加动画效果或闪烁提醒
-        # 例如：低电量时闪烁、GPS信号差时闪烁等
-        pass
+        # 在线时长更新（每秒调用）
+        try:
+            import time as _time
+            if getattr(self, '_current_state', None) and self._current_state.get('connected') and self._online_start_ts:
+                elapsed = int(_time.time() - self._online_start_ts)
+                hours = elapsed // 3600
+                mins = (elapsed % 3600) // 60
+                secs = elapsed % 60
+                try:
+                    self.online_time_label.setText(f"{hours} h {mins} m {secs} s")
+                except Exception:
+                    pass
+        except Exception:
+            # 忽略定时器更新中的任何异常，保持 UI 稳定
+            pass

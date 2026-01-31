@@ -91,8 +91,8 @@ class UsvFleetLauncher(QDialog):
         self.executor = ThreadPoolExecutor(max_workers=10)
         
         # 日志级别控制（减少冗余输出）
-        # 临时开启调试：诊断 state_handler 检测问题
-        self.verbose_logging = True
+        # 默认关闭详细日志以保持简洁输出
+        self.verbose_logging = False
         
         # 初始化 UI
         self._init_ui()
@@ -101,6 +101,11 @@ class UsvFleetLauncher(QDialog):
         self.status_updated.connect(self._on_status_updated)
         self.batch_status_updated.connect(self._on_batch_status_updated)
         self.log_message.connect(self._log_sync)
+
+        # 日志去重与限制（用于简洁风格）
+        self._last_log = None
+        self._last_log_count = 0
+        self._max_log_lines = 300
         
         # 加载配置
         self._load_fleet_config()
@@ -127,7 +132,7 @@ class UsvFleetLauncher(QDialog):
     
     def _init_ui(self):
         """初始化用户界面"""
-        self.setWindowTitle("USV 集群启动器 (优化版)")
+        self.setWindowTitle("USV 集群启动器")
         self.setMinimumSize(900, 600)
         
         # 主布局
@@ -136,7 +141,7 @@ class UsvFleetLauncher(QDialog):
         main_layout.setContentsMargins(20, 20, 20, 20)
         
         # ============== 标题区域 ==============
-        title_label = QLabel("▶️ USV 集群管理 (性能优化)")
+        title_label = QLabel("▶️ USV 集群管理")
         title_font = QFont()
         title_font.setPointSize(16)
         title_font.setBold(True)
@@ -144,11 +149,7 @@ class UsvFleetLauncher(QDialog):
         title_label.setAlignment(Qt.AlignCenter)
         main_layout.addWidget(title_label)
         
-        # 副标题
-        subtitle_label = QLabel("管理和监控所有 USV 节点的启动与停止 | 异步检测 + 并行优化")
-        subtitle_label.setAlignment(Qt.AlignCenter)
-        subtitle_label.setStyleSheet("color: #9e9e9e; font-size: 14px;")
-        main_layout.addWidget(subtitle_label)
+        # 副标题（移除多余说明，界面保持简洁）
         
         # ============== USV 列表区域 ==============
         list_group = QGroupBox("📝 USV 设备列表")
@@ -579,11 +580,36 @@ class UsvFleetLauncher(QDialog):
     
     def _log_sync(self, message):
         """同步日志输出（在主线程中执行）"""
-        self.log_text.append(message)
-        # 滚动到底部
-        self.log_text.verticalScrollBar().setValue(
-            self.log_text.verticalScrollBar().maximum()
-        )
+        # 简洁风格：合并重复消息并限制日志行数
+        try:
+            if message == self._last_log:
+                self._last_log_count += 1
+                # 更新最后一行显示计数
+                last_plain = self.log_text.toPlainText().splitlines()
+                if last_plain:
+                    # 用 " xN" 后缀表示重复次数
+                    last_plain[-1] = f"{self._last_log}  x{self._last_log_count}"
+                    self.log_text.setPlainText('\n'.join(last_plain))
+            else:
+                # 新消息
+                self._last_log = message
+                self._last_log_count = 1
+                self.log_text.append(message)
+
+            # 限制最大行数，超出则删除最早的行
+            lines = self.log_text.toPlainText().splitlines()
+            if len(lines) > self._max_log_lines:
+                lines = lines[-self._max_log_lines:]
+                self.log_text.setPlainText('\n'.join(lines))
+
+            # 滚动到底部
+            self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        except Exception:
+            # 回退到简单追加，避免因日志处理导致崩溃
+            try:
+                self.log_text.append(message)
+            except Exception:
+                pass
     
     def _toggle_verbose_logging(self, state):
         """切换详细日志模式"""
