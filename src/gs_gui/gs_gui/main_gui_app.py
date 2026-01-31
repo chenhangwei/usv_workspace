@@ -24,13 +24,14 @@ from logging.handlers import RotatingFileHandler
 
 import rclpy
 from rclpy.parameter import Parameter
-from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings
+from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings, QPropertyAnimation, QEasingCurve
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog, QMenu,
     QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, 
     QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup, QInputDialog
 )
 from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush
+from PyQt5.QtWidgets import QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
 from gs_gui.ui import Ui_MainWindow
@@ -123,6 +124,15 @@ class MainWindow(QMainWindow):
             self.ui.cluster_tableView,
             self.ui.departed_tableView
         )
+
+        # 导航反馈进度条高亮配置
+        self.NAV_HIGHLIGHT_DURATION_MS = 3000
+        # 颜色可根据主题调整；使用浅橙->暖橙渐变作为默认（提高不透明度以增强可见性）
+        self.NAV_HIGHLIGHT_START = QColor(255, 220, 100, 230)
+        self.NAV_HIGHLIGHT_END = QColor(255, 120, 0, 220)
+
+        # 导航反馈进度条高亮状态映射：usv_id -> {'anim': QPropertyAnimation, 'overlay': QWidget}
+        self._nav_feedback_highlight = {}
         
         # 设置表格为单行选择模式
         self.ui.cluster_tableView.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -1374,6 +1384,7 @@ limitations under the License.
         """
         处理导航反馈信息，更新到表格中（科幻增强版）
         """
+        print(f"[DEBUG] handle_navigation_feedback called: usv_id={usv_id}, dist={getattr(feedback, 'distance_to_goal', None)}")
         # 检查是否已有该 USV 的行
         if usv_id not in self._nav_feedback_row_map:
             row = self.nav_feedback_table.rowCount()
@@ -1448,6 +1459,21 @@ limitations under the License.
         
         bar.setValue(progress_val)
         bar.setFormat(f"{dist:.1f}m")
+        # 触发高亮动画：当接近目标（dist < 1.5）或进度接近满值时，高亮渐变持续 3 秒
+        try:
+            if dist < 1.5 or progress_val >= 99:
+                # 如果已有正在进行的高亮，重启它以保证可见性
+                existing = self._nav_feedback_highlight.get(usv_id)
+                if existing:
+                    try:
+                        existing['anim'].stop()
+                        existing['overlay'].deleteLater()
+                    except Exception:
+                        pass
+                    self._nav_feedback_highlight.pop(usv_id, None)
+                self._trigger_progress_highlight(row, usv_id)
+        except Exception:
+            pass
         
         # 4. 航向误差 (HEADING ERR)
         dir_sym = "◀" if feedback.heading_error > 0 else "▶"
@@ -1471,6 +1497,119 @@ limitations under the License.
         if 0 < eta < 10:
             eta_item.setForeground(QColor("#00f2ff"))
         self.nav_feedback_table.setItem(row, 5, eta_item)
+
+    def _trigger_progress_highlight(self, row, usv_id):
+        """
+        在指定行的进度条上方显示一个渐变高亮覆盖，并在 3 秒内淡出。
+        使用 QGraphicsOpacityEffect + QPropertyAnimation 控制透明度。
+        """
+        try:
+            print(f"[DEBUG] _trigger_progress_highlight start: usv_id={usv_id}, row={row}")
+            bar = self.nav_feedback_table.cellWidget(row, 3)
+            if bar is None:
+                return
+
+            # 创建容器 widget（用于承载发光效果），并在其内部创建实际可渐隐的 child
+            container = QWidget(bar)
+            container.setAttribute(Qt.WA_TransparentForMouseEvents)
+            container.setObjectName(f"nav_highlight_container_{usv_id}")
+            container.setGeometry(bar.rect())
+            container.setStyleSheet("background:transparent;")
+            container.show()
+            container.raise_()
+
+            child = QWidget(container)
+            child.setAttribute(Qt.WA_TransparentForMouseEvents)
+            child.setObjectName(f"nav_highlight_child_{usv_id}")
+            child.setGeometry(container.rect())
+            # 根据主题选择描边颜色
+            palette = self.palette()
+            bg_color = palette.color(QPalette.Window)
+            is_light = bg_color.lightness() > 128
+            border_col = 'rgba(0,0,0,80)' if is_light else 'rgba(255,255,255,60)'
+            child.setStyleSheet(self._make_highlight_stylesheet(border_col))
+            child.show()
+
+            # 给 child 添加透明度效果并对其进行动画（fade out）
+            opacity_effect = QGraphicsOpacityEffect(child)
+            child.setGraphicsEffect(opacity_effect)
+
+            anim = QPropertyAnimation(opacity_effect, b"opacity", self)
+            anim.setDuration(self.NAV_HIGHLIGHT_DURATION_MS)
+            anim.setStartValue(1.0)
+            anim.setEndValue(0.0)
+            anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+            def _on_finished():
+                try:
+                    container.deleteLater()
+                except Exception:
+                    pass
+                print(f"[DEBUG] _trigger_progress_highlight finished: usv_id={usv_id}")
+                self._nav_feedback_highlight.pop(usv_id, None)
+
+            anim.finished.connect(_on_finished)
+
+            # 当 progress bar 改变尺寸时，保持 container/child 尺寸一致
+            def _on_bar_resize():
+                try:
+                    rect = bar.rect()
+                    container.setGeometry(rect)
+                    child.setGeometry(container.rect())
+                except Exception:
+                    pass
+
+            # 连接到 bar 的 resize 事件：使用属性替换法绑定
+            bar.resizeEvent = (lambda ev, old=bar.resizeEvent: (old(ev), _on_bar_resize()))
+
+            # 给 container 添加发光/描边效果（不影响 child 的透明度动画）
+            try:
+                glow = QGraphicsDropShadowEffect(container)
+                glow.setOffset(0, 0)
+                glow.setBlurRadius(30)
+                glow.setColor(QColor(0, 0, 0, 160) if is_light else QColor(255, 160, 80, 200))
+                container.setGraphicsEffect(glow)
+            except Exception:
+                pass
+
+            # 保存引用以避免被回收
+            self._nav_feedback_highlight[usv_id] = {'anim': anim, 'container': container, 'child': child}
+            anim.start()
+        except Exception:
+            pass
+
+    def _make_highlight_stylesheet(self, border_color=None):
+        """
+        根据当前主题返回一个渐变背景样式，用于 overlay。
+        """
+        # 使用 RGBA 值插入到 qss 字符串
+        s1 = f"rgba({self.NAV_HIGHLIGHT_START.red()},{self.NAV_HIGHLIGHT_START.green()},{self.NAV_HIGHLIGHT_START.blue()},{self.NAV_HIGHLIGHT_START.alpha()})"
+        s2 = f"rgba({self.NAV_HIGHLIGHT_END.red()},{self.NAV_HIGHLIGHT_END.green()},{self.NAV_HIGHLIGHT_END.blue()},{self.NAV_HIGHLIGHT_END.alpha()})"
+        b = f"border:1px solid {border_color};" if border_color else ""
+        return (
+            "background: qlineargradient(x1:0,y1:0,x2:1,y2:0, "
+            f"stop:0 {s1}, stop:1 {s2});"
+            "border-radius: 3px;"
+            f"{b}"
+        )
+
+    def _apply_glow_effect(self, widget, is_light_theme: bool):
+        """
+        为 overlay 添加发光/描边效果。浅色主题使用深色半透明 glow，深色主题使用亮色 glow。
+        """
+        try:
+            glow = QGraphicsDropShadowEffect(widget)
+            glow.setOffset(0, 0)
+            glow.setBlurRadius(18)
+            if is_light_theme:
+                # 浅色主题：使用暗色半透明 glow 作为描边增强
+                glow.setColor(QColor(0, 0, 0, 160))
+            else:
+                # 暗色主题：使用暖色发光提高可见性
+                glow.setColor(QColor(255, 160, 80, 200))
+            widget.setGraphicsEffect(glow)
+        except Exception:
+            pass
     
     # ============== UI辅助方法 ==============
     def show_usv_plot_window(self):
