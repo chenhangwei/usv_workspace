@@ -31,7 +31,7 @@ import threading
 
 class MpcPathTracker:
     #def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.4,q_pos=10.0, q_theta=1.0, r_vel=0.1, r_w=5.0, r_acc=1.0, r_dw=10.0):
-    def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.3,q_pos=6.0, q_theta=2.0, r_vel=0.1, r_w=10.0, r_acc=1.0, r_dw=20.0):
+    def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.3,q_pos=10.0, q_theta=1.0, r_vel=0.1, r_w=10.0, r_acc=2.0, r_dw=20.0):
         """
         初始化 MPC 控制器
         """
