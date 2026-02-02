@@ -154,7 +154,7 @@ mavros:
     control_mode: 'velocity'                # 🔧 已切换为速度模式，使用 velocity_controller_node
 
 # =============================================================================
-# 速度控制器参数 (Pure Pursuit + Stanley 混合控制)
+# 速度控制器参数 (MPC 模型预测控制)
 # 
 # 使用说明:
 # 1. 将 usv_control_node.control_mode 设置为 'velocity' 启用速度模式
@@ -162,49 +162,40 @@ mavros:
 # 3. 速度模式下，导航目标仍发送到 set_usv_nav_goal，但由 velocity_controller_node 处理
 # 
 # 优势:
-# - 彻底解决航点附近减速问题
-# - 更精确的路径跟踪
-# - 可调节的控制参数
+# - 预测未来轨迹，消除蛇形震荡
+# - 平滑的控制输出，保护舵机
+# - 直接处理运动学约束
 # =============================================================================
 /**/velocity_controller_node:
   ros__parameters:
     # 控制模式 (必须与 usv_control_node.control_mode 一致)
     control_mode: 'velocity'                # 'position' 或 'velocity'
     
-    # 控制器类型
-    # - 'pure_pursuit': 纯追踪算法，远距离快速收敛
-    # - 'stanley': Stanley控制器，近距离精确跟踪
-    # - 'hybrid': 混合控制（推荐），自动切换
-    # - 'mpc': MPC模型预测控制（推荐），更平滑的轨迹和抗干扰能力
-    controller_type: 'mpc'
-    
     # ==================== MPC 参数 (模型预测控制) ====================
-    mpc_prediction_steps: 30                # 预测步数 N (dt=0.1s, N=30 -> 预测3.0秒) - 推荐20~40
-    mpc_weight_pos: 30.0                    # 位置误差权重 Q_pos - 推荐20~50, 越大越贴线
-    mpc_weight_heading: 5.0                 # 航向误差权重 Q_theta - 推荐1~10
-    mpc_weight_steering: 8.0                # 转向平滑权重 R_w (消除画龙的关键) - 推荐5~20, 越大越平滑
-    
-    # ==================== Pure Pursuit 参数 ====================
-    lookahead_distance: 1.5                 # 前视距离（米） - [优化] 2.5->1.5: 减小前视距离，减少切角大弧线现象，使跟踪更紧密
-    min_lookahead: 1.0                      # 最小前视距离（米） - [优化] 1.2->1.0: 配合lookahead_distance减小
-    max_lookahead: 6.0                      # 最大前视距离（米）
-    lookahead_gain: 0.6                     # 前视距离增益 (L = gain * v + min)
-    
-    # ==================== Stanley 参数 ====================
-    stanley_gain: 3.5                       # Stanley 增益 k - [优化] 2.0->3.5: 大幅增大增益，提高对横向误差的修正灵敏度，解决"懒洋洋"回正慢的问题
-    stanley_softening: 0.15                 # 软化系数，提高低速稳定性
-    
-    # ==================== 混合控制参数 ====================
-    hybrid_switch_distance: 2.5             # 混合控制切换距离阈值（米）- 略增大
+    # 参数调整历史 (注意: YAML参数会覆盖Python默认值):
+    # 
+    # v1 (1/30): q_pos=30, q_theta=5, r_w=8, r_dw=5(默认), w_max=0.4
+    #            结果: 航向误差std=39.3°, 振荡频率=0.39Hz → 大振幅低频振荡
+    # 
+    # v2 (2/02): q_pos=30, q_theta=5, r_w=8, r_dw=20(代码修改), w_max=0.4
+    #            结果: 航向误差std=17.8°(↓55%), 振荡频率=0.47Hz(↑19%)
+    #            分析: r_dw↑ 限制角加速度变化 → 振幅↓频率↑
+    # 
+    # v3 (current): q_pos=5, q_theta=8, r_w=10, r_dw=15, w_max=0.3
+    #               策略: q_pos↓减少追线过冲, q_theta↑稳定航向, r_dw↓平衡频率
+    mpc_prediction_steps: 20                # 预测步数 N (dt=0.1s, N=20 -> 预测2.0秒)
+    mpc_weight_pos: 5.0                     # Q_pos: 位置误差权重 (↓减少追线过冲)
+    mpc_weight_heading: 8.0                 # Q_theta: 航向误差权重 (↑稳定船头方向)
+    mpc_weight_steering: 10.0               # R_w: 角速度惩罚 (惩罚大转向)
+    mpc_weight_steering_rate: 15.0          # R_dw: 角加速度惩罚 (平滑舵机动作)
     
     # ==================== 速度参数 ====================
-    cruise_speed: 0.4                       # 巡航速度（m/s）- 略降低提高精度
-    max_angular_velocity: 0.4               # 最大角速度（rad/s）- 略降低减少急转
-    min_speed: 0.15                         # 最小速度（m/s） - [优化] 0.05->0.15: 提高最小速度以维持低速下的舵效
+    cruise_speed: 0.4                       # 巡航速度（m/s）
+    max_angular_velocity: 0.3               # 最大角速度（rad/s）- 限制转向速度
+    min_speed: 0.15                         # 最小速度（m/s）
     
     # ==================== 到达判断 ====================
-    # 注意: goal_tolerance 应与 navigate_to_point_node.nav_arrival_threshold 一致
-    goal_tolerance: 1.5                     # 最终航点到达阈值（米） - [优化] 0.8->1.5: 增大判定圈，避免因惯性冲过头后反复震荡调整
+    goal_tolerance: 1.5                     # 最终航点到达阈值（米）
     switch_tolerance: 2.0                   # 中间航点切换阈值（米）
     
     # ==================== 控制参数 ====================
@@ -216,10 +207,8 @@ mavros:
     require_armed: true                     # 是否需要解锁
     
     # ==================== L1风格航向估计参数 ====================
-    # 使用飞控EKF速度向量代替磁力计，完全避免坐标系偏移问题
     use_velocity_based_heading: true        # 启用速度方向航向估计（推荐）
     min_speed_for_velocity_heading: 0.15    # 使用速度航向的最小速度（m/s）
-                                            # 低于此速度时保持最后有效航向
 
 # =============================================================================
 # 传感器驱动模块参数

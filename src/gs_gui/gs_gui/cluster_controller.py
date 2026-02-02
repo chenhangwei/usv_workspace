@@ -32,6 +32,7 @@ class AckState:
     retry: int = 0
     ack_time: Optional[float] = None
     received: bool = False  # 新增：目标点是否已被USV确认接收
+    timeout_logged: bool = False  # 是否已输出超时日志（避免重复刷屏）
 
 
 
@@ -461,7 +462,10 @@ class ClusterController:
         else:
             if state.retry >= self.node._max_retries:
                  state.acked = False
-                 self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+                 # 只在首次到达最大重试次数时输出错误日志，避免刷屏
+                 if not state.timeout_logged:
+                     self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+                     state.timeout_logged = True
 
     def _old_publish_cluster_targets_callback(self):
         """保留原方法占位，避免接口问题 (已被新方法替代)"""
@@ -680,8 +684,10 @@ class ClusterController:
             # ⚠️ 修复：超时失败不等于成功确认，不应设置 acked=True
             # 只记录失败状态，让 _check_and_proceed_on_ack_rate 根据确认率判断是否进入下一步
             state.acked = False  # 明确标记为未确认
-            # 记录错误日志，说明该USV已超时且达到最大重试次数
-            self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+            # 只在首次到达最大重试次数时输出错误日志，避免刷屏
+            if not state.timeout_logged:
+                self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+                state.timeout_logged = True
 
     def _area_to_global(self, p_area):
         """

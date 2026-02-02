@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <cluster type="formation">
   <step number="1" nav_mode="async">
     <usvs>
@@ -17,7 +17,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>0.075</x>
+          <x>-0.050</x>
           <y>-12.000</y>
           <z>0.000</z>
         </position>
@@ -45,7 +45,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>-10.828</y>
           <z>0.000</z>
         </position>
@@ -73,7 +73,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>4.025</x>
+          <x>-4.000</x>
           <y>-8.000</y>
           <z>0.000</z>
         </position>
@@ -101,7 +101,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>-5.172</y>
           <z>0.000</z>
         </position>
@@ -129,7 +129,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-0.025</x>
+          <x>0.050</x>
           <y>-4.000</y>
           <z>0.000</z>
         </position>
@@ -157,7 +157,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>-2.828</y>
           <z>0.000</z>
         </position>
@@ -185,7 +185,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-3.975</x>
+          <x>4.000</x>
           <y>0.000</y>
           <z>0.000</z>
         </position>
@@ -213,7 +213,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>2.828</y>
           <z>0.000</z>
         </position>
@@ -241,7 +241,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>0.075</x>
+          <x>-0.050</x>
           <y>4.000</y>
           <z>0.000</z>
         </position>
@@ -269,7 +269,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>5.172</y>
           <z>0.000</z>
         </position>
@@ -297,7 +297,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>4.025</x>
+          <x>-4.000</x>
           <y>8.000</y>
           <z>0.000</z>
         </position>
@@ -325,7 +325,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>10.828</y>
           <z>0.000</z>
         </position>
@@ -353,7 +353,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>0.075</x>
+          <x>-0.050</x>
           <y>12.000</y>
           <z>0.000</z>
         </position>
@@ -381,7 +381,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>10.828</y>
           <z>0.000</z>
         </position>
@@ -409,7 +409,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-3.975</x>
+          <x>4.000</x>
           <y>8.000</y>
           <z>0.000</z>
         </position>
@@ -437,7 +437,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>5.172</y>
           <z>0.000</z>
         </position>
@@ -465,7 +465,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-0.025</x>
+          <x>0.050</x>
           <y>4.000</y>
           <z>0.000</z>
         </position>
@@ -493,7 +493,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>2.828</y>
           <z>0.000</z>
         </position>
@@ -521,7 +521,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>4.025</x>
+          <x>-4.000</x>
           <y>-0.000</y>
           <z>0.000</z>
         </position>
@@ -549,7 +549,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>2.853</x>
+          <x>-2.828</x>
           <y>-2.828</y>
           <z>0.000</z>
         </position>
@@ -577,7 +577,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>0.075</x>
+          <x>-0.050</x>
           <y>-4.000</y>
           <z>0.000</z>
         </position>
@@ -605,7 +605,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>-5.172</y>
           <z>0.000</z>
         </position>
@@ -633,7 +633,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-3.975</x>
+          <x>4.000</x>
           <y>-8.000</y>
           <z>0.000</z>
         </position>
@@ -661,7 +661,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-2.803</x>
+          <x>2.828</x>
           <y>-10.828</y>
           <z>0.000</z>
         </position>
@@ -689,7 +689,7 @@
       <usv led="0">
         <usv_id>usv_02</usv_id>
         <position>
-          <x>-0.025</x>
+          <x>0.050</x>
           <y>-12.000</y>
           <z>0.000</z>
         </position>

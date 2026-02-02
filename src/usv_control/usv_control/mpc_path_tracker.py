@@ -30,8 +30,12 @@ import sys
 import threading
 
 class MpcPathTracker:
-    #def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.4,q_pos=10.0, q_theta=1.0, r_vel=0.1, r_w=5.0, r_acc=1.0, r_dw=10.0):
-    def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.3,q_pos=10.0, q_theta=1.0, r_vel=0.1, r_w=10.0, r_acc=2.0, r_dw=20.0):
+    # 参数调整历史:
+    # v1 (1/30): w_max=0.4, q_pos=10, q_theta=1, r_w=5, r_dw=10 → 大振幅低频振荡
+    # v2 (2/02): w_max=0.3, q_pos=10, q_theta=1, r_w=10, r_dw=20 → 小振幅高频振荡
+    # v3 (current): 降低q_pos，增加q_theta，消除S形
+    def __init__(self, prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.3,
+                 q_pos=5.0, q_theta=3.0, r_vel=0.1, r_w=10.0, r_acc=2.0, r_dw=20.0):
         """
         初始化 MPC 控制器
         """

@@ -1384,7 +1384,6 @@ limitations under the License.
         """
         处理导航反馈信息，更新到表格中（科幻增强版）
         """
-        print(f"[DEBUG] handle_navigation_feedback called: usv_id={usv_id}, dist={getattr(feedback, 'distance_to_goal', None)}")
         # 检查是否已有该 USV 的行
         if usv_id not in self._nav_feedback_row_map:
             row = self.nav_feedback_table.rowCount()
@@ -2039,9 +2038,6 @@ limitations under the License.
                 last_settings = {
                     'cruise_speed': float(self.settings.value('velocity_cruise_speed_last', 0.5)),
                     'max_angular_velocity': float(self.settings.value('velocity_max_angular_last', 0.5)),
-                    'lookahead_distance': float(self.settings.value('velocity_lookahead_last', 2.0)),
-                    'stanley_gain': float(self.settings.value('velocity_stanley_gain_last', 2.5)),
-                    'hybrid_switch_distance': float(self.settings.value('velocity_hybrid_switch_last', 2.0)),
                     'goal_tolerance': float(self.settings.value('velocity_goal_tolerance_last', 0.5)),
                     'switch_tolerance': float(self.settings.value('velocity_switch_tolerance_last', 1.5)),
                 }
@@ -2059,9 +2055,6 @@ limitations under the License.
             try:
                 self.settings.setValue('velocity_cruise_speed_last', settings['cruise_speed'])
                 self.settings.setValue('velocity_max_angular_last', settings['max_angular_velocity'])
-                self.settings.setValue('velocity_lookahead_last', settings['lookahead_distance'])
-                self.settings.setValue('velocity_stanley_gain_last', settings['stanley_gain'])
-                self.settings.setValue('velocity_hybrid_switch_last', settings['hybrid_switch_distance'])
                 self.settings.setValue('velocity_goal_tolerance_last', settings['goal_tolerance'])
                 self.settings.setValue('velocity_switch_tolerance_last', settings['switch_tolerance'])
             except Exception:
@@ -2108,8 +2101,7 @@ limitations under the License.
             info_msg = (
                 f"✅ 已下发速度控制器参数 → {len(target_ids)} 艘 USV\n"
                 f"   巡航速度: {settings['cruise_speed']:.2f} m/s\n"
-                f"   前视距离: {settings['lookahead_distance']:.2f} m\n"
-                f"   Stanley增益: {settings['stanley_gain']:.2f}\n"
+                f"   最大角速度: {settings['max_angular_velocity']:.2f} rad/s\n"
                 f"   到达阈值: {settings['goal_tolerance']:.2f} m"
             )
             

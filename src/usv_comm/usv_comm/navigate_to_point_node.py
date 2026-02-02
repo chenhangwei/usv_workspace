@@ -15,7 +15,7 @@ NavigateToPoint 导航节点 (基于话题通信) - 支持平滑航点切换
 该节点替代 Action Server,使用普通 ROS 2 话题实现导航功能。
 更适合跨 Domain 通信场景,避免了 Domain Bridge 对 Action 转发的复杂性。
 
-新增功能 (Pure Pursuit + 航点队列):
+新增功能 (航点队列 + 平滑切换):
 - 航点队列管理: 支持连续接收多个目标点
 - 平滑切换: 中间航点提前切换，避免减速停止
 - 精确到达: 仅最终航点才真正到达判定
@@ -28,7 +28,7 @@ NavigateToPoint 导航节点 (基于话题通信) - 支持平滑航点切换
 
 作者: Auto-generated
 日期: 2025-11-19
-更新: 2026-01-21 - 添加平滑导航支持 (Pure Pursuit + 航点队列)
+更新: 2026-01-21 - 添加平滑导航支持 (航点队列 + 提前切换)
 """
 
 import rclpy
@@ -55,7 +55,7 @@ class NavigateToPointNode(Node):
     4. 最终航点: 到达阈值内才停止
     5. 转发目标点到控制节点
     
-    平滑导航原理 (Pure Pursuit):
+    平滑导航原理:
     - 中间航点: 距离 < switch_threshold 时立即切换到下一航点
     - 最终航点: 距离 < nav_arrival_threshold 时才视为到达
     - 这样可以避免在中间航点处减速停止

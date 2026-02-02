@@ -12,15 +12,15 @@
 """
 USV 速度模式路径跟踪控制器
 
-算法: Pure Pursuit + Stanley 混合控制
+算法: MPC（模型预测控制）
 特点: 
-- 远距离快速收敛 (Pure Pursuit)
-- 近距离精确跟踪 (Stanley)
-- 不依赖飞控减速逻辑，彻底解决航点附近减速问题
+- 多步预测，优化控制序列
+- 自适应航向和位置跟踪权重
+- 抑制转向抖动，轨迹平滑
 
 参考: 
+- CasADi: https://web.casadi.org/
 - PythonRobotics: https://github.com/AtsushiSakai/PythonRobotics
-- Stanley: Stanford DARPA Challenge
 
 作者: Auto-generated
 日期: 2026-01-22
@@ -142,15 +142,12 @@ class VelocityCommand:
 
 class ControllerType(Enum):
     """控制器类型"""
-    PURE_PURSUIT = 1   # 纯追踪
-    STANLEY = 2        # Stanley 控制器
-    HYBRID = 3         # 混合控制（推荐）
-    MPC = 4            # MPC 模型预测控制
+    MPC = 1            # MPC 模型预测控制（唯一支持）
 
 
 class VelocityPathTracker:
     """
-    速度模式路径跟踪控制器
+    速度模式路径跟踪控制器 (MPC)
     
     使用方法:
         tracker = VelocityPathTracker()
@@ -161,7 +158,7 @@ class VelocityPathTracker:
             publish_velocity(cmd)
     
     特点:
-    - 混合控制: 远距离用 Pure Pursuit, 近距离用 Stanley
+    - MPC 模型预测控制，预测未来轨迹
     - 航点队列: 支持连续航点，平滑切换
     - 自适应速度: 曲率大时减速，接近目标时减速
     - 安全保护: 位姿无效时返回停止指令
@@ -169,21 +166,6 @@ class VelocityPathTracker:
     
     def __init__(
         self,
-        # Pure Pursuit 参数
-        lookahead_distance: float = 2.0,      # 前视距离 (m)
-        # ...
-        min_lookahead: float = 1.0,           # 最小前视距离
-        max_lookahead: float = 5.0,           # 最大前视距离
-        lookahead_gain: float = 0.5,          # 前视距离增益 (L = gain * v + min)
-        
-        # Stanley 参数
-        stanley_gain: float = 2.5,            # Stanley 增益 k
-        stanley_softening: float = 0.1,       # 软化系数，防止低速时不稳定
-        
-        # 混合控制参数
-        controller_type: ControllerType = ControllerType.HYBRID,
-        hybrid_switch_distance: float = 2.0,  # 切换距离阈值
-        
         # 速度参数
         cruise_speed: float = 0.5,            # 巡航速度 (m/s)
         max_angular_velocity: float = 0.5,    # 最大角速度 (rad/s)
@@ -215,6 +197,10 @@ class VelocityPathTracker:
         # 越大越平滑(消除画龙)，越小反应越快.
         mpc_r_w: float = 5.0,
         
+        # R_dw: 角加速度变化率权重 (推荐 5.0 ~ 20.0). [丝滑的核心]
+        # 越大舵机动作越平滑，太大会增加振荡频率.
+        mpc_r_dw: float = 15.0,
+        
         # N: 预测步数 (推荐 10 ~ 30).
         # 20步 * 0.1s = 预测未来2秒. 太长增加计算量，太短容易短视.
         mpc_prediction_steps: int = 20,
@@ -222,20 +208,6 @@ class VelocityPathTracker:
         # 航点队列
         waypoint_queue_size: int = 10,        # 航点队列大小
     ):
-        # ==================== Pure Pursuit 参数 ====================
-        self.lookahead_distance = lookahead_distance
-        self.min_lookahead = min_lookahead
-        self.max_lookahead = max_lookahead
-        self.lookahead_gain = lookahead_gain
-        
-        # ==================== Stanley 参数 ====================
-        self.stanley_gain = stanley_gain
-        self.stanley_softening = stanley_softening
-        
-        # ==================== 混合控制 ====================
-        self.controller_type = controller_type
-        self.hybrid_switch_distance = hybrid_switch_distance
-        
         # ==================== 速度参数 ====================
         self.cruise_speed = cruise_speed
         self.max_angular_velocity = max_angular_velocity
@@ -256,6 +228,7 @@ class VelocityPathTracker:
             'q_pos': mpc_q_pos,
             'q_theta': mpc_q_theta,
             'r_w': mpc_r_w,
+            'r_dw': mpc_r_dw,
             'prediction_steps': mpc_prediction_steps
         }
 
@@ -269,9 +242,7 @@ class VelocityPathTracker:
         self._max_path_history: int = 5
 
         # ==================== MPC 控制器 ====================
-        self.mpc_tracker = None
-        if self.controller_type == ControllerType.MPC:
-            self.mpc_tracker = MpcPathTracker(**self.mpc_params)
+        self.mpc_tracker = MpcPathTracker(**self.mpc_params)
         
         # ==================== 安全与诊断 ====================
         self._last_pose_time: float = 0.0
@@ -417,7 +388,7 @@ class VelocityPathTracker:
                 return VelocityCommand.stop()
         self._last_valid_distance = distance_to_waypoint
         
-        # 更新路径历史 (用于 Stanley)
+        # 更新路径历史 (用于 MPC 状态估计)
         self._update_path_history(pose)
         
         # 检查是否需要切换航点或到达
@@ -489,97 +460,37 @@ class VelocityPathTracker:
             )
             return cmd.sanitize()
         
-        # ==================== 计算控制指令 ====================
-        # MPC 模型预测控制
-        if self.controller_type == ControllerType.MPC:
-            if self.mpc_tracker is None:
-                self.mpc_tracker = MpcPathTracker(**self.mpc_params)
-            
-            self.debug_info['active_controller'] = 'MPC'
-            
-            # L1 改进：使用有效航向(可能基于速度向量)
-            # 当速度 > 0.3m/s 时使用 Course (航迹角)，否则使用 Heading (罗盘角)
-            effective_yaw = self._get_control_heading(pose)
-            
-            v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
-                [pose.x, pose.y, effective_yaw], 
-                [target.x, target.y], 
-                target_speed=target.speed
-            )
-            # 调试打印 (临时)
-            # print(f"DEBUG: MPC Raw: v={v_cmd:.3f}, w={w_cmd:.3f}, TgtSpd={target.speed:.3f}, Dist={distance_to_target:.3f}")
-
-            # 获取调试信息
-            self.debug_info['mpc'] = self.mpc_tracker.debug_info
-            
-            # 检查 NaN
-            if math.isnan(v_cmd) or math.isnan(w_cmd):
-                print(f"ERROR: MPC returned NaN! v={v_cmd}, w={w_cmd}")
-                return VelocityCommand.stop()
-
-            return VelocityCommand(v_cmd, 0.0, w_cmd).sanitize()
+        # ==================== 计算控制指令 (MPC) ====================
+        self.debug_info['active_controller'] = 'MPC'
         
-        # 其他控制器
-        if self.controller_type == ControllerType.PURE_PURSUIT:
-            self.debug_info['active_controller'] = 'PurePursuit'
-            angular_velocity = self._pure_pursuit(pose, target)
-        elif self.controller_type == ControllerType.STANLEY:
-            self.debug_info['active_controller'] = 'Stanley'
-            angular_velocity = self._stanley(pose, target)
-        else:  # HYBRID
-            self.debug_info['active_controller'] = 'Hybrid'
-            angular_velocity = self._hybrid_control(pose, target, distance_to_target)
+        # L1 改进：使用有效航向(可能基于速度向量)
+        # 当速度 > 0.3m/s 时使用 Course (航迹角)，否则使用 Heading (罗盘角)
+        effective_yaw = self._get_control_heading(pose)
         
-        # ==================== 输出安全校验 ====================
+        # 计算自适应速度 (距离减速 + 曲率减速)
+        # 这是关键修复：之前没有调用此函数，导致接近目标时不减速
+        adaptive_speed = self._compute_adaptive_speed(
+            target_speed=target.speed,
+            angular_velocity=self._last_angular_velocity,
+            distance_to_goal=distance_to_target,
+            is_final=target.is_final
+        )
+        
+        v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
+            [pose.x, pose.y, effective_yaw], 
+            [target.x, target.y], 
+            target_speed=adaptive_speed  # 使用自适应速度，而不是固定速度
+        )
+        
+        # 获取调试信息
+        self.debug_info['mpc'] = self.mpc_tracker.debug_info
+        
         # 检查 NaN
-        if math.isnan(angular_velocity):
-            angular_velocity = 0.0
-        
-        # 限制角速度
-        angular_velocity = np.clip(
-            angular_velocity, 
-            -self.max_angular_velocity, 
-            self.max_angular_velocity
-        )
-        
-        # 航向死区 (非常小的角速度归零，避免抖动)
-        if abs(angular_velocity) < HEADING_DEADZONE:
-            angular_velocity = 0.0
-        
-        # ==================== 自适应低通滤波 ====================
-        # 航向误差大时减小滤波系数（快速响应），误差小时增大滤波（平稳）
-        adaptive_filter = self._compute_adaptive_filter(heading_error)
-        angular_velocity = (
-            adaptive_filter * angular_velocity +
-            (1 - adaptive_filter) * self._last_angular_velocity
-        )
-        self._last_angular_velocity = angular_velocity
-        
-        # 计算自适应线速度
-        # 修改：拆分为基础逻辑 + 过弯减速逻辑
-        # 1. 基础速度（考虑转弯曲率和距离终点减速）
-        base_speed = self._compute_adaptive_speed(
-            target.speed, 
-            angular_velocity, 
-            distance_to_target,
-            target.is_final
-        )
-        
-        # 2. 过弯前瞻减速（根据下一个航点的角度提前减速）
-        corning_limit = self._calculate_corner_speed_limit(pose, target)
-        
-        # 取最小值
-        linear_speed = min(base_speed, corning_limit)
-        
-        # 构建并清理指令
-        cmd = VelocityCommand(
-            linear_x=linear_speed,
-            linear_y=0.0,
-            angular_z=angular_velocity
-        )
-        
-        # 最终安全校验
-        return cmd.sanitize()
+        if math.isnan(v_cmd) or math.isnan(w_cmd):
+            print(f"ERROR: MPC returned NaN! v={v_cmd}, w={w_cmd}")
+            return VelocityCommand.stop()
+
+        return VelocityCommand(v_cmd, 0.0, w_cmd).sanitize()
     
     # ==================== 内部方法 ====================
 
@@ -710,7 +621,7 @@ class VelocityPathTracker:
                 if len(self._path_history) > self._max_path_history:
                     self._path_history.pop(0)
     
-    def _check_waypoint_transition(self, distance: float, pose: Pose2D = None) -> bool:
+    def _check_waypoint_transition(self, distance: float, pose: Optional[Pose2D] = None) -> bool:
         """
         检查是否需要切换航点或到达
         
@@ -734,64 +645,42 @@ class VelocityPathTracker:
             # 中间航点：使用切换阈值
             threshold = self.switch_tolerance
             
-            # 针对 MPC 优化：智能调整切换半径
-            if self.controller_type == ControllerType.MPC:
-                # 默认保持 1.0m 宽松切换，追求丝滑
-                base_threshold = max(threshold, 1.0)
+            # MPC 优化：智能调整切换半径
+            # 默认保持 1.0m 宽松切换，追求丝滑
+            base_threshold = max(threshold, 1.0)
+            
+            # 智能判断：如果是急转弯（夹角 < 90度），强制缩小半径，防止绕大圈
+            # 获取下个航点检测拐角
+            if self._waypoint_queue and self._path_history:
+                prev = self._path_history[-1]
+                curr = self._current_waypoint
+                next_wp = self._waypoint_queue[0]
                 
-                # 智能判断：如果是急转弯（夹角 < 90度），强制缩小半径，防止绕大圈
-                # 获取下个航点检测拐角
-                if self._waypoint_queue and self._path_history:
-                    prev = self._path_history[-1]
-                    curr = self._current_waypoint
-                    next_wp = self._waypoint_queue[0]
-                    
-                    # 向量1: prev -> current
-                    v1_x, v1_y = curr.x - prev.x, curr.y - prev.y
-                    # 向量2: current -> next
-                    v2_x, v2_y = next_wp.x - curr.x, next_wp.y - curr.y
-                    
-                    # 计算夹角余弦
-                    dot_prod = v1_x*v2_x + v1_y*v2_y
-                    norm1 = math.hypot(v1_x, v1_y)
-                    norm2 = math.hypot(v2_x, v2_y)
-                    
-                    if norm1 > 0.1 and norm2 > 0.1:
-                        cos_angle = dot_prod / (norm1 * norm2)
-                        
-                        # cos_angle > 0 说明夹角 < 90度 (锐角/直角转向)
-                        # cos_angle < 0 说明夹角 > 90度 (钝角/平缓转向)
-                        # 注意：这里是向量夹角。
-                        # 直行: 向量角0度(cos=1); 掉头: 向量角180度(cos=-1)
-                        # 我们关心的是航线之间的折角？
-                        # 不，向量夹角 定义为: 前进方向的偏转.
-                        # 直行: v1, v2 同向 -> angle=0, cos=1
-                        # 90度右转: angle=90, cos=0
-                        # 掉头: angle=180, cos=-1
-                        
-                        # 修正: 上述逻辑反了。
-                        # 我们希望: 
-                        # - 偏转角小 (直行/缓弯): cos -> 1.0. 此时 threshold = 1.0m (大半径切弯)
-                        # - 偏转角大 (急弯/掉头): cos -> -1.0. 此时 threshold = 0.3m (小半径，逼近顶点)
-                        
-                        # 简单的线性映射:
-                        # cos = 1  (0度偏转) -> threshold = 1.0
-                        # cos = 0  (90度偏转) -> threshold = 0.5
-                        # cos = -1 (180度掉头) -> threshold = 0.2
-                        
-                        # 映射公式:
-                        # factor = (cos_angle + 1) / 2.0  # 0.0 ~ 1.0
-                        # threshold = 0.2 + 0.8 * factor
-                        
-                        factor = (cos_angle + 1.0) / 2.0 
-                        threshold = 0.2 + (base_threshold - 0.2) * factor
-                        
-                        # 再次保底，不小于 0.2m
-                        threshold = max(threshold, 0.2)
+                # 向量1: prev -> current
+                v1_x, v1_y = curr.x - prev.x, curr.y - prev.y
+                # 向量2: current -> next
+                v2_x, v2_y = next_wp.x - curr.x, next_wp.y - curr.y
                 
-                else:
-                    threshold = base_threshold
+                # 计算夹角余弦
+                dot_prod = v1_x*v2_x + v1_y*v2_y
+                norm1 = math.hypot(v1_x, v1_y)
+                norm2 = math.hypot(v2_x, v2_y)
+                
+                if norm1 > 0.1 and norm2 > 0.1:
+                    cos_angle = dot_prod / (norm1 * norm2)
                     
+                    # 映射公式:
+                    # cos = 1  (0度偏转) -> threshold = base_threshold (大半径切弯)
+                    # cos = -1 (180度掉头) -> threshold = 0.2m (小半径，逼近顶点)
+                    factor = (cos_angle + 1.0) / 2.0 
+                    threshold = 0.2 + (base_threshold - 0.2) * factor
+                    
+                    # 再次保底，不小于 0.2m
+                    threshold = max(threshold, 0.2)
+            
+            else:
+                threshold = base_threshold
+                
             # 中间点允许过站切换
             allow_pass_by = True
         
@@ -826,7 +715,7 @@ class VelocityPathTracker:
 
     def _handle_arrival_or_switch(self) -> bool:
         """执行到达或切换逻辑"""
-        if self._current_waypoint.is_final:
+        if self._current_waypoint is not None and self._current_waypoint.is_final:
             # 到达最终目标
             self._goal_reached = True
             return True
@@ -851,151 +740,6 @@ class VelocityPathTracker:
             # 队列为空，当前航点变成最终航点
             if self._current_waypoint:
                 self._current_waypoint.is_final = True
-    
-    def _pure_pursuit(self, pose: Pose2D, target: Waypoint) -> float:
-        """
-        Pure Pursuit 算法
-        
-        原理: 追踪前视点，计算转向曲率
-        κ = 2 * sin(α) / L
-        ω = v * κ
-        
-        Args:
-            pose: 当前位姿
-            target: 目标航点
-            
-        Returns:
-            angular_velocity: 角速度 (rad/s)
-        """
-        # 计算自适应前视距离
-        L = self.lookahead_gain * self.cruise_speed + self.min_lookahead
-        L = np.clip(L, self.min_lookahead, self.max_lookahead)
-        
-        # 目标点作为前视点
-        lookahead_x = target.x
-        lookahead_y = target.y
-        
-        # 计算到前视点的向量 (在世界坐标系)
-        dx = lookahead_x - pose.x
-        dy = lookahead_y - pose.y
-        
-        # 转换到车身坐标系
-        # L1 改进：如果使用航迹角，local_x aligned with velocity vector
-        effective_yaw = self._get_control_heading(pose)
-        cos_yaw = math.cos(effective_yaw)
-        sin_yaw = math.sin(effective_yaw)
-        local_x = dx * cos_yaw + dy * sin_yaw
-        local_y = -dx * sin_yaw + dy * cos_yaw
-        
-        # 计算到前视点的距离
-        ld = math.hypot(local_x, local_y)
-        if ld < 0.1:
-            return 0.0
-        
-        # 计算曲率: κ = 2 * y / L²
-        # 这里用实际距离代替固定 L
-        curvature = 2.0 * local_y / (ld * ld)
-        
-        # 角速度 = 速度 * 曲率
-        angular_velocity = target.speed * curvature
-        
-        return angular_velocity
-    
-    def _stanley(self, pose: Pose2D, target: Waypoint) -> float:
-        """
-        Stanley 控制器
-        
-        原理: 考虑横向误差和航向误差
-        δ = θ_e + arctan(k * e_y / (v + ε))
-        
-        Args:
-            pose: 当前位姿
-            target: 目标航点
-            
-        Returns:
-            angular_velocity: 角速度 (rad/s)
-        """
-        # 计算到目标的方向
-        dx = target.x - pose.x
-        dy = target.y - pose.y
-        dist = math.hypot(dx, dy)
-        
-        if dist < 0.1:
-            return 0.0
-        
-        # 目标航向（从当前位置指向目标）
-        target_yaw = math.atan2(dy, dx)
-        
-        # 航向误差 (L1 改进：使用有效航向/航迹)
-        effective_yaw = self._get_control_heading(pose)
-        heading_error = self._normalize_angle(target_yaw - effective_yaw)
-        
-        # 如果有路径历史，计算横向误差
-        cross_track_error = 0.0
-        if len(self._path_history) >= 1:
-            # 使用最近的路径段计算横向误差
-            prev_wp = self._path_history[-1]
-            cross_track_error = self._compute_cross_track_error(
-                pose, prev_wp, target
-            )
-        
-        # Stanley 公式
-        velocity = max(target.speed, self.min_speed)
-        stanley_term = math.atan2(
-            self.stanley_gain * cross_track_error,
-            velocity + self.stanley_softening
-        )
-        
-        # 总转向角
-        steering_angle = heading_error + stanley_term
-        
-        # 转换为角速度 (假设船长 ~1m)
-        angular_velocity = steering_angle * velocity
-        
-        return angular_velocity
-    
-    def _hybrid_control(
-        self, 
-        pose: Pose2D, 
-        target: Waypoint,
-        distance_to_target: float
-    ) -> float:
-        """
-        混合控制: 远距离用 Pure Pursuit (航线跟踪)，近距离用 Stanley
-        
-        改进：在有前序航点时，Pure Pursuit 使用航线上的前视点，
-        实现真正的直线跟踪，类似飞控 L1 算法。
-        
-        过渡区使用加权混合，避免控制指令跳变。
-        """
-        # 尝试使用航线跟踪版 Pure Pursuit
-        pure_pursuit_omega, used_path_tracking = self._pure_pursuit_on_path(pose, target)
-        
-        # Stanley 始终基于航线计算（如果有历史）
-        stanley_omega = self._stanley(pose, target)
-        
-        # 定义安全切换距离：接近目标时必须用航点跟踪模式
-        SAFE_DISTANCE = 3.0  # 距离目标 3m 内回退到航点跟踪
-        
-        # 计算混合权重 (alpha: Pure Pursuit 权重)
-        if distance_to_target > self.hybrid_switch_distance:
-            # 远距离: 主要使用 Pure Pursuit (航线跟踪模式)
-            alpha = 0.9
-        elif distance_to_target < self.hybrid_switch_distance / 2:
-            # 近距离: 主要使用 Stanley (20% Pure Pursuit)
-            alpha = 0.2
-        else:
-            # 过渡区: 线性插值
-            ratio = (distance_to_target - self.hybrid_switch_distance / 2) / \
-                    (self.hybrid_switch_distance / 2)
-            alpha = 0.2 + 0.7 * ratio  # 从 0.2 到 0.9
-        
-        # 如果接近目标 (< 3m) 且未使用航线跟踪，完全切换到 Stanley
-        # 确保能精确到达目标点
-        if distance_to_target < SAFE_DISTANCE and not used_path_tracking:
-            alpha = min(alpha, 0.3)  # 限制 PP 权重
-        
-        return alpha * pure_pursuit_omega + (1 - alpha) * stanley_omega
     
     def _compute_cross_track_error(
         self, 
@@ -1057,127 +801,6 @@ class VelocityPathTracker:
         proj_y = wp1.y + t * dy
         
         return proj_x, proj_y, t
-    
-    def _get_lookahead_on_path(
-        self, 
-        pose: Pose2D, 
-        wp1: Waypoint, 
-        wp2: Waypoint,
-        lookahead_dist: float
-    ) -> Tuple[float, float, bool]:
-        """
-        在航线上计算前视点 (L1 风格)
-        
-        Args:
-            pose: 当前位姿
-            wp1: 航线起点
-            wp2: 航线终点
-            lookahead_dist: 前视距离
-            
-        Returns:
-            (lh_x, lh_y, valid): 前视点坐标和是否有效
-        """
-        # 1. 计算投影点
-        proj_x, proj_y, t = self._project_to_path(pose, wp1, wp2)
-        
-        # 2. 检查投影是否在有效范围
-        # 如果 t > 1 (船过了目标点)，不使用航线跟踪
-        if t > 1.0:
-            return wp2.x, wp2.y, False
-        
-        # 如果 t < -0.5 (船在航线起点后方太远)，不使用航线跟踪
-        if t < -0.5:
-            return wp2.x, wp2.y, False
-        
-        # 3. 计算到投影点的横向距离
-        cross_track = math.hypot(pose.x - proj_x, pose.y - proj_y)
-        
-        # 如果横向误差太大 (>5m)，先回归航线
-        if cross_track > 5.0:
-            return wp2.x, wp2.y, False
-        
-        # 4. 沿航线方向前进 lookahead_dist
-        path_dx = wp2.x - wp1.x
-        path_dy = wp2.y - wp1.y
-        path_len = math.hypot(path_dx, path_dy)
-        
-        if path_len < 0.1:
-            return wp2.x, wp2.y, False
-        
-        # 单位方向向量
-        dir_x = path_dx / path_len
-        dir_y = path_dy / path_len
-        
-        # 前视点 = 投影点 + 前视距离 * 方向
-        lh_x = proj_x + lookahead_dist * dir_x
-        lh_y = proj_y + lookahead_dist * dir_y
-        
-        # 5. 检查前视点是否超出航线终点
-        # 计算前视点到起点的距离比例
-        lh_t = ((lh_x - wp1.x) * path_dx + (lh_y - wp1.y) * path_dy) / (path_len * path_len)
-        
-        if lh_t > 1.0:
-            # 前视点超出终点，限制在终点
-            lh_x = wp2.x
-            lh_y = wp2.y
-        
-        return lh_x, lh_y, True
-    
-    def _pure_pursuit_on_path(self, pose: Pose2D, target: Waypoint) -> Tuple[float, bool]:
-        """
-        航线跟踪版 Pure Pursuit
-        
-        前视点在航线上，而不是直接指向目标航点。
-        这样可以让船先回到航线再沿线行驶，实现真正的直线。
-        
-        Args:
-            pose: 当前位姿
-            target: 目标航点
-            
-        Returns:
-            (angular_velocity, used_path_tracking): 角速度和是否使用了航线跟踪
-        """
-        # 检查是否有前序航点
-        if not self._path_history:
-            # 没有历史航点，无法构成航线
-            return self._pure_pursuit(pose, target), False
-        
-        prev_wp = self._path_history[-1]
-        
-        # 计算自适应前视距离
-        L = self.lookahead_gain * self.cruise_speed + self.min_lookahead
-        L = np.clip(L, self.min_lookahead, self.max_lookahead)
-        
-        # 获取航线上的前视点
-        lh_x, lh_y, valid = self._get_lookahead_on_path(pose, prev_wp, target, L)
-        
-        if not valid:
-            # 无法使用航线跟踪，回退到普通模式
-            return self._pure_pursuit(pose, target), False
-        
-        # 使用航线上的前视点计算曲率
-        dx = lh_x - pose.x
-        dy = lh_y - pose.y
-        
-        # 转换到车身坐标系
-        effective_yaw = self._get_control_heading(pose)
-        cos_yaw = math.cos(effective_yaw)
-        sin_yaw = math.sin(effective_yaw)
-        local_x = dx * cos_yaw + dy * sin_yaw
-        local_y = -dx * sin_yaw + dy * cos_yaw
-        
-        # 计算到前视点的距离
-        ld = math.hypot(local_x, local_y)
-        if ld < 0.1:
-            return 0.0, True
-        
-        # 计算曲率
-        curvature = 2.0 * local_y / (ld * ld)
-        
-        # 角速度 = 速度 * 曲率
-        angular_velocity = target.speed * curvature
-        
-        return angular_velocity, True
     
     def _compute_adaptive_speed(
         self, 
@@ -1285,17 +908,3 @@ class VelocityPathTracker:
         """更新切换阈值"""
         if tolerance > 0:
             self.switch_tolerance = tolerance
-    
-    def set_controller_type(self, controller_type: ControllerType):
-        """设置控制器类型"""
-        self.controller_type = controller_type
-    
-    def set_stanley_gain(self, gain: float):
-        """设置 Stanley 增益"""
-        if gain > 0:
-            self.stanley_gain = gain
-    
-    def set_lookahead_distance(self, distance: float):
-        """设置前视距离"""
-        if distance > 0:
-            self.lookahead_distance = distance

@@ -30,7 +30,8 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
-from mavros_msgs.msg import PositionTarget
+from mavros_msgs.msg import PositionTarget, State
+from std_msgs.msg import Bool
 from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug
 
 import math
@@ -85,10 +86,26 @@ class LogCollectorNode(Node):
         self._mpc_pred_theta = 0.0
         self._active_controller = ''
         
+        # MPC 参数配置 (用于日志记录)
+        self._mpc_param_q_pos = 0.0
+        self._mpc_param_q_theta = 0.0
+        self._mpc_param_r_w = 0.0
+        self._mpc_param_r_dw = 0.0
+        self._mpc_param_w_max = 0.0
+        self._mpc_param_n_steps = 0
+        self._mpc_params_received = False  # 标记是否已收到参数
+        
+        # 飞控状态 (用于记录模式切换)
+        self._flight_mode = ''
+        self._is_armed = False
+        self._last_flight_mode = ''  # 用于检测模式切换
+        self._mode_change_events = []  # 模式切换事件列表
+        
         # ==================== 任务状态 ====================
         self._is_navigating = False       # 是否正在导航
+        self._is_paused = False           # 是否处于暂停状态 (HOLD)
         self._last_goal_time = 0.0        # 上次收到目标的时间
-        self._idle_timeout = 5.0          # 空闲超时（秒），超时后停止记录
+        self._idle_timeout = 30.0         # 空闲超时（秒），只在非暂停状态下检查
         self._record_count = 0            # 本次任务记录条数
         
 
@@ -131,6 +148,19 @@ class LogCollectorNode(Node):
         self.create_subscription(
             MpcDebug, 'velocity_controller/debug',
             self._debug_callback, qos_best_effort)
+        
+        # 飞控状态订阅 (用于记录模式切换)
+        self.create_subscription(
+            State, 'state',
+            self._state_callback, qos_best_effort)
+        
+        # 导航控制订阅 (用于检测暂停/停止)
+        self.create_subscription(
+            Bool, 'cancel_navigation',
+            self._cancel_navigation_callback, qos_reliable)
+        self.create_subscription(
+            Bool, 'stop_navigation',
+            self._stop_navigation_callback, qos_reliable)
             
         # ==================== 定时器 ====================
         self.create_timer(0.1, self._log_data)
@@ -163,6 +193,17 @@ class LogCollectorNode(Node):
             self._csv_file = open(self._current_log_path, 'w', newline='')
             self._csv_writer = csv.writer(self._csv_file)
             
+            # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
+            if self._mpc_params_received:
+                self._csv_file.write(f'# MPC Parameters Configuration\n')
+                self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
+                self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
+                self._csv_file.write(f'# R_w (steering weight): {self._mpc_param_r_w:.2f}\n')
+                self._csv_file.write(f'# R_dw (steering rate weight): {self._mpc_param_r_dw:.2f}\n')
+                self._csv_file.write(f'# w_max (max angular velocity): {self._mpc_param_w_max:.3f} rad/s\n')
+                self._csv_file.write(f'# N_steps (prediction horizon): {self._mpc_param_n_steps}\n')
+                self._csv_file.write(f'#\n')
+            
             # 写入表头
             self._csv_writer.writerow([
                 'timestamp',
@@ -173,8 +214,12 @@ class LogCollectorNode(Node):
                 'cmd_vx', 'cmd_vy', 'cmd_omega',
                 'distance_to_goal', 'heading_error_deg',
                 'yaw_diff_deg',
-                'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl'
+                'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl',
+                'flight_mode', 'armed'
             ])
+            
+            # 清空模式切换事件列表
+            self._mode_change_events = []
             
             self._record_count = 0
             self.get_logger().info(f'📝 新建日志文件: {filename}')
@@ -187,16 +232,31 @@ class LogCollectorNode(Node):
         """关闭当前日志文件"""
         if self._csv_file:
             try:
+                # 在文件末尾写入模式切换摘要
+                if self._mode_change_events:
+                    self._csv_file.write(f'\n# ==================== 模式切换事件 ====================\n')
+                    for event in self._mode_change_events:
+                        self._csv_file.write(
+                            f'# {event["timestamp"]:.3f}: {event["from_mode"]} → {event["to_mode"]} '
+                            f'(armed={event["armed"]})\n'
+                        )
+                    self._csv_file.write(f'# 共 {len(self._mode_change_events)} 次模式切换\n')
+                
                 self._csv_file.flush()
                 self._csv_file.close()
+                
+                # 日志统计
+                mode_changes = len(self._mode_change_events)
                 self.get_logger().info(
-                    f'📁 日志已保存: {self._current_log_path.name} ({self._record_count} 条)')
+                    f'📁 日志已保存: {self._current_log_path.name} '
+                    f'({self._record_count} 条, {mode_changes} 次模式切换)')
             except Exception as e:
                 self.get_logger().error(f'关闭日志文件失败: {e}')
             finally:
                 self._csv_file = None
                 self._csv_writer = None
                 self._current_log_path = None
+                self._mode_change_events = []
 
     def _pose_callback(self, msg: PoseStamped):
 
@@ -239,8 +299,15 @@ class LogCollectorNode(Node):
         
         # 收到导航目标，开始/继续记录
         current_time = self.get_clock().now().nanoseconds / 1e9
+        
+        # 收到新目标时，重置暂停状态
+        if self._is_paused:
+            self._is_paused = False
+            self.get_logger().info('▶️ 导航恢复，继续记录日志')
+        
         if not self._is_navigating:
             self._is_navigating = True
+            self._is_paused = False
             self._record_count = 0
             self.get_logger().info(f'🔴 开始记录导航日志 [目标 ID={self._goal_id}]')
             self._start_new_log(self._goal_id, task_name)
@@ -273,6 +340,59 @@ class LogCollectorNode(Node):
         self._mpc_cost = msg.cost
         self._mpc_pred_theta = msg.mpc_pred_theta
         self._active_controller = msg.active_controller
+        
+        # 接收 MPC 参数配置
+        self._mpc_param_q_pos = getattr(msg, 'param_q_pos', 0.0)
+        self._mpc_param_q_theta = getattr(msg, 'param_q_theta', 0.0)
+        self._mpc_param_r_w = getattr(msg, 'param_r_w', 0.0)
+        self._mpc_param_r_dw = getattr(msg, 'param_r_dw', 0.0)
+        self._mpc_param_w_max = getattr(msg, 'param_w_max', 0.0)
+        self._mpc_param_n_steps = getattr(msg, 'param_n_steps', 0)
+        self._mpc_params_received = True
+
+    def _state_callback(self, msg: State):
+        """飞控状态回调 - 记录模式切换"""
+        new_mode = msg.mode
+        self._is_armed = msg.armed
+        
+        # 检测模式切换
+        if self._flight_mode != '' and new_mode != self._flight_mode:
+            current_time = self.get_clock().now().nanoseconds / 1e9
+            event = {
+                'timestamp': current_time,
+                'from_mode': self._flight_mode,
+                'to_mode': new_mode,
+                'armed': self._is_armed
+            }
+            self._mode_change_events.append(event)
+            self.get_logger().info(
+                f'🔄 模式切换: {self._flight_mode} → {new_mode} (armed={self._is_armed})'
+            )
+        
+        self._last_flight_mode = self._flight_mode
+        self._flight_mode = new_mode
+
+    def _cancel_navigation_callback(self, msg: Bool):
+        """暂停导航回调 (HOLD 按钮)
+        
+        暂停任务但不结束日志记录，任务可以恢复
+        """
+        if msg.data and self._is_navigating:
+            self._is_paused = True
+            self.get_logger().info('⏸️ 导航暂停，日志记录继续...')
+
+    def _stop_navigation_callback(self, msg: Bool):
+        """停止导航回调 (集群 STOP 按钮)
+        
+        任务完全结束，关闭日志文件
+        """
+        if msg.data and self._is_navigating:
+            self._is_navigating = False
+            self._is_paused = False
+            self.get_logger().info(
+                f'⏹️ 任务停止 (手动终止), 停止记录, '
+                f'本次记录 {self._record_count} 条')
+            self._close_current_log()
 
     def _result_callback(self, msg: NavigationResult):
         """导航结果回调"""
@@ -282,10 +402,23 @@ class LogCollectorNode(Node):
         # 检测最终到达（不是平滑切换）
         is_final_arrival = '成功到达' in message and '已通过' not in message
         
-        if is_final_arrival and self._is_navigating:
+        # 检测任务停止（手动终止）
+        is_stopped = '已停止' in message or '任务停止' in message
+        
+        # 检测暂停（不结束日志）
+        is_paused = '已暂停' in message or '等待恢复' in message
+        
+        if is_paused and self._is_navigating:
+            # 暂停状态：不关闭日志
+            self._is_paused = True
+            self.get_logger().info(f'⏸️ 任务暂停 [ID={goal_id}], 日志记录继续...')
+        elif (is_final_arrival or is_stopped) and self._is_navigating:
+            # 任务完成或停止：关闭日志
             self._is_navigating = False
+            self._is_paused = False
+            reason = '任务完成' if is_final_arrival else '任务停止'
             self.get_logger().info(
-                f'✅ 任务完成 [ID={goal_id}], 停止记录, '
+                f'✅ {reason} [ID={goal_id}], 停止记录, '
                 f'本次记录 {self._record_count} 条')
             self._close_current_log()
     
@@ -295,14 +428,17 @@ class LogCollectorNode(Node):
         
         # 检查是否应该停止记录
         if self._is_navigating:
-            idle_time = current_time - self._last_goal_time
-            if idle_time > self._idle_timeout:
-                self._is_navigating = False
-                self.get_logger().info(
-                    f'⏹️ 停止记录导航日志 (空闲 {idle_time:.1f}s), '
-                    f'本次记录 {self._record_count} 条')
-                self._close_current_log()
-                return
+            # 暂停状态下不检查超时，只有正常导航时才检查
+            if not self._is_paused:
+                idle_time = current_time - self._last_goal_time
+                if idle_time > self._idle_timeout:
+                    self._is_navigating = False
+                    self._is_paused = False
+                    self.get_logger().info(
+                        f'⏹️ 停止记录导航日志 (空闲 {idle_time:.1f}s), '
+                        f'本次记录 {self._record_count} 条')
+                    self._close_current_log()
+                    return
         else:
             # 未在导航中，不记录
             return
@@ -347,7 +483,9 @@ class LogCollectorNode(Node):
             f'{self._mpc_solve_time:.2f}',
             f'{self._mpc_cost:.4f}',
             f'{math.degrees(self._mpc_pred_theta):.2f}',
-            f'{self._active_controller}'
+            f'{self._active_controller}',
+            f'{self._flight_mode}',
+            f'{1 if self._is_armed else 0}'
         ])
         self._record_count += 1
     

@@ -428,9 +428,6 @@ class GroundStationNode(Node):
             settings (dict): 设置字典，包含:
                 - cruise_speed: 巡航速度 (m/s)
                 - max_angular_velocity: 最大角速度 (rad/s)
-                - lookahead_distance: 前视距离 (m)
-                - stanley_gain: Stanley 增益
-                - hybrid_switch_distance: 混合切换距离 (m)
                 - goal_tolerance: 到达阈值 (m)
                 - switch_tolerance: 切换阈值 (m)
         """
@@ -442,9 +439,6 @@ class GroundStationNode(Node):
         param_mapping = {
             'cruise_speed': (self.usv_manager.velocity_cruise_speed_pubs, 'cruise_speed'),
             'max_angular_velocity': (self.usv_manager.velocity_max_angular_pubs, 'max_angular_velocity'),
-            'lookahead_distance': (self.usv_manager.velocity_lookahead_pubs, 'lookahead_distance'),
-            'stanley_gain': (self.usv_manager.velocity_stanley_gain_pubs, 'stanley_gain'),
-            'hybrid_switch_distance': (self.usv_manager.velocity_hybrid_switch_pubs, 'hybrid_switch_distance'),
             'goal_tolerance': (self.usv_manager.velocity_goal_tolerance_pubs, 'goal_tolerance'),
             'switch_tolerance': (self.usv_manager.velocity_switch_tolerance_pubs, 'switch_tolerance'),
         }

@@ -50,9 +50,6 @@ class UsvManager:
         # 速度控制器参数下发
         self.velocity_cruise_speed_pubs = {}        # 巡航速度
         self.velocity_max_angular_pubs = {}         # 最大角速度
-        self.velocity_lookahead_pubs = {}           # 前视距离
-        self.velocity_stanley_gain_pubs = {}        # Stanley 增益
-        self.velocity_hybrid_switch_pubs = {}       # 混合切换距离
         self.velocity_goal_tolerance_pubs = {}      # 到达阈值
         self.velocity_switch_tolerance_pubs = {}    # 切换阈值
         
@@ -142,12 +139,6 @@ class UsvManager:
             Float32, f"{ns}/set_velocity_cruise_speed", self.qos_a)
         self.velocity_max_angular_pubs[usv_id] = self.node.create_publisher(
             Float32, f"{ns}/set_velocity_max_angular", self.qos_a)
-        self.velocity_lookahead_pubs[usv_id] = self.node.create_publisher(
-            Float32, f"{ns}/set_velocity_lookahead", self.qos_a)
-        self.velocity_stanley_gain_pubs[usv_id] = self.node.create_publisher(
-            Float32, f"{ns}/set_velocity_stanley_gain", self.qos_a)
-        self.velocity_hybrid_switch_pubs[usv_id] = self.node.create_publisher(
-            Float32, f"{ns}/set_velocity_hybrid_switch", self.qos_a)
         self.velocity_goal_tolerance_pubs[usv_id] = self.node.create_publisher(
             Float32, f"{ns}/set_velocity_goal_tolerance", self.qos_a)
         self.velocity_switch_tolerance_pubs[usv_id] = self.node.create_publisher(
@@ -255,9 +246,6 @@ class UsvManager:
         velocity_pubs_dict = {
             'cruise_speed': self.velocity_cruise_speed_pubs,
             'max_angular': self.velocity_max_angular_pubs,
-            'lookahead': self.velocity_lookahead_pubs,
-            'stanley_gain': self.velocity_stanley_gain_pubs,
-            'hybrid_switch': self.velocity_hybrid_switch_pubs,
             'goal_tolerance': self.velocity_goal_tolerance_pubs,
             'switch_tolerance': self.velocity_switch_tolerance_pubs,
         }

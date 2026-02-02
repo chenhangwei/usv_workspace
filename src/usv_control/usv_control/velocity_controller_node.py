@@ -12,7 +12,7 @@
 """
 USV 速度模式控制节点
 
-基于 Pure Pursuit + Stanley 混合控制器的速度模式导航节点。
+基于 MPC（模型预测控制）的速度模式导航节点。
 直接发送速度指令给飞控，绕过飞控的减速逻辑，实现平滑连续导航。
 
 订阅:
@@ -28,7 +28,6 @@ USV 速度模式控制节点
 
 参数:
 - control_mode: 控制模式 ('velocity' 或 'position')
-- controller_type: 控制器类型 ('pure_pursuit', 'stanley', 'hybrid')
 - cruise_speed: 巡航速度 (m/s)
 - max_angular_velocity: 最大角速度 (rad/s)
 - goal_tolerance: 到达阈值 (m)
@@ -80,7 +79,7 @@ class VelocityControllerNode(Node):
     """
     USV 速度模式控制节点
     
-    使用 Pure Pursuit + Stanley 混合控制器计算速度指令，
+    使用 MPC（模型预测控制）算法计算速度指令，
     直接发送给飞控，避免飞控的位置模式减速逻辑。
     """
     
@@ -93,26 +92,13 @@ class VelocityControllerNode(Node):
         # ==================== 参数声明 ====================
         # 控制模式
         self.declare_parameter('control_mode', 'velocity')  # 'position' 或 'velocity'
-        self.declare_parameter('controller_type', 'hybrid')  # 'pure_pursuit', 'stanley', 'hybrid'
-        
-        # Pure Pursuit 参数
-        self.declare_parameter('lookahead_distance', 2.0)
-        self.declare_parameter('min_lookahead', 1.0)
-        self.declare_parameter('max_lookahead', 5.0)
-        self.declare_parameter('lookahead_gain', 0.5)
-        
-        # Stanley 参数
-        self.declare_parameter('stanley_gain', 2.5)
-        self.declare_parameter('stanley_softening', 0.1)
-        
-        # 混合控制参数
-        self.declare_parameter('hybrid_switch_distance', 2.0)
         
         # MPC 参数
         self.declare_parameter('mpc_prediction_steps', 20)
         self.declare_parameter('mpc_weight_pos', 20.0)
         self.declare_parameter('mpc_weight_heading', 5.0)
         self.declare_parameter('mpc_weight_steering', 5.0)
+        self.declare_parameter('mpc_weight_steering_rate', 15.0)  # R_dw: 角加速度惩罚
         
         # 速度参数
         self.declare_parameter('cruise_speed', 0.5)
@@ -138,43 +124,40 @@ class VelocityControllerNode(Node):
         
         # ==================== 获取参数 ====================
         self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
-        controller_type_str = str(self.get_parameter('controller_type').value or 'hybrid')
-        self.get_logger().info(f'🔍 正在初始化速度控制器... 模式: {controller_type_str}')
+        self.get_logger().info(f'🔍 正在初始化速度控制器... 模式: MPC')
         
-        # 控制器类型映射
-        controller_type_map = {
-            'pure_pursuit': ControllerType.PURE_PURSUIT,
-            'stanley': ControllerType.STANLEY,
-            'hybrid': ControllerType.HYBRID,
-            'mpc': ControllerType.MPC
-        }
-        controller_type = controller_type_map.get(controller_type_str, ControllerType.HYBRID)
+        # 控制器类型固定为 MPC
+        controller_type = ControllerType.MPC
         
         self.require_guided_mode = bool(self.get_parameter('require_guided_mode').value)
         self.require_armed = bool(self.get_parameter('require_armed').value)
         
         # ==================== 初始化路径跟踪器 ====================
-        self.get_logger().info(f'🛠️ 正在创建 VelocityPathTracker ({controller_type_str})...')
+        self.get_logger().info(f'🛠️ 正在创建 VelocityPathTracker (MPC)...')
+        
+        # 保存 MPC 参数供日志记录使用
+        self._mpc_params = {
+            'q_pos': float(self.get_parameter('mpc_weight_pos').value or 20.0),
+            'q_theta': float(self.get_parameter('mpc_weight_heading').value or 5.0),
+            'r_w': float(self.get_parameter('mpc_weight_steering').value or 5.0),
+            'r_dw': float(self.get_parameter('mpc_weight_steering_rate').value or 15.0),
+            'w_max': float(self.get_parameter('max_angular_velocity').value or 0.5),
+            'n_steps': int(self.get_parameter('mpc_prediction_steps').value or 20),
+        }
+        
         try:
             self.tracker = VelocityPathTracker(
-                lookahead_distance=float(self.get_parameter('lookahead_distance').value or 2.0),
-                min_lookahead=float(self.get_parameter('min_lookahead').value or 1.0),
-                max_lookahead=float(self.get_parameter('max_lookahead').value or 5.0),
-                lookahead_gain=float(self.get_parameter('lookahead_gain').value or 0.5),
-                stanley_gain=float(self.get_parameter('stanley_gain').value or 2.5),
-                stanley_softening=float(self.get_parameter('stanley_softening').value or 0.1),
-                controller_type=controller_type,
-                hybrid_switch_distance=float(self.get_parameter('hybrid_switch_distance').value or 2.0),
                 cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
                 max_angular_velocity=float(self.get_parameter('max_angular_velocity').value or 0.5),
                 
                 # MPC 参数传递
                 mpc_v_max=float(self.get_parameter('cruise_speed').value or 0.4),
-                mpc_w_max=float(self.get_parameter('max_angular_velocity').value or 1.0),
-                mpc_q_pos=float(self.get_parameter('mpc_weight_pos').value or 20.0),
-                mpc_q_theta=float(self.get_parameter('mpc_weight_heading').value or 5.0),
-                mpc_r_w=float(self.get_parameter('mpc_weight_steering').value or 5.0),
-                mpc_prediction_steps=int(self.get_parameter('mpc_prediction_steps').value or 20),
+                mpc_w_max=self._mpc_params['w_max'],
+                mpc_q_pos=self._mpc_params['q_pos'],
+                mpc_q_theta=self._mpc_params['q_theta'],
+                mpc_r_w=self._mpc_params['r_w'],
+                mpc_r_dw=self._mpc_params['r_dw'],
+                mpc_prediction_steps=self._mpc_params['n_steps'],
                 
                 min_speed=float(self.get_parameter('min_speed').value or 0.05),
                 goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
@@ -238,7 +221,7 @@ class VelocityControllerNode(Node):
         
         # PAUSED 状态保护 - 刚进入暂停状态时不立即尝试恢复
         self._paused_state_enter_time: float = 0.0   # 进入 PAUSED 状态的时间
-        self._paused_state_grace_period: float = 5.0  # 暂停状态保护期 (秒)，高延迟网络需要更长时间
+        self._paused_state_grace_period: float = 5.0  # 暂停状态保护期 (秒)，等待cancel_navigation消息
         
         # 导航状态管理 (使用枚举替代简单布尔值)
         self._navigation_state: NavigationState = NavigationState.IDLE
@@ -352,33 +335,6 @@ class VelocityControllerNode(Node):
             callback_group=self.callback_group
         )
         
-        # 前视距离
-        self.lookahead_sub = self.create_subscription(
-            Float32,
-            'set_velocity_lookahead',
-            self._lookahead_callback,
-            qos_reliable,
-            callback_group=self.callback_group
-        )
-        
-        # Stanley 增益
-        self.stanley_gain_sub = self.create_subscription(
-            Float32,
-            'set_velocity_stanley_gain',
-            self._stanley_gain_callback,
-            qos_reliable,
-            callback_group=self.callback_group
-        )
-        
-        # 混合切换距离
-        self.hybrid_switch_sub = self.create_subscription(
-            Float32,
-            'set_velocity_hybrid_switch',
-            self._hybrid_switch_callback,
-            qos_reliable,
-            callback_group=self.callback_group
-        )
-        
         # 最大角速度
         self.max_angular_sub = self.create_subscription(
             Float32,
@@ -482,13 +438,11 @@ class VelocityControllerNode(Node):
                 self.get_logger().info('  航向估计: 磁力计')
         else:
             self.get_logger().info('  功能: 待机 (由 usv_control_node 处理)')
-        self.get_logger().info(f'  控制器类型: {controller_type_str}')
+        self.get_logger().info('  控制器类型: MPC')
         self.get_logger().info(f'  巡航速度: {self.tracker.cruise_speed} m/s')
         self.get_logger().info(f'  最大角速度: {self.tracker.max_angular_velocity} rad/s')
         self.get_logger().info(f'  到达阈值: {self.tracker.goal_tolerance} m')
         self.get_logger().info(f'  切换阈值: {self.tracker.switch_tolerance} m')
-        self.get_logger().info(f'  前视距离: {self.tracker.lookahead_distance} m')
-        self.get_logger().info(f'  Stanley 增益: {self.tracker.stanley_gain}')
         self.get_logger().info('='*60)
     
     # ==================== 回调函数 ====================
@@ -922,27 +876,6 @@ class VelocityControllerNode(Node):
             self.tracker.set_switch_tolerance(msg.data)
             self.get_logger().info(f'切换阈值更新: {old_tol:.2f} → {msg.data:.2f} m')
     
-    def _lookahead_callback(self, msg: Float32):
-        """更新前视距离"""
-        if msg.data > 0:
-            old_val = self.tracker.lookahead_distance
-            self.tracker.set_lookahead_distance(msg.data)
-            self.get_logger().info(f'前视距离更新: {old_val:.2f} → {msg.data:.2f} m')
-    
-    def _stanley_gain_callback(self, msg: Float32):
-        """更新 Stanley 增益"""
-        if msg.data > 0:
-            old_val = self.tracker.stanley_gain
-            self.tracker.set_stanley_gain(msg.data)
-            self.get_logger().info(f'Stanley 增益更新: {old_val:.2f} → {msg.data:.2f}')
-    
-    def _hybrid_switch_callback(self, msg: Float32):
-        """更新混合切换距离"""
-        if msg.data > 0:
-            old_val = self.tracker.hybrid_switch_distance
-            self.tracker.hybrid_switch_distance = msg.data
-            self.get_logger().info(f'混合切换距离更新: {old_val:.2f} → {msg.data:.2f} m')
-    
     def _max_angular_callback(self, msg: Float32):
         """更新最大角速度"""
         if msg.data > 0:
@@ -1021,7 +954,7 @@ class VelocityControllerNode(Node):
         """
         处理避障控制
         
-        使用 Pure Pursuit 追踪避障目标点
+        使用简单的方向追踪算法追踪避障目标点
         """
         if self._avoidance_position is None or self.current_pose is None:
             return
@@ -1041,8 +974,8 @@ class VelocityControllerNode(Node):
             self._avoidance_position.y - self.current_pose.y
         )
         
-        # 使用 Pure Pursuit 计算速度指令
-        # 简化版：直接朝向目标
+        # 使用简单方向追踪计算速度指令
+        # 直接朝向目标
         dx = self._avoidance_position.x - self.current_pose.x
         dy = self._avoidance_position.y - self.current_pose.y
         target_yaw = math.atan2(dy, dx)
@@ -1280,11 +1213,20 @@ class VelocityControllerNode(Node):
                     # 不立即恢复 GUIDED，等待下一个循环检查是否有 cancel_navigation 消息
                 elif self._navigation_state == NavigationState.PAUSED:
                     # 已经是 PAUSED 状态，且已过保护期
-                    # 修改逻辑：无论是手动请求还是意外切换，只要是 HOLD/LOITER，都应当尊重该状态
-                    # 这避免了与遥控器/地面站手动操作的冲突，也防止了覆盖电池/失联保护触发的 HOLD
-                    self.get_logger().debug(
-                        f'PAUSED 状态保持 {current_mode}，不自动恢复 GUIDED (尊重手动操作/Failsafe)'
-                    )
+                    # 保护期已过但没有收到 cancel_navigation 消息，说明是飞控自动切换
+                    # 应该自动恢复 GUIDED 继续任务
+                    if not is_manual_hold:
+                        self.get_logger().info(
+                            f'⏱️ 保护期已过，未收到手动暂停请求，判定为飞控自动切换 {current_mode}，'
+                            f'自动恢复 GUIDED 模式'
+                        )
+                        self._restore_guided_mode()
+                        # 恢复导航状态
+                        self._set_navigation_state(NavigationState.ACTIVE, "自动恢复GUIDED模式")
+                    else:
+                        self.get_logger().debug(
+                            f'PAUSED 状态保持 {current_mode}，手动暂停标志仍有效，不恢复 GUIDED'
+                        )
                 else:
                     # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
                     self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
@@ -1373,6 +1315,14 @@ class VelocityControllerNode(Node):
             debug_msg.solver_status = int(mpc_info.get('status', -1))
             debug_msg.active_controller = str(debug_info.get('active_controller', 'none'))
             debug_msg.ref_curvature = 0.0 # 暂未实现
+            
+            # 添加 MPC 参数信息，用于日志记录和调试
+            debug_msg.param_q_pos = float(self._mpc_params['q_pos'])
+            debug_msg.param_q_theta = float(self._mpc_params['q_theta'])
+            debug_msg.param_r_w = float(self._mpc_params['r_w'])
+            debug_msg.param_r_dw = float(self._mpc_params['r_dw'])
+            debug_msg.param_w_max = float(self._mpc_params['w_max'])
+            debug_msg.param_n_steps = int(self._mpc_params['n_steps'])
             
             self.debug_pub.publish(debug_msg)
         except Exception as e:

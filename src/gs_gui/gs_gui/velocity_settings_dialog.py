@@ -14,9 +14,6 @@
 
 支持在线设置:
 - 巡航速度 (cruise_speed)
-- 前视距离 (lookahead_distance)
-- Stanley 增益 (stanley_gain)
-- 混合切换距离 (hybrid_switch_distance)
 - 到达阈值 (goal_tolerance)
 - 切换阈值 (switch_tolerance)
 - 最大角速度 (max_angular_velocity)
@@ -49,9 +46,6 @@ class VelocitySettingsDialog(QDialog):
         self.current_settings = current_settings or {
             'cruise_speed': 0.5,
             'max_angular_velocity': 0.5,
-            'lookahead_distance': 2.0,
-            'stanley_gain': 2.5,
-            'hybrid_switch_distance': 2.0,
             'goal_tolerance': 0.5,
             'switch_tolerance': 1.5,
         }
@@ -64,7 +58,7 @@ class VelocitySettingsDialog(QDialog):
         
         # ==================== 说明 ====================
         info_label = QLabel(
-            "配置 USV 速度控制器 (Pure Pursuit + Stanley 混合) 的参数。\n"
+            "配置 USV 速度控制器 (MPC) 的参数。\n"
             "速度模式直接发送速度指令，可实现平滑连续导航。"
         )
         info_label.setWordWrap(True)
@@ -101,55 +95,6 @@ class VelocitySettingsDialog(QDialog):
         
         speed_tab.setLayout(speed_layout)
         tab_widget.addTab(speed_tab, "🚀 速度")
-        
-        # --- 控制器设置 Tab ---
-        controller_tab = QWidget()
-        controller_layout = QFormLayout()
-        controller_layout.setSpacing(12)
-        
-        # 前视距离
-        self.lookahead_spin = QDoubleSpinBox()
-        self.lookahead_spin.setRange(0.5, 10.0)
-        self.lookahead_spin.setSingleStep(0.5)
-        self.lookahead_spin.setDecimals(2)
-        self.lookahead_spin.setValue(self.current_settings.get('lookahead_distance', 2.0))
-        self.lookahead_spin.setSuffix(" m")
-        self.lookahead_spin.setToolTip(
-            "Pure Pursuit 前视距离\n"
-            "• 越大: 路径越平滑，但对路径偏离响应慢\n"
-            "• 越小: 响应快，但可能震荡"
-        )
-        controller_layout.addRow("前视距离:", self.lookahead_spin)
-        
-        # Stanley 增益
-        self.stanley_gain_spin = QDoubleSpinBox()
-        self.stanley_gain_spin.setRange(0.5, 5.0)
-        self.stanley_gain_spin.setSingleStep(0.5)
-        self.stanley_gain_spin.setDecimals(2)
-        self.stanley_gain_spin.setValue(self.current_settings.get('stanley_gain', 2.5))
-        self.stanley_gain_spin.setToolTip(
-            "Stanley 控制器横向误差增益\n"
-            "• 越大: 横向误差校正越强\n"
-            "• 越小: 校正平缓但收敛慢"
-        )
-        controller_layout.addRow("Stanley 增益:", self.stanley_gain_spin)
-        
-        # 混合切换距离
-        self.hybrid_switch_spin = QDoubleSpinBox()
-        self.hybrid_switch_spin.setRange(0.5, 5.0)
-        self.hybrid_switch_spin.setSingleStep(0.5)
-        self.hybrid_switch_spin.setDecimals(2)
-        self.hybrid_switch_spin.setValue(self.current_settings.get('hybrid_switch_distance', 2.0))
-        self.hybrid_switch_spin.setSuffix(" m")
-        self.hybrid_switch_spin.setToolTip(
-            "混合控制器切换距离\n"
-            "• 距离目标 > 此值: 偏向 Pure Pursuit\n"
-            "• 距离目标 < 此值: 偏向 Stanley"
-        )
-        controller_layout.addRow("混合切换距离:", self.hybrid_switch_spin)
-        
-        controller_tab.setLayout(controller_layout)
-        tab_widget.addTab(controller_tab, "⚙️ 控制器")
         
         # --- 阈值设置 Tab ---
         threshold_tab = QWidget()
@@ -194,8 +139,7 @@ class VelocitySettingsDialog(QDialog):
         tip_label = QLabel(
             "💡 参数调优建议:\n"
             "• 巡航速度: 根据水域条件和任务需求调整\n"
-            "• 前视距离: 一般为 2-3 倍船长\n"
-            "• Stanley 增益: 越大横向误差校正越快，但可能震荡\n"
+            "• 最大角速度: 越大转向越快，但可能不稳定\n"
             "• 切换阈值 > 到达阈值，确保中间航点平滑过渡"
         )
         tip_label.setWordWrap(True)
@@ -236,9 +180,6 @@ class VelocitySettingsDialog(QDialog):
         """恢复默认设置"""
         self.cruise_speed_spin.setValue(0.5)
         self.max_angular_spin.setValue(0.5)
-        self.lookahead_spin.setValue(2.0)
-        self.stanley_gain_spin.setValue(2.5)
-        self.hybrid_switch_spin.setValue(2.0)
         self.goal_tolerance_spin.setValue(0.5)
         self.switch_tolerance_spin.setValue(1.5)
     
@@ -252,9 +193,6 @@ class VelocitySettingsDialog(QDialog):
         return {
             'cruise_speed': self.cruise_speed_spin.value(),
             'max_angular_velocity': self.max_angular_spin.value(),
-            'lookahead_distance': self.lookahead_spin.value(),
-            'stanley_gain': self.stanley_gain_spin.value(),
-            'hybrid_switch_distance': self.hybrid_switch_spin.value(),
             'goal_tolerance': self.goal_tolerance_spin.value(),
             'switch_tolerance': self.switch_tolerance_spin.value(),
         }

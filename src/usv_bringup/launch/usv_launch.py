@@ -225,7 +225,7 @@ def generate_launch_description():
         parameters=[param_file]
     )
 
-    # 速度控制器节点 (Pure Pursuit + Stanley 混合控制)
+    # 速度控制器节点 (MPC 控制)
     # 仅在 usv_params.yaml 中 control_mode='velocity' 时需要启动
     # 可实现无减速的平滑航点跟踪
     velocity_controller_node = Node(
@@ -553,7 +553,7 @@ def generate_launch_description():
             usv_status_node,          # 状态管理（依赖 MAVROS）
             usv_control_node,         # 核心控制器（依赖 MAVROS 和 EKF 原点）
             usv_command_node,         # 命令处理（依赖 MAVROS）
-            velocity_controller_node, # 速度控制器（Pure Pursuit + Stanley，速度模式下使用）
+            velocity_controller_node, # 速度控制器（MPC，速度模式下使用）
             # usv_avoidance_node,     # 避障功能（已注释）
         ]
     )
