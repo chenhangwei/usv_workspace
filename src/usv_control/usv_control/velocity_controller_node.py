@@ -335,6 +335,24 @@ class VelocityControllerNode(Node):
             callback_group=self.callback_group
         )
         
+        # ==================== 与 navigate_to_point_node 阈值同步 ====================
+        # 订阅 navigate_to_point_node 的阈值设置话题，保持两个节点阈值一致
+        self.nav_arrival_threshold_sub = self.create_subscription(
+            Float32,
+            'set_nav_arrival_threshold',
+            self._goal_tolerance_callback,  # 复用相同的回调
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
+        self.nav_switch_threshold_sub = self.create_subscription(
+            Float32,
+            'set_nav_switch_threshold',
+            self._switch_tolerance_callback,  # 复用相同的回调
+            qos_reliable,
+            callback_group=self.callback_group
+        )
+        
         # 最大角速度
         self.max_angular_sub = self.create_subscription(
             Float32,

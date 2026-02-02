@@ -77,10 +77,12 @@ mavros:
     battery_voltage_empty: 10.8             # 空电电压（V）- 电量显示0%，需要充电
 
 # NavigateToPoint 话题版本节点参数（launch 实际启动的节点名为 navigate_to_point_node）
+# ⚠️ 阈值参数说明：nav_arrival_threshold 与 velocity_controller_node.goal_tolerance 已自动同步
+#    当通过话题 set_nav_arrival_threshold 设置时，两个节点会同时更新
 /**/navigate_to_point_node:
   ros__parameters:
-    nav_arrival_threshold: 1.5              # 最终到达目标点的距离阈值（米）- [优化] 0.8->1.5: 保持与velocity_controller.goal_tolerance一致
-    nav_switch_threshold: 2.0               # 平滑导航时切换下一个航点的距离阈值（米）
+    nav_arrival_threshold: 1.5              # 最终到达目标点的距离阈值（米）- 与 velocity_controller.goal_tolerance 同步
+    nav_switch_threshold: 2.0               # 平滑导航时切换下一个航点的距离阈值（米）- 与 velocity_controller.switch_tolerance 同步
     nav_smooth_navigation: true             # 是否启用平滑导航模式（连续追踪不停顿）
     nav_feedback_period: 0.2                # 反馈发布周期（秒）
     distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
@@ -137,7 +139,7 @@ mavros:
 /**/usv_command_node:
   ros__parameters:
     # 支持的飞行模式列表
-    supported_modes: ['GUIDED', 'MANUAL', 'AUTO', 'HOLD', 'ARCO', 'STEERING']
+    supported_modes: ['GUIDED', 'MANUAL', 'AUTO', 'HOLD', 'ARCO', 'STEERING','RTL']
     # 服务超时时间
     service_timeout_sec: 5.0                # 服务等待超时时间（秒）
     # 解锁命令超时时间
@@ -195,8 +197,10 @@ mavros:
     min_speed: 0.15                         # 最小速度（m/s）
     
     # ==================== 到达判断 ====================
-    goal_tolerance: 1.5                     # 最终航点到达阈值（米）
-    switch_tolerance: 2.0                   # 中间航点切换阈值（米）
+    # ⚠️ 这两个参数与 navigate_to_point_node 的阈值通过话题自动同步
+    #    运行时通过 set_nav_arrival_threshold / set_nav_switch_threshold 话题统一设置
+    goal_tolerance: 1.0                   # 最终航点到达阈值（米）- 同步自 nav_arrival_threshold
+    switch_tolerance: 1.5                   # 中间航点切换阈值（米）- 同步自 nav_switch_threshold
     
     # ==================== 控制参数 ====================
     control_rate: 20.0                      # 控制频率（Hz）
