@@ -222,6 +222,24 @@ mavros:
                                             #   - 横向偏差大 → 调大到 20~30
                                             #   - 轨迹不平滑 → 调小到 10
     
+    # ========== v6 (2/04): 速度自适应 tau_omega - 根治低速S形振荡 ==========
+    # 核心原理:
+    #   - 船舶转向响应与速度相关: 高速时舵效好(tau小), 低速时舵效差(tau大)
+    #   - 使用固定 tau_omega 会导致低速时模型失配 → S形振荡
+    #   - 自适应 tau_omega 使同一套参数适用于所有船只，无需单独调参
+    #
+    # 参数说明:
+    #   adaptive_tau_enabled: 启用速度自适应 tau_omega
+    #   tau_omega_low_speed: 低速时的 tau_omega (船转向慢, tau 大)
+    #   tau_omega_high_speed: 高速时的 tau_omega (船转向快, tau 小)
+    #   tau_speed_threshold_low/high: 低/高速阈值
+    #
+    adaptive_tau_enabled: true              # 启用速度自适应 tau_omega (推荐开启)
+    tau_omega_low_speed: 0.8                # 低速时 tau_omega (秒)
+    tau_omega_high_speed: 0.4               # 高速时 tau_omega (秒)
+    tau_speed_threshold_low: 0.15           # 低速阈值 (m/s)
+    tau_speed_threshold_high: 0.35          # 高速阈值 (m/s)
+    
     # ==================== 速度参数 ====================
     cruise_speed: 0.4                       # 巡航速度（m/s）
     max_angular_velocity: 0.5               # 最大角速度（rad/s）- 放宽转向限制解决饱和问题
@@ -230,7 +248,7 @@ mavros:
     # ==================== 到达判断 ====================
     # ⚠️ 这两个参数与 navigate_to_point_node 的阈值通过话题自动同步
     #    运行时通过 set_nav_arrival_threshold / set_nav_switch_threshold 话题统一设置
-    goal_tolerance: 1.0                   # 最终航点到达阈值（米）- 同步自 nav_arrival_threshold
+    goal_tolerance: 1.5                   # 最终航点到达阈值（米）- 同步自 nav_arrival_threshold
     switch_tolerance: 1.5                   # 中间航点切换阈值（米）- 同步自 nav_switch_threshold
     
     # ==================== 控制参数 ====================

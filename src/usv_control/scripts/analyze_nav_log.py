@@ -34,6 +34,7 @@ import csv
 import math
 from pathlib import Path
 from datetime import datetime
+from typing import Any
 
 # 尝试导入可视化库
 try:
@@ -49,16 +50,42 @@ except ImportError:
 def load_csv(filepath: str) -> list:
     """加载 CSV 文件"""
     data = []
-    with open(filepath, 'r') as f:
+    def _to_number(value: Any):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip()
+        if s == "":
+            return None
+        try:
+            return float(s)
+        except ValueError:
+            return s
+
+    with open(filepath, 'r', errors='replace', newline='') as f:
+        # 兼容 v5 日志：文件头可能包含若干以 # 开头的注释/参数行
+        # 找到第一行非注释作为 CSV header
+        while True:
+            pos = f.tell()
+            line = f.readline()
+            if not line:
+                return []
+            if line.strip() and not line.lstrip().startswith('#'):
+                f.seek(pos)
+                break
+
         reader = csv.DictReader(f)
         for row in reader:
-            # 转换为浮点数
+            # 兼容：文件尾可能有 '# ...' 统计行，或不完整行
+            ts = row.get('timestamp')
+            ts_num = _to_number(ts)
+            if not isinstance(ts_num, (int, float)):
+                continue
+
             parsed = {}
             for key, value in row.items():
-                try:
-                    parsed[key] = float(value)
-                except ValueError:
-                    parsed[key] = value
+                parsed[key] = _to_number(value)
             data.append(parsed)
     return data
 
@@ -72,6 +99,19 @@ def analyze_statistics(data: list):
     # 基本信息
     duration = data[-1]['timestamp'] - data[0]['timestamp']
     print(f"\n⏱️  记录时长: {duration:.1f} 秒 ({len(data)} 条记录)")
+
+    # 采样率统计
+    if len(data) >= 3:
+        dts = [data[i]['timestamp'] - data[i - 1]['timestamp'] for i in range(1, len(data))]
+        dts_sorted = sorted(dts)
+        dt_med = dts_sorted[len(dts_sorted) // 2]
+        dt_p95 = dts_sorted[int(len(dts_sorted) * 0.95)]
+        dt_max = dts_sorted[-1]
+        hz = (1.0 / dt_med) if dt_med > 1e-9 else 0.0
+        print(f"\n🧾 采样信息:")
+        print(f"   中位 dt: {dt_med:.3f}s (~{hz:.1f} Hz)")
+        print(f"   P95 dt: {dt_p95:.3f}s")
+        print(f"   最大 dt: {dt_max:.3f}s")
     
     # 速度统计
     speeds = [d['velocity_speed'] for d in data]
@@ -90,11 +130,56 @@ def analyze_statistics(data: list):
         print(f"   平均差异: {avg_diff:.1f}°")
         print(f"   最大差异: {max_diff:.1f}°")
     
-    # 距离误差统计
-    distances = [d['distance_to_goal'] for d in data if d['goal_id'] > 0]
+    # 距离误差统计（优先使用几何距离：target - pose）
+    dist_calc = None
+    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
+        dist_calc = [
+            math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y'])
+            for d in data
+            if all(isinstance(d.get(k), (int, float)) for k in ('pose_x', 'pose_y', 'target_x', 'target_y'))
+        ]
+
+    dist_logged = [d.get('distance_to_goal') for d in data if isinstance(d.get('distance_to_goal'), (int, float))]
+    distances = dist_calc if dist_calc else dist_logged
+
     if distances:
         min_dist = min(distances)
+        end_dist = distances[-1]
         print(f"\n🎯 最小到达距离: {min_dist:.3f} m")
+        print(f"   结束时距离: {end_dist:.3f} m")
+
+        # 如果两者同时存在，做一致性检查（常见于 goal 切换时序不同步）
+        if dist_calc and dist_logged and len(dist_calc) == len(dist_logged):
+            diffs = [abs(a - b) for a, b in zip(dist_calc, dist_logged)]
+            bad = sum(1 for x in diffs if x > 2.0)
+            if bad:
+                print(f"   ⚠️ distance_to_goal 与几何距离不一致: {bad}/{len(diffs)} 点 (最大差异 {max(diffs):.2f}m)")
+
+        # 到达阈值（默认 1.5m，请与 usv_params.yaml 保持一致）
+        threshold = 1.5
+        reach_idx = next((i for i, d in enumerate(distances) if d <= threshold), None)
+        if reach_idx is not None:
+            reach_t = data[reach_idx]['timestamp'] - data[0]['timestamp']
+            print(f"   首次进入 {threshold:.1f}m 阈值: t={reach_t:.1f}s")
+        else:
+            print(f"   ⚠️ 未进入 {threshold:.1f}m 到达阈值")
+
+    # 横向偏差统计
+    if 'cross_track_error' in data[0]:
+        ctes = [abs(d['cross_track_error']) for d in data if isinstance(d.get('cross_track_error'), (int, float))]
+        if ctes:
+            rms = math.sqrt(sum(x * x for x in ctes) / len(ctes))
+            print(f"\n📐 横向误差 |cross_track_error|:")
+            print(f"   RMS: {rms:.3f} m")
+            print(f"   最大: {max(ctes):.3f} m")
+
+    # 航向误差统计
+    if 'heading_error_deg' in data[0]:
+        hes = [abs(d['heading_error_deg']) for d in data if isinstance(d.get('heading_error_deg'), (int, float))]
+        if hes:
+            print(f"\n🧭 航向误差 |heading_error_deg|:")
+            print(f"   平均: {sum(hes)/len(hes):.1f}°")
+            print(f"   最大: {max(hes):.1f}°")
     
     # 角速度统计
     omegas = [abs(d['cmd_omega']) for d in data]
@@ -110,8 +195,11 @@ def analyze_statistics(data: list):
         solve_times = [d.get('mpc_solve_time_ms', 0) for d in data]
         avg_time = sum(solve_times) / len(solve_times)
         max_time = max(solve_times)
+        st_sorted = sorted(solve_times)
+        p95_time = st_sorted[int(len(st_sorted) * 0.95)]
         
         print(f"   平均求解时间: {avg_time:.2f} ms")
+        print(f"   P95 求解时间: {p95_time:.2f} ms")
         print(f"   最大求解时间: {max_time:.2f} ms")
         if max_time > 50:
              print(f"   ⚠️  求解时间过长 (>50ms)")
@@ -125,6 +213,80 @@ def analyze_statistics(data: list):
         print(f"   控制器分布:")
         for ctrl, count in controllers.items():
             print(f"   - {ctrl}: {count} ({count/len(data)*100:.1f}%)")
+
+    # 目标点/任务段统计
+    goals = [int(d['goal_id']) for d in data if isinstance(d.get('goal_id'), (int, float))]
+    if goals:
+        unique_goals = []
+        for g in goals:
+            if not unique_goals or unique_goals[-1] != g:
+                unique_goals.append(g)
+        print(f"\n🗺️  goal_id 变化序列: {unique_goals}")
+
+    # 控制输出范围与疑似饱和
+    def _sat_ratio(values, limit, tol=1e-3):
+        if not values:
+            return 0.0
+        hits = sum(1 for v in values if isinstance(v, (int, float)) and abs(abs(v) - limit) <= tol)
+        return hits / len(values)
+
+    vx_cmds = [d.get('cmd_vx') for d in data if isinstance(d.get('cmd_vx'), (int, float))]
+    om_cmds = [d.get('cmd_omega') for d in data if isinstance(d.get('cmd_omega'), (int, float))]
+    if vx_cmds:
+        vmax = max(abs(v) for v in vx_cmds)
+        print(f"\n🎮 指令范围:")
+        print(f"   cmd_vx: [{min(vx_cmds):.3f}, {max(vx_cmds):.3f}] m/s")
+        if vmax > 1e-6:
+            print(f"   cmd_vx 触顶比例(~{vmax:.3f}): {_sat_ratio(vx_cmds, vmax)*100:.1f}%")
+    if om_cmds:
+        omax = max(abs(v) for v in om_cmds)
+        print(f"   cmd_omega: [{min(om_cmds):.3f}, {max(om_cmds):.3f}] rad/s")
+        if omax > 1e-6:
+            print(f"   cmd_omega 触顶比例(~{omax:.3f}): {_sat_ratio(om_cmds, omax)*100:.1f}%")
+
+
+def plot_errors(data: list, output_path: Path):
+    """绘制误差相关曲线"""
+    if not HAS_MATPLOTLIB:
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 9), sharex=True)
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+
+    ax = axes[0]
+    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
+        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y']) for d in data]
+    else:
+        dist = [d.get('distance_to_goal', 0) for d in data]
+    ax.plot(t, dist, 'purple', label='Distance to Goal')
+    # 到达阈值（默认 1.5m，请与 usv_params.yaml 保持一致）
+    ax.axhline(y=1.5, color='r', linestyle='--', label='Arrival Threshold (1.5m)')
+    ax.set_ylabel('Distance (m)')
+    ax.set_title('Errors')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1]
+    he = [d.get('heading_error_deg', 0) for d in data]
+    ax.plot(t, he, 'b-', label='Heading Error (deg)')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.set_ylabel('deg')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    cte = [d.get('cross_track_error', 0) for d in data]
+    ax.plot(t, cte, 'g-', label='Cross Track Error (m)')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.set_ylabel('m')
+    ax.set_xlabel('Time (s)')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(output_path / 'errors.png', dpi=150)
+    plt.close()
+    print(f"   📈 误差图: {output_path / 'errors.png'}")
 
 
 def find_yaw_offset(data: list) -> float:
@@ -220,11 +382,14 @@ def plot_velocity(data: list, output_path: Path):
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    # Distance to goal
+    # Distance to goal (prefer geometric distance)
     ax = axes[2]
-    dist = [d['distance_to_goal'] for d in data]
+    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
+        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y']) for d in data]
+    else:
+        dist = [d.get('distance_to_goal', 0) for d in data]
     ax.plot(t, dist, 'purple', label='Distance to Goal')
-    ax.axhline(y=0.8, color='r', linestyle='--', label='Arrival Threshold (0.8m)')
+    ax.axhline(y=1.5, color='r', linestyle='--', label='Arrival Threshold (1.5m)')
     ax.set_ylabel('Distance (m)')
     ax.set_xlabel('Time (s)')
     ax.legend()
@@ -363,7 +528,8 @@ def main():
         if not log_dir.exists():
             print("❌ 未找到日志目录: ~/usv_logs")
             sys.exit(1)
-        log_files = sorted(log_dir.glob('nav_log_*.csv'))
+        # v5 实测日志可能按批次/艇号分目录保存，使用递归查找
+        log_files = sorted(log_dir.rglob('nav_log_*.csv'))
         if not log_files:
             print("❌ 未找到日志文件")
             sys.exit(1)
@@ -401,6 +567,7 @@ def main():
         plot_heading_comparison(data, output_path)
         plot_control_commands(data, output_path)
         plot_mpc_debug(data, output_path)
+        plot_errors(data, output_path)
         print(f"\n✅ 图表已保存到: {output_path}")
 
     print("\n" + "="*60)

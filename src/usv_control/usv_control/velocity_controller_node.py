@@ -104,6 +104,13 @@ class VelocityControllerNode(Node):
         self.declare_parameter('mpc_tau_omega', 0.4)              # 转向时间常数 (秒)
         self.declare_parameter('mpc_weight_cte', 15.0)            # Cross Track Error 权重
         
+        # v6 新增: 速度自适应 tau_omega 参数 (解决低速S形振荡)
+        self.declare_parameter('adaptive_tau_enabled', True)      # 是否启用速度自适应 tau_omega
+        self.declare_parameter('tau_omega_low_speed', 0.8)        # 低速时的 tau_omega (秒)
+        self.declare_parameter('tau_omega_high_speed', 0.4)       # 高速时的 tau_omega (秒)
+        self.declare_parameter('tau_speed_threshold_low', 0.15)   # 低速阈值 (m/s)
+        self.declare_parameter('tau_speed_threshold_high', 0.35)  # 高速阈值 (m/s)
+        
         # 速度参数
         self.declare_parameter('cruise_speed', 0.5)
         self.declare_parameter('max_angular_velocity', 0.5)
@@ -255,6 +262,17 @@ class VelocityControllerNode(Node):
         self._velocity_based_yaw: float = 0.0  # 基于速度向量的航向
         self._velocity_yaw_valid: bool = False  # 速度航向是否有效
         self._current_speed: float = 0.0  # 当前速度 (m/s)
+        
+        # ==================== v6: 速度自适应 tau_omega ====================
+        # 低速时舵效差，转向惯性相对更大，需要更大的 tau_omega
+        self._adaptive_tau_enabled = bool(self.get_parameter('adaptive_tau_enabled').value or True)
+        self._tau_omega_low = float(self.get_parameter('tau_omega_low_speed').value or 0.8)
+        self._tau_omega_high = float(self.get_parameter('tau_omega_high_speed').value or 0.4)
+        self._tau_speed_low = float(self.get_parameter('tau_speed_threshold_low').value or 0.15)
+        self._tau_speed_high = float(self.get_parameter('tau_speed_threshold_high').value or 0.35)
+        self._current_tau_omega = self._mpc_params['tau_omega']  # 当前使用的 tau_omega
+        self._last_tau_update_time: float = 0.0
+        self._tau_update_interval: float = 0.5  # tau_omega 更新间隔 (秒，避免频繁重建求解器)
         
         # ==================== 订阅者 ====================
         # 位姿订阅
@@ -477,11 +495,16 @@ class VelocityControllerNode(Node):
     
     def _velocity_callback(self, msg: TwistStamped):
         """
-        速度回调 - L1 风格航向估计
+        速度回调 - L1 风格航向估计 + 自适应 tau_omega
         
         使用飞控 EKF 融合后的速度向量计算实际航向，
         类似飞控 L1 算法，自动适应坐标系偏移。
+        
+        v6 新增: 根据当前速度自适应调整 MPC 的 tau_omega 参数，
+        解决低速时 S 形振荡问题。
         """
+        import time
+        
         vx = msg.twist.linear.x
         vy = msg.twist.linear.y
         speed = math.sqrt(vx * vx + vy * vy)
@@ -494,6 +517,11 @@ class VelocityControllerNode(Node):
         else:
             # 速度太低，速度航向不可靠
             self._velocity_yaw_valid = False
+        
+        # ==================== v6: 速度自适应 tau_omega ====================
+        # 低速时舵效差，转向动力学变化，需要更大的 tau_omega
+        if self._adaptive_tau_enabled:
+            self._update_adaptive_tau_omega(speed)
     
     def _pose_callback(self, msg: PoseStamped):
         """位姿回调 - 包含数据验证、跳变检测和航向选择"""
@@ -579,6 +607,55 @@ class VelocityControllerNode(Node):
         self._last_valid_pose = new_pose
         self._last_pose_time = current_time
         self._consecutive_timeout_count = 0  # 重置超时计数
+    
+    def _update_adaptive_tau_omega(self, current_speed: float):
+        """
+        根据当前速度自适应调整 MPC 的 tau_omega 参数
+        
+        核心原理:
+        - 高速时 (>0.35 m/s): 舵效好，tau_omega = 0.4s (响应快)
+        - 低速时 (<0.15 m/s): 舵效差，tau_omega = 0.8s (响应慢)
+        - 中间速度: 线性插值
+        
+        这解决了 MPC 使用固定 tau_omega 时，低速下模型失配导致的 S 形振荡问题。
+        所有 USV 无需单独调参，因为舵效-速度关系是船舶动力学的普遍规律。
+        
+        Args:
+            current_speed: 当前速度 (m/s)
+        """
+        import time
+        
+        current_time = time.time()
+        
+        # 限制更新频率，避免频繁重建 MPC 求解器
+        if current_time - self._last_tau_update_time < self._tau_update_interval:
+            return
+        
+        # 计算自适应 tau_omega
+        if current_speed <= self._tau_speed_low:
+            # 低速区: 使用大 tau (转向慢)
+            new_tau = self._tau_omega_low
+        elif current_speed >= self._tau_speed_high:
+            # 高速区: 使用小 tau (转向快)
+            new_tau = self._tau_omega_high
+        else:
+            # 过渡区: 线性插值
+            ratio = (current_speed - self._tau_speed_low) / (self._tau_speed_high - self._tau_speed_low)
+            new_tau = self._tau_omega_low + ratio * (self._tau_omega_high - self._tau_omega_low)
+        
+        # 检查是否需要更新 (变化超过 5% 才更新，避免频繁重建)
+        if abs(new_tau - self._current_tau_omega) / self._current_tau_omega > 0.05:
+            self._current_tau_omega = new_tau
+            self._last_tau_update_time = current_time
+            
+            # 动态更新 MPC 控制器的 tau_omega
+            try:
+                self.tracker.mpc_tracker.set_tau_omega(new_tau)
+                self.get_logger().debug(
+                    f'🔧 Adaptive tau_omega: speed={current_speed:.2f} m/s -> tau={new_tau:.2f}s'
+                )
+            except Exception as e:
+                self.get_logger().warning(f'Failed to update tau_omega: {e}')
     
     def _state_callback(self, msg: State):
         """飞控状态回调"""
