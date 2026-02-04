@@ -68,7 +68,7 @@ def generate_launch_description():
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_02',
+        default_value='usv_03',
         description='无人船节点的命名空间'
     )
     
@@ -127,8 +127,8 @@ def generate_launch_description():
         #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
 
         #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
-        default_value='udp://192.168.68.54:14551@192.168.68.53:14560',  # usv_02 → 地面站端口14560
-        #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
+        #default_value='udp://192.168.68.54:14551@192.168.68.53:14560',  # usv_02 → 地面站端口14560
+        default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
         description='地面站MAVLink通信地址'
     )
     
@@ -386,9 +386,9 @@ def generate_launch_description():
                 'gcs_url': gcs_url,
                 
                 # MAVLink 身份配置 (直接在启动文件设置,优先级最高)
-                'system_id': 102,           # MAVROS 自身系统 ID
+                'system_id': 103,           # MAVROS 自身系统 ID
                 'component_id': 191,        # MAVROS 自身组件 ID
-                'target_system_id':2,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
+                'target_system_id':3,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
                 'target_component_id': 1,   # 目标飞控组件 ID (固定为1)
                 
                 # ==================== 插件黑名单（加速启动，关键优化！）====================

@@ -82,7 +82,10 @@ mavros:
 /**/navigate_to_point_node:
   ros__parameters:
     nav_arrival_threshold: 1.5              # 最终到达目标点的距离阈值（米）- 与 velocity_controller.goal_tolerance 同步
-    nav_switch_threshold: 2.0               # 平滑导航时切换下一个航点的距离阈值（米）- 与 velocity_controller.switch_tolerance 同步
+    nav_switch_threshold: 1.5               # 平滑导航时切换下一个航点的距离阈值（米）
+                                            # 调参建议 (避免中间航点停顿):
+                                            #   - 仍有停顿 → 调大到 2.0~3.0
+                                            #   - 切弯过早/掉点 → 保持 1.5 或更小
     nav_smooth_navigation: true             # 是否启用平滑导航模式（连续追踪不停顿）
     nav_feedback_period: 0.2                # 反馈发布周期（秒）
     distance_mode: '2d'                     # 距离计算模式：'2d'（仅XY平面）或 '3d'（包含Z轴）
@@ -183,18 +186,46 @@ mavros:
     #            结果: 航向误差std=17.8°(↓55%), 振荡频率=0.47Hz(↑19%)
     #            分析: r_dw↑ 限制角加速度变化 → 振幅↓频率↑
     # 
-    # v3 (current): q_pos=5, q_theta=8, r_w=10, r_dw=15, w_max=0.3
-    #               策略: q_pos↓减少追线过冲, q_theta↑稳定航向, r_dw↓平衡频率
+    # v3 (2/03 AM): q_pos=5, q_theta=8, r_w=10, r_dw=15, w_max=0.3
+    #               结果: 角速度饱和54.2%, 方向反转0.30Hz, 横向偏差±1.2m
+    #               问题: Q_pos太小导致纠偏不及时, w_max太小导致控制器受限
+    # 
+    # v4 (2/03 PM): q_pos=10, q_theta=12, r_w=6, r_dw=12, w_max=0.5
+    #               问题: 仍有S形振荡! 根本原因是 Unicycle 模型与实船不匹配
+    #
+    # ========== v5 (2/03): 一阶惯性转向模型 - 根治S形振荡 ==========
+    # 核心改进:
+    #   1. 状态扩展: [x,y,θ] → [x,y,θ,ω_actual] (4维)
+    #   2. 动力学: θ̇=ω_cmd → θ̇=ω_actual, τ·ω̇+ω=ω_cmd
+    #   3. 代价: 点对点 → CTE + 航线方向
+    #
+    # 新参数说明:
+    #   tau_omega: 转向时间常数 (秒), 模拟船的转向惯性
+    #              - 船从发出命令到实际角速度达到63.2%的时间
+    #              - 推荐 0.3~0.6, 越大预测转向越慢
+    #   q_cte:     Cross Track Error权重, 控制横向偏差
+    #              - 推荐 10.0~30.0, 越大走线越精确
+    #
     mpc_prediction_steps: 20                # 预测步数 N (dt=0.1s, N=20 -> 预测2.0秒)
-    mpc_weight_pos: 5.0                     # Q_pos: 位置误差权重 (↓减少追线过冲)
-    mpc_weight_heading: 8.0                 # Q_theta: 航向误差权重 (↑稳定船头方向)
-    mpc_weight_steering: 10.0               # R_w: 角速度惩罚 (惩罚大转向)
-    mpc_weight_steering_rate: 15.0          # R_dw: 角加速度惩罚 (平滑舵机动作)
+    mpc_weight_pos: 10.0                    # Q_pos: 沿航线进度权重
+    mpc_weight_heading: 8.0                 # Q_theta: 航向误差权重 (v5适当降低)
+    mpc_weight_steering: 5.0                # R_w: 角速度惩罚 (v5适当降低)
+    mpc_weight_steering_rate: 10.0          # R_dw: 角加速度惩罚
+    
+    # v5 新增参数 (一阶惯性转向模型)
+    mpc_tau_omega: 0.4                      # 转向时间常数 (秒) - 核心参数!
+                                            # 调参建议:
+                                            #   - 还在画龙 → 调大到 0.5~0.6
+                                            #   - 响应迟钝 → 调小到 0.3
+    mpc_weight_cte: 15.0                    # Cross Track Error权重
+                                            # 调参建议:
+                                            #   - 横向偏差大 → 调大到 20~30
+                                            #   - 轨迹不平滑 → 调小到 10
     
     # ==================== 速度参数 ====================
     cruise_speed: 0.4                       # 巡航速度（m/s）
-    max_angular_velocity: 0.3               # 最大角速度（rad/s）- 限制转向速度
-    min_speed: 0.15                         # 最小速度（m/s）
+    max_angular_velocity: 0.5               # 最大角速度（rad/s）- 放宽转向限制解决饱和问题
+    min_speed: 0.2                         # 最小速度（m/s）
     
     # ==================== 到达判断 ====================
     # ⚠️ 这两个参数与 navigate_to_point_node 的阈值通过话题自动同步
@@ -212,7 +243,7 @@ mavros:
     
     # ==================== L1风格航向估计参数 ====================
     use_velocity_based_heading: true        # 启用速度方向航向估计（推荐）
-    min_speed_for_velocity_heading: 0.15    # 使用速度航向的最小速度（m/s）
+    min_speed_for_velocity_heading: 0.2    # 使用速度航向的最小速度（m/s）
 
 # =============================================================================
 # 传感器驱动模块参数

@@ -199,11 +199,20 @@ class VelocityPathTracker:
         
         # R_dw: 角加速度变化率权重 (推荐 5.0 ~ 20.0). [丝滑的核心]
         # 越大舵机动作越平滑，太大会增加振荡频率.
-        mpc_r_dw: float = 15.0,
+        mpc_r_dw: float = 10.0,
         
         # N: 预测步数 (推荐 10 ~ 30).
         # 20步 * 0.1s = 预测未来2秒. 太长增加计算量，太短容易短视.
         mpc_prediction_steps: int = 20,
+        
+        # v5 新增参数 (一阶惯性转向模型)
+        # tau_omega: 转向时间常数 (秒). 模拟船的转向惯性.
+        # 推荐 0.3 ~ 0.6, 越大MPC预测转向越慢, 需根据实船辨识.
+        mpc_tau_omega: float = 0.4,
+        
+        # q_cte: Cross Track Error权重. 控制横向偏差.
+        # 推荐 10.0 ~ 30.0, 越大走线越精确.
+        mpc_q_cte: float = 15.0,
         
         # 航点队列
         waypoint_queue_size: int = 10,        # 航点队列大小
@@ -229,8 +238,14 @@ class VelocityPathTracker:
             'q_theta': mpc_q_theta,
             'r_w': mpc_r_w,
             'r_dw': mpc_r_dw,
-            'prediction_steps': mpc_prediction_steps
+            'prediction_steps': mpc_prediction_steps,
+            # v5 新增
+            'tau_omega': mpc_tau_omega,
+            'q_cte': mpc_q_cte,
         }
+        
+        # 上一个航点 (用于计算航线方向)
+        self._prev_waypoint_pos: Optional[tuple] = None
 
         # ==================== 航点队列 ====================
         self._waypoint_queue: Deque[Waypoint] = deque(maxlen=waypoint_queue_size)
@@ -282,6 +297,10 @@ class VelocityPathTracker:
         self._goal_reached = False
         self._last_angular_velocity = 0.0
         self._last_pose_time = time.time()  # 记录时间
+        
+        # v5: 重置航线起点 (新航点任务，没有上一个航点)
+        self._prev_waypoint_pos = None
+        self.mpc_tracker.reset()  # 重置 MPC 状态
         
         # 注意：不再强制设置 is_final = True
         # is_final 由调用者根据 nav_mode 决定
@@ -479,7 +498,8 @@ class VelocityPathTracker:
         v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
             [pose.x, pose.y, effective_yaw], 
             [target.x, target.y], 
-            target_speed=adaptive_speed  # 使用自适应速度，而不是固定速度
+            target_speed=adaptive_speed,  # 使用自适应速度，而不是固定速度
+            prev_waypoint=self._prev_waypoint_pos  # v5 新增: 传递上一个航点用于计算航线方向
         )
         
         # 获取调试信息
@@ -553,10 +573,13 @@ class VelocityPathTracker:
             corner_factor = 1.0 - ratio * (1.0 - MIN_CORNER_RATIO)
         
         # 计算距离影响: 离当前拐点越近，限速越严格
-        # 增大影响半径，提前减速
-        # 动态调整：基于当前巡航速度，预留至少 5秒 的减速时间/距离
-        # 如 2m/s -> 10m. 0.5m/s -> 2.5m. 最小 5.0m
-        influence_radius = max(8.0, self.cruise_speed * 5.0)
+        # 动态调整：基于当前巡航速度计算影响半径
+        # 原则：影响半径应略大于 switch_tolerance，确保切换前有平滑减速
+        # 对于 0.4m/s 船：influence_radius ≈ 4.0m (略大于 switch=3.5m)
+        # 对于 1.0m/s 船：influence_radius ≈ 5.0m
+        # 公式：max(switch_tolerance + 1.0, cruise_speed * 5.0)
+        # 使用 4.5m 作为最小值 (比 3.5m switch 略大)
+        influence_radius = max(4.5, self.cruise_speed * 5.0)
         
         dist_factor = min(1.0, len1 / influence_radius)
         
@@ -730,9 +753,14 @@ class VelocityPathTracker:
             # 保存当前航点到历史
             if self._current_waypoint:
                 self._path_history.append(self._current_waypoint)
+                # v5: 记录上一个航点位置，用于计算航线方向
+                self._prev_waypoint_pos = (self._current_waypoint.x, self._current_waypoint.y)
             
             # 从队列获取下一个航点
             self._current_waypoint = self._waypoint_queue.popleft()
+            
+            # v5: 通知 MPC 航线起点变了
+            self.mpc_tracker.set_prev_waypoint(self._prev_waypoint_pos)
             
             # 更新 final 标记
             self._update_final_waypoint_flags()

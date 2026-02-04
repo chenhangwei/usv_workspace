@@ -93,7 +93,16 @@ class LogCollectorNode(Node):
         self._mpc_param_r_dw = 0.0
         self._mpc_param_w_max = 0.0
         self._mpc_param_n_steps = 0
+        # v5 新增参数
+        self._mpc_param_tau_omega = 0.0
+        self._mpc_param_q_cte = 0.0
         self._mpc_params_received = False  # 标记是否已收到参数
+        
+        # v5 新增: 一阶惯性模型状态
+        self._omega_actual = 0.0
+        self._omega_cmd = 0.0
+        self._cross_track_error = 0.0
+        self._path_theta = 0.0
         
         # 飞控状态 (用于记录模式切换)
         self._flight_mode = ''
@@ -195,13 +204,15 @@ class LogCollectorNode(Node):
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
             if self._mpc_params_received:
-                self._csv_file.write(f'# MPC Parameters Configuration\n')
+                self._csv_file.write(f'# MPC Parameters Configuration (v5: First-Order Inertia Model)\n')
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
                 self._csv_file.write(f'# R_w (steering weight): {self._mpc_param_r_w:.2f}\n')
                 self._csv_file.write(f'# R_dw (steering rate weight): {self._mpc_param_r_dw:.2f}\n')
                 self._csv_file.write(f'# w_max (max angular velocity): {self._mpc_param_w_max:.3f} rad/s\n')
                 self._csv_file.write(f'# N_steps (prediction horizon): {self._mpc_param_n_steps}\n')
+                self._csv_file.write(f'# tau_omega (steering time constant): {self._mpc_param_tau_omega:.2f} s\n')
+                self._csv_file.write(f'# Q_cte (cross-track error weight): {self._mpc_param_q_cte:.2f}\n')
                 self._csv_file.write(f'#\n')
             
             # 写入表头
@@ -215,6 +226,8 @@ class LogCollectorNode(Node):
                 'distance_to_goal', 'heading_error_deg',
                 'yaw_diff_deg',
                 'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl',
+                # v5 新增字段
+                'omega_actual', 'omega_cmd', 'cross_track_error', 'path_theta_deg',
                 'flight_mode', 'armed'
             ])
             
@@ -348,6 +361,16 @@ class LogCollectorNode(Node):
         self._mpc_param_r_dw = getattr(msg, 'param_r_dw', 0.0)
         self._mpc_param_w_max = getattr(msg, 'param_w_max', 0.0)
         self._mpc_param_n_steps = getattr(msg, 'param_n_steps', 0)
+        # v5 新增参数
+        self._mpc_param_tau_omega = getattr(msg, 'param_tau_omega', 0.0)
+        self._mpc_param_q_cte = getattr(msg, 'param_q_cte', 0.0)
+        
+        # v5 新增: 一阶惯性模型状态
+        self._omega_actual = getattr(msg, 'omega_actual', 0.0)
+        self._omega_cmd = getattr(msg, 'omega_cmd', 0.0)
+        self._cross_track_error = getattr(msg, 'cross_track_error', 0.0)
+        self._path_theta = getattr(msg, 'path_theta', 0.0)
+        
         self._mpc_params_received = True
 
     def _state_callback(self, msg: State):
@@ -484,6 +507,11 @@ class LogCollectorNode(Node):
             f'{self._mpc_cost:.4f}',
             f'{math.degrees(self._mpc_pred_theta):.2f}',
             f'{self._active_controller}',
+            # v5 新增字段
+            f'{self._omega_actual:.4f}',
+            f'{self._omega_cmd:.4f}',
+            f'{self._cross_track_error:.4f}',
+            f'{math.degrees(self._path_theta):.2f}',
             f'{self._flight_mode}',
             f'{1 if self._is_armed else 0}'
         ])

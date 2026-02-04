@@ -7,6 +7,7 @@
 #
 # Author: chenhangwei
 # Date: 2026-01-29
+# Updated: 2026-02-03 - v5 添加一阶惯性模型相关字段
 # =============================================================================
 # MPC 控制器调试信息
 
@@ -21,6 +22,12 @@ float32 mpc_pred_x              # 预测位置 X
 float32 mpc_pred_y              # 预测位置 Y
 float32 mpc_pred_theta          # 预测航向
 
+# v5 新增: 一阶惯性模型状态
+float32 omega_actual            # 估计的实际角速度 (rad/s)
+float32 omega_cmd               # 角速度命令 (rad/s)
+float32 cross_track_error       # 横向偏差 CTE (m)
+float32 path_theta              # 当前航线方向 (rad)
+
 # 内部状态
 int32 solver_status             # 求解器状态 (0=Success)
 string active_controller        # 当前激活的控制器类型
@@ -33,3 +40,7 @@ float32 param_r_w               # 角速度权重 R_w
 float32 param_r_dw              # 角加速度权重 R_dw
 float32 param_w_max             # 最大角速度限制 (rad/s)
 int32 param_n_steps             # 预测步数
+
+# v5 新增参数
+float32 param_tau_omega         # 转向时间常数 (s)
+float32 param_q_cte             # CTE 权重

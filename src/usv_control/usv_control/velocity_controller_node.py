@@ -95,10 +95,14 @@ class VelocityControllerNode(Node):
         
         # MPC 参数
         self.declare_parameter('mpc_prediction_steps', 20)
-        self.declare_parameter('mpc_weight_pos', 20.0)
-        self.declare_parameter('mpc_weight_heading', 5.0)
+        self.declare_parameter('mpc_weight_pos', 10.0)
+        self.declare_parameter('mpc_weight_heading', 8.0)
         self.declare_parameter('mpc_weight_steering', 5.0)
-        self.declare_parameter('mpc_weight_steering_rate', 15.0)  # R_dw: 角加速度惩罚
+        self.declare_parameter('mpc_weight_steering_rate', 10.0)  # R_dw: 角加速度惩罚
+        
+        # v5 新增参数 (一阶惯性转向模型)
+        self.declare_parameter('mpc_tau_omega', 0.4)              # 转向时间常数 (秒)
+        self.declare_parameter('mpc_weight_cte', 15.0)            # Cross Track Error 权重
         
         # 速度参数
         self.declare_parameter('cruise_speed', 0.5)
@@ -137,12 +141,15 @@ class VelocityControllerNode(Node):
         
         # 保存 MPC 参数供日志记录使用
         self._mpc_params = {
-            'q_pos': float(self.get_parameter('mpc_weight_pos').value or 20.0),
-            'q_theta': float(self.get_parameter('mpc_weight_heading').value or 5.0),
+            'q_pos': float(self.get_parameter('mpc_weight_pos').value or 10.0),
+            'q_theta': float(self.get_parameter('mpc_weight_heading').value or 8.0),
             'r_w': float(self.get_parameter('mpc_weight_steering').value or 5.0),
-            'r_dw': float(self.get_parameter('mpc_weight_steering_rate').value or 15.0),
+            'r_dw': float(self.get_parameter('mpc_weight_steering_rate').value or 10.0),
             'w_max': float(self.get_parameter('max_angular_velocity').value or 0.5),
             'n_steps': int(self.get_parameter('mpc_prediction_steps').value or 20),
+            # v5 新增
+            'tau_omega': float(self.get_parameter('mpc_tau_omega').value or 0.4),
+            'q_cte': float(self.get_parameter('mpc_weight_cte').value or 15.0),
         }
         
         try:
@@ -158,6 +165,9 @@ class VelocityControllerNode(Node):
                 mpc_r_w=self._mpc_params['r_w'],
                 mpc_r_dw=self._mpc_params['r_dw'],
                 mpc_prediction_steps=self._mpc_params['n_steps'],
+                # v5 新增参数
+                mpc_tau_omega=self._mpc_params['tau_omega'],
+                mpc_q_cte=self._mpc_params['q_cte'],
                 
                 min_speed=float(self.get_parameter('min_speed').value or 0.05),
                 goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
@@ -1334,6 +1344,12 @@ class VelocityControllerNode(Node):
             debug_msg.active_controller = str(debug_info.get('active_controller', 'none'))
             debug_msg.ref_curvature = 0.0 # 暂未实现
             
+            # v5 新增: 一阶惯性模型状态
+            debug_msg.omega_actual = float(mpc_info.get('omega_actual_est', 0.0))
+            debug_msg.omega_cmd = float(mpc_info.get('pred_omega', 0.0))  # 使用预测的下一步角速度
+            debug_msg.cross_track_error = float(mpc_info.get('cte', 0.0))
+            debug_msg.path_theta = float(mpc_info.get('path_theta_deg', 0.0) * 3.14159 / 180.0)  # 转回弧度
+            
             # 添加 MPC 参数信息，用于日志记录和调试
             debug_msg.param_q_pos = float(self._mpc_params['q_pos'])
             debug_msg.param_q_theta = float(self._mpc_params['q_theta'])
@@ -1341,6 +1357,9 @@ class VelocityControllerNode(Node):
             debug_msg.param_r_dw = float(self._mpc_params['r_dw'])
             debug_msg.param_w_max = float(self._mpc_params['w_max'])
             debug_msg.param_n_steps = int(self._mpc_params['n_steps'])
+            # v5 新增参数
+            debug_msg.param_tau_omega = float(self._mpc_params['tau_omega'])
+            debug_msg.param_q_cte = float(self._mpc_params['q_cte'])
             
             self.debug_pub.publish(debug_msg)
         except Exception as e:
