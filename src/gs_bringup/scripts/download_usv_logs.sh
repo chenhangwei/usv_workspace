@@ -30,8 +30,8 @@
 #
 
 # ==================== 配置 ====================
-#USV_HOST="192.168.68.54"      # USV 的 IP 地址
-USV_HOST="192.168.68.52"      # USV 的 IP 地址
+USV_HOST="192.168.68.54"      # USV 的 IP 地址
+#USV_HOST="192.168.68.52"      # USV 的 IP 地址
 USV_USER="chenhangwei"         # USV 的用户名
 USV_LOG_DIR="~/usv_logs"       # USV 上的日志目录
 LOCAL_LOG_DIR="$HOME/usv_logs" # 本地保存目录
@@ -51,7 +51,7 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}    USV 导航日志下载工具${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo -e "USV 地址: ${GREEN}${USV_USER}@${USV_HOST}${NC}"
-echo -e "本地目录: ${GREEN}${LOCAL_LOG_DIR}${NC}"
+echo -e "本地目录: ${GREEN}${LOCAL_LOG_DIR}${NC} (按版本/USV ID 分目录)"
 echo ""
 
 # 检查连接
@@ -82,6 +82,46 @@ list_logs() {
     echo -e "共 ${GREEN}${count}${NC} 个日志文件"
 }
 
+# 解析远程日志头信息 (USV ID / 版本)
+get_remote_meta() {
+    local remote_path="$1"
+    local header
+    local version="V5"
+    local usv_id="usv_unknown"
+
+    header=$(ssh "${USV_USER}@${USV_HOST}" "head -n 30 ${remote_path} 2>/dev/null")
+    if echo "$header" | grep -qi "v7"; then
+        version="V7"
+    elif echo "$header" | grep -qi "v6"; then
+        version="V6"
+    elif echo "$header" | grep -qi "v5"; then
+        version="V5"
+    fi
+
+    usv_id=$(echo "$header" | grep -i "usv_id" | head -1 | sed -E 's/.*usv_id[^:]*:[[:space:]]*//I' | tr -d '\r' | awk '{print $1}')
+    if [[ -z "$usv_id" ]]; then
+        usv_id=$(echo "$header" | grep -io "usv_[0-9][0-9]" | head -1)
+    fi
+
+    if [[ -z "$usv_id" ]]; then
+        usv_id="usv_unknown"
+    elif [[ "$usv_id" =~ ^[0-9]+$ ]]; then
+        usv_id=$(printf "usv_%02d" "$usv_id")
+    elif [[ "$usv_id" =~ ^usv_[0-9]+$ ]]; then
+        num=${usv_id#usv_}
+        usv_id=$(printf "usv_%02d" "$num" 2>/dev/null || echo "$usv_id")
+    fi
+
+    echo "${version}|${usv_id}"
+}
+
+# 根据版本和 USV ID 确定本地保存路径
+get_local_dir() {
+    local version="$1"
+    local usv_id="$2"
+    echo "${LOCAL_LOG_DIR}/${version}/${usv_id}"
+}
+
 # 下载最新的日志文件
 download_latest() {
     echo -e "${YELLOW}查找最新日志...${NC}"
@@ -97,23 +137,29 @@ download_latest() {
     echo -e "最新日志: ${GREEN}${filename}${NC}"
     echo ""
     
+    meta=$(get_remote_meta "$latest")
+    version=${meta%%|*}
+    usv_id=${meta##*|}
+    local_dir=$(get_local_dir "$version" "$usv_id")
+    mkdir -p "$local_dir"
+
     echo -n "下载中... "
-    if scp "${USV_USER}@${USV_HOST}:${latest}" "${LOCAL_LOG_DIR}/" &>/dev/null; then
+    if scp "${USV_USER}@${USV_HOST}:${latest}" "${local_dir}/" &>/dev/null; then
         echo -e "${GREEN}✓ 完成${NC}"
         echo ""
-        echo -e "已保存到: ${GREEN}${LOCAL_LOG_DIR}/${filename}${NC}"
+        echo -e "已保存到: ${GREEN}${local_dir}/${filename}${NC}"
         
         # 显示文件信息
         echo ""
         echo -e "${YELLOW}文件信息:${NC}"
-        ls -lh "${LOCAL_LOG_DIR}/${filename}"
-        lines=$(wc -l < "${LOCAL_LOG_DIR}/${filename}")
+        ls -lh "${local_dir}/${filename}"
+        lines=$(wc -l < "${local_dir}/${filename}")
         echo -e "记录数: ${GREEN}$((lines - 1))${NC} 条 (不含表头)"
         
         # 提示分析
         echo ""
         echo -e "${BLUE}运行分析:${NC}"
-        echo -e "  python3 ~/usv_workspace/src/usv_control/scripts/analyze_nav_log.py ${LOCAL_LOG_DIR}/${filename}"
+        echo -e "  python3 ~/usv_workspace/src/usv_control/scripts/analyze_nav_log.py ${local_dir}/${filename}"
     else
         echo -e "${RED}✗ 下载失败${NC}"
         return 1
@@ -136,8 +182,13 @@ download_all() {
     count=0
     for file in $files; do
         filename=$(basename "$file")
-        echo -n "  下载 ${filename}... "
-        if scp "${USV_USER}@${USV_HOST}:${file}" "${LOCAL_LOG_DIR}/" &>/dev/null; then
+        meta=$(get_remote_meta "$file")
+        version=${meta%%|*}
+        usv_id=${meta##*|}
+        local_dir=$(get_local_dir "$version" "$usv_id")
+        mkdir -p "$local_dir"
+        echo -n "  下载 ${filename} -> ${local_dir}... "
+        if scp "${USV_USER}@${USV_HOST}:${file}" "${local_dir}/" &>/dev/null; then
             echo -e "${GREEN}✓${NC}"
             ((count++))
         else
@@ -163,10 +214,16 @@ download_file() {
     echo -e "${YELLOW}下载: ${filename}${NC}"
     echo ""
     
+    meta=$(get_remote_meta "$remote_path")
+    version=${meta%%|*}
+    usv_id=${meta##*|}
+    local_dir=$(get_local_dir "$version" "$usv_id")
+    mkdir -p "$local_dir"
+
     echo -n "下载中... "
-    if scp "${USV_USER}@${USV_HOST}:${remote_path}" "${LOCAL_LOG_DIR}/" &>/dev/null; then
+    if scp "${USV_USER}@${USV_HOST}:${remote_path}" "${local_dir}/" &>/dev/null; then
         echo -e "${GREEN}✓ 完成${NC}"
-        echo -e "已保存到: ${GREEN}${LOCAL_LOG_DIR}/$(basename ${filename})${NC}"
+        echo -e "已保存到: ${GREEN}${local_dir}/$(basename ${filename})${NC}"
     else
         echo -e "${RED}✗ 下载失败${NC}"
         echo -e "${YELLOW}提示: 检查文件名是否正确${NC}"
@@ -221,7 +278,7 @@ clean_local_logs() {
         return 0
     fi
     
-    count=$(ls "${LOCAL_LOG_DIR}"/nav_log_*.csv 2>/dev/null | wc -l)
+    count=$(find "${LOCAL_LOG_DIR}" -type f -name "nav_log_*.csv" 2>/dev/null | wc -l)
     
     if [ "$count" -eq 0 ]; then
         echo -e "${YELLOW}本地没有日志文件${NC}"
@@ -229,7 +286,7 @@ clean_local_logs() {
     fi
     
     echo -e "将删除 ${RED}${count}${NC} 个本地日志文件:"
-    ls -lh "${LOCAL_LOG_DIR}"/nav_log_*.csv 2>/dev/null | while read line; do
+    find "${LOCAL_LOG_DIR}" -type f -name "nav_log_*.csv" -exec ls -lh {} \; 2>/dev/null | while read line; do
         echo "  $line"
     done
     echo ""
@@ -242,7 +299,7 @@ clean_local_logs() {
     fi
     
     echo -n "删除中... "
-    if rm -f "${LOCAL_LOG_DIR}"/nav_log_*.csv 2>/dev/null; then
+    if find "${LOCAL_LOG_DIR}" -type f -name "nav_log_*.csv" -exec rm -f {} \; 2>/dev/null; then
         echo -e "${GREEN}✓ 完成${NC}"
         echo -e "已清除 ${GREEN}${count}${NC} 个本地日志文件"
     else

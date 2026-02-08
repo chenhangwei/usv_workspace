@@ -16,7 +16,8 @@ USV 导航日志分析脚本
 
 用法:
     python3 analyze_nav_log.py <log_file.csv>
-    python3 analyze_nav_log.py  # 自动使用最新的日志文件
+    python3 analyze_nav_log.py <log_dir>   # 分析目录下全部日志
+    python3 analyze_nav_log.py             # 自动使用最新的日志文件
 
 输出:
     - 轨迹图 (位置 + 目标点)
@@ -32,6 +33,8 @@ USV 导航日志分析脚本
 import sys
 import csv
 import math
+import io
+import contextlib
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -399,6 +402,72 @@ def find_yaw_offset(data: list) -> float:
     return avg
 
 
+class TeeStdout:
+    """将 stdout 同时写入多个流"""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, text: str) -> int:
+        for stream in self._streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
+def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
+    if not log_file.exists():
+        print(f"❌ 文件不存在: {log_file}")
+        return False
+
+    output_path = log_file.parent / log_file.stem
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    report_path = output_path / 'analysis_report.txt'
+    report_buffer = io.StringIO()
+    report_buffer.write("USV nav log analysis report\n")
+    report_buffer.write(f"Log file: {log_file}\n")
+    report_buffer.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    report_buffer.write(f"Output dir: {output_path}\n")
+    report_buffer.write("\n")
+
+    print(f"\n📖 加载日志: {log_file}")
+    data, header_info = load_csv(str(log_file))
+    print(f"   记录数: {len(data)}")
+    report_buffer.write(f"Records: {len(data)}\n\n")
+
+    if len(data) < 10:
+        print("⚠️  数据量太少，无法分析")
+        if batch_mode:
+            report_buffer.write("Data too small, analysis skipped.\n")
+            report_path.write_text(report_buffer.getvalue(), encoding='utf-8')
+            print(f"   📝 说明文件: {report_path}")
+            return False
+        return False
+
+    with contextlib.redirect_stdout(TeeStdout(sys.stdout, report_buffer)):
+        analyze_statistics(data, header_info)
+        find_yaw_offset(data)
+
+        if HAS_MATPLOTLIB:
+            print("\n📊 生成图表...")
+            plot_trajectory(data, output_path)
+            plot_velocity(data, output_path)
+            plot_heading_comparison(data, output_path)
+            plot_control_commands(data, output_path)
+            plot_mpc_debug(data, output_path)
+            plot_errors(data, output_path)
+            plot_v6_adaptive_tau(data, output_path, header_info)
+            print(f"\n✅ 图表已保存到: {output_path}")
+
+    report_path.write_text(report_buffer.getvalue(), encoding='utf-8')
+    print(f"   📝 说明文件: {report_path}")
+    return True
+
+
 def plot_trajectory(data: list, output_path: Path):
     """绘制轨迹图"""
     fig, ax = plt.subplots(figsize=(10, 10))
@@ -670,57 +739,40 @@ def plot_v6_adaptive_tau(data: list, output_path: Path, header_info: dict = None
 
 
 def main():
-    # 确定日志文件路径
+    # 确定日志路径
     if len(sys.argv) > 1:
-        log_file = Path(sys.argv[1])
+        input_path = Path(sys.argv[1])
     else:
-        # 自动查找最新的日志文件
         log_dir = Path.home() / 'usv_logs'
         if not log_dir.exists():
             print("❌ 未找到日志目录: ~/usv_logs")
             sys.exit(1)
-        # v5 实测日志可能按批次/艇号分目录保存，使用递归查找
         log_files = sorted(log_dir.rglob('nav_log_*.csv'))
         if not log_files:
             print("❌ 未找到日志文件")
             sys.exit(1)
-        log_file = log_files[-1]
-        print(f"📂 使用最新日志: {log_file}")
+        input_path = log_files[-1]
+        print(f"📂 使用最新日志: {input_path}")
 
-    if not log_file.exists():
-        print(f"❌ 文件不存在: {log_file}")
+    if not input_path.exists():
+        print(f"❌ 路径不存在: {input_path}")
         sys.exit(1)
 
-    # 新建输出文件夹（与csv同名）
-    output_path = log_file.parent / log_file.stem
-    output_path.mkdir(parents=True, exist_ok=True)
+    if input_path.is_dir():
+        log_files = sorted(input_path.rglob('nav_log_*.csv'))
+        if not log_files:
+            print(f"❌ 目录下未找到日志文件: {input_path}")
+            sys.exit(1)
+    else:
+        log_files = [input_path]
 
-    # 加载数据
-    print(f"\n📖 加载日志: {log_file}")
-    data, header_info = load_csv(str(log_file))
-    print(f"   记录数: {len(data)}")
-
-    if len(data) < 10:
-        print("⚠️  数据量太少，无法分析")
-        sys.exit(1)
-
-    # 统计分析
-    analyze_statistics(data, header_info)
-
-    # 航向偏移分析
-    find_yaw_offset(data)
-
-    # 可视化
-    if HAS_MATPLOTLIB:
-        print("\n📊 生成图表...")
-        plot_trajectory(data, output_path)
-        plot_velocity(data, output_path)
-        plot_heading_comparison(data, output_path)
-        plot_control_commands(data, output_path)
-        plot_mpc_debug(data, output_path)
-        plot_errors(data, output_path)
-        plot_v6_adaptive_tau(data, output_path, header_info)  # v6+ 新增
-        print(f"\n✅ 图表已保存到: {output_path}")
+    batch_mode = len(log_files) > 1
+    for idx, log_file in enumerate(log_files, start=1):
+        if batch_mode:
+            print("\n" + "="*60)
+            print(f"[{idx}/{len(log_files)}] {log_file}")
+            print("="*60)
+        analyze_log_file(log_file, batch_mode=batch_mode)
 
     print("\n" + "="*60)
     print("分析完成!")
