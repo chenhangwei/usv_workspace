@@ -76,9 +76,8 @@ def generate_launch_description():
         launch_arguments={
             'namespace': namespace,
             'simulation_mode': 'sitl',
-            'fcu_url': 'udp://127.0.0.1:14551@14555', # 尝试连接本地 SITL
-            # gcs_url 这里设为空，或者让 MAVROS 转发到本地 QGC
-            'gcs_url': 'udp://@localhost:14550' 
+            'fcu_url': 'udp://:14551@',  # UDP监听14551端口接收MAVProxy转发
+            'gcs_url': 'udp://@localhost:14550'  # 转发到本地 QGC
         }.items()
     )
 

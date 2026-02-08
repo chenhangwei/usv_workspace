@@ -44,3 +44,12 @@ int32 param_n_steps             # 预测步数
 # v5 新增参数
 float32 param_tau_omega         # 转向时间常数 (s)
 float32 param_q_cte             # CTE 权重
+
+# v6 新增: 速度自适应 tau_omega 参数
+string usv_id                   # USV 标识 (如 "usv_02", "usv_03")
+bool adaptive_tau_enabled       # 是否启用速度自适应 tau_omega
+float32 tau_omega_low_speed     # 低速时的 tau_omega (s)
+float32 tau_omega_high_speed    # 高速时的 tau_omega (s)
+float32 tau_speed_threshold_low # 低速阈值 (m/s)
+float32 tau_speed_threshold_high # 高速阈值 (m/s)
+float32 current_tau_omega       # 当前实际使用的 tau_omega (s) - 自适应实时值

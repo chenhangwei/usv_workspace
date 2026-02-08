@@ -98,6 +98,15 @@ class LogCollectorNode(Node):
         self._mpc_param_q_cte = 0.0
         self._mpc_params_received = False  # 标记是否已收到参数
         
+        # v6 新增: USV ID 和速度自适应 tau_omega 参数
+        self._usv_id = ''
+        self._adaptive_tau_enabled = False
+        self._tau_omega_low_speed = 0.0
+        self._tau_omega_high_speed = 0.0
+        self._tau_speed_threshold_low = 0.0
+        self._tau_speed_threshold_high = 0.0
+        self._current_tau_omega = 0.0
+        
         # v5 新增: 一阶惯性模型状态
         self._omega_actual = 0.0
         self._omega_cmd = 0.0
@@ -204,15 +213,22 @@ class LogCollectorNode(Node):
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
             if self._mpc_params_received:
-                self._csv_file.write(f'# MPC Parameters Configuration (v5: First-Order Inertia Model)\n')
+                self._csv_file.write(f'# MPC Parameters Configuration (v6: Adaptive Tau Model)\n')
+                self._csv_file.write(f'# USV ID: {self._usv_id}\n')
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
                 self._csv_file.write(f'# R_w (steering weight): {self._mpc_param_r_w:.2f}\n')
                 self._csv_file.write(f'# R_dw (steering rate weight): {self._mpc_param_r_dw:.2f}\n')
                 self._csv_file.write(f'# w_max (max angular velocity): {self._mpc_param_w_max:.3f} rad/s\n')
                 self._csv_file.write(f'# N_steps (prediction horizon): {self._mpc_param_n_steps}\n')
-                self._csv_file.write(f'# tau_omega (steering time constant): {self._mpc_param_tau_omega:.2f} s\n')
+                self._csv_file.write(f'# tau_omega (base steering time constant): {self._mpc_param_tau_omega:.2f} s\n')
                 self._csv_file.write(f'# Q_cte (cross-track error weight): {self._mpc_param_q_cte:.2f}\n')
+                self._csv_file.write(f'# --- v6 Adaptive Tau Parameters ---\n')
+                self._csv_file.write(f'# adaptive_tau_enabled: {self._adaptive_tau_enabled}\n')
+                self._csv_file.write(f'# tau_omega_low_speed: {self._tau_omega_low_speed:.2f} s\n')
+                self._csv_file.write(f'# tau_omega_high_speed: {self._tau_omega_high_speed:.2f} s\n')
+                self._csv_file.write(f'# tau_speed_threshold_low: {self._tau_speed_threshold_low:.2f} m/s\n')
+                self._csv_file.write(f'# tau_speed_threshold_high: {self._tau_speed_threshold_high:.2f} m/s\n')
                 self._csv_file.write(f'#\n')
             
             # 写入表头
@@ -228,7 +244,9 @@ class LogCollectorNode(Node):
                 'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl',
                 # v5 新增字段
                 'omega_actual', 'omega_cmd', 'cross_track_error', 'path_theta_deg',
-                'flight_mode', 'armed'
+                'flight_mode', 'armed',
+                # v6 新增字段
+                'current_tau_omega'
             ])
             
             # 清空模式切换事件列表
@@ -364,6 +382,15 @@ class LogCollectorNode(Node):
         # v5 新增参数
         self._mpc_param_tau_omega = getattr(msg, 'param_tau_omega', 0.0)
         self._mpc_param_q_cte = getattr(msg, 'param_q_cte', 0.0)
+        
+        # v6 新增: USV ID 和速度自适应 tau_omega 参数
+        self._usv_id = getattr(msg, 'usv_id', '')
+        self._adaptive_tau_enabled = getattr(msg, 'adaptive_tau_enabled', False)
+        self._tau_omega_low_speed = getattr(msg, 'tau_omega_low_speed', 0.0)
+        self._tau_omega_high_speed = getattr(msg, 'tau_omega_high_speed', 0.0)
+        self._tau_speed_threshold_low = getattr(msg, 'tau_speed_threshold_low', 0.0)
+        self._tau_speed_threshold_high = getattr(msg, 'tau_speed_threshold_high', 0.0)
+        self._current_tau_omega = getattr(msg, 'current_tau_omega', 0.0)
         
         # v5 新增: 一阶惯性模型状态
         self._omega_actual = getattr(msg, 'omega_actual', 0.0)
@@ -513,7 +540,9 @@ class LogCollectorNode(Node):
             f'{self._cross_track_error:.4f}',
             f'{math.degrees(self._path_theta):.2f}',
             f'{self._flight_mode}',
-            f'{1 if self._is_armed else 0}'
+            f'{1 if self._is_armed else 0}',
+            # v6 新增字段
+            f'{self._current_tau_omega:.3f}'
         ])
         self._record_count += 1
     

@@ -13,21 +13,20 @@ def generate_launch_description():
     )
     
     # SITL connection string
-    # Default ArduPilot SITL uses UDP port 14550 for GCS, but allows connection on other ports?
-    # MAVROS usually connects to bind port 14540 (local) or connects remote.
-    # Standard: 'udp://127.0.0.1:14551@14555' (MAVROS bind 14551, target 14555)
+    # ⚠️ sim_vehicle.py 启动时 MAVProxy 会占用 tcp:5760，所以必须用 --out 转发给 MAVROS
+    # SITL 启动命令需加: --out=udp:127.0.0.1:14551
+    # MAVROS 通过 UDP 监听 14551 端口接收转发的数据
     fcu_url_arg = DeclareLaunchArgument(
         'fcu_url',
-        default_value='udp://127.0.0.1:14551@14555',
-        description='MAVROS FCU URL for SITL'
+        default_value='udp://:14551@',
+        description='MAVROS FCU URL (UDP监听14551端口接收MAVProxy转发)'
     )
 
-    # GCS URL
-    # Can bridge to local QGC on 14550
+    # GCS URL - 转发到本地 QGroundControl (可选)
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
         default_value='udp://@localhost:14550',
-        description='MAVROS GCS URL'
+        description='MAVROS GCS URL (转发到本地QGC)'
     )
 
     namespace = LaunchConfiguration('namespace')
@@ -47,9 +46,7 @@ def generate_launch_description():
             'namespace': namespace,
             'fcu_url': fcu_url,
             'gcs_url': gcs_url,
-            # We might want to disable some hardware specific nodes if they fail gracefully?
-            # Or assume SITL replaces FCU and other hardware is just missing/ignored.
-            # usv_launch doesn't have many flags to disable drivers yet, except lidar maybe.
+            'simulation_mode': 'sitl',
         }.items()
     )
 

@@ -1,0 +1,37 @@
+# =============================================================================
+# USV SITL 仿真模式参数覆盖文件
+# 
+# 用法: 在 sitl_launch.py 中替换或追加到 usv_params.yaml
+#       也可以手动运行时指定:
+#       ros2 launch usv_bringup usv_launch.py \
+#           simulation_mode:=sitl \
+#           fcu_url:=tcp://127.0.0.1:5760 \
+#           param_file:=/path/to/usv_params_sitl.yaml
+#
+# ⚠️ 注意: 此文件中的 gps_origin 必须与 SITL 启动位置一致！
+# =============================================================================
+
+# Auto Set Home 参数（SITL 中 GPS 立即收敛，缩短延迟）
+/**/auto_set_home_node:
+  ros__parameters:
+    set_delay_sec: 3.0                      # SITL GPS 秒定位，3 秒足够
+    use_current_gps: true                   # 使用 SITL 当前模拟 GPS 位置
+
+# GPS 坐标转换（使用 SITL 默认 Canberra 位置）
+# ⚠️ 如果你改了 SITL 启动位置，这里也要同步修改！
+/**/gps_to_local_node:
+  ros__parameters:
+    gps_origin_lat: 22.5180977              # 与 SITL --custom-location 一致
+    gps_origin_lon: 113.9007239             # 与 SITL --custom-location 一致
+    gps_origin_alt: 0.0
+    publish_rate: 10.0
+    enable_gps_to_local: true
+    coordinate_yaw_offset_deg: 0.0
+
+/**/coord_transform_node:
+  ros__parameters:
+    gps_origin_lat: 22.5180977
+    gps_origin_lon: 113.9007239
+    gps_origin_alt: 0.0
+    enable_coord_transform: true
+    use_global_position_target: true

@@ -47,9 +47,21 @@ except ImportError:
     print("   安装: pip3 install matplotlib")
 
 
-def load_csv(filepath: str) -> list:
-    """加载 CSV 文件"""
+def load_csv(filepath: str) -> tuple:
+    """加载 CSV 文件
+    
+    Returns:
+        tuple: (data, header_info)
+            - data: 数据行列表
+            - header_info: 日志头信息字典 (USV ID, 参数等)
+    """
     data = []
+    header_info = {
+        'usv_id': 'unknown',
+        'version': 'v5',  # 默认 v5
+        'params': {}
+    }
+    
     def _to_number(value: Any):
         if value is None:
             return None
@@ -63,17 +75,41 @@ def load_csv(filepath: str) -> list:
         except ValueError:
             return s
 
+    def _parse_header_line(line: str):
+        """解析日志头注释行中的参数"""
+        line = line.lstrip('#').strip()
+        if ':' in line:
+            key, _, value = line.partition(':')
+            key = key.strip().lower().replace(' ', '_').replace('(', '').replace(')', '')
+            value = value.strip()
+            # 解析特定字段
+            if 'usv_id' in key or key == 'usv_id':
+                header_info['usv_id'] = value
+            elif 'v6' in line.lower() or 'adaptive' in line.lower():
+                header_info['version'] = 'v6'
+            elif 'v7' in line.lower():
+                header_info['version'] = 'v7'
+            # 解析数值参数
+            if any(k in key for k in ['tau', 'weight', 'threshold', 'q_', 'r_', 'w_max', 'n_steps']):
+                try:
+                    header_info['params'][key] = float(value.split()[0])
+                except (ValueError, IndexError):
+                    header_info['params'][key] = value
+
     with open(filepath, 'r', errors='replace', newline='') as f:
-        # 兼容 v5 日志：文件头可能包含若干以 # 开头的注释/参数行
-        # 找到第一行非注释作为 CSV header
+        # 兼容 v5/v6 日志：文件头可能包含若干以 # 开头的注释/参数行
+        # 解析并找到第一行非注释作为 CSV header
         while True:
             pos = f.tell()
             line = f.readline()
             if not line:
-                return []
+                return [], header_info
             if line.strip() and not line.lstrip().startswith('#'):
                 f.seek(pos)
                 break
+            # 解析日志头参数
+            if line.lstrip().startswith('#'):
+                _parse_header_line(line)
 
         reader = csv.DictReader(f)
         for row in reader:
@@ -87,14 +123,35 @@ def load_csv(filepath: str) -> list:
             for key, value in row.items():
                 parsed[key] = _to_number(value)
             data.append(parsed)
-    return data
+    
+    # 检测 v6 特有字段
+    if data and 'current_tau_omega' in data[0]:
+        if header_info['version'] == 'v5':
+            header_info['version'] = 'v6'
+    
+    return data, header_info
 
 
-def analyze_statistics(data: list):
+def analyze_statistics(data: list, header_info: dict = None):
     """统计分析"""
     print("\n" + "="*60)
     print("📊 统计分析")
     print("="*60)
+    
+    # 显示 USV ID 和版本信息 (v6+)
+    if header_info:
+        usv_id = header_info.get('usv_id', 'unknown')
+        version = header_info.get('version', 'v5')
+        print(f"\n🚢 USV: {usv_id}  (日志版本: {version})")
+        
+        # 显示 v6 自适应参数
+        params = header_info.get('params', {})
+        if params:
+            tau_params = {k: v for k, v in params.items() if 'tau' in k}
+            if tau_params:
+                print(f"\n🔧 自适应 Tau 参数:")
+                for k, v in tau_params.items():
+                    print(f"   {k}: {v}")
     
     # 基本信息
     duration = data[-1]['timestamp'] - data[0]['timestamp']
@@ -243,6 +300,28 @@ def analyze_statistics(data: list):
         print(f"   cmd_omega: [{min(om_cmds):.3f}, {max(om_cmds):.3f}] rad/s")
         if omax > 1e-6:
             print(f"   cmd_omega 触顶比例(~{omax:.3f}): {_sat_ratio(om_cmds, omax)*100:.1f}%")
+        
+        # 按配置的 w_max 计算真实饱和率 (v6+)
+        if header_info:
+            w_max_cfg = header_info.get('params', {}).get('w_max_max_angular_velocity', 0.5)
+            if isinstance(w_max_cfg, (int, float)) and w_max_cfg > 0:
+                true_sat = _sat_ratio(om_cmds, w_max_cfg, tol=0.01)
+                print(f"   → 配置 w_max={w_max_cfg:.2f} 饱和率: {true_sat*100:.1f}%")
+    
+    # v6+ 振荡频率分析 (零交叉法)
+    if om_cmds and len(om_cmds) > 20:
+        zero_crossings = 0
+        for i in range(1, len(om_cmds)):
+            if om_cmds[i-1] * om_cmds[i] < 0:  # 符号变化
+                zero_crossings += 1
+        duration_s = data[-1]['timestamp'] - data[0]['timestamp']
+        if duration_s > 0:
+            osc_freq = zero_crossings / (2 * duration_s)  # 每个周期2次过零
+            print(f"\n📈 振荡分析:")
+            print(f"   角速度方向反转: {zero_crossings} 次")
+            print(f"   估计振荡频率: {osc_freq:.2f} Hz ({1/osc_freq:.1f}s/周期)" if osc_freq > 0.01 else "   估计振荡频率: 无明显振荡")
+            if osc_freq > 0.3:
+                print(f"   ⚠️  振荡频率较高，可能存在 S 形轨迹问题")
 
 
 def plot_errors(data: list, output_path: Path):
@@ -518,6 +597,78 @@ def plot_mpc_debug(data: list, output_path: Path):
     print(f"   📈 MPC 调试图: {output_path / 'mpc_debug.png'}")
 
 
+def plot_v6_adaptive_tau(data: list, output_path: Path, header_info: dict = None):
+    """绘制 V6 自适应 tau_omega 分析图"""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    # 检查是否有 v6 字段
+    if 'current_tau_omega' not in data[0]:
+        return
+    
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True)
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    
+    # 获取 USV ID 用于标题
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    
+    # 1. 当前 tau_omega vs 速度
+    ax = axes[0]
+    tau = [d.get('current_tau_omega', 0) for d in data]
+    speed = [d.get('velocity_speed', 0) for d in data]
+    
+    ax2 = ax.twinx()
+    ln1 = ax.plot(t, tau, 'b-', label='current_tau_omega', linewidth=1.5)
+    ln2 = ax2.plot(t, speed, 'g-', alpha=0.5, label='speed')
+    
+    ax.set_ylabel('tau_omega (s)', color='blue')
+    ax2.set_ylabel('speed (m/s)', color='green')
+    ax.set_title(f'V6 Adaptive Tau Analysis - {usv_id}')
+    
+    # 绘制配置的阈值线
+    if header_info:
+        params = header_info.get('params', {})
+        tau_low = params.get('tau_omega_low_speed', 0.8)
+        tau_high = params.get('tau_omega_high_speed', 0.4)
+        if isinstance(tau_low, (int, float)):
+            ax.axhline(y=tau_low, color='b', linestyle='--', alpha=0.5, label=f'tau_low={tau_low:.1f}')
+        if isinstance(tau_high, (int, float)):
+            ax.axhline(y=tau_high, color='b', linestyle=':', alpha=0.5, label=f'tau_high={tau_high:.1f}')
+    
+    lns = ln1 + ln2
+    labs = [l.get_label() for l in lns]
+    ax.legend(lns, labs, loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    # 2. 角速度命令 vs 实际角速度
+    ax = axes[1]
+    omega_cmd = [d.get('omega_cmd', 0) for d in data]
+    omega_actual = [d.get('omega_actual', 0) for d in data]
+    
+    ax.plot(t, omega_cmd, 'r-', label='omega_cmd', alpha=0.7)
+    ax.plot(t, omega_actual, 'b-', label='omega_actual', linewidth=1.5)
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.set_ylabel('Angular Velocity (rad/s)')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    # 3. 横向偏差 CTE
+    ax = axes[2]
+    cte = [d.get('cross_track_error', 0) for d in data]
+    ax.plot(t, cte, 'purple', label='Cross Track Error')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.fill_between(t, cte, alpha=0.3, color='purple')
+    ax.set_ylabel('CTE (m)')
+    ax.set_xlabel('Time (s)')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'v6_adaptive_tau.png', dpi=150)
+    plt.close()
+    print(f"   📈 V6 自适应 Tau 图: {output_path / 'v6_adaptive_tau.png'}")
+
+
 def main():
     # 确定日志文件路径
     if len(sys.argv) > 1:
@@ -546,7 +697,7 @@ def main():
 
     # 加载数据
     print(f"\n📖 加载日志: {log_file}")
-    data = load_csv(str(log_file))
+    data, header_info = load_csv(str(log_file))
     print(f"   记录数: {len(data)}")
 
     if len(data) < 10:
@@ -554,7 +705,7 @@ def main():
         sys.exit(1)
 
     # 统计分析
-    analyze_statistics(data)
+    analyze_statistics(data, header_info)
 
     # 航向偏移分析
     find_yaw_offset(data)
@@ -568,6 +719,7 @@ def main():
         plot_control_commands(data, output_path)
         plot_mpc_debug(data, output_path)
         plot_errors(data, output_path)
+        plot_v6_adaptive_tau(data, output_path, header_info)  # v6+ 新增
         print(f"\n✅ 图表已保存到: {output_path}")
 
     print("\n" + "="*60)

@@ -309,3 +309,48 @@ mavros:
     max_play_interval: 10                   # 最大播放间隔（秒）
     min_play_count: 1                       # 最小播放次数
     max_play_count: 3                       # 最大播放次数
+
+# =============================================================================
+# USV_03 专用参数配置 (v7)
+# 
+# 问题诊断:
+# - USV_03 在 yaw_rate 模式下出现 S 形振荡（47% 转向饱和）
+# - USV_02 正常（18% 转向饱和）
+# - 两船在 RTL/位置模式下均正常 → 非硬件问题
+# - 飞控参数完全一致 → 问题在于 yaw_rate 响应差异
+# 
+# 解决方案:
+# - 增大 tau_omega: 1.2s (原 0.4-0.8s) → 模型更保守，适应慢响应
+# - 增大 mpc_weight_steering: 15 (原 5) → 惩罚大转向
+# - 降低 max_angular_velocity: 0.35 rad/s (原 0.5) → 限制转向幅度
+# =============================================================================
+/usv_03/velocity_controller_node:
+  ros__parameters:
+    # ========== v7: USV_03 专用保守参数 ==========
+    # 覆盖通用配置中的关键参数
+    
+    # 核心: 增大转向时间常数 (适应 USV_03 慢响应特性)
+    mpc_tau_omega: 1.2                      # 转向时间常数 (秒) - 从 0.4 增大到 1.2
+                                            # USV_03 转向响应慢，需更保守的预测模型
+    
+    # 自适应 tau_omega 参数 (均增大)
+    adaptive_tau_enabled: true              # 保持启用速度自适应
+    tau_omega_low_speed: 1.5                # 低速时 tau_omega (秒) - 从 0.8 增大到 1.5
+    tau_omega_high_speed: 1.0               # 高速时 tau_omega (秒) - 从 0.4 增大到 1.0
+    tau_speed_threshold_low: 0.15           # 低速阈值 (m/s)
+    tau_speed_threshold_high: 0.35          # 高速阈值 (m/s)
+    
+    # 增大控制惩罚权重 (抑制激进转向)
+    mpc_weight_steering: 15.0               # R_w: 角速度惩罚 - 从 5 增大到 15
+    mpc_weight_steering_rate: 20.0          # R_dw: 角加速度惩罚 - 从 10 增大到 20
+    
+    # 增大 CTE 权重 (补偿 R_w 增大带来的横向偏差)
+    mpc_weight_cte: 20.0                    # Q_cte: 横向偏差权重 - 从 15 增大到 20
+    
+    # 降低最大角速度 (限制转向幅度)
+    max_angular_velocity: 0.35              # 最大角速度 - 从 0.5 降低到 0.35 rad/s
+    
+    # 增大角速度滤波系数 (更平滑的估计)
+    angular_velocity_filter: 0.5            # 滤波系数 - 从 0.4 增大到 0.5
+    
+    # 其他参数保持默认 (继承通用配置)

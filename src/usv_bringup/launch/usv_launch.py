@@ -36,7 +36,7 @@ from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAct
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, LaunchConfigurationEquals, LaunchConfigurationNotEquals
 
 
 def generate_launch_description():
@@ -64,6 +64,14 @@ def generate_launch_description():
     # =============================================================================
     # 参数声明
     # =============================================================================
+
+    # 仿真模式参数
+    # 'hardware' = 真实硬件, 'sitl' = ArduPilot SITL 仿真, 'simple' = 简单仿真
+    simulation_mode_arg = DeclareLaunchArgument(
+        'simulation_mode',
+        default_value='hardware',
+        description='运行模式: hardware(真实硬件), sitl(ArduPilot SITL), simple(简单仿真)'
+    )
 
     # 命名空间参数
     namespace_arg = DeclareLaunchArgument(
@@ -149,6 +157,7 @@ def generate_launch_description():
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
     enable_log_collector = LaunchConfiguration('enable_log_collector')
+    simulation_mode = LaunchConfiguration('simulation_mode')
     #lidar_port = LaunchConfiguration('lidar_port')
 
     # =============================================================================
@@ -315,43 +324,47 @@ def generate_launch_description():
     # 辅助功能节点
     # =============================================================================
 
-    # LED控制节点
+    # LED控制节点（仅硬件模式）
     usv_led_node = Node(
         package='usv_led',
         executable='usv_led_node',
         name='usv_led_node',
         namespace=namespace,
         output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         parameters=[param_file]
     )
 
-    # 声音控制节点
+    # 声音控制节点（仅硬件模式）
     usv_sound_node = Node(
         package='usv_sound',
         executable='usv_sound_node',
         name='usv_sound_node',
         namespace=namespace,
         output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         parameters=[param_file]
     )
 
-    # 风扇控制节点
+    # 风扇控制节点（仅硬件模式）
     usv_fan_node = Node(
         package='usv_fan',
         executable='usv_fan_node',
         name='usv_fan_node',
         namespace=namespace,
         output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         parameters=[param_file]
     )
 
-    # 鸭头动作控制节点
+    # 鸭头动作控制节点（仅硬件模式）
     usv_head_action_node = Node(
         package='usv_action',
         executable='usv_head_action_node',
         name='usv_head_action_node',
         namespace=namespace,
         output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         parameters=[param_file]
     )
 
@@ -372,23 +385,26 @@ def generate_launch_description():
     # 飞控通信节点
     # =============================================================================
 
-    # MAVROS节点
+    # =========================================================================
+    # MAVROS 节点 - 硬件模式 (simulation_mode == 'hardware')
+    # =========================================================================
     mavros_node = Node(
         package='mavros',
         executable='mavros_node',
         namespace=namespace,
         output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         parameters=[
-            param_file,  # 加载YAML文件的其他参数
+            param_file,
             {
                 # 核心连接参数
                 'fcu_url': fcu_url,
                 'gcs_url': gcs_url,
                 
-                # MAVLink 身份配置 (直接在启动文件设置,优先级最高)
+                # MAVLink 身份配置 (硬件模式)
                 'system_id': 102,           # MAVROS 自身系统 ID
                 'component_id': 191,        # MAVROS 自身组件 ID
-                'target_system_id':2,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
+                'target_system_id': 2,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
                 'target_component_id': 1,   # 目标飞控组件 ID (固定为1)
                 
                 # ==================== 插件黑名单（加速启动，关键优化！）====================
@@ -480,6 +496,96 @@ def generate_launch_description():
         ]
     )
 
+    # =========================================================================
+    # MAVROS 节点 - SITL 仿真模式 (simulation_mode == 'sitl')
+    # =========================================================================
+    # SITL 模式关键差异：
+    #   - system_id: 255 (标准 GCS ID)
+    #   - target_system_id: 1 (SITL 默认 sysid=1)
+    #   - fcu_url: tcp://127.0.0.1:5760 (由 sitl_launch.py 传入)
+    #   - 减少不必要的插件禁用（SITL 中一些插件有用）
+    mavros_node_sitl = Node(
+        package='mavros',
+        executable='mavros_node',
+        namespace=namespace,
+        output='screen',
+        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        parameters=[
+            param_file,
+            {
+                # 核心连接参数
+                'fcu_url': fcu_url,
+                'gcs_url': gcs_url,
+                
+                # MAVLink 身份配置 (SITL 模式)
+                # ⚠️ system_id 不能用 255，因为 MAVProxy 已经用了 255，会冲突
+                'system_id': 240,           # MAVROS 系统 ID (避开 MAVProxy 的 255)
+                'component_id': 191,        # MAVROS 组件 ID
+                'target_system_id': 1,      # SITL 默认系统 ID = 1
+                'target_component_id': 1,   # 飞控组件 ID
+                
+                # SITL 模式下的插件黑名单（比硬件模式少禁用一些）
+                'plugin_denylist': [
+                    'actuator_control',
+                    'adsb',
+                    'cam_imu_sync',
+                    'camera',
+                    'cellular_status',
+                    'companion_process_status',
+                    'debug_value',
+                    'distance_sensor',
+                    'esc_status',
+                    'esc_telemetry',
+                    'fake_gps',
+                    'ftp',
+                    'gimbal_control',
+                    'gps_input',
+                    'gps_rtk',
+                    'guided_target',
+                    'landing_target',
+                    'log_transfer',
+                    'mag_calibration_status',
+                    'manual_control',
+                    'mocap_pose_estimate',
+                    'mount_control',
+                    'nav_controller_output',
+                    'obstacle_distance',
+                    'odometry',
+                    'onboard_computer_status',
+                    'open_drone_id',
+                    'optical_flow',
+                    'play_tune',
+                    'px4flow',
+                    'rangefinder',
+                    'setpoint_accel',
+                    'setpoint_attitude',
+                    'setpoint_position',
+                    'setpoint_trajectory',
+                    'setpoint_velocity',
+                    'tdr_radio',
+                    'terrain',
+                    'trajectory',
+                    'tunnel',
+                    'vibration',
+                    'vision_pose',
+                    'vision_speed',
+                    'wheel_odometry',
+                    'wind_estimation',
+                    'rallypoint',
+                    'geofence',
+                ],
+                
+                # 性能参数
+                'sys.disable_diag': True,
+                
+                # 连接参数（SITL 连接更快，超时可以短一些）
+                'conn.timeout': 15.0,
+                'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
+                'conn.heartbeat_rate': 1.0,
+            },
+        ]
+    )
+
     # =============================================================================
     # 传感器相关节点
     # =============================================================================
@@ -536,6 +642,7 @@ def generate_launch_description():
     # ⚠️ 关键修复：延长启动时间，避免 GPS 高度未收敛导致 z 坐标偏移 -17m
     delayed_home_node = TimerAction(
         period=2.0,  # 等待 MAVROS + GPS 就绪（2秒确保 GPS 数据开始输出）
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         actions=[
            auto_set_home_node,    # 自动设置 EKF Origin（必须在 GPS 高度稳定后）
         ]
@@ -546,6 +653,7 @@ def generate_launch_description():
     # ⚠️ 关键：必须等待 GPS 高度充分收敛后再启动依赖 EKF 的节点
     delayed_control_nodes = TimerAction(
         period=13.0,
+        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
         actions=[
             gps_to_local_node,        # GPS→本地坐标转换（新增，优先启动）
             coord_transform_node,     # XYZ→GPS坐标转换（新增）
@@ -557,19 +665,53 @@ def generate_launch_description():
             # usv_avoidance_node,     # 避障功能（已注释）
         ]
     )
+
+    # =========================================================================
+    # SITL 模式启动序列（延迟更短，SITL GPS 秒定位）
+    # =========================================================================
+    delayed_home_node_sitl = TimerAction(
+        period=1.0,  # SITL 中 GPS 立即就绪
+        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        actions=[
+           auto_set_home_node,
+        ]
+    )
+    
+    delayed_control_nodes_sitl = TimerAction(
+        period=5.0,  # SITL 中 EKF 收敛更快，5 秒足够
+        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        actions=[
+            gps_to_local_node,
+            coord_transform_node,
+            navigate_to_point_node,
+            usv_status_node,
+            usv_control_node,
+            usv_command_node,
+            velocity_controller_node,
+        ]
+    )
     
     # =============================================================================
     # 启动描述配置
     # =============================================================================
 
-    # 启动顺序（修复后总时间约 13 秒，确保 GPS 高度充分收敛）：
+    # =====================================================================
+    # 硬件模式启动顺序（总时间约 13 秒，确保 GPS 高度充分收敛）：
     # 阶段 1 (t=0s):   启动 MAVROS（开始连接飞控，GPS 数据开始输出）
     # 阶段 2 (t=2s):   启动 auto_set_home_node（等待 GPS 水平定位就绪）
     # 阶段 3 (t=2-12s): auto_set_home_node 内部等待 10 秒（GPS 高度收敛）
     # 阶段 4 (t=13s):  启动控制节点（EKF 原点已正确设置，z 坐标无偏移）
     # 阶段 5 (t=0s):   辅助功能节点并行启动（不依赖 MAVROS）
+    #
+    # SITL 模式启动顺序（总时间约 5 秒）：
+    # 阶段 1 (t=0s):   启动 MAVROS（TCP 连接 SITL）
+    # 阶段 2 (t=1s):   启动 auto_set_home_node（SITL GPS 立即就绪）
+    # 阶段 3 (t=5s):   启动控制节点
+    # 辅助硬件节点: 不启动（SITL 无硬件外设）
+    # =====================================================================
     return LaunchDescription([
         # 基础参数配置
+        simulation_mode_arg,
         namespace_arg,
         param_file_arg,
         fcu_url_arg,
@@ -577,24 +719,26 @@ def generate_launch_description():
         enable_log_collector_arg,
         #lidar_port_arg,
         
-        # 阶段 1：立即启动 MAVROS 和关键服务
-        mavros_node,               # 飞控通信（优先启动）
-        # shutdown_service_node,     # 优雅关闭服务（禁用）
-       
+        # ============================
+        # 硬件模式 (simulation_mode == 'hardware')
+        # ============================
+        mavros_node,               # 飞控通信 - 硬件模式（条件启动）
+        delayed_home_node,         # 延迟启动 home 设置
+        delayed_control_nodes,     # 延迟启动控制节点
         
-        # 阶段 2：延迟 0.5 秒启动 EKF Origin 设置（关键优化）
-        delayed_home_node,
-        
-        # 阶段 3：延迟 3 秒启动控制节点
-        delayed_control_nodes,
-        
-        # 第三阶段：辅助功能节点（不依赖 MAVROS，可并行启动）
+        # 辅助功能节点（仅硬件模式，SITL 无硬件外设）
         usv_led_node,          # LED控制
         usv_sound_node,        # 声音控制
         usv_fan_node,          # 风扇控制
-        #usv_ultrasonic_radar_node,  # 超声波雷达
         usv_head_action_node,       # 鸭头动作控制
-        log_collector_node,         # 导航日志收集（通过 enable_log_collector 参数控制）
+        log_collector_node,         # 导航日志收集
+        
+        # ============================
+        # SITL 模式 (simulation_mode == 'sitl')
+        # ============================
+        mavros_node_sitl,          # 飞控通信 - SITL 模式（条件启动）
+        delayed_home_node_sitl,    # 延迟启动 home 设置（SITL 延迟短）
+        delayed_control_nodes_sitl,# 延迟启动控制节点（SITL 延迟短）
         
         # 可选节点（根据硬件配置启用）
         # usv_uwb_node,             # UWB定位

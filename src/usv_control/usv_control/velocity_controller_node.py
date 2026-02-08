@@ -86,6 +86,10 @@ class VelocityControllerNode(Node):
     def __init__(self):
         super().__init__('velocity_controller_node')
         
+        # USV ID (从命名空间提取，如 /usv_02 -> usv_02)
+        ns = self.get_namespace()
+        self._usv_id = ns.strip('/') if ns and ns != '/' else 'unknown'
+        
         # 回调组
         self.callback_group = ReentrantCallbackGroup()
         
@@ -1437,6 +1441,15 @@ class VelocityControllerNode(Node):
             # v5 新增参数
             debug_msg.param_tau_omega = float(self._mpc_params['tau_omega'])
             debug_msg.param_q_cte = float(self._mpc_params['q_cte'])
+            
+            # v6 新增: USV ID 和速度自适应 tau_omega 参数
+            debug_msg.usv_id = self._usv_id
+            debug_msg.adaptive_tau_enabled = self._adaptive_tau_enabled
+            debug_msg.tau_omega_low_speed = float(self._tau_omega_low)
+            debug_msg.tau_omega_high_speed = float(self._tau_omega_high)
+            debug_msg.tau_speed_threshold_low = float(self._tau_speed_low)
+            debug_msg.tau_speed_threshold_high = float(self._tau_speed_high)
+            debug_msg.current_tau_omega = float(self._current_tau_omega)
             
             self.debug_pub.publish(debug_msg)
         except Exception as e:
