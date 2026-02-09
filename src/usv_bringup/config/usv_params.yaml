@@ -208,19 +208,19 @@ mavros:
     #
     mpc_prediction_steps: 20                # 预测步数 N (dt=0.1s, N=20 -> 预测2.0秒)
     mpc_weight_pos: 10.0                    # Q_pos: 沿航线进度权重
-    mpc_weight_heading: 8.0                 # Q_theta: 航向误差权重 (v5适当降低)
-    mpc_weight_steering: 15.0               # R_w: 角速度惩罚 (v9: 5→15, 平衡CTE代价, 消除bang-bang)
-    mpc_weight_steering_rate: 25.0          # R_dw: 角加速度惩罚 (v9: 10→25, 强制平滑过渡)
+    mpc_weight_heading: 3.0                 # Q_theta: 航向误差权重 (v12: 5→3, 不急于修正航向)
+    mpc_weight_steering: 60.0               # R_w: 角速度惩罚 (v13: 55→60, 配合τ_min提升)
+    mpc_weight_steering_rate: 100.0         # R_dw: 角加速度惩罚 (v13: 80→100, 极平滑角速度变化率)
     
     # v5 新增参数 (一阶惯性转向模型)
     mpc_tau_omega: 0.4                      # 转向时间常数 (秒) - 核心参数!
                                             # 调参建议:
                                             #   - 还在画龙 → 调大到 0.5~0.6
                                             #   - 响应迟钝 → 调小到 0.3
-    mpc_weight_cte: 12.0                    # Cross Track Error权重 (v9: 15→12, 略放松换平滑)
+    mpc_weight_cte: 3.0                     # Cross Track Error权重 (v12: 5→3, 慢慢修正即可,不追求精确跟线)
                                             # 调参建议:
-                                            #   - 横向偏差大 → 调大到 15~20
-                                            #   - 轨迹不平滑 → 调小到 8~10
+                                            #   - 横向偏差大 → 调大到 5~8
+                                            #   - 轨迹不平滑 → 调小到 2~3
     
     # ========== v6 (2/04): 速度自适应 tau_omega - 根治低速S形振荡 ==========
     # 核心原理:
@@ -241,9 +241,9 @@ mavros:
     tau_speed_threshold_high: 0.50          # 高速阈值 (m/s)
     
     # ==================== 速度参数 ====================
-    cruise_speed: 0.6                       # 巡航速度（m/s）
-    max_angular_velocity: 0.35              # 最大角速度（rad/s）(v9: 0.5→0.35, v=0.3时转弯半径0.86m)
-    min_speed: 0.3                         # 最小速度（m/s）
+    cruise_speed: 0.35                      # 巡航速度（m/s）(v11: 0.4→0.35, 略降速配合更稳定行驶)
+    max_angular_velocity: 0.40              # 最大角速度（rad/s）(v13: 0.50→0.40, 配合高R_w+高τ_min不需要那么大范围)
+    min_speed: 0.25                         # 最小速度（m/s）(v10: 0.3→0.25, 允许更低速转弯)
     
     # ==================== 到达判断 ====================
     # ⚠️ 这两个参数与 navigate_to_point_node 的阈值通过话题自动同步
@@ -277,13 +277,13 @@ mavros:
     #   - ampc_enabled=false 时退化为标准 MPC v5 + v6 速度自适应
     #
     ampc_enabled: true                      # 启用 AMPC 在线辨识 (推荐 true)
-    ampc_rls_forgetting_factor: 0.97        # RLS 遗忘因子 λ (0.9-0.99)
+    ampc_rls_forgetting_factor: 0.995       # RLS 遗忘因子 λ (v11: 0.99→0.995, 更长记忆让τ收敛更稳定)
                                             #   越小 → 适应越快但越吵
                                             #   越大 → 越稳定但适应越慢
-    ampc_heading_observer_alpha: 0.3        # 航向速率滤波系数 (0-1)
+    ampc_heading_observer_alpha: 0.08       # 航向速率滤波系数 (v12: 0.12→0.08, 航向噪声0.29仍高,加强滤波)
                                             #   越大 → 跟踪越快但越吵
                                             #   越小 → 越平滑但延迟越大
-    ampc_tau_min: 0.20                      # τ 估计下限 (秒) (v9: 0.1→0.20, 防止不现实的超快响应)
+    ampc_tau_min: 0.30                      # τ 估计下限 (秒) (v13: 0.15→0.30, τ连续3次打下限! 强制MPC保守预测转向)
     ampc_tau_max: 1.5                       # τ 估计上限 (秒) (v9b: 3.0→1.5, USV真实τ不超过1.5s)
     ampc_rebuild_threshold: 0.15            # τ 变化超此比例才重建 MPC
     ampc_saturation_tau_boost: 1.02          # 慢性饱和时 τ 升压因子 (v9b: 1.15→1.02, 让RLS自行辨识)
@@ -350,9 +350,14 @@ mavros:
 # =============================================================================
 /usv_03/velocity_controller_node:
   ros__parameters:
-    # v8: 回退所有参数到默认值, 由 AMPC 自动适应
-    # 如果 AMPC 效果不佳, 可将 ampc_enabled 设为 false 并取消下方注释回退到 v7
+    # v10: USV_03 专属抗震荡参数
+    # 数据分析: USV_03 τ_est≈0.26s, CTE_std=0.22m, 饱和率62%, S形严重
+    # 策略: 在共享v10参数基础上进一步增大转向惩罚
     ampc_enabled: true                      # AMPC 在线辨识
+    mpc_weight_steering: 80.0              # R_w: 65→80 (v13: USV_03专属, 配合τ_min=0.30强力压饱和)
+    mpc_weight_steering_rate: 120.0         # R_dw: 90→120 (v13: USV_03专属, 极平滑角速度变化率)
+    mpc_weight_cte: 3.0                     # Q_cte: 慢慢修正到航线即可
+    cruise_speed: 0.30                      # 巡航速度 (USV_03低速行驶)
     
     # v7 参数备份 (如果 AMPC 效果不理想，取消以下注释并设 ampc_enabled: false)
     # mpc_tau_omega: 1.2

@@ -52,21 +52,30 @@
     # MPC 权重参数 (SITL 调优)
     mpc_weight_pos: 10.0                    # Q_pos: 位置权重 (保持不变)
     mpc_weight_heading: 8.0                 # Q_theta: 航向权重 (保持不变)
-    mpc_weight_steering: 8.0                # R_w: 转向惩罚 ↑ (5→8, 适度抑制频繁转向)
-    mpc_weight_steering_rate: 25.0          # R_dw: 转向速率惩罚 ↑↑ (10→25, 关键抗振荡)
-    mpc_weight_cte: 15.0                    # Q_cte: 横向偏差权重 (15, 降低避免过度纠偏)
+    mpc_weight_steering: 20.0               # R_w: 转向惩罚 ↑↑ (8→20, 抑制S形高频震荡)
+    mpc_weight_steering_rate: 40.0          # R_dw: 转向速率惩罚 ↑↑ (25→40, 强制平滑角速度输出)
+    mpc_weight_cte: 12.0                    # Q_cte: 横向偏差权重 (15→12, 降低以减少过度纠偏引起的震荡)
     
     # v5 转向时间常数 (SITL 仿真船响应更快, 需要更小的 tau)
     mpc_tau_omega: 0.4                      # 基础 tau_omega (0.4s, 匹配仿真响应)
     
     # v6 速度自适应 tau_omega (关键调优: 大幅降低以适配仿真)
     adaptive_tau_enabled: true
-    tau_omega_low_speed: 0.6                # 低速 tau: 1.50→0.6 (仿真低速转向仍较快)
-    tau_omega_high_speed: 0.3               # 高速 tau: 1.00→0.3 (仿真高速舵效好)
-    tau_speed_threshold_low: 0.10           # 低速阈值: 0.15→0.10 (仿真中速度波动小)
-    tau_speed_threshold_high: 0.30          # 高速阈值: 0.35→0.30
+    tau_omega_low_speed: 0.6                # 低速 tau: 仿真低速转向仍较快
+    tau_omega_high_speed: 0.3               # 高速 tau: 仿真高速舵效好
+    tau_speed_threshold_low: 0.10           # 低速阈值
+    tau_speed_threshold_high: 0.30          # 高速阈值
     
     # 速度与角速度限制
-    max_angular_velocity: 0.5               # w_max: 0.35→0.5 (放宽以消除饱和)
-    cruise_speed: 0.4                       # 巡航速度
-    min_speed: 0.15                         # 最小速度: 0.20→0.15 (允许更低速转弯)
+    max_angular_velocity: 0.5               # w_max: 仿真中放宽以消除饱和
+    cruise_speed: 0.30                      # 巡航速度 ↓ (0.4→0.30, 降速减震)
+    min_speed: 0.15                         # 最小速度: 允许更低速转弯
+    
+    # v8 AMPC 参数 (SITL 调优)
+    ampc_enabled: true
+    ampc_rls_forgetting_factor: 0.99        # RLS 遗忘因子 ↑ (0.97→0.99, 更稳定的τ估计)
+    ampc_heading_observer_alpha: 0.18       # 航向滤波 ↓ (0.3→0.18, 平滑ω观测减少噪声激励)
+    ampc_tau_min: 0.15                      # τ 下限
+    ampc_tau_max: 1.5                       # τ 上限
+    ampc_rebuild_threshold: 0.15            # τ 变化重建阈值
+    ampc_saturation_tau_boost: 1.02         # 饱和升压因子

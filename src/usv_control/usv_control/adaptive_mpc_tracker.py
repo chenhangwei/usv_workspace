@@ -238,7 +238,7 @@ class TauOmegaEstimator:
         
         # 平滑输出 (防止 τ 突变导致 MPC 性能退化)
         self._tau_smoothed = initial_tau
-        self._tau_smooth_factor = 0.08  # 平滑因子, 越小越平滑
+        self._tau_smooth_factor = 0.04  # 平滑因子 (v10: 0.08→0.04, 更平缓的τ变化减少模型跳变震荡)
         
     def update(self, omega_cmd: float, omega_actual: float) -> float:
         """
