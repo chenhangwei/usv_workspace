@@ -35,3 +35,38 @@
     gps_origin_alt: 0.0
     enable_coord_transform: true
     use_global_position_target: true
+
+# =============================================================================
+# SITL 仿真 MPC 速度控制器参数覆盖
+# 
+# Gazebo 仿真中船舶动力学响应比实船更快,需要更小的 tau_omega
+# 以避免模型失配导致的 S 形振荡
+#
+# 调参记录 (SITL):
+#   2026-02-08: 基于 nav_log_20260208_180233_goal_2.csv 分析
+#     问题: tau 过大(1.2~1.5s) + w_max 过小(0.35) → 振荡 0.32Hz + 饱和 37%
+#     方案: 降低 tau 适配仿真响应速度, 放宽 w_max, 增大 R_dw 抑制振荡
+# =============================================================================
+/**/velocity_controller_node:
+  ros__parameters:
+    # MPC 权重参数 (SITL 调优)
+    mpc_weight_pos: 10.0                    # Q_pos: 位置权重 (保持不变)
+    mpc_weight_heading: 8.0                 # Q_theta: 航向权重 (保持不变)
+    mpc_weight_steering: 8.0                # R_w: 转向惩罚 ↑ (5→8, 适度抑制频繁转向)
+    mpc_weight_steering_rate: 25.0          # R_dw: 转向速率惩罚 ↑↑ (10→25, 关键抗振荡)
+    mpc_weight_cte: 15.0                    # Q_cte: 横向偏差权重 (15, 降低避免过度纠偏)
+    
+    # v5 转向时间常数 (SITL 仿真船响应更快, 需要更小的 tau)
+    mpc_tau_omega: 0.4                      # 基础 tau_omega (0.4s, 匹配仿真响应)
+    
+    # v6 速度自适应 tau_omega (关键调优: 大幅降低以适配仿真)
+    adaptive_tau_enabled: true
+    tau_omega_low_speed: 0.6                # 低速 tau: 1.50→0.6 (仿真低速转向仍较快)
+    tau_omega_high_speed: 0.3               # 高速 tau: 1.00→0.3 (仿真高速舵效好)
+    tau_speed_threshold_low: 0.10           # 低速阈值: 0.15→0.10 (仿真中速度波动小)
+    tau_speed_threshold_high: 0.30          # 高速阈值: 0.35→0.30
+    
+    # 速度与角速度限制
+    max_angular_velocity: 0.5               # w_max: 0.35→0.5 (放宽以消除饱和)
+    cruise_speed: 0.4                       # 巡航速度
+    min_speed: 0.15                         # 最小速度: 0.20→0.15 (允许更低速转弯)
