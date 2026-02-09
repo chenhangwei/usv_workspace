@@ -36,7 +36,8 @@ from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAct
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
-from launch.conditions import IfCondition, LaunchConfigurationEquals, LaunchConfigurationNotEquals
+from launch.conditions import IfCondition
+from launch.substitutions import EqualsSubstitution
 
 
 def generate_launch_description():
@@ -331,7 +332,7 @@ def generate_launch_description():
         name='usv_led_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         parameters=[param_file]
     )
 
@@ -342,7 +343,7 @@ def generate_launch_description():
         name='usv_sound_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         parameters=[param_file]
     )
 
@@ -353,7 +354,7 @@ def generate_launch_description():
         name='usv_fan_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         parameters=[param_file]
     )
 
@@ -364,7 +365,7 @@ def generate_launch_description():
         name='usv_head_action_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         parameters=[param_file]
     )
 
@@ -393,7 +394,7 @@ def generate_launch_description():
         executable='mavros_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         parameters=[
             param_file,
             {
@@ -509,7 +510,7 @@ def generate_launch_description():
         executable='mavros_node',
         namespace=namespace,
         output='screen',
-        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'sitl')),
         parameters=[
             param_file,
             {
@@ -642,7 +643,7 @@ def generate_launch_description():
     # ⚠️ 关键修复：延长启动时间，避免 GPS 高度未收敛导致 z 坐标偏移 -17m
     delayed_home_node = TimerAction(
         period=2.0,  # 等待 MAVROS + GPS 就绪（2秒确保 GPS 数据开始输出）
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         actions=[
            auto_set_home_node,    # 自动设置 EKF Origin（必须在 GPS 高度稳定后）
         ]
@@ -653,7 +654,7 @@ def generate_launch_description():
     # ⚠️ 关键：必须等待 GPS 高度充分收敛后再启动依赖 EKF 的节点
     delayed_control_nodes = TimerAction(
         period=13.0,
-        condition=LaunchConfigurationEquals('simulation_mode', 'hardware'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
         actions=[
             gps_to_local_node,        # GPS→本地坐标转换（新增，优先启动）
             coord_transform_node,     # XYZ→GPS坐标转换（新增）
@@ -671,7 +672,7 @@ def generate_launch_description():
     # =========================================================================
     delayed_home_node_sitl = TimerAction(
         period=1.0,  # SITL 中 GPS 立即就绪
-        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'sitl')),
         actions=[
            auto_set_home_node,
         ]
@@ -679,7 +680,7 @@ def generate_launch_description():
     
     delayed_control_nodes_sitl = TimerAction(
         period=5.0,  # SITL 中 EKF 收敛更快，5 秒足够
-        condition=LaunchConfigurationEquals('simulation_mode', 'sitl'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'sitl')),
         actions=[
             gps_to_local_node,
             coord_transform_node,
