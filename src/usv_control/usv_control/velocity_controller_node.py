@@ -115,6 +115,15 @@ class VelocityControllerNode(Node):
         self.declare_parameter('tau_speed_threshold_low', 0.15)   # 低速阈值 (m/s)
         self.declare_parameter('tau_speed_threshold_high', 0.35)  # 高速阈值 (m/s)
         
+        # v8 新增: AMPC (自适应MPC) 参数 - 在线辨识 tau_omega，消除逐船调参
+        self.declare_parameter('ampc_enabled', True)                   # 是否启用 AMPC
+        self.declare_parameter('ampc_rls_forgetting_factor', 0.97)     # RLS 遗忘因子
+        self.declare_parameter('ampc_heading_observer_alpha', 0.3)     # 航向速率滤波系数
+        self.declare_parameter('ampc_tau_min', 0.1)                    # τ 估计下限 (秒)
+        self.declare_parameter('ampc_tau_max', 3.0)                    # τ 估计上限 (秒)
+        self.declare_parameter('ampc_rebuild_threshold', 0.15)         # τ 变化重建阈值
+        self.declare_parameter('ampc_saturation_tau_boost', 1.05)      # 饱和时 τ 升压因子
+        
         # 速度参数
         self.declare_parameter('cruise_speed', 0.5)
         self.declare_parameter('max_angular_velocity', 0.5)
@@ -163,6 +172,18 @@ class VelocityControllerNode(Node):
             'q_cte': float(self.get_parameter('mpc_weight_cte').value or 15.0),
         }
         
+        # v8: AMPC 参数
+        self._ampc_enabled = bool(self.get_parameter('ampc_enabled').value)
+        self._ampc_params = {
+            'ampc_enabled': self._ampc_enabled,
+            'ampc_rls_forgetting_factor': float(self.get_parameter('ampc_rls_forgetting_factor').value or 0.97),
+            'ampc_heading_observer_alpha': float(self.get_parameter('ampc_heading_observer_alpha').value or 0.3),
+            'ampc_tau_min': float(self.get_parameter('ampc_tau_min').value or 0.1),
+            'ampc_tau_max': float(self.get_parameter('ampc_tau_max').value or 3.0),
+            'ampc_rebuild_threshold': float(self.get_parameter('ampc_rebuild_threshold').value or 0.15),
+            'ampc_saturation_tau_boost': float(self.get_parameter('ampc_saturation_tau_boost').value or 1.05),
+        }
+        
         try:
             self.tracker = VelocityPathTracker(
                 cruise_speed=float(self.get_parameter('cruise_speed').value or 0.5),
@@ -180,12 +201,16 @@ class VelocityControllerNode(Node):
                 mpc_tau_omega=self._mpc_params['tau_omega'],
                 mpc_q_cte=self._mpc_params['q_cte'],
                 
+                # v8 AMPC 参数
+                **self._ampc_params,
+                
                 min_speed=float(self.get_parameter('min_speed').value or 0.05),
                 goal_tolerance=float(self.get_parameter('goal_tolerance').value or 0.5),
                 switch_tolerance=float(self.get_parameter('switch_tolerance').value or 1.5),
                 angular_velocity_filter=float(self.get_parameter('angular_velocity_filter').value or 0.3),
             )
-            self.get_logger().info('✅ VelocityPathTracker 初始化成功')
+            ampc_status = 'AMPC在线辨识' if self._ampc_enabled else 'MPC v5 标准'
+            self.get_logger().info(f'✅ VelocityPathTracker 初始化成功 (模式: {ampc_status})')
         except Exception as e:
             self.get_logger().fatal(f'❌ VelocityPathTracker 初始化失败: {e}')
             raise e
@@ -489,6 +514,10 @@ class VelocityControllerNode(Node):
         else:
             self.get_logger().info('  功能: 待机 (由 usv_control_node 处理)')
         self.get_logger().info('  控制器类型: MPC')
+        if self._ampc_enabled:
+            self.get_logger().info('  🧠 AMPC 在线辨识: 已启用 (τ_omega 自动适应)')
+        else:
+            self.get_logger().info('  AMPC 在线辨识: 未启用 (使用 v6 速度自适应 tau)')
         self.get_logger().info(f'  巡航速度: {self.tracker.cruise_speed} m/s')
         self.get_logger().info(f'  最大角速度: {self.tracker.max_angular_velocity} rad/s')
         self.get_logger().info(f'  到达阈值: {self.tracker.goal_tolerance} m')
@@ -523,8 +552,9 @@ class VelocityControllerNode(Node):
             self._velocity_yaw_valid = False
         
         # ==================== v6: 速度自适应 tau_omega ====================
-        # 低速时舵效差，转向动力学变化，需要更大的 tau_omega
-        if self._adaptive_tau_enabled:
+        # v8: AMPC 启用时，跳过 v6 的速度自适应 tau，因为 AMPC 通过 RLS 在线辨识真实 tau
+        # 两套自适应逻辑不应同时工作，否则会互相干扰
+        if self._adaptive_tau_enabled and not self._ampc_enabled:
             self._update_adaptive_tau_omega(speed)
     
     def _pose_callback(self, msg: PoseStamped):
@@ -1449,7 +1479,24 @@ class VelocityControllerNode(Node):
             debug_msg.tau_omega_high_speed = float(self._tau_omega_high)
             debug_msg.tau_speed_threshold_low = float(self._tau_speed_low)
             debug_msg.tau_speed_threshold_high = float(self._tau_speed_high)
-            debug_msg.current_tau_omega = float(self._current_tau_omega)
+            
+            # v8: AMPC 自适应信息
+            if self._ampc_enabled and hasattr(self.tracker, 'mpc_tracker'):
+                ampc_info = mpc_info.get('ampc', {})
+                # 使用 AMPC 在线估计的 tau 替代 v6 速度自适应的 tau
+                debug_msg.current_tau_omega = float(ampc_info.get('tau_estimated', self._current_tau_omega))
+                # 将 AMPC 特有信息写入已有字段
+                debug_msg.ampc_enabled = True
+                debug_msg.ampc_tau_estimated = float(ampc_info.get('tau_estimated', 0.0))
+                debug_msg.ampc_tau_confidence = float(ampc_info.get('tau_confidence', 0.0))
+                debug_msg.ampc_omega_measured = float(ampc_info.get('omega_measured', 0.0))
+                debug_msg.ampc_saturation_ratio = float(ampc_info.get('saturation_ratio', 0.0))
+                debug_msg.ampc_heading_noise = float(ampc_info.get('heading_noise_std', 0.0))
+                debug_msg.ampc_rebuild_count = int(ampc_info.get('rebuild_count', 0))
+                debug_msg.ampc_converged = bool(ampc_info.get('is_converged', False))
+            else:
+                debug_msg.current_tau_omega = float(self._current_tau_omega)
+                debug_msg.ampc_enabled = False
             
             self.debug_pub.publish(debug_msg)
         except Exception as e:

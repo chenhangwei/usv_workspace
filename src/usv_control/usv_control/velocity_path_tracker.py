@@ -34,6 +34,7 @@ from enum import Enum
 from collections import deque
 import time
 from .mpc_path_tracker import MpcPathTracker
+from .adaptive_mpc_tracker import AdaptiveMpcTracker
 
 
 # ==================== 安全常量 ====================
@@ -214,6 +215,16 @@ class VelocityPathTracker:
         # 推荐 10.0 ~ 30.0, 越大走线越精确.
         mpc_q_cte: float = 15.0,
         
+        # v8 新增: AMPC (自适应 MPC) 参数
+        # 启用后自动辨识每艘船的 tau_omega，消除逐船调参需求
+        ampc_enabled: bool = True,                  # 是否启用 AMPC
+        ampc_rls_forgetting_factor: float = 0.97,   # RLS 遗忘因子 (0.9-0.99)
+        ampc_heading_observer_alpha: float = 0.3,   # 航向速率滤波系数 (0-1)
+        ampc_tau_min: float = 0.1,                  # τ 估计下限 (秒)
+        ampc_tau_max: float = 3.0,                  # τ 估计上限 (秒)
+        ampc_rebuild_threshold: float = 0.15,       # τ 变化超此比例才重建 MPC
+        ampc_saturation_tau_boost: float = 1.05,     # 慢性饱和时 τ 升压因子
+        
         # 航点队列
         waypoint_queue_size: int = 10,        # 航点队列大小
     ):
@@ -257,7 +268,21 @@ class VelocityPathTracker:
         self._max_path_history: int = 5
 
         # ==================== MPC 控制器 ====================
-        self.mpc_tracker = MpcPathTracker(**self.mpc_params)
+        # v8: 根据 ampc_enabled 标志选择标准 MPC 或自适应 MPC
+        self._ampc_enabled = ampc_enabled
+        if ampc_enabled:
+            self.mpc_tracker = AdaptiveMpcTracker(
+                **self.mpc_params,
+                ampc_enabled=True,
+                rls_forgetting_factor=ampc_rls_forgetting_factor,
+                heading_observer_alpha=ampc_heading_observer_alpha,
+                tau_min=ampc_tau_min,
+                tau_max=ampc_tau_max,
+                rebuild_threshold=ampc_rebuild_threshold,
+                saturation_tau_boost=ampc_saturation_tau_boost,
+            )
+        else:
+            self.mpc_tracker = MpcPathTracker(**self.mpc_params)
         
         # ==================== 安全与诊断 ====================
         self._last_pose_time: float = 0.0

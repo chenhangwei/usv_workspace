@@ -113,6 +113,16 @@ class LogCollectorNode(Node):
         self._cross_track_error = 0.0
         self._path_theta = 0.0
         
+        # v8 新增: AMPC 在线辨识状态
+        self._ampc_enabled = False
+        self._ampc_tau_estimated = 0.0
+        self._ampc_tau_confidence = 0.0
+        self._ampc_omega_measured = 0.0
+        self._ampc_saturation_ratio = 0.0
+        self._ampc_heading_noise = 0.0
+        self._ampc_rebuild_count = 0
+        self._ampc_converged = False
+        
         # 飞控状态 (用于记录模式切换)
         self._flight_mode = ''
         self._is_armed = False
@@ -125,6 +135,7 @@ class LogCollectorNode(Node):
         self._last_goal_time = 0.0        # 上次收到目标的时间
         self._idle_timeout = 30.0         # 空闲超时（秒），只在非暂停状态下检查
         self._record_count = 0            # 本次任务记录条数
+        self._goal_count = 0              # 本次任务处理的目标数
         
 
         # ==================== 日志文件句柄 ====================
@@ -187,7 +198,8 @@ class LogCollectorNode(Node):
         self.get_logger().info('📊 日志收集节点已启动')
         self.get_logger().info(f'   日志目录: {self._log_dir}')
         self.get_logger().info(f'   采样频率: 10 Hz')
-        self.get_logger().info(f'   模式: 按任务分文件记录')
+        self.get_logger().info(f'   模式: 整个集群任务记为一个文件')
+        self.get_logger().info(f'   结束条件: stop_navigation 或空闲超时 {self._idle_timeout:.0f}s')
         self.get_logger().info('='*50)
     
     def _start_new_log(self, goal_id, task_name=None):
@@ -229,6 +241,8 @@ class LogCollectorNode(Node):
                 self._csv_file.write(f'# tau_omega_high_speed: {self._tau_omega_high_speed:.2f} s\n')
                 self._csv_file.write(f'# tau_speed_threshold_low: {self._tau_speed_threshold_low:.2f} m/s\n')
                 self._csv_file.write(f'# tau_speed_threshold_high: {self._tau_speed_threshold_high:.2f} m/s\n')
+                self._csv_file.write(f'# --- v8 AMPC Parameters ---\n')
+                self._csv_file.write(f'# ampc_enabled: {self._ampc_enabled}\n')
                 self._csv_file.write(f'#\n')
             
             # 写入表头
@@ -246,7 +260,11 @@ class LogCollectorNode(Node):
                 'omega_actual', 'omega_cmd', 'cross_track_error', 'path_theta_deg',
                 'flight_mode', 'armed',
                 # v6 新增字段
-                'current_tau_omega'
+                'current_tau_omega',
+                # v8 新增: AMPC 在线辨识字段
+                'ampc_enabled', 'ampc_tau_estimated', 'ampc_tau_confidence',
+                'ampc_omega_measured', 'ampc_saturation_ratio',
+                'ampc_heading_noise', 'ampc_rebuild_count', 'ampc_converged'
             ])
             
             # 清空模式切换事件列表
@@ -322,7 +340,11 @@ class LogCollectorNode(Node):
         self._magnetometer_yaw = math.atan2(siny_cosp, cosy_cosp)
     
     def _nav_goal_callback(self, msg: NavigationGoal):
-        """导航目标回调"""
+        """导航目标回调
+        
+        整个集群任务使用同一个日志文件，不因中间航点切换而分割。
+        日志只在首次收到目标时创建，在 stop_navigation 或空闲超时时关闭。
+        """
         self._target_x = msg.target_pose.pose.position.x
         self._target_y = msg.target_pose.pose.position.y
         self._goal_id = getattr(msg, 'goal_id', 0)
@@ -337,15 +359,19 @@ class LogCollectorNode(Node):
             self.get_logger().info('▶️ 导航恢复，继续记录日志')
         
         if not self._is_navigating:
+            # 首次收到目标：开始新日志文件
             self._is_navigating = True
             self._is_paused = False
             self._record_count = 0
+            self._goal_count = 1
             self.get_logger().info(f'🔴 开始记录导航日志 [目标 ID={self._goal_id}]')
             self._start_new_log(self._goal_id, task_name)
-        elif task_name and getattr(self, '_current_task_name', '') != task_name:
-             # 如果任务名称变了，即使看来还在导航，也切分文件
-             # (处理连续任务无间隙的情况)
-             self._start_new_log(self._goal_id, task_name)
+        else:
+            # 后续目标：继续使用同一个日志文件，不切分
+            self._goal_count = getattr(self, '_goal_count', 0) + 1
+            self.get_logger().info(
+                f'📍 新目标 [ID={self._goal_id}], '
+                f'继续在同一日志文件中记录 (第{self._goal_count}个目标)')
              
         self._current_task_name = task_name 
         self._last_goal_time = current_time
@@ -398,6 +424,16 @@ class LogCollectorNode(Node):
         self._cross_track_error = getattr(msg, 'cross_track_error', 0.0)
         self._path_theta = getattr(msg, 'path_theta', 0.0)
         
+        # v8 新增: AMPC 在线辨识状态
+        self._ampc_enabled = getattr(msg, 'ampc_enabled', False)
+        self._ampc_tau_estimated = getattr(msg, 'ampc_tau_estimated', 0.0)
+        self._ampc_tau_confidence = getattr(msg, 'ampc_tau_confidence', 0.0)
+        self._ampc_omega_measured = getattr(msg, 'ampc_omega_measured', 0.0)
+        self._ampc_saturation_ratio = getattr(msg, 'ampc_saturation_ratio', 0.0)
+        self._ampc_heading_noise = getattr(msg, 'ampc_heading_noise', 0.0)
+        self._ampc_rebuild_count = getattr(msg, 'ampc_rebuild_count', 0)
+        self._ampc_converged = getattr(msg, 'ampc_converged', False)
+        
         self._mpc_params_received = True
 
     def _state_callback(self, msg: State):
@@ -441,36 +477,52 @@ class LogCollectorNode(Node):
             self._is_paused = False
             self.get_logger().info(
                 f'⏹️ 任务停止 (手动终止), 停止记录, '
-                f'本次记录 {self._record_count} 条')
+                f'本次记录 {self._record_count} 条, {self._goal_count} 个目标')
             self._close_current_log()
 
     def _result_callback(self, msg: NavigationResult):
-        """导航结果回调"""
+        """导航结果回调
+        
+        整个集群任务（多航点）使用同一个日志文件。
+        中间航点到达只记录事件，不关闭日志。
+        日志关闭只由 stop_navigation 或空闲超时触发。
+        """
         message = getattr(msg, 'message', '')
         goal_id = getattr(msg, 'goal_id', 0)
         
-        # 检测最终到达（不是平滑切换）
-        is_final_arrival = '成功到达' in message and '已通过' not in message
+        # 检测暂停（不结束日志）
+        is_paused = '已暂停' in message or '等待恢复' in message
         
         # 检测任务停止（手动终止）
         is_stopped = '已停止' in message or '任务停止' in message
         
-        # 检测暂停（不结束日志）
-        is_paused = '已暂停' in message or '等待恢复' in message
+        # 检测航点到达（中间或最终）
+        is_arrival = '成功到达' in message and '已通过' not in message
+        is_waypoint_passed = '已通过' in message
         
         if is_paused and self._is_navigating:
             # 暂停状态：不关闭日志
             self._is_paused = True
             self.get_logger().info(f'⏸️ 任务暂停 [ID={goal_id}], 日志记录继续...')
-        elif (is_final_arrival or is_stopped) and self._is_navigating:
-            # 任务完成或停止：关闭日志
+        elif is_stopped and self._is_navigating:
+            # 手动停止：关闭日志
             self._is_navigating = False
             self._is_paused = False
-            reason = '任务完成' if is_final_arrival else '任务停止'
             self.get_logger().info(
-                f'✅ {reason} [ID={goal_id}], 停止记录, '
+                f'⏹️ 任务停止 [ID={goal_id}], 停止记录, '
                 f'本次记录 {self._record_count} 条')
             self._close_current_log()
+        elif is_arrival and self._is_navigating:
+            # 航点到达：只记录事件，不关闭日志
+            # 后续可能还有更多航点，由空闲超时自动关闭
+            self._last_goal_time = self.get_clock().now().nanoseconds / 1e9
+            goal_count = getattr(self, '_goal_count', 0)
+            self.get_logger().info(
+                f'🏁 目标到达 [ID={goal_id}], 日志继续记录 '
+                f'(已处理 {goal_count} 个目标, {self._record_count} 条记录)')
+        elif is_waypoint_passed and self._is_navigating:
+            # 中间航点通过：刷新时间戳，继续记录
+            self._last_goal_time = self.get_clock().now().nanoseconds / 1e9
     
     def _log_data(self):
         """记录数据到 CSV（仅在导航任务进行时）"""
@@ -486,7 +538,7 @@ class LogCollectorNode(Node):
                     self._is_paused = False
                     self.get_logger().info(
                         f'⏹️ 停止记录导航日志 (空闲 {idle_time:.1f}s), '
-                        f'本次记录 {self._record_count} 条')
+                        f'本次记录 {self._record_count} 条, {self._goal_count} 个目标')
                     self._close_current_log()
                     return
         else:
@@ -542,7 +594,16 @@ class LogCollectorNode(Node):
             f'{self._flight_mode}',
             f'{1 if self._is_armed else 0}',
             # v6 新增字段
-            f'{self._current_tau_omega:.3f}'
+            f'{self._current_tau_omega:.3f}',
+            # v8 新增: AMPC 在线辨识字段
+            f'{1 if self._ampc_enabled else 0}',
+            f'{self._ampc_tau_estimated:.4f}',
+            f'{self._ampc_tau_confidence:.3f}',
+            f'{self._ampc_omega_measured:.4f}',
+            f'{self._ampc_saturation_ratio:.3f}',
+            f'{self._ampc_heading_noise:.4f}',
+            f'{self._ampc_rebuild_count}',
+            f'{1 if self._ampc_converged else 0}'
         ])
         self._record_count += 1
     

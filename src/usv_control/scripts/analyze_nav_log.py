@@ -88,6 +88,8 @@ def load_csv(filepath: str) -> tuple:
             # 解析特定字段
             if 'usv_id' in key or key == 'usv_id':
                 header_info['usv_id'] = value
+            elif 'v8' in line.lower() or 'ampc' in line.lower():
+                header_info['version'] = 'v8'
             elif 'v6' in line.lower() or 'adaptive' in line.lower():
                 header_info['version'] = 'v6'
             elif 'v7' in line.lower():
@@ -127,10 +129,12 @@ def load_csv(filepath: str) -> tuple:
                 parsed[key] = _to_number(value)
             data.append(parsed)
     
-    # 检测 v6 特有字段
+    # 检测 v6/v8 特有字段
     if data and 'current_tau_omega' in data[0]:
         if header_info['version'] == 'v5':
             header_info['version'] = 'v6'
+    if data and 'ampc_tau_estimated' in data[0]:
+        header_info['version'] = 'v8'
     
     return data, header_info
 
@@ -311,6 +315,55 @@ def analyze_statistics(data: list, header_info: dict = None):
                 true_sat = _sat_ratio(om_cmds, w_max_cfg, tol=0.01)
                 print(f"   → 配置 w_max={w_max_cfg:.2f} 饱和率: {true_sat*100:.1f}%")
     
+    # v8 AMPC 统计
+    if 'ampc_tau_estimated' in data[0]:
+        ampc_on = [d for d in data if d.get('ampc_enabled', 0) == 1]
+        if ampc_on:
+            tau_ests = [d['ampc_tau_estimated'] for d in ampc_on
+                        if isinstance(d.get('ampc_tau_estimated'), (int, float)) and d['ampc_tau_estimated'] > 0]
+            confs = [d.get('ampc_tau_confidence', 0) for d in ampc_on
+                     if isinstance(d.get('ampc_tau_confidence'), (int, float))]
+            sat_ratios = [d.get('ampc_saturation_ratio', 0) for d in ampc_on
+                          if isinstance(d.get('ampc_saturation_ratio'), (int, float))]
+            noises = [d.get('ampc_heading_noise', 0) for d in ampc_on
+                      if isinstance(d.get('ampc_heading_noise'), (int, float))]
+            rebuild_counts = [d.get('ampc_rebuild_count', 0) for d in ampc_on
+                              if isinstance(d.get('ampc_rebuild_count'), (int, float))]
+            
+            print(f"\n🧠 AMPC v8 在线辨识统计:")
+            if tau_ests:
+                print(f"   τ 估计范围: {min(tau_ests):.3f} ~ {max(tau_ests):.3f} s")
+                print(f"   τ 最终值: {tau_ests[-1]:.3f} s")
+            if confs:
+                print(f"   置信度: {confs[-1]:.2f} (最终)")
+            
+            # 检查是否收敛
+            converged_samples = [d for d in ampc_on if d.get('ampc_converged', 0) == 1]
+            if converged_samples:
+                first_converged_t = converged_samples[0]['timestamp'] - data[0]['timestamp']
+                print(f"   收敛时间: t={first_converged_t:.1f}s")
+            else:
+                print(f"   ⚠️  本次任务未收敛")
+            
+            if sat_ratios:
+                avg_sat = sum(sat_ratios) / len(sat_ratios)
+                max_sat = max(sat_ratios)
+                print(f"   饱和率: 平均 {avg_sat*100:.1f}%, 最大 {max_sat*100:.1f}%")
+                if max_sat > 0.35:
+                    print(f"   ⚠️  存在慢性饱和 (>35%)")
+            
+            if noises:
+                avg_noise = sum(noises) / len(noises)
+                print(f"   航向噪声: 平均 {avg_noise:.4f} rad/s")
+                if avg_noise > 0.05:
+                    print(f"   ⚠️  航向噪声偏高 (磁力计质量!)")
+            
+            if rebuild_counts:
+                total_rebuilds = int(max(rebuild_counts))
+                print(f"   求解器重建: {total_rebuilds} 次")
+        else:
+            print(f"\n🧠 AMPC: 未启用")
+
     # v6+ 振荡频率分析 (零交叉法)
     if om_cmds and len(om_cmds) > 20:
         zero_crossings = 0
@@ -461,6 +514,7 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
             plot_mpc_debug(data, output_path)
             plot_errors(data, output_path)
             plot_v6_adaptive_tau(data, output_path, header_info)
+            plot_v8_ampc(data, output_path, header_info)
             print(f"\n✅ 图表已保存到: {output_path}")
 
     report_path.write_text(report_buffer.getvalue(), encoding='utf-8')
@@ -736,6 +790,111 @@ def plot_v6_adaptive_tau(data: list, output_path: Path, header_info: dict = None
     plt.savefig(output_path / 'v6_adaptive_tau.png', dpi=150)
     plt.close()
     print(f"   📈 V6 自适应 Tau 图: {output_path / 'v6_adaptive_tau.png'}")
+
+
+def plot_v8_ampc(data: list, output_path: Path, header_info: dict = None):
+    """绘制 V8 AMPC 在线辨识分析图"""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    # 检查是否有 v8 字段
+    if 'ampc_tau_estimated' not in data[0]:
+        return
+    
+    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    fig.suptitle(f'AMPC v8 Online Identification - {usv_id}', fontsize=14, fontweight='bold')
+    
+    # 1. τ 估计值 + 置信度
+    ax = axes[0]
+    tau_est = [d.get('ampc_tau_estimated', 0) for d in data]
+    tau_conf = [d.get('ampc_tau_confidence', 0) for d in data]
+    tau_current = [d.get('current_tau_omega', 0) for d in data]
+    converged = [d.get('ampc_converged', 0) for d in data]
+    
+    ax2 = ax.twinx()
+    ln1 = ax.plot(t, tau_est, 'b-', label='τ estimated (RLS)', linewidth=1.5)
+    ln2 = ax.plot(t, tau_current, 'r--', label='τ active (MPC)', linewidth=1.0, alpha=0.7)
+    ln3 = ax2.plot(t, tau_conf, 'g-', label='confidence', alpha=0.6, linewidth=1.0)
+    
+    # 标记收敛点
+    for i in range(1, len(converged)):
+        if converged[i] == 1 and converged[i-1] == 0:
+            ax.axvline(x=t[i], color='green', linestyle=':', alpha=0.8, linewidth=1.5)
+            ax.annotate('converged', xy=(t[i], tau_est[i]),
+                       fontsize=8, color='green', ha='left')
+    
+    ax.set_ylabel('τ_omega (s)', color='blue')
+    ax2.set_ylabel('Confidence (0-1)', color='green')
+    ax2.set_ylim(-0.05, 1.1)
+    
+    lns = ln1 + ln2 + ln3
+    labs = [l.get_label() for l in lns]
+    ax.legend(lns, labs, loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    # 2. 角速度: 实测 (AMPC) vs 命令
+    ax = axes[1]
+    omega_measured = [d.get('ampc_omega_measured', 0) for d in data]
+    omega_cmd = [d.get('omega_cmd', 0) for d in data]
+    omega_actual = [d.get('omega_actual', 0) for d in data]
+    
+    ax.plot(t, omega_cmd, 'r-', label='ω_cmd', alpha=0.5, linewidth=1.0)
+    ax.plot(t, omega_actual, 'b--', label='ω_actual (MPC state)', alpha=0.5, linewidth=1.0)
+    ax.plot(t, omega_measured, 'k-', label='ω_measured (observer)', linewidth=1.5)
+    ax.axhline(y=0, color='grey', linewidth=0.5)
+    ax.set_ylabel('Angular Velocity (rad/s)')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    # 3. 饱和率 + 重建事件
+    ax = axes[2]
+    sat_ratio = [d.get('ampc_saturation_ratio', 0) for d in data]
+    rebuild_count = [d.get('ampc_rebuild_count', 0) for d in data]
+    
+    ax.fill_between(t, sat_ratio, alpha=0.3, color='orange')
+    ax.plot(t, sat_ratio, 'orange', label='saturation ratio', linewidth=1.0)
+    ax.axhline(y=0.35, color='red', linestyle='--', alpha=0.5, label='chronic threshold (35%)')
+    ax.set_ylabel('Saturation Ratio')
+    ax.set_ylim(-0.05, 1.05)
+    
+    # 标记重建事件
+    ax2 = ax.twinx()
+    ax2.plot(t, rebuild_count, 'purple', label='rebuild count', linewidth=1.0, alpha=0.7)
+    ax2.set_ylabel('Rebuild Count', color='purple')
+    
+    lns_a = ax.get_lines()
+    lns_b = ax2.get_lines()
+    labs_all = [l.get_label() for l in lns_a] + [l.get_label() for l in lns_b]
+    ax.legend(list(lns_a) + list(lns_b), labs_all, loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    # 4. 航向噪声 + CTE
+    ax = axes[3]
+    noise = [d.get('ampc_heading_noise', 0) for d in data]
+    cte = [d.get('cross_track_error', 0) for d in data]
+    
+    ax2 = ax.twinx()
+    ln1 = ax.plot(t, noise, 'darkorange', label='heading noise (std)', linewidth=1.0)
+    ax.axhline(y=0.05, color='darkorange', linestyle=':', alpha=0.5, label='noise baseline (0.05)')
+    ln2 = ax2.plot(t, cte, 'purple', label='CTE', alpha=0.7, linewidth=1.0)
+    ax2.axhline(y=0, color='grey', linewidth=0.5)
+    
+    ax.set_ylabel('Heading Noise (rad/s)', color='darkorange')
+    ax2.set_ylabel('CTE (m)', color='purple')
+    ax.set_xlabel('Time (s)')
+    
+    lns = ln1 + ln2
+    labs = [l.get_label() for l in lns]
+    ax.legend(lns, labs, loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'v8_ampc_analysis.png', dpi=150)
+    plt.close()
+    print(f"   📈 V8 AMPC 分析图: {output_path / 'v8_ampc_analysis.png'}")
 
 
 def main():

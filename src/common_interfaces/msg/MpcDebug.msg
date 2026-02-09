@@ -8,6 +8,7 @@
 # Author: chenhangwei
 # Date: 2026-01-29
 # Updated: 2026-02-03 - v5 添加一阶惯性模型相关字段
+# Updated: 2026-02-09 - v8 添加 AMPC 在线辨识相关字段
 # =============================================================================
 # MPC 控制器调试信息
 
@@ -53,3 +54,13 @@ float32 tau_omega_high_speed    # 高速时的 tau_omega (s)
 float32 tau_speed_threshold_low # 低速阈值 (m/s)
 float32 tau_speed_threshold_high # 高速阈值 (m/s)
 float32 current_tau_omega       # 当前实际使用的 tau_omega (s) - 自适应实时值
+
+# v8 新增: AMPC 自适应 MPC 在线辨识信息
+bool ampc_enabled               # 是否启用 AMPC 在线辨识
+float32 ampc_tau_estimated      # RLS 在线估计的 tau_omega (s)
+float32 ampc_tau_confidence     # tau 估计置信度 (0-1)
+float32 ampc_omega_measured     # 从航向变化实测的 omega_actual (rad/s)
+float32 ampc_saturation_ratio   # 角速度饱和率 (0-1)
+float32 ampc_heading_noise      # 航向噪声标准差 (rad/s)
+int32 ampc_rebuild_count        # MPC 求解器重建次数
+bool ampc_converged             # RLS 估计是否已收敛
