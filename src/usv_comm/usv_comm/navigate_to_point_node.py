@@ -114,6 +114,13 @@ class NavigateToPointNode(Node):
         self._rotate_last_yaw = None               # 上一次检测的航向
         self._rotate_in_progress = False           # 是否正在执行旋转
         
+        # 延迟最终到达判定 - ASYNC 模式下队列为空时不立即判定为“最终航点”
+        # 给后续 batch 航点到达的时间窗口，避免中间航点被误判为最终目标
+        self._pending_final_arrival: bool = False          # 是否有待确认的最终到达
+        self._pending_final_arrival_time: float = 0.0      # 开始等待的时间
+        self._pending_final_arrival_delay: float = 2.0     # 等待时间(秒)，覆盖典型 batch 间隔(~1s)
+        self._pending_final_distance: float = 0.0          # 待确认时的距离
+        
         # ==================== 航点队列 ====================
         self.waypoint_queue: deque = deque(maxlen=self.waypoint_queue_size)
         
@@ -452,6 +459,12 @@ class NavigateToPointNode(Node):
             self._manual_pause_requested = False
             self.get_logger().info('▶️ 收到新目标，自动解除暂停状态（包括手动暂停）')
         
+        # 收到新航点，取消延迟最终到达判定（新航点证明这不是最终目标）
+        if self._pending_final_arrival:
+            self._pending_final_arrival = False
+            self.get_logger().debug(
+                f'✓ 收到新目标 [ID={msg.goal_id}], 已取消延迟最终到达判定')
+        
         # 详细诊断日志
         current_goal_info = f"current_goal={'有' if self.current_goal else '无'}"
         if self.current_goal:
@@ -463,35 +476,69 @@ class NavigateToPointNode(Node):
             f'{msg.target_pose.pose.position.y:.2f}) '
             f'| 状态: {current_goal_info}, 队列={len(self.waypoint_queue)}')
 
-        # ========== 新任务检测: goal_id=1 表示新任务开始 ==========
-        # GS 每次开始新集群任务时会重置 goal_id 从 1 开始
-        # 如果收到 goal_id=1，说明是新任务的第一个目标
-        # 必须清空之前的残留任务和队列，确保新任务能正确开始
-        if msg.goal_id == 1:
-            had_current = self.current_goal is not None
-            had_queue = len(self.waypoint_queue) > 0
+        # ========== 过时步骤拒绝 + 新任务检测 + 消息乱序修正 ==========
+        # 从确定性 goal_id 解析步骤号: goal_id = usv编号 × 10000 + step
+        incoming_step = msg.goal_id % 10000
+        current_step = (self.current_goal_id % 10000) if self.current_goal_id else 0
+        
+        # 处理消息乱序: step N+1 可能先于 step N 到达 (ROS2 不保证 topic 消息顺序)
+        # 场景: GS 几乎同时发送 step N 和 step N+1 (lookahead)，N+1 先到达 USV
+        if incoming_step > 0 and incoming_step < current_step:
+            # 检查当前目标是否刚设置 (< 1秒) → 可能是消息乱序而非过时航点
+            if self.goal_start_time:
+                elapsed = (self.get_clock().now() - self.goal_start_time).nanoseconds / 1e9
+                if elapsed < 1.0 and incoming_step == current_step - 1:
+                    # 极可能是乱序: step N+1 先到达成为 current，现在 step N 到达
+                    # 修正: 将 step N 设为 current，step N+1 推入队列前端
+                    old_current = self.current_goal
+                    old_current_id = self.current_goal_id
+                    
+                    # 推入队列前端 (保持顺序)
+                    self.waypoint_queue.appendleft(old_current)
+                    
+                    # 设置低步骤号为当前目标
+                    self.current_goal = msg
+                    self.current_goal_id = msg.goal_id
+                    self.goal_start_time = self.get_clock().now()
+                    self._last_dedup_goal_id = None
+                    
+                    self.get_logger().warn(
+                        f'🔄 消息乱序修正: [ID={msg.goal_id}](step={incoming_step}) '
+                        f'应在 [ID={old_current_id}](step={current_step}) 之前, '
+                        f'已交换执行顺序, 队列={len(self.waypoint_queue)}')
+                    
+                    # 转发修正后的当前目标
+                    self.target_pub.publish(msg)
+                    return
             
-            if had_current or had_queue:
-                old_goal_id = self.current_goal_id
-                old_queue_len = len(self.waypoint_queue)
-                
-                # 清除当前任务
-                self.current_goal = None
-                self.current_goal_id = None
-                self.goal_start_time = None
-                self._last_dedup_goal_id = None
-                
-                # 清空队列
-                self.waypoint_queue.clear()
-                
-                # 重置状态
-                self._sync_mode_start_time = None
-                self._arrival_check_samples = []
-                self._rotate_in_progress = False
-                
-                self.get_logger().info(
-                    f'🗑️ 新任务开始 [ID=1], 清空残留: '
-                    f'旧任务ID={old_goal_id}, 队列长度={old_queue_len}')
+            # 非乱序场景: 真正的过时航点 (重试时USV已走过)
+            self.get_logger().info(
+                f'⏭️ 跳过过时航点 [ID={msg.goal_id}] step={incoming_step} < current={current_step}')
+            return
+        
+        # 新任务检测：step 回到 1 而当前在更高步骤 → 新任务开始
+        # （主要作为 stop_navigation 消息的备份机制，防止消息丢失时残留活动）
+        if incoming_step == 1 and current_step > 1:
+            old_goal_id = self.current_goal_id
+            old_queue_len = len(self.waypoint_queue)
+            
+            # 清除当前任务
+            self.current_goal = None
+            self.current_goal_id = None
+            self.goal_start_time = None
+            self._last_dedup_goal_id = None
+            
+            # 清空队列
+            self.waypoint_queue.clear()
+            
+            # 重置状态
+            self._sync_mode_start_time = None
+            self._arrival_check_samples = []
+            self._rotate_in_progress = False
+            
+            self.get_logger().info(
+                f'🗑️ 新任务检测 [ID={msg.goal_id}, step={incoming_step}], 清空残留: '
+                f'旧任务ID={old_goal_id}, 队列长度={old_queue_len}')
 
         # 检查是否与当前目标重复
         is_dup = self._is_duplicate_goal(msg)
@@ -685,6 +732,32 @@ class NavigateToPointNode(Node):
         has_next = len(self.waypoint_queue) > 0
         nav_mode = getattr(self.current_goal, 'nav_mode', self.NAV_MODE_ASYNC)
         
+        # ===== 检查延迟最终到达判定 =====
+        # 如果在等待期间队列中来了新航点，取消延迟并平滑切换
+        if self._pending_final_arrival and has_next:
+            self._pending_final_arrival = False
+            self.get_logger().info(
+                f'✓ 延迟判定取消: 队列收到新航点, 平滑切换 [ID={self.current_goal_id}]')
+            self._switch_to_next_waypoint(distance, "延迟后平滑切换")
+            return
+        
+        # ===== 检查延迟最终到达超时 =====
+        if self._pending_final_arrival:
+            import time
+            elapsed = time.time() - self._pending_final_arrival_time
+            if elapsed >= self._pending_final_arrival_delay:
+                # 等待超时，确认是真正的最终航点
+                self._pending_final_arrival = False
+                self.get_logger().info(
+                    f'🎯 到达最终目标! [ID={self.current_goal_id}], '
+                    f'距离={self._pending_final_distance:.3f}m (延迟{elapsed:.1f}s确认)')
+                self._publish_result(
+                    self.current_goal_id, success=True,
+                    message=f'成功到达目标(距离={self._pending_final_distance:.3f}m, 模式={self._nav_mode_name(nav_mode)})')
+                self._clear_current_goal()
+            # 在等待期间不做其他判断
+            return
+        
         # ===== 中间航点且为异步模式：提前切换 =====
         if has_next and nav_mode == self.NAV_MODE_ASYNC and distance < self.switch_threshold:
             self._switch_to_next_waypoint(distance, "平滑切换")
@@ -723,18 +796,39 @@ class NavigateToPointNode(Node):
                     f'⏱️ 同步模式超时 [ID={self.current_goal_id}], 自动切换为异步模式')
                 nav_mode = self.NAV_MODE_ASYNC  # 降级为异步模式
         
-        # ===== 终止模式或最后一个航点：停止导航 =====
-        if nav_mode == self.NAV_MODE_TERMINAL or not has_next:
+        # ===== 终止模式：立即停止 =====
+        if nav_mode == self.NAV_MODE_TERMINAL:
             self.get_logger().info(
-                f'🎯 到达{"终止点" if nav_mode == self.NAV_MODE_TERMINAL else "最终目标"}! '
-                f'[ID={self.current_goal_id}], 距离={distance:.3f}m')
-            
+                f'🎯 到达终止点! [ID={self.current_goal_id}], 距离={distance:.3f}m')
             self._publish_result(
-                self.current_goal_id,
-                success=True,
+                self.current_goal_id, success=True,
                 message=f'成功到达目标(距离={distance:.3f}m, 模式={self._nav_mode_name(nav_mode)})')
-            
             self._clear_current_goal()
+            return
+        
+        # ===== 最后一个航点（队列为空） =====
+        if not has_next:
+            if nav_mode == self.NAV_MODE_ASYNC and not self._pending_final_arrival:
+                # ASYNC 模式 + 队列为空: 可能是 batch 间隙，延迟判定
+                # 给后续航点 2s 时间窗口，避免中间航点被误判为最终目标
+                import time
+                self._pending_final_arrival = True
+                self._pending_final_arrival_time = time.time()
+                self._pending_final_distance = distance
+                self.get_logger().debug(
+                    f'⏳ ASYNC 模式队列为空 [ID={self.current_goal_id}], '
+                    f'延迟{self._pending_final_arrival_delay}s确认是否为最终航点')
+                return
+            elif not self._pending_final_arrival:
+                # SYNC/ROTATE 模式: 立即判定为最终航点
+                self.get_logger().info(
+                    f'🎯 到达最终目标! [ID={self.current_goal_id}], 距离={distance:.3f}m')
+                self._publish_result(
+                    self.current_goal_id, success=True,
+                    message=f'成功到达目标(距离={distance:.3f}m, 模式={self._nav_mode_name(nav_mode)})')
+                self._clear_current_goal()
+                return
+            # _pending_final_arrival=True 的情况在上方 _handle_smooth_navigation 中处理
             return
         
         # ===== 异步模式或同步确认完成：切换到下一航点 =====
@@ -1019,6 +1113,9 @@ class NavigateToPointNode(Node):
         self._rotate_total_angle = 0.0
         self._rotate_last_yaw = None
         self._rotate_in_progress = False
+        
+        # 重置延迟最终到达状态
+        self._pending_final_arrival = False
     
     def _check_idle_protection(self):
         """

@@ -49,6 +49,8 @@ from std_msgs.msg import String, Float32, Bool
 from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug
 
 import math
+import time
+import threading
 from typing import Optional
 from enum import Enum, auto
 
@@ -92,6 +94,11 @@ class VelocityControllerNode(Node):
         
         # 回调组
         self.callback_group = ReentrantCallbackGroup()
+        
+        # 导航目标回调锁 - 防止 ReentrantCallbackGroup 下并发执行导致竞态条件
+        # 当 navigate_to_point_node 快速连发多个目标时（如乱序修正），
+        # 确保 set_waypoint 调用按消息到达顺序串行执行
+        self._nav_goal_lock = threading.Lock()
         
         # ==================== 参数声明 ====================
         # 控制模式
@@ -268,6 +275,21 @@ class VelocityControllerNode(Node):
         # PAUSED 状态保护 - 刚进入暂停状态时不立即尝试恢复
         self._paused_state_enter_time: float = 0.0   # 进入 PAUSED 状态的时间
         self._paused_state_grace_period: float = 5.0  # 暂停状态保护期 (秒)，等待cancel_navigation消息
+        
+        # GUIDED 切换保护期 - 发送 GUIDED 切换命令后等待生效
+        self._guided_switch_request_time: float = 0.0  # 上次请求切换 GUIDED 的时间
+        self._guided_switch_grace_period: float = 2.0  # 切换保护期 (秒)
+        
+        # 延迟 HOLD 切换 - 防止多步任务中每 2 步频繁 HOLD/GUIDED 切换
+        self._delayed_hold_pending: bool = False      # 是否有待执行的延迟 HOLD
+        self._delayed_hold_deadline: float = 0.0      # 延迟 HOLD 的执行截止时间
+        self._delayed_hold_delay: float = 3.0         # 延迟时间 (秒)
+        
+        # 延迟软停止 - COMPLETED 状态下不立即停止，等待后续航点
+        # 解决多 batch 导航中 batch 间隙(~1s)被强制停止的问题
+        self._delayed_stop_pending: bool = False      # 是否有待执行的延迟停止
+        self._delayed_stop_deadline: float = 0.0      # 延迟停止的执行截止时间
+        self._delayed_stop_delay: float = 1.5         # 延迟时间 (秒)，大于典型 batch 间隔 (~1s)
         
         # 导航状态管理 (使用枚举替代简单布尔值)
         self._navigation_state: NavigationState = NavigationState.IDLE
@@ -738,16 +760,21 @@ class VelocityControllerNode(Node):
                 # 使用统一的结束方法，设置为 COMPLETED 状态
                 self._end_navigation(NavigationState.COMPLETED, "成功到达目标")
                 
-                # 导航完成后自动切换到 HOLD 模式
-                self._switch_to_hold_mode()
+                # 延迟切换到 HOLD 模式：多步任务中下一步航点可能很快到达
+                # 如果在延迟期内收到新目标，取消 HOLD 切换，避免频繁 HOLD/GUIDED 循环
+                self._delayed_hold_pending = True
+                self._delayed_hold_deadline = time.time() + self._delayed_hold_delay
+                self.get_logger().debug(
+                    f'⏳ 延迟 HOLD 切换 {self._delayed_hold_delay}s，等待可能的后续航点')
                 
             elif self._current_goal_id is not None and goal_id == self._current_goal_id:
-                # 兼容旧逻辑：ID 匹配也停止
+                # 兼容旧逻辑：ID 匹配也停止追踪，但不切换 HOLD
+                # 中间航点的内部到达检测（如 _on_goal_reached）会走这条路径
+                # 保持 GUIDED 模式，等待 navigate_to_point_node 发送下一个目标
                 self.get_logger().info(
-                    f'✅ 收到到达通知 [ID={goal_id}], 停止追踪')
+                    f'✅ 收到到达通知 [ID={goal_id}], 停止追踪 (保持GUIDED等待下一目标)')
                 
-                self._end_navigation(NavigationState.COMPLETED, "成功到达目标")
-                self._switch_to_hold_mode()
+                self._end_navigation(NavigationState.COMPLETED, "到达当前航点")
             else:
                 self.get_logger().debug(
                     f'收到到达通知 [ID={goal_id}], message="{message}", 忽略'
@@ -826,6 +853,10 @@ class VelocityControllerNode(Node):
         处理常规导航和旋转机动
         
         注意：NAV_MODE_TERMINAL (离群单点导航) 由 usv_control_node 的位置模式处理
+        
+        线程安全：使用 _nav_goal_lock 防止 ReentrantCallbackGroup 下的并发竞态。
+        当 navigate_to_point_node 乱序修正后快速连发多个目标时，
+        确保 set_waypoint 调用严格按消息到达顺序执行，避免后到的目标覆盖先到的目标。
         """
         target = msg.target_pose.pose.position
         goal_id = getattr(msg, 'goal_id', 0)
@@ -851,6 +882,12 @@ class VelocityControllerNode(Node):
             )
             return
         
+        # 加锁保护：防止并发回调导致 set_waypoint 执行顺序错乱
+        with self._nav_goal_lock:
+            self._process_nav_goal(msg, target, goal_id, nav_mode)
+    
+    def _process_nav_goal(self, msg: NavigationGoal, target, goal_id: int, nav_mode: int):
+        """导航目标处理（锁内执行，线程安全）"""
         maneuver_type = getattr(msg, 'maneuver_type', 0)
         maneuver_param = getattr(msg, 'maneuver_param', 0.0)
         
@@ -925,6 +962,14 @@ class VelocityControllerNode(Node):
             self.tracker.set_waypoint(waypoint)
             self._control_active = True
             
+            # 收到新目标，取消所有待执行的延迟操作 (停止 + HOLD 切换)
+            if self._delayed_stop_pending:
+                self._delayed_stop_pending = False
+                self.get_logger().debug(f'✓ 收到新目标 [ID={goal_id}], 已取消延迟软停止')
+            if self._delayed_hold_pending:
+                self._delayed_hold_pending = False
+                self.get_logger().debug(f'✓ 收到新目标 [ID={goal_id}], 已取消延迟 HOLD 切换')
+            
             # 新任务开始，清除手动暂停状态
             # 无论之前是否处于手动暂停，新任务都会开始执行
             if self._manual_hold_requested:
@@ -942,6 +987,8 @@ class VelocityControllerNode(Node):
                 mode_msg = String()
                 mode_msg.data = 'GUIDED'
                 self.mode_pub.publish(mode_msg)
+                # 记录切换请求时间，防止控制循环在切换生效前就取消导航
+                self._guided_switch_request_time = time.time()
             
             self._set_navigation_state(NavigationState.ACTIVE, f"新导航目标[ID={goal_id}]")
             
@@ -1033,6 +1080,10 @@ class VelocityControllerNode(Node):
         # 仅在速度模式下运行
         if self.control_mode != 'velocity':
             return
+        
+        # 检查延迟停止和延迟 HOLD 切换
+        self._check_delayed_stop()
+        self._check_delayed_hold()
         
         # 检查前置条件
         if not self._check_preconditions():
@@ -1291,16 +1342,35 @@ class VelocityControllerNode(Node):
             return False
         
         # ==================== 检查模式 ====================
+        # 已切换到 GUIDED，清除保护期标记
+        if self.require_guided_mode and self.current_state.mode == 'GUIDED':
+            if self._guided_switch_request_time > 0:
+                self._guided_switch_request_time = 0.0
+        
         if self.require_guided_mode and self.current_state.mode != 'GUIDED':
             current_mode = self.current_state.mode
             
-            # MANUAL 模式: 用户明确要求手动控制，尊重用户意图，结束导航
+            # MANUAL 模式: 检查是否在 GUIDED 切换保护期内
             if current_mode == 'MANUAL':
+                import time as _time
+                now = _time.time()
+                in_guided_switch_grace = (
+                    self._guided_switch_request_time > 0 and
+                    (now - self._guided_switch_request_time) < self._guided_switch_grace_period
+                )
+                
+                if in_guided_switch_grace:
+                    # 刚发送了 GUIDED 切换命令，等待生效，不取消导航
+                    self.get_logger().debug(
+                        f'GUIDED 切换保护期内 ({now - self._guided_switch_request_time:.1f}s)，等待模式切换生效'
+                    )
+                    return False
+                
+                # 保护期外的 MANUAL 模式: 用户明确要求手动控制，尊重用户意图
                 if self._navigation_state == NavigationState.ACTIVE:
                     self.get_logger().warn(
                         f'⚠️ 检测到切换为 MANUAL 模式，尊重用户意图，结束导航任务'
                     )
-                    # 强制结束导航，设置为 CANCELLED 状态，不自动恢复 GUIDED
                     self._end_navigation(NavigationState.CANCELLED, "用户切换到MANUAL模式")
                 else:
                     self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
@@ -1620,6 +1690,9 @@ class VelocityControllerNode(Node):
         结束当前导航任务
         
         统一处理导航结束的所有清理工作。
+        根据结束状态决定停止策略:
+        - COMPLETED: 延迟软停止，新航点可能很快到达，避免不必要的停-起循环
+        - CANCELLED/FAILED: 立即紧急停止
         
         Args:
             end_state: 结束状态 (COMPLETED, CANCELLED, FAILED)
@@ -1635,8 +1708,16 @@ class VelocityControllerNode(Node):
         # 更新导航状态
         self._set_navigation_state(end_state, reason)
         
-        # 停止 USV
-        self.stop_usv()
+        # 根据结束状态决定停止策略
+        if end_state in (NavigationState.CANCELLED, NavigationState.FAILED):
+            # 用户取消或异常: 立即紧急停止
+            self.stop_usv()
+        elif end_state == NavigationState.COMPLETED:
+            # 正常完成: 延迟软停止，给后续航点到达的时间窗口
+            # 典型 batch 间隔约 0.7-1.5s，延迟 1.5s 可覆盖大部分情况
+            # 如果新航点在延迟期内到达，取消停止，实现平滑过渡
+            self._delayed_stop_pending = True
+            self._delayed_stop_deadline = time.time() + self._delayed_stop_delay
     
     def _publish_status(self):
         """
@@ -1694,6 +1775,47 @@ class VelocityControllerNode(Node):
         self.status_pub.publish(status_msg)
     
     # ==================== 模式切换 ====================
+    
+    def _check_delayed_stop(self):
+        """
+        检查是否应执行延迟软停止
+        
+        COMPLETED 状态下不立即停止 USV，而是等待一小段时间。
+        如果期间收到新航点，_delayed_stop_pending 被清除，USV 不停止实现平滑过渡。
+        如果超时仍无新航点，发送零速指令让 USV 安全减速。
+        """
+        if not self._delayed_stop_pending:
+            return
+        
+        import time
+        if time.time() >= self._delayed_stop_deadline:
+            self._delayed_stop_pending = False
+            if self._navigation_state == NavigationState.COMPLETED:
+                self.get_logger().info('🛑 延迟软停止: 无后续航点，发送零速指令')
+                self._publish_velocity_command(VelocityCommand.stop())
+            else:
+                self.get_logger().debug(
+                    f'延迟软停止取消: 当前状态={self._navigation_state.name}')
+    
+    def _check_delayed_hold(self):
+        """
+        检查是否应执行延迟 HOLD 切换
+        
+        在控制循环中调用，当延迟超时且仍处于 COMPLETED 状态时切换到 HOLD。
+        如果在延迟期间收到了新目标，_delayed_hold_pending 已被清除，不会切换。
+        """
+        if not self._delayed_hold_pending:
+            return
+        
+        import time
+        if time.time() >= self._delayed_hold_deadline:
+            self._delayed_hold_pending = False
+            if self._navigation_state == NavigationState.COMPLETED:
+                self.get_logger().info('🛑 延迟期满，无后续航点，自动切换到 HOLD 模式')
+                self._switch_to_hold_mode()
+            else:
+                self.get_logger().debug(
+                    f'延迟 HOLD 取消: 当前状态={self._navigation_state.name}')
     
     def _switch_to_hold_mode(self):
         """

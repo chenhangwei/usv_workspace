@@ -889,7 +889,30 @@ class GroundStationNode(Node):
             )
 
     # ==================== 基于话题的导航方法 ====================
-    
+
+    @staticmethod
+    def _compute_goal_id(usv_id: str, step: int) -> int:
+        """计算确定性 goal_id: usv编号 × 10000 + step步骤号.
+
+        编码格式: usv_XX → XX * 10000 + step
+        例: usv_01 step 1 → 10001, usv_03 step 5 → 30005
+        可通过 _parse_goal_id() 反向解析出 usv 编号和步骤号.
+        """
+        try:
+            usv_num = int(usv_id.split('_')[-1])
+        except (ValueError, IndexError):
+            usv_num = 0
+        return usv_num * 10000 + step
+
+    @staticmethod
+    def _parse_goal_id(goal_id: int) -> tuple:
+        """从 goal_id 解析出 (usv编号, step步骤号).
+
+        Returns:
+            (usv_number, step_number)
+        """
+        return goal_id // 10000, goal_id % 10000
+
     def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, 
                                  maneuver_type=0, maneuver_param=0.0, step=None,
                                  nav_mode=0, sync_timeout=10.0, arrival_quality_threshold=0.8,
@@ -938,67 +961,17 @@ class GroundStationNode(Node):
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             return False
         
-        # 发送前去重：若与该USV当前缓存目标一致，则复用旧 goal_id 直接重发
-        goal_id = None
-        reuse_goal_id = False
+        # ==================== 确定性 Goal ID ====================
+        # goal_id = usv编号 × 10000 + step步骤号
+        # 同一 USV 的同一步骤永远得到相同 ID，重试/预发送/结果匹配全部自动正确
+        current_step = step if step is not None else getattr(self, 'run_step', 1)
+        goal_id = self._compute_goal_id(usv_id, current_step)
+        is_retry = False
+
+        # 检查是否为重试（同一 goal_id 再次发送）
         cached = self._usv_nav_target_cache.get(usv_id)
-        try:
-            reuse_enabled = bool(self.get_parameter('dedup_goal_id_reuse_enabled').value)
-        except Exception:
-            reuse_enabled = True
-
-        def _param_float(name: str, default: float) -> float:
-            try:
-                v = self.get_parameter(name).value
-                if v is None:
-                    return default
-                return float(v)
-            except Exception:
-                return default
-
-        pos_eps = max(0.0, _param_float('dedup_goal_pos_epsilon', 0.01))
-        yaw_eps = max(0.0, _param_float('dedup_goal_yaw_epsilon', 0.05))
-        man_eps = max(0.0, _param_float('dedup_goal_maneuver_param_epsilon', 1e-3))
-
-        if reuse_enabled and cached:
-            try:
-                dx = float(cached.get('x', 0.0)) - float(x)
-                dy = float(cached.get('y', 0.0)) - float(y)
-                dz = float(cached.get('z', 0.0)) - float(z)
-                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-                yaw_match = (not bool(use_yaw)) or (abs(float(cached.get('yaw', 0.0)) - float(yaw)) <= yaw_eps)
-                same_step = True
-                if step is not None:
-                    same_step = int(cached.get('step', step)) == int(step)
-                same_maneuver = (
-                    int(cached.get('maneuver_type', maneuver_type)) == int(maneuver_type)
-                    and abs(float(cached.get('maneuver_param', 0.0)) - float(maneuver_param)) <= man_eps
-                )
-                if (
-                    dist <= pos_eps
-                    and bool(use_yaw) == bool(cached.get('use_yaw', bool(use_yaw)))
-                    and yaw_match
-                    and same_maneuver
-                    and same_step
-                ):
-                    cached_goal_id = cached.get('goal_id')
-                    if cached_goal_id is not None:
-                        goal_id = int(cached_goal_id)
-                        reuse_goal_id = True
-            except Exception:
-                reuse_goal_id = False
-
-        if not reuse_goal_id:
-            # 生成唯一的目标ID
-            with self._goal_id_lock:
-                goal_id = self._next_goal_id
-                self._next_goal_id += 1
-
-        if goal_id is None:
-            # 防御：理论上不会发生
-            self.get_logger().warning('goal_id 生成失败，放弃发送')
-            self.ros_signal.nav_status_update.emit(usv_id, "失败")
-            return False
+        if cached and cached.get('goal_id') == goal_id:
+            is_retry = True
         
         # 记录目标ID到USV的映射
         self._goal_to_usv[goal_id] = usv_id
@@ -1044,7 +1017,6 @@ class GroundStationNode(Node):
         pub.publish(goal_msg)
         
         # 更新缓存和状态 (预发送时跳过，避免覆盖当前执行步骤的goal_id)
-        current_step = step if step is not None else self.run_step
         if not is_lookahead:
             self._usv_nav_target_cache[usv_id] = {
                 'goal_id': goal_id,
@@ -1067,10 +1039,12 @@ class GroundStationNode(Node):
         
         nav_mode_names = {0: '异步', 1: '同步', 2: '旋转', 3: '终止'}
         mode_str = nav_mode_names.get(nav_mode, '异步')
-        resend_tag = "(重发复用ID) " if reuse_goal_id else ""
+        usv_num, step_num = self._parse_goal_id(goal_id)
+        retry_tag = "(重试) " if is_retry else ""
         lookahead_tag = "📤预发送 " if is_lookahead else "📤 "
         self.get_logger().info(
-            f"{lookahead_tag}{usv_id} 导航目标已发送 {resend_tag}[ID={goal_id}]: "
+            f"{lookahead_tag}{usv_id} 导航目标已发送 {retry_tag}"
+            f"[ID={goal_id} (USV{usv_num:02d}-Step{step_num})]: "
             f"XY({x:.1f}, {y:.1f}), Yaw({yaw:.1f}°), "
             f"机动({maneuver_type}, {maneuver_param:.1f}), 模式={mode_str}, 超时={timeout:.0f}s")
         
@@ -1117,42 +1091,21 @@ class GroundStationNode(Node):
         """
         导航结果回调 (话题版本)
         
+        通过确定性 goal_id 编码直接解析 step 编号，
+        不再依赖缓存匹配，彻底避免 ID 不一致导致结果被丢弃。
+        
         Args:
             msg (NavigationResult): 导航结果消息
             usv_id (str): USV标识符
         """
-        # 详细调试日志
-        # self.get_logger().info(
-        #     f"🔍 [DEBUG] 收到导航结果: usv_id={usv_id}, goal_id={msg.goal_id}, "
-        #     f"success={msg.success}, message={msg.message}"
-        # )
+        # 从 goal_id 解析出 USV 编号和步骤号
+        usv_num, goal_step = self._parse_goal_id(msg.goal_id)
         
-        # 检查是否是当前目标的结果
-        cached = self._usv_nav_target_cache.get(usv_id)
-        # if cached:
-        #     self.get_logger().info(
-        #         f"🔍 [DEBUG] 缓存目标信息: goal_id={cached.get('goal_id')}, "
-        #         f"step={cached.get('step')}, x={cached.get('x'):.2f}, y={cached.get('y'):.2f}"
-        #     )
-        # else:
-        #     self.get_logger().warning(
-        #         f"⚠️ {usv_id} 没有缓存目标，可能已被清除或过期"
-        #     )
-        
-        if cached and cached.get('goal_id') != msg.goal_id:
-            self.get_logger().warning(
-                f"⚠️ {usv_id} 目标ID不匹配: cached={cached.get('goal_id')}, "
-                f"received={msg.goal_id}，忽略此结果"
-            )
-            return  # 忽略旧目标的结果
-        
-        # 记录日志
+        # 基本日志
         status_icon = "✅" if msg.success else "❌"
         self.get_logger().info(
-            f"{status_icon} {usv_id} 导航完成 [ID={msg.goal_id}]: {msg.message}")
-        
-        # 获取目标的 step 信息
-        goal_step = cached.get('step') if cached else None
+            f"{status_icon} {usv_id} 导航完成 "
+            f"[ID={msg.goal_id} (USV{usv_num:02d}-Step{goal_step})]: {msg.message}")
         
         # 更新状态
         if msg.success:
@@ -1162,10 +1115,6 @@ class GroundStationNode(Node):
             # 标记目标已到达（用于UI显示绿色X），而不是删除缓存
             if usv_id in self._usv_nav_target_cache:
                 self._usv_nav_target_cache[usv_id]['reached'] = True
-            
-            # ✅ 修复：不在每个目标点完成时切换HOLD，让USV保持GUIDED模式继续执行后续步骤
-            # 集群任务完成后会统一切换到HOLD（在_reset_cluster_task中处理）
-            # self.get_logger().info(f"✅ {usv_id} 导航成功，保持GUIDED模式等待下一步任务")
         else:
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             self.cluster_controller.mark_usv_goal_result(usv_id, False, goal_step)

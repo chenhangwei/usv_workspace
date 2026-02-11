@@ -455,47 +455,67 @@ class VelocityPathTracker:
             self._goal_reached = True
             return VelocityCommand.stop()
         
-        # ==================== 大航向误差处理 ====================
-        # 计算航向误差
+        # ==================== 航向误差计算 ====================
         dx = target.x - pose.x
         dy = target.y - pose.y
         target_yaw = math.atan2(dy, dx)
         heading_error = self._normalize_angle(target_yaw - pose.yaw)
         
-        # ==================== 优先转向逻辑 (Pivot Turn) ====================
-        # 当航向误差 > 30° 时，优先进行原地或低速转向，减小转弯半径
-        # 这样可以避免在目标点附近绕大圈 (Orbiting)
-        LARGE_HEADING_ERROR_THRESHOLD = math.radians(30)  # 30°
+        # ==================== 双模式转弯控制 (v15) ====================
+        #
+        # 问题背景:
+        #   MPC 在 heading_error > 60° 时几乎瘫痪:
+        #     - R_w=80 抑制角速度 → ω ≈ 0.10 rad/s (远低于 w_max=0.4)
+        #     - CTE 代价阻止前进 → v = 0 (前进会偏离航线)
+        #     - 结果: 无法前进也无法有效旋转，USV 死锁
+        #
+        # 解决方案: 分两个模式——
+        #   1. heading_error > 60°: 弧形转弯 (Arc Turn)
+        #      - 绕过 MPC，直接输出 max_angular_velocity 旋转
+        #      - 保持 cos(|error|/2) × speed 的前进分量 → 弧形而非点转
+        #      - 效果: 120° Z形拐角，半速弧形过渡，~5秒完成
+        #   2. heading_error ≤ 60°: MPC 跟踪
+        #      - MPC 在此范围内工作良好 (CTE 偏差可控)
+        #      - cos() 降速提供额外裕度
+        #      - tau_omega 一阶惯性模型防 S 形振荡
+
+        ARC_TURN_THRESHOLD = math.radians(60)  # 60°: MPC 可靠工作的上限
         
-        if abs(heading_error) > LARGE_HEADING_ERROR_THRESHOLD:
-            # 大航向误差模式：急减速 + 最大角速度转向
-            # 确定转向方向（正误差左转，负误差右转）
+        if abs(heading_error) > ARC_TURN_THRESHOLD:
+            # === 弧形转弯模式 (Arc Turn) ===
+            # MPC 在此角度范围无法有效控制，直接指令旋转 + 前进
+            
+            # 角速度: 最大角速度，方向跟随误差符号
             if heading_error > 0:
                 angular_velocity = self.max_angular_velocity
             else:
                 angular_velocity = -self.max_angular_velocity
             
-            # 减速策略：
-            # 误差 > 45°: 极低速/原地旋转 (0.05x 速度)
-            # 誤差 30°-45°: 线性过渡 (0.4x -> 0.05x)
+            # 前进速度: cos(|error|/2) 曲线，保证弧形转弯
+            #   60°  → cos(30°) = 0.87 → 0.26 m/s  (大弧转弯)
+            #   90°  → cos(45°) = 0.71 → 0.21 m/s
+            #   120° → cos(60°) = 0.50 → 0.15 m/s  (Z形拐角)
+            #   150° → cos(75°) = 0.26 → 0.08 m/s  (紧弧)
+            #   180° → cos(90°) = 0.00 → min_speed  (掉头)
+            heading_speed_factor = math.cos(abs(heading_error) / 2.0)
+            heading_speed_factor = max(heading_speed_factor, 0.12)
+            linear_speed = target.speed * heading_speed_factor
             
-            PIVOT_THRESHOLD = math.radians(45) # 45度以上视为需要大幅调整
+            # 最终航点接近时额外减速 (防止飘过)
+            if target.is_final and distance_to_target < 3.0:
+                approach_factor = max(distance_to_target / 3.0, 0.2)
+                linear_speed *= approach_factor
             
-            if abs(heading_error) > PIVOT_THRESHOLD:
-                heading_factor = 0.05 # 几乎停车，优先转向
-            else:
-                # 30~45度之间插值: 0.4 -> 0.05
-                ratio = (abs(heading_error) - LARGE_HEADING_ERROR_THRESHOLD) / (PIVOT_THRESHOLD - LARGE_HEADING_ERROR_THRESHOLD)
-                heading_factor = 0.4 - 0.35 * ratio
+            linear_speed = max(linear_speed, self.min_speed)
             
-            linear_speed = target.speed * heading_factor
-            
-            # 应用滤波
+            # 角速度滤波 (平滑切换到弧形模式，防止突变)
             angular_velocity = (
                 self.angular_velocity_filter * angular_velocity +
                 (1 - self.angular_velocity_filter) * self._last_angular_velocity
             )
             self._last_angular_velocity = angular_velocity
+            
+            self.debug_info['active_controller'] = 'ARC_TURN'
             
             cmd = VelocityCommand(
                 linear_x=linear_speed,
@@ -503,6 +523,12 @@ class VelocityPathTracker:
                 angular_z=angular_velocity
             )
             return cmd.sanitize()
+        
+        # === MPC 跟踪模式 (heading_error ≤ 60°) ===
+        # MPC 在此范围内工作良好: CTE 偏差可控, 角速度需求在 R_w=80 可承受范围
+        # 额外应用 cos() 降速为 MPC 提供转向裕度
+        heading_speed_factor = math.cos(abs(heading_error) / 2.0)
+        # 60° 边界: cos(30°) = 0.87, 速度降至 87% — 平滑过渡到弧形模式的 87%
         
         # ==================== 计算控制指令 (MPC) ====================
         self.debug_info['active_controller'] = 'MPC'
@@ -512,7 +538,6 @@ class VelocityPathTracker:
         effective_yaw = self._get_control_heading(pose)
         
         # 计算自适应速度 (距离减速 + 曲率减速)
-        # 这是关键修复：之前没有调用此函数，导致接近目标时不减速
         adaptive_speed = self._compute_adaptive_speed(
             target_speed=target.speed,
             angular_velocity=self._last_angular_velocity,
@@ -520,11 +545,15 @@ class VelocityPathTracker:
             is_final=target.is_final
         )
         
+        # 应用航向误差降速
+        adaptive_speed *= heading_speed_factor
+        adaptive_speed = max(adaptive_speed, self.min_speed)
+        
         v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
             [pose.x, pose.y, effective_yaw], 
             [target.x, target.y], 
-            target_speed=adaptive_speed,  # 使用自适应速度，而不是固定速度
-            prev_waypoint=self._prev_waypoint_pos  # v5 新增: 传递上一个航点用于计算航线方向
+            target_speed=adaptive_speed,
+            prev_waypoint=self._prev_waypoint_pos
         )
         
         # 获取调试信息

@@ -225,7 +225,7 @@ class LogCollectorNode(Node):
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
             if self._mpc_params_received:
-                self._csv_file.write(f'# MPC Parameters Configuration (v6: Adaptive Tau Model)\n')
+                    self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
                 self._csv_file.write(f'# USV ID: {self._usv_id}\n')
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
@@ -550,8 +550,8 @@ class LogCollectorNode(Node):
         
         timestamp = current_time
         
-        # 计算距离 (如果没有从反馈获取)
-        if self._distance_to_goal == 0.0 and self._goal_id > 0:
+        # 计算距离 (始终使用当前目标与位姿的几何距离，避免切点时序不一致)
+        if self._goal_id > 0:
             dx = self._target_x - self._pose_x
             dy = self._target_y - self._pose_y
             self._distance_to_goal = math.sqrt(dx * dx + dy * dy)

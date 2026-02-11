@@ -62,6 +62,7 @@ class ClusterController:
         self._lookahead_steps = 1             # 预发送步数 (当前步+N个后续步)
         self._lookahead_queue_threshold = 2   # 当 USV 队列剩余 < 此值时预发送
         self._lookahead_sent: Dict[str, set] = ThreadSafeDict()  # 已预发送的 (usv_id -> set of steps)
+        self._lookahead_completed: Dict[str, set] = ThreadSafeDict()  # 预发送已完成的 (usv_id -> set of steps)
 
         # 初始化状态变量
         self._state = ClusterTaskState.IDLE
@@ -235,19 +236,17 @@ class ClusterController:
             # 计算最大步骤数，遍历所有目标点获取step值的最大值，若列表为空则默认为1
             self.node.max_step = max(target.get('step', 1) for target in temp_list) if temp_list else 0
 
-            # ========== 重置 goal_id 计数器 ==========
-            # 新任务开始时重置 goal_id 为 1，这样 USV 端收到 ID=1 时会清空残留队列
-            self.node._next_goal_id = 1
-            self.node.get_logger().info("🔄 新任务开始，重置 goal_id 计数器为 1")
+            # ========== 新任务前取消所有活动目标 ==========
+            # 发送 stop_navigation 到所有 USV，清空残留队列
+            for uid in list(self.node._usv_nav_target_cache.keys()):
+                self._cancel_active_goal(uid)
+            self.node.get_logger().info("🔄 新任务开始，已发送 stop_navigation 清空所有 USV 残留队列")
 
-            # 初始化每艇 ack 状态，为每个USV设备初始化确认状态
-            # 清空之前的确认状态映射表，准备记录新的状态
+            # 初始化每艇 ack 状态
             self._ack_states.clear()
             self._usv_step_progress.clear()  # 清空步骤进度
             self._lookahead_sent.clear()     # 清空预发送记录
-            
-            # 根据当前步骤获取相关的USV列表
-            # cluster_usv_list = self._get_usvs_by_step(self.node.current_targets, self.node.run_step)
+            self._lookahead_completed.clear() # 清空预发送完成记录
             
             # 初始化所有参与任务的 USV 进度
             all_usvs = set(t.get('usv_id') for t in temp_list if t.get('usv_id'))
@@ -351,6 +350,14 @@ class ClusterController:
             if state is None or state.step != current_step:
                 state = AckState(step=current_step)
                 self._ack_states[usv_id] = state
+                # 自动确认已通过 lookahead 完成的步骤
+                completed_set = self._lookahead_completed.get(usv_id)
+                if completed_set and current_step in completed_set:
+                    state.acked = True
+                    state.ack_time = self._now()
+                    completed_set.discard(current_step)
+                    self.node.get_logger().info(
+                        f"⏩ Step {current_step} for {usv_id} 已通过 lookahead 完成，自动确认")
 
             if state.acked:
                 sync_enabled = target_data.get('sync', True)
@@ -425,6 +432,44 @@ class ClusterController:
                 
             pos = target_data.get('position', {})
             if all(k in pos for k in ('x', 'y')):
+                # ========== 检查是否已通过 lookahead 预发送 ==========
+                # 注意: 仅首次发送时跳过，重试时必须重新发送（可能 USV 已完成/丢失原目标）
+                is_retry = state.retry > 0
+                sent_set = self._lookahead_sent.get(usv_id)
+                if self._lookahead_enabled and sent_set and state.step in sent_set and not is_retry:
+                    # 更新 GS 缓存到当前步骤，使反馈匹配能跟踪到 lookahead 步骤
+                    la_goal_id = self.node._compute_goal_id(usv_id, state.step)
+                    p_g = self._area_to_global(pos)
+                    p_l = self._global_to_usv_local(usv_id, p_g)
+                    self.node._usv_nav_target_cache[usv_id] = {
+                        'goal_id': la_goal_id,
+                        'x': float(p_l.get('x', 0.0)),
+                        'y': float(p_l.get('y', 0.0)),
+                        'z': float(p_l.get('z', 0.0)),
+                        'step': state.step,
+                        'timestamp': self._now(),
+                        'paused': False,
+                    }
+                    self.node.ros_signal.nav_status_update.emit(usv_id, "执行中")
+                    
+                    # 已预发送，检查是否也已完成
+                    completed_set = self._lookahead_completed.get(usv_id)
+                    if completed_set and state.step in completed_set:
+                        self.node.get_logger().info(
+                            f"⏩ Step {state.step} 已通过 lookahead 预发送并完成 {usv_id}，自动确认")
+                        state.acked = True
+                        state.ack_time = self._now()
+                        completed_set.discard(state.step)
+                    else:
+                        self.node.get_logger().info(
+                            f"⏭️ Step {state.step} 已通过 lookahead 预发送给 {usv_id}，跳过重复发送")
+                    
+                    # 即使跳过了当前步骤的发送，仍需为后续步骤发送 lookahead
+                    # 否则队列会在平滑切换后变空，导致中间航点被误判为"最终航点"
+                    if self._lookahead_enabled:
+                        self._send_lookahead_goals(usv_id, state.step)
+                    return
+
                 p_global = self._area_to_global(pos)
                 p_local = self._global_to_usv_local(usv_id, p_global)
                 
@@ -438,8 +483,9 @@ class ClusterController:
                 sync_timeout = target_data.get('sync_timeout', 10.0)
                 arrival_quality = target_data.get('arrival_quality_threshold', 0.8)
                 
+                retry_tag = f" (重试{state.retry})" if is_retry else ""
                 self.node.get_logger().info(
-                    f"📤执行 Step {state.step} {usv_id}: Pos=({p_local['x']:.1f}, {p_local['y']:.1f})"
+                    f"📤执行 Step {state.step} {usv_id}{retry_tag}: Pos=({p_local['x']:.1f}, {p_local['y']:.1f})"
                 )
                 
                 self.node.send_nav_goal_via_topic(
@@ -1077,6 +1123,15 @@ class ClusterController:
         
         expected_step = goal_step if goal_step is not None else self.node.run_step
         if state.step != expected_step and state.step != expected_step - 1:
+            # 检查是否为 lookahead 预发送的步骤完成结果
+            if success and expected_step is not None and expected_step > state.step:
+                if usv_id not in self._lookahead_completed:
+                    self._lookahead_completed[usv_id] = set()
+                self._lookahead_completed[usv_id].add(expected_step)
+                self.node.get_logger().info(
+                    f"📋 {usv_id} 完成预发送 Step {expected_step} "
+                    f"(当前 state.step={state.step})，记录待确认")
+                return
             self.node.get_logger().warning(
                 f"⚠️  {usv_id} step不匹配! state.step={state.step}, expected_step={expected_step}, run_step={self.node.run_step}"
             )
