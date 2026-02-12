@@ -153,6 +153,10 @@ class VelocityControllerNode(Node):
         self.declare_parameter('min_speed_for_velocity_heading', 0.20)  # 使用速度航向的最小速度 (m/s)
         self.declare_parameter('heading_fusion_speed_range', 0.15)  # 航向融合过渡速度范围 (m/s)
         
+        # v14 新增: 模式保护和渐进减速参数
+        self.declare_parameter('consecutive_hold_threshold', 3)      # 连续 HOLD 强制暂停阈值
+        self.declare_parameter('soft_decel_duration', 3.0)           # 渐进减速持续时间 (秒)
+        
         # ==================== 获取参数 ====================
         self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
         self.get_logger().info(f'🔍 正在初始化速度控制器... 模式: MPC')
@@ -261,24 +265,32 @@ class VelocityControllerNode(Node):
         self._max_timeout_before_stop: int = 5  # 连续超时次数阈值
         
         # ==================== 模式保护 ====================
+        # 设计原则: 导航任务进行中 GUIDED 模式为最高优先级
+        # 任何非 GUIDED 模式(HOLD/MANUAL/LOITER等)被检测到时立即恢复 GUIDED
+        # 不允许任何停顿影响导航效果
         self._mode_protection_enabled: bool = True  # 导航中自动恢复 GUIDED 模式
         self._last_mode_restore_time: float = 0.0   # 上次恢复模式的时间
-        self._mode_restore_cooldown: float = 2.0    # 恢复模式冷却时间 (秒)
+        self._mode_restore_cooldown: float = 0.2    # 恢复模式冷却时间 (秒) - 极短，仅防消息风暴
         
-        # 手动HOLD/取消请求标志 - 用于区分手动切换和飞控自动切换
-        # 当收到 cancel_navigation 消息时设置为 True
-        # 防止模式检测在 cancel_navigation 消息到达前就尝试恢复 GUIDED
+        # ====== 连续HOLD强制暂停机制 ======
+        # 地面站手动HOLD需要连续触发多次才能强制暂停任务
+        # 单次HOLD(无论来源)不会暂停导航，会立即恢复GUIDED
+        # 这样飞控自动HOLD、意外HOLD都不会中断导航
         self._manual_hold_requested: bool = False
-        self._manual_hold_request_time: float = 0.0  # 请求时间戳
+        self._manual_hold_request_time: float = 0.0  # 最近一次请求时间戳
         self._manual_hold_timeout: float = 3600.0    # 手动请求有效期 (1小时，实际由新任务清除)
+        self._consecutive_hold_count: int = 0        # 连续HOLD请求计数
+        self._consecutive_hold_window: float = 5.0   # 连续HOLD计数窗口 (秒)
+        self._consecutive_hold_threshold: int = int(self.get_parameter('consecutive_hold_threshold').value or 3)
+        self._last_hold_request_time: float = 0.0    # 上一次HOLD请求的时间
         
-        # PAUSED 状态保护 - 刚进入暂停状态时不立即尝试恢复
+        # PAUSED 状态保护 - 仅在强制暂停后使用
         self._paused_state_enter_time: float = 0.0   # 进入 PAUSED 状态的时间
-        self._paused_state_grace_period: float = 5.0  # 暂停状态保护期 (秒)，等待cancel_navigation消息
+        self._paused_state_grace_period: float = 0.5  # 暂停状态保护期 (秒) - 极短
         
         # GUIDED 切换保护期 - 发送 GUIDED 切换命令后等待生效
         self._guided_switch_request_time: float = 0.0  # 上次请求切换 GUIDED 的时间
-        self._guided_switch_grace_period: float = 2.0  # 切换保护期 (秒)
+        self._guided_switch_grace_period: float = 1.0  # 切换保护期 (秒) - 缩短
         
         # 延迟 HOLD 切换 - 防止多步任务中每 2 步频繁 HOLD/GUIDED 切换
         self._delayed_hold_pending: bool = False      # 是否有待执行的延迟 HOLD
@@ -290,6 +302,15 @@ class VelocityControllerNode(Node):
         self._delayed_stop_pending: bool = False      # 是否有待执行的延迟停止
         self._delayed_stop_deadline: float = 0.0      # 延迟停止的执行截止时间
         self._delayed_stop_delay: float = 1.5         # 延迟时间 (秒)，大于典型 batch 间隔 (~1s)
+        
+        # 渐进减速 - 导航完成后平滑减速至零，替代急刹车
+        # 在 _end_navigation(COMPLETED) 后立即启动，线性降低速度
+        # 如果减速期间收到新航点，自动取消减速并恢复导航
+        self._soft_decel_active: bool = False           # 渐进减速是否激活
+        self._soft_decel_start_time: float = 0.0        # 渐进减速开始时间
+        self._soft_decel_duration: float = float(self.get_parameter('soft_decel_duration').value or 3.0)
+        self._soft_decel_start_vx: float = 0.0          # 减速开始时的线速度
+        self._soft_decel_start_omega: float = 0.0       # 减速开始时的角速度
         
         # 导航状态管理 (使用枚举替代简单布尔值)
         self._navigation_state: NavigationState = NavigationState.IDLE
@@ -760,12 +781,14 @@ class VelocityControllerNode(Node):
                 # 使用统一的结束方法，设置为 COMPLETED 状态
                 self._end_navigation(NavigationState.COMPLETED, "成功到达目标")
                 
-                # 延迟切换到 HOLD 模式：多步任务中下一步航点可能很快到达
+                # 延迟切换到 HOLD 模式：等渐进减速完成后再切换
+                # 延迟时间 = 减速持续时间 + 缓冲时间，确保 HOLD 在减速完成之后
                 # 如果在延迟期内收到新目标，取消 HOLD 切换，避免频繁 HOLD/GUIDED 循环
+                hold_delay = self._soft_decel_duration + 1.0
                 self._delayed_hold_pending = True
-                self._delayed_hold_deadline = time.time() + self._delayed_hold_delay
+                self._delayed_hold_deadline = time.time() + hold_delay
                 self.get_logger().debug(
-                    f'⏳ 延迟 HOLD 切换 {self._delayed_hold_delay}s，等待可能的后续航点')
+                    f'⏳ 延迟 HOLD 切换 {hold_delay:.1f}s (减速{self._soft_decel_duration:.1f}s + 缓冲1.0s)')
                 
             elif self._current_goal_id is not None and goal_id == self._current_goal_id:
                 # 兼容旧逻辑：ID 匹配也停止追踪，但不切换 HOLD
@@ -782,37 +805,57 @@ class VelocityControllerNode(Node):
     
     def _cancel_navigation_callback(self, msg: Bool):
         """
-        取消导航回调 - 来自地面站的强制取消请求
+        取消导航回调 - 来自地面站的暂停请求
         
-        当用户在地面站点击 HOLD 或 MANUAL 按钮时，会发送此消息。
-        导航任务进入 PAUSED 状态（暂停），不会自动恢复 GUIDED。
+        当用户在地面站点击 HOLD 按钮时，会发送此消息。
         
-        状态转换: ANY → PAUSED (手动暂停)
-        - 手动暂停状态不会触发自动恢复 GUIDED
-        - 设置 _manual_hold_requested 标志，区分手动暂停和飞控自动切换
-        - 当用户发送新导航任务时，任务会自动恢复
+        ===== 连续HOLD强制暂停机制 =====
+        导航任务进行中，GUIDED 模式为最高优先级:
+        - 单次 HOLD 请求: 不暂停，自动恢复 GUIDED 继续导航
+        - 连续 N 次 HOLD 请求(在时间窗口内): 强制暂停任务
+        
+        这确保了:
+        1. 飞控自动切换的 HOLD 不会中断导航
+        2. 偶尔的误触不会影响导航
+        3. 操作员需要明确连续操作才能强制暂停
         """
         if not msg.data:
             return
         
-        self.get_logger().warn('🛑 收到暂停导航请求（来自地面站），任务进入暂停状态')
+        import time as _time
+        now = _time.time()
         
-        # 设置手动HOLD请求标志 - 防止模式检测在状态更新前就尝试恢复 GUIDED
-        # 这解决了时序竞争问题：地面站同时发送 cancel_navigation 和 set_mode HOLD，
-        # 但模式检测可能在 cancel_navigation 消息处理前就检测到 HOLD 模式
-        self._manual_hold_requested = True
-        self._manual_hold_request_time = self.get_clock().now().nanoseconds / 1e9
-        
-        # 无论当前状态如何，都设置为 PAUSED 状态
-        # 即使已经是 PAUSED（由模式检测触发），也要确保是"手动暂停"
-        if self._navigation_state in (NavigationState.ACTIVE, NavigationState.PAUSED):
-            self._set_navigation_state(NavigationState.PAUSED, "用户手动暂停")
-            # 停止当前运动但保留航点信息
-            self._publish_velocity_command(VelocityCommand.stop())
+        # ===== 连续HOLD计数 =====
+        if (now - self._last_hold_request_time) <= self._consecutive_hold_window:
+            self._consecutive_hold_count += 1
+        else:
+            # 超出时间窗口，重新计数
+            self._consecutive_hold_count = 1
+        self._last_hold_request_time = now
         
         self.get_logger().info(
-            f'✅ 导航任务已暂停，手动暂停标志已设置 (manual_hold_requested={self._manual_hold_requested})'
-        )
+            f'📥 收到HOLD请求 [{self._consecutive_hold_count}/{self._consecutive_hold_threshold}] '
+            f'(需连续{self._consecutive_hold_threshold}次才能强制暂停)')
+        
+        # 检查是否达到强制暂停阈值
+        if self._consecutive_hold_count >= self._consecutive_hold_threshold:
+            # 达到阈值，强制暂停
+            self.get_logger().warn(
+                f'🛑 连续{self._consecutive_hold_count}次HOLD请求，强制暂停导航任务')
+            self._manual_hold_requested = True
+            self._manual_hold_request_time = self.get_clock().now().nanoseconds / 1e9
+            self._consecutive_hold_count = 0  # 重置计数
+            
+            if self._navigation_state in (NavigationState.ACTIVE, NavigationState.PAUSED):
+                self._set_navigation_state(NavigationState.PAUSED, "连续HOLD强制暂停")
+                self._publish_velocity_command(VelocityCommand.stop())
+            
+            self.get_logger().info(
+                f'✅ 导航任务已强制暂停 (manual_hold_requested={self._manual_hold_requested})')
+        else:
+            # 未达到阈值，不暂停，GUIDED 将在下一个控制循环自动恢复
+            self.get_logger().info(
+                f'⏩ HOLD请求次数不足，导航继续 (GUIDED将自动恢复)')
     
     def _stop_navigation_callback(self, msg: Bool):
         """
@@ -821,6 +864,8 @@ class VelocityControllerNode(Node):
         完全停止导航任务，清空所有目标。
         需要发送新任务才能重新开始导航。
         
+        注意: STOP 是强制操作，不受连续HOLD计数限制，立即生效。
+        
         状态转换: ANY → CANCELLED (完全停止)
         """
         if not msg.data:
@@ -828,9 +873,10 @@ class VelocityControllerNode(Node):
         
         self.get_logger().warn('🛑 收到停止导航请求（集群STOP），任务完全停止')
         
-        # 设置手动HOLD请求标志
+        # STOP 是明确的停止意图，直接设置标志
         self._manual_hold_requested = True
         self._manual_hold_request_time = self.get_clock().now().nanoseconds / 1e9
+        self._consecutive_hold_count = 0  # 重置计数
         
         # 清空所有导航目标
         self._target_x = None
@@ -875,11 +921,29 @@ class VelocityControllerNode(Node):
         
         # NAV_MODE_TERMINAL (离群单点导航) 跳过，让 usv_control_node 位置模式处理
         # 位置模式更适合精确定点停留，而非连续路径跟踪
+        # 重要：必须主动让出控制权，停止发布速度指令，避免与 usv_control_node 的
+        # GPS 位置指令在 ArduPilot GUIDED 模式下产生 setpoint 竞争
         if nav_mode == NAV_MODE_TERMINAL:
             self.get_logger().info(
                 f'⏭️ 离群目标 [ID={goal_id}] ({target.x:.2f}, {target.y:.2f}) '
-                f'使用位置模式处理 (NAV_MODE_TERMINAL)'
+                f'使用位置模式处理 (NAV_MODE_TERMINAL), 让出速度控制权'
             )
+            # 清理控制状态，防止控制循环继续发布零速指令
+            # 这些零速指令会覆盖 usv_control_node 的 GPS 位置目标
+            self.tracker.clear_waypoints()
+            self._control_active = False
+            self._current_goal_id = None
+            # 取消可能残留的软减速和延迟 HOLD
+            # （TERMINAL 模式的到达/HOLD 由 usv_control_node 和 navigate_to_point_node 处理）
+            self._soft_decel_active = False
+            self._delayed_stop_pending = False
+            self._delayed_hold_pending = False
+            # 旋转状态也需清理
+            if self._rotation_active:
+                self._rotation_active = False
+                self._rotation_initialized = False
+            # 设置导航状态为 IDLE，表示速度控制器不再参与控制
+            self._set_navigation_state(NavigationState.IDLE, "TERMINAL模式让出控制权")
             return
         
         # 加锁保护：防止并发回调导致 set_waypoint 执行顺序错乱
@@ -888,6 +952,7 @@ class VelocityControllerNode(Node):
     
     def _process_nav_goal(self, msg: NavigationGoal, target, goal_id: int, nav_mode: int):
         """导航目标处理（锁内执行，线程安全）"""
+        self._current_goal_nav_mode = nav_mode  # 记录当前导航模式，用于 feedback
         maneuver_type = getattr(msg, 'maneuver_type', 0)
         maneuver_param = getattr(msg, 'maneuver_param', 0.0)
         
@@ -962,7 +1027,10 @@ class VelocityControllerNode(Node):
             self.tracker.set_waypoint(waypoint)
             self._control_active = True
             
-            # 收到新目标，取消所有待执行的延迟操作 (停止 + HOLD 切换)
+            # 收到新目标，取消所有待执行的延迟操作 (减速 + 停止 + HOLD 切换)
+            if self._soft_decel_active:
+                self._soft_decel_active = False
+                self.get_logger().debug(f'✓ 收到新目标 [ID={goal_id}], 已取消渐进减速')
             if self._delayed_stop_pending:
                 self._delayed_stop_pending = False
                 self.get_logger().debug(f'✓ 收到新目标 [ID={goal_id}], 已取消延迟软停止')
@@ -1084,6 +1152,12 @@ class VelocityControllerNode(Node):
         # 检查延迟停止和延迟 HOLD 切换
         self._check_delayed_stop()
         self._check_delayed_hold()
+        
+        # ==================== 渐进减速处理 ====================
+        # 导航完成后平滑减速，优先于常规导航控制
+        if self._soft_decel_active:
+            self._handle_soft_deceleration()
+            return
         
         # 检查前置条件
         if not self._check_preconditions():
@@ -1350,103 +1424,61 @@ class VelocityControllerNode(Node):
         if self.require_guided_mode and self.current_state.mode != 'GUIDED':
             current_mode = self.current_state.mode
             
-            # MANUAL 模式: 检查是否在 GUIDED 切换保护期内
-            if current_mode == 'MANUAL':
-                import time as _time
-                now = _time.time()
-                in_guided_switch_grace = (
-                    self._guided_switch_request_time > 0 and
-                    (now - self._guided_switch_request_time) < self._guided_switch_grace_period
-                )
-                
-                if in_guided_switch_grace:
-                    # 刚发送了 GUIDED 切换命令，等待生效，不取消导航
-                    self.get_logger().debug(
-                        f'GUIDED 切换保护期内 ({now - self._guided_switch_request_time:.1f}s)，等待模式切换生效'
-                    )
-                    return False
-                
-                # 保护期外的 MANUAL 模式: 用户明确要求手动控制，尊重用户意图
-                if self._navigation_state == NavigationState.ACTIVE:
-                    self.get_logger().warn(
-                        f'⚠️ 检测到切换为 MANUAL 模式，尊重用户意图，结束导航任务'
-                    )
-                    self._end_navigation(NavigationState.CANCELLED, "用户切换到MANUAL模式")
-                else:
-                    self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+            import time as _time
+            now = _time.time()
+            
+            # ============================================================
+            # GUIDED 模式最高优先级策略:
+            # 导航任务 ACTIVE 状态下，任何非 GUIDED 模式都立即恢复
+            # 包括 HOLD、MANUAL、LOITER、RTL 等所有模式
+            # 只有经过连续HOLD强制暂停(PAUSED+manual_hold)才不恢复
+            # ============================================================
+            
+            # 检查是否在 GUIDED 切换命令生效等待期
+            in_guided_switch_grace = (
+                self._guided_switch_request_time > 0 and
+                (now - self._guided_switch_request_time) < self._guided_switch_grace_period
+            )
+            
+            if in_guided_switch_grace:
+                # 刚发送了 GUIDED 切换命令，等待生效
+                self.get_logger().debug(
+                    f'GUIDED 切换保护期内 ({now - self._guided_switch_request_time:.1f}s)，等待生效')
                 return False
             
-            # HOLD/LOITER 模式: 根据导航状态和手动请求标志决定是否恢复 GUIDED
-            if current_mode in ['HOLD', 'LOITER']:
-                # 检查是否是手动请求的 HOLD（来自地面站的暂停请求）
-                current_time = self.get_clock().now().nanoseconds / 1e9
-                is_manual_hold = (
-                    self._manual_hold_requested and 
-                    (current_time - self._manual_hold_request_time) < self._manual_hold_timeout
-                )
-                
-                # 检查是否在 PAUSED 状态的保护期内
-                # 保护期内不尝试恢复 GUIDED，等待 cancel_navigation 消息到达
-                in_paused_grace_period = (
-                    self._navigation_state == NavigationState.PAUSED and
-                    (current_time - self._paused_state_enter_time) < self._paused_state_grace_period
-                )
-                
-                if is_manual_hold:
-                    # 手动请求的 HOLD，尊重用户意图，进入暂停状态，不恢复 GUIDED
-                    if self._navigation_state == NavigationState.ACTIVE:
-                        self.get_logger().warn(
-                            f'⚠️ 检测到手动切换 {current_mode} 模式（来自地面站），任务进入暂停状态'
-                        )
-                        self._set_navigation_state(NavigationState.PAUSED, f"用户手动切换{current_mode}模式")
-                        # 停止当前运动
-                        self._publish_velocity_command(VelocityCommand.stop())
-                    # 手动暂停状态下不恢复 GUIDED，等待用户发送新任务或手动切换 GUIDED
-                    self.get_logger().debug(f'手动 {current_mode} 模式（暂停中），不自动恢复 GUIDED')
-                elif in_paused_grace_period:
-                    # 在 PAUSED 状态保护期内，不尝试恢复 GUIDED
-                    # 等待 cancel_navigation 消息到达，以确定是手动暂停还是飞控自动切换
-                    self.get_logger().debug(
-                        f'PAUSED 状态保护期内 ({current_time - self._paused_state_enter_time:.1f}s < {self._paused_state_grace_period}s)，'
-                        f'等待 cancel_navigation 消息'
-                    )
-                elif self._navigation_state == NavigationState.ACTIVE:
-                    # 导航进行中被切换到 HOLD（可能是飞控自动切换或手动切换）
-                    # 先进入 PAUSED 状态并等待保护期，让 cancel_navigation 消息有时间到达
-                    self._set_navigation_state(NavigationState.PAUSED, f"被{current_mode}模式打断，等待确认")
-                    self._publish_velocity_command(VelocityCommand.stop())
-                    self.get_logger().info(
-                        f'⏸️ 检测到 {current_mode} 模式，进入保护期等待 ({self._paused_state_grace_period}s)，'
-                        f'以确定是手动暂停还是飞控自动切换'
-                    )
-                    # 不立即恢复 GUIDED，等待下一个循环检查是否有 cancel_navigation 消息
-                elif self._navigation_state == NavigationState.PAUSED:
-                    # 已经是 PAUSED 状态，且已过保护期
-                    # 保护期已过但没有收到 cancel_navigation 消息，说明是飞控自动切换
-                    # 应该自动恢复 GUIDED 继续任务
-                    if not is_manual_hold:
-                        self.get_logger().info(
-                            f'⏱️ 保护期已过，未收到手动暂停请求，判定为飞控自动切换 {current_mode}，'
-                            f'自动恢复 GUIDED 模式'
-                        )
-                        self._restore_guided_mode()
-                        # 恢复导航状态
-                        self._set_navigation_state(NavigationState.ACTIVE, "自动恢复GUIDED模式")
-                    else:
-                        self.get_logger().debug(
-                            f'PAUSED 状态保持 {current_mode}，手动暂停标志仍有效，不恢复 GUIDED'
-                        )
-                else:
-                    # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
-                    self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+            # 检查是否是连续HOLD强制暂停状态
+            is_force_paused = (
+                self._manual_hold_requested and
+                self._navigation_state == NavigationState.PAUSED
+            )
+            
+            if is_force_paused:
+                # 连续HOLD强制暂停中 - 不恢复 GUIDED，等待用户发新任务或手动GUIDED
+                self.get_logger().debug(
+                    f'强制暂停中 ({current_mode})，不自动恢复 GUIDED')
                 return False
             
-            # 其他模式 (RTL, AUTO 等): 导航进行中尝试恢复 GUIDED
-            if self._should_protect_navigation():
-                self._set_navigation_state(NavigationState.PAUSED, f"被{current_mode}模式打断")
+            # ===== 核心逻辑: 导航进行中 → 立即恢复 GUIDED =====
+            if self._navigation_state == NavigationState.ACTIVE:
+                # 导航进行中，任何非 GUIDED 模式都立即恢复
+                # 不进入 PAUSED，不等待 cancel_navigation，不停止运动
+                self.get_logger().warn(
+                    f'⚡ 导航进行中检测到 {current_mode} 模式，立即恢复 GUIDED (零停顿策略)')
                 self._restore_guided_mode()
-            else:
-                self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode}')
+                # 保持 ACTIVE 状态，不发送 stop 指令，无缝继续导航
+                return False
+            
+            if self._navigation_state == NavigationState.PAUSED and not is_force_paused:
+                # 非强制暂停的 PAUSED 状态(可能因之前的短暂模式切换遗留)
+                # 恢复 GUIDED 并恢复为 ACTIVE
+                self.get_logger().info(
+                    f'⏩ PAUSED状态检测到 {current_mode}，恢复 GUIDED 继续导航')
+                self._restore_guided_mode()
+                self._set_navigation_state(NavigationState.ACTIVE, "自动恢复GUIDED模式")
+                return False
+            
+            # IDLE, CANCELLED, COMPLETED, FAILED 状态不恢复
+            self.get_logger().debug(f'需要 GUIDED 模式，当前: {current_mode} (状态: {self._navigation_state.name})')
             return False
         
         # 模式正确 (GUIDED)，检查是否应该恢复导航
@@ -1607,6 +1639,9 @@ class VelocityControllerNode(Node):
         else:
             feedback.estimated_time = 0.0
         
+        # 导航模式
+        feedback.nav_mode = getattr(self, '_current_goal_nav_mode', 0)
+        
         # 队列状态
         feedback.queue_length = self.tracker.get_queue_length()
         feedback.queue_capacity = 10  # 默认队列大小
@@ -1675,15 +1710,27 @@ class VelocityControllerNode(Node):
         """
         检查是否应该保护导航（自动恢复 GUIDED）
         
+        GUIDED 最高优先级策略:
+        - ACTIVE 状态: 始终保护
+        - PAUSED 且非强制暂停: 保护（尝试恢复）
+        - PAUSED 且强制暂停(连续HOLD): 不保护（尊重用户意图）
+        
         Returns:
             bool: 是否应该自动恢复 GUIDED 模式
         """
         if not self._mode_protection_enabled:
             return False
         
-        # 只有 ACTIVE 状态才保护（被意外切换模式时恢复）
-        # PAUSED 状态表示已经被打断一次，如果再次被打断可能是用户意图
-        return self._navigation_state == NavigationState.ACTIVE
+        # ACTIVE 状态始终保护
+        if self._navigation_state == NavigationState.ACTIVE:
+            return True
+        
+        # PAUSED 状态: 非强制暂停时保护
+        if self._navigation_state == NavigationState.PAUSED:
+            is_force_paused = self._manual_hold_requested
+            return not is_force_paused
+        
+        return False
     
     def _end_navigation(self, end_state: NavigationState, reason: str = ""):
         """
@@ -1713,11 +1760,10 @@ class VelocityControllerNode(Node):
             # 用户取消或异常: 立即紧急停止
             self.stop_usv()
         elif end_state == NavigationState.COMPLETED:
-            # 正常完成: 延迟软停止，给后续航点到达的时间窗口
-            # 典型 batch 间隔约 0.7-1.5s，延迟 1.5s 可覆盖大部分情况
-            # 如果新航点在延迟期内到达，取消停止，实现平滑过渡
-            self._delayed_stop_pending = True
-            self._delayed_stop_deadline = time.time() + self._delayed_stop_delay
+            # 正常完成: 启动渐进减速，平滑地将速度降至零
+            # 替代之前的延迟急停方案，避免同步等待时的突然刹车
+            # 如果新航点在减速期内到达，自动取消减速并恢复导航
+            self._start_soft_deceleration()
     
     def _publish_status(self):
         """
@@ -1778,11 +1824,10 @@ class VelocityControllerNode(Node):
     
     def _check_delayed_stop(self):
         """
-        检查是否应执行延迟软停止
+        检查是否应执行延迟软停止 (作为渐进减速的备用机制)
         
-        COMPLETED 状态下不立即停止 USV，而是等待一小段时间。
-        如果期间收到新航点，_delayed_stop_pending 被清除，USV 不停止实现平滑过渡。
-        如果超时仍无新航点，发送零速指令让 USV 安全减速。
+        正常情况下渐进减速已在 _end_navigation(COMPLETED) 时启动，
+        此方法仅在渐进减速未激活时作为安全兜底。
         """
         if not self._delayed_stop_pending:
             return
@@ -1791,8 +1836,10 @@ class VelocityControllerNode(Node):
         if time.time() >= self._delayed_stop_deadline:
             self._delayed_stop_pending = False
             if self._navigation_state == NavigationState.COMPLETED:
-                self.get_logger().info('🛑 延迟软停止: 无后续航点，发送零速指令')
-                self._publish_velocity_command(VelocityCommand.stop())
+                if not self._soft_decel_active:
+                    # 渐进减速未激活（异常情况），启动减速作为兜底
+                    self.get_logger().info('🛑 延迟软停止: 渐进减速未激活，启动兜底减速')
+                    self._start_soft_deceleration()
             else:
                 self.get_logger().debug(
                     f'延迟软停止取消: 当前状态={self._navigation_state.name}')
@@ -1817,6 +1864,53 @@ class VelocityControllerNode(Node):
                 self.get_logger().debug(
                     f'延迟 HOLD 取消: 当前状态={self._navigation_state.name}')
     
+    def _start_soft_deceleration(self):
+        """
+        启动渐进减速
+        
+        从当前速度线性减速到零，替代急刹车。
+        在同步等待等场景下提供更平滑的停止体验。
+        如果减速期间收到新目标，减速自动取消。
+        """
+        import time
+        self._soft_decel_active = True
+        self._soft_decel_start_time = time.time()
+        # 使用最后的速度指令作为起始速度
+        if self._last_velocity_cmd is not None:
+            self._soft_decel_start_vx = self._last_velocity_cmd.linear_x
+            self._soft_decel_start_omega = self._last_velocity_cmd.angular_z
+        else:
+            self._soft_decel_start_vx = 0.0
+            self._soft_decel_start_omega = 0.0
+        self.get_logger().info(
+            f'🔽 开始渐进减速: vx={self._soft_decel_start_vx:.2f} m/s, '
+            f'ω={self._soft_decel_start_omega:.2f} rad/s, '
+            f'持续时间={self._soft_decel_duration:.1f}s')
+    
+    def _handle_soft_deceleration(self):
+        """
+        处理渐进减速控制
+        
+        在控制循环中调用，线性递减速度直到归零。
+        减速完成后发送零速指令确保 USV 完全停止。
+        """
+        import time
+        elapsed = time.time() - self._soft_decel_start_time
+        
+        if elapsed >= self._soft_decel_duration:
+            # 减速完成，发送零速指令
+            self._soft_decel_active = False
+            self._publish_velocity_command(VelocityCommand.stop())
+            self.get_logger().info('🔽 渐进减速完成，速度已归零')
+            return
+        
+        # 线性减速: ratio 从 1.0 线性递减到 0.0
+        ratio = 1.0 - (elapsed / self._soft_decel_duration)
+        vx = self._soft_decel_start_vx * ratio
+        omega = self._soft_decel_start_omega * ratio
+        cmd = VelocityCommand(vx, 0.0, omega)
+        self._publish_velocity_command(cmd)
+    
     def _switch_to_hold_mode(self):
         """
         导航任务完成后切换到 HOLD 模式
@@ -1834,20 +1928,25 @@ class VelocityControllerNode(Node):
     
     def _restore_guided_mode(self):
         """
-        导航进行中检测到非 GUIDED 模式时，自动恢复到 GUIDED 模式
+        导航进行中检测到非 GUIDED 模式时，立即恢复到 GUIDED 模式
+        
+        零停顿策略: 以最短冷却时间(0.2s)发送 GUIDED 切换命令,
+        并设置切换保护期避免在 GUIDED 生效前重复发送。
         """
         import time
         current_time = time.time()
         
-        # 冷却时间检查，避免频繁切换
+        # 冷却时间检查，避免频繁切换 (0.2s 极短冷却)
         if current_time - self._last_mode_restore_time < self._mode_restore_cooldown:
             return
         
         self._last_mode_restore_time = current_time
+        # 设置切换保护期，避免在 GUIDED 生效前重复触发
+        self._guided_switch_request_time = current_time
         
         current_mode = self.current_state.mode if self.current_state else 'UNKNOWN'
         self.get_logger().warn(
-            f'⚠️ 导航进行中检测到模式切换为 {current_mode}，自动恢复 GUIDED 模式'
+            f'⚡ 立即恢复 GUIDED 模式 (当前: {current_mode})'
         )
         mode_msg = String()
         mode_msg.data = 'GUIDED'

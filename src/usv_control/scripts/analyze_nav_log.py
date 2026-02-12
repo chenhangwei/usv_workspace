@@ -105,6 +105,14 @@ def load_csv(filepath: str) -> tuple:
             # 解析特定字段
             if 'usv_id' in key or key == 'usv_id':
                 header_info['usv_id'] = value
+            # 通用版本检测: 从 (vXX) 格式中提取版本号
+            import re as _re
+            version_match = _re.search(r'\(v(\d+)\)', line)
+            if version_match:
+                detected_ver = int(version_match.group(1))
+                current_ver = int(header_info['version'].lstrip('v') or '5')
+                if detected_ver > current_ver:
+                    header_info['version'] = f'v{detected_ver}'
             elif 'v8' in line.lower() or 'ampc' in line.lower():
                 header_info['version'] = 'v8'
             elif 'v6' in line.lower() or 'adaptive' in line.lower():

@@ -296,6 +296,16 @@ class VelocityPathTracker:
         self._last_stall_check_time: float = 0.0
         self._last_stall_check_distance: float = 0.0
         
+        # ==================== 偏离检测 (Divergence Detection) ====================
+        # 当 USV 进入监控半径后，如果距离持续增大（越来越远），
+        # 说明无法到达目标点，强制判定为"偏离到达"并切换到下一航点
+        self._divergence_monitor_radius: float = 3.0    # 开始监控的半径 (m)
+        self._divergence_min_distance: float = float('inf')  # 监控期间的最小距离
+        self._divergence_increase_count: int = 0         # 距离连续增大的计数
+        self._divergence_increase_threshold: int = 8     # 连续增大多少次判定为偏离
+        self._divergence_monitoring: bool = False         # 是否处于偏离监控状态
+        self._divergence_last_distance: float = float('inf')  # 上次检测的距离
+        
         # 调试信息
         self.debug_info = {
              'mpc': {},
@@ -326,6 +336,9 @@ class VelocityPathTracker:
         # v5: 重置航线起点 (新航点任务，没有上一个航点)
         self._prev_waypoint_pos = None
         self.mpc_tracker.reset()  # 重置 MPC 状态
+        
+        # 重置偏离检测状态
+        self._reset_divergence_monitor()
         
         # 注意：不再强制设置 is_final = True
         # is_final 由调用者根据 nav_mode 决定
@@ -764,6 +777,11 @@ class VelocityPathTracker:
         # 1. 距离圈检测 (Circle Check)
         if distance < threshold:
             return self._handle_arrival_or_switch()
+        
+        # 1.5 偏离检测 (Divergence Detection)
+        # 补救机制: 进入监控半径后如果距离持续增大，说明无法靠近目标，强制切换
+        if self._check_divergence(distance):
+            return self._goal_reached
             
         # 2. 过站检测 (Pass-by Check)
         # 仅当允许过站、且位姿有效、且有历史路径时进行
@@ -792,6 +810,7 @@ class VelocityPathTracker:
 
     def _handle_arrival_or_switch(self) -> bool:
         """执行到达或切换逻辑"""
+        self._reset_divergence_monitor()
         if self._current_waypoint is not None and self._current_waypoint.is_final:
             # 到达最终目标
             self._goal_reached = True
@@ -800,6 +819,80 @@ class VelocityPathTracker:
             # 切换到下一个航点
             self._switch_to_next_waypoint()
             return False
+    
+    def _reset_divergence_monitor(self):
+        """重置偏离检测状态"""
+        self._divergence_monitoring = False
+        self._divergence_min_distance = float('inf')
+        self._divergence_increase_count = 0
+        self._divergence_last_distance = float('inf')
+    
+    def _check_divergence(self, distance: float) -> bool:
+        """
+        偏离检测补救机制
+        
+        当 USV 进入监控半径 (默认3m) 后，持续追踪距离变化趋势:
+        - 记录最小距离 (最近接近点)
+        - 如果距离连续增大超过阈值次数，说明 USV 正在偏离目标
+        - 此时强制判定为"偏离到达"，切换到下一个航点，避免绕圈或卡死
+        
+        Args:
+            distance: 当前到目标的距离
+            
+        Returns:
+            True 如果检测到偏离并已执行切换/到达
+        """
+        if distance >= self._divergence_monitor_radius:
+            # 还没进入监控区域，不检测
+            if self._divergence_monitoring:
+                # 曾经进入过监控区域后又离开了 → 立即判定为偏离
+                return self._handle_divergence_arrival(distance)
+            return False
+        
+        # 进入监控区域
+        if not self._divergence_monitoring:
+            self._divergence_monitoring = True
+            self._divergence_min_distance = distance
+            self._divergence_last_distance = distance
+            self._divergence_increase_count = 0
+            return False
+        
+        # 更新最小距离
+        if distance < self._divergence_min_distance:
+            self._divergence_min_distance = distance
+        
+        # 检查距离是否在增大 (加0.05m容差，过滤GPS抖动)
+        if distance > self._divergence_last_distance + 0.05:
+            self._divergence_increase_count += 1
+        else:
+            # 距离没有增大，重置计数 (但不重置最小距离)
+            self._divergence_increase_count = 0
+        
+        self._divergence_last_distance = distance
+        
+        # 判定: 连续增大次数超过阈值，且最小距离未能进入到达阈值
+        arrival_threshold = self.goal_tolerance if (
+            self._current_waypoint and self._current_waypoint.is_final
+        ) else self.switch_tolerance
+        
+        if (self._divergence_increase_count >= self._divergence_increase_threshold
+                and self._divergence_min_distance > arrival_threshold):
+            return self._handle_divergence_arrival(distance)
+        
+        return False
+    
+    def _handle_divergence_arrival(self, distance: float) -> bool:
+        """
+        处理偏离到达 - 强制切换到下一航点或判定到达
+        
+        Args:
+            distance: 当前距离
+            
+        Returns:
+            True 如果是最终目标的偏离到达
+        """
+        self._reset_divergence_monitor()
+        return self._handle_arrival_or_switch()
     
     def _switch_to_next_waypoint(self):
         """切换到下一个航点"""

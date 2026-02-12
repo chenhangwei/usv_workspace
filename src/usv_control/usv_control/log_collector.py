@@ -79,6 +79,7 @@ class LogCollectorNode(Node):
         
         self._distance_to_goal = 0.0
         self._heading_error_rad = 0.0  # 弧度
+        self._nav_mode = 0               # 导航模式: 0=async, 1=sync, 2=rotate, 3=terminal
         
         # MPC Debug Info
         self._mpc_solve_time = 0.0
@@ -225,7 +226,7 @@ class LogCollectorNode(Node):
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
             if self._mpc_params_received:
-                    self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
+                self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
                 self._csv_file.write(f'# USV ID: {self._usv_id}\n')
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
@@ -264,7 +265,9 @@ class LogCollectorNode(Node):
                 # v8 新增: AMPC 在线辨识字段
                 'ampc_enabled', 'ampc_tau_estimated', 'ampc_tau_confidence',
                 'ampc_omega_measured', 'ampc_saturation_ratio',
-                'ampc_heading_noise', 'ampc_rebuild_count', 'ampc_converged'
+                'ampc_heading_noise', 'ampc_rebuild_count', 'ampc_converged',
+                # v14 新增字段
+                'nav_mode'
             ])
             
             # 清空模式切换事件列表
@@ -348,6 +351,7 @@ class LogCollectorNode(Node):
         self._target_x = msg.target_pose.pose.position.x
         self._target_y = msg.target_pose.pose.position.y
         self._goal_id = getattr(msg, 'goal_id', 0)
+        self._nav_mode = getattr(msg, 'nav_mode', 0)
         task_name = getattr(msg, 'task_name', None)
         
         # 收到导航目标，开始/继续记录
@@ -603,7 +607,9 @@ class LogCollectorNode(Node):
             f'{self._ampc_saturation_ratio:.3f}',
             f'{self._ampc_heading_noise:.4f}',
             f'{self._ampc_rebuild_count}',
-            f'{1 if self._ampc_converged else 0}'
+            f'{1 if self._ampc_converged else 0}',
+            # v14 新增字段
+            f'{self._nav_mode}'
         ])
         self._record_count += 1
     

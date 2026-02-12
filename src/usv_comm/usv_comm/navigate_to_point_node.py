@@ -121,6 +121,16 @@ class NavigateToPointNode(Node):
         self._pending_final_arrival_delay: float = 2.0     # 等待时间(秒)，覆盖典型 batch 间隔(~1s)
         self._pending_final_distance: float = 0.0          # 待确认时的距离
         
+        # ==================== 偏离检测 (Divergence Detection) ====================
+        # 补救机制: 当 USV 进入监控半径后如果距离持续增大，
+        # 说明无法到达目标点，强制判定为"偏离到达"并切换到下一个航点
+        self._divergence_monitor_radius: float = 3.0    # 开始监控的半径 (m)
+        self._divergence_min_distance: float = float('inf')  # 监控期间的最小距离
+        self._divergence_increase_count: int = 0         # 距离连续增大的计数
+        self._divergence_increase_threshold: int = 8     # 连续增大多少次判定为偏离
+        self._divergence_monitoring: bool = False         # 是否处于偏离监控状态
+        self._divergence_last_distance: float = float('inf')  # 上次检测的距离
+        
         # ==================== 航点队列 ====================
         self.waypoint_queue: deque = deque(maxlen=self.waypoint_queue_size)
         
@@ -765,7 +775,12 @@ class NavigateToPointNode(Node):
         
         # ===== 检查是否到达目标点（所有模式共用的到达判断） =====
         if distance < self.nav_arrival_threshold:
+            self._reset_divergence_monitor()  # 已到达，重置偏离检测
             self._handle_arrival(distance, nav_mode, has_next)
+            return
+        
+        # ===== 偏离检测补救: 进入3m后距离持续增大则强制切换 =====
+        if self._check_divergence(distance):
             return
         
         # 超时检查
@@ -986,6 +1001,9 @@ class NavigateToPointNode(Node):
         self._arrival_check_samples = []
         self._rotate_in_progress = False
         
+        # 重置偏离检测状态
+        self._reset_divergence_monitor()
+        
         # 设置新目标
         self.current_goal = next_goal
         self.current_goal_id = next_goal.goal_id
@@ -1009,6 +1027,7 @@ class NavigateToPointNode(Node):
         标准导航模式 - 每个航点都精确到达，支持四种导航模式
         """
         if distance < self.nav_arrival_threshold:
+            self._reset_divergence_monitor()  # 已到达，重置偏离检测
             nav_mode = getattr(self.current_goal, 'nav_mode', self.NAV_MODE_ASYNC)
             has_next = len(self.waypoint_queue) > 0
             
@@ -1022,7 +1041,108 @@ class NavigateToPointNode(Node):
                 self._set_current_goal(next_goal)
             return
         
+        # 偏离检测补救: 进入3m后距离持续增大则强制切换
+        if self._check_divergence(distance):
+            # 如果当前目标已清除且队列中还有航点，开始执行下一个
+            if self.current_goal is None and self.waypoint_queue:
+                next_goal = self.waypoint_queue.popleft()
+                self.get_logger().info(f'📋 执行队列下一航点 [ID={next_goal.goal_id}]')
+                self._set_current_goal(next_goal)
+            return
+        
         self._check_timeout(distance)
+
+    def _reset_divergence_monitor(self):
+        """重置偏离检测状态"""
+        self._divergence_monitoring = False
+        self._divergence_min_distance = float('inf')
+        self._divergence_increase_count = 0
+        self._divergence_last_distance = float('inf')
+    
+    def _check_divergence(self, distance: float) -> bool:
+        """
+        偏离检测补救机制
+        
+        当 USV 进入监控半径 (默认3m) 后，持续追踪距离变化趋势:
+        - 记录最小距离 (最近接近点)
+        - 如果距离连续增大超过阈值次数，说明 USV 正在偏离目标
+        - 此时强制判定为"偏离到达"，切换到下一个航点，避免绕圈或卡死
+        
+        Args:
+            distance: 当前到目标的距离
+            
+        Returns:
+            True 如果检测到偏离并已执行切换
+        """
+        if distance >= self._divergence_monitor_radius:
+            # 还没进入监控区域
+            if self._divergence_monitoring:
+                # 曾经进入过监控区域后又离开了 → 立即判定为偏离
+                self.get_logger().warn(
+                    f'⚠️ 偏离检测: USV 已离开监控区域 [ID={self.current_goal_id}], '
+                    f'当前距离={distance:.2f}m, 最近距离={self._divergence_min_distance:.2f}m')
+                self._handle_divergence_arrival(distance)
+                return True
+            return False
+        
+        # 进入监控区域
+        if not self._divergence_monitoring:
+            self._divergence_monitoring = True
+            self._divergence_min_distance = distance
+            self._divergence_last_distance = distance
+            self._divergence_increase_count = 0
+            return False
+        
+        # 更新最小距离
+        if distance < self._divergence_min_distance:
+            self._divergence_min_distance = distance
+        
+        # 检查距离是否在增大 (加0.05m容差，过滤GPS抖动)
+        if distance > self._divergence_last_distance + 0.05:
+            self._divergence_increase_count += 1
+        else:
+            # 距离没有增大，重置计数 (但不重置最小距离)
+            self._divergence_increase_count = 0
+        
+        self._divergence_last_distance = distance
+        
+        # 判定: 连续增大次数超过阈值，且最小距离未能进入到达阈值
+        if (self._divergence_increase_count >= self._divergence_increase_threshold
+                and self._divergence_min_distance > self.nav_arrival_threshold):
+            self.get_logger().warn(
+                f'⚠️ 偏离检测触发 [ID={self.current_goal_id}]: '
+                f'距离连续增大{self._divergence_increase_count}次, '
+                f'最近距离={self._divergence_min_distance:.2f}m > 到达阈值={self.nav_arrival_threshold:.2f}m, '
+                f'当前距离={distance:.2f}m')
+            self._handle_divergence_arrival(distance)
+            return True
+        
+        return False
+    
+    def _handle_divergence_arrival(self, distance: float):
+        """
+        处理偏离到达 - 强制切换到下一航点或判定到达
+        
+        Args:
+            distance: 当前距离
+        """
+        has_next = len(self.waypoint_queue) > 0
+        
+        self._reset_divergence_monitor()
+        
+        if has_next:
+            # 还有后续航点，切换过去
+            self._switch_to_next_waypoint(distance, "偏离补救切换")
+        else:
+            # 没有后续航点，判定为偏离到达最终目标
+            self.get_logger().warn(
+                f'⚠️ 偏离到达最终目标 [ID={self.current_goal_id}], '
+                f'距离={distance:.2f}m (未达到{self.nav_arrival_threshold:.2f}m阈值)')
+            self._publish_result(
+                self.current_goal_id, success=True,
+                message=f'偏离到达目标(距离={distance:.2f}m, 最近={self._divergence_min_distance:.2f}m, '
+                        f'未达阈值={self.nav_arrival_threshold:.2f}m)')
+            self._clear_current_goal()
 
     def _check_timeout(self, distance: float):
         """检查是否超时"""
@@ -1116,6 +1236,9 @@ class NavigateToPointNode(Node):
         
         # 重置延迟最终到达状态
         self._pending_final_arrival = False
+        
+        # 重置偏离检测状态
+        self._reset_divergence_monitor()
     
     def _check_idle_protection(self):
         """

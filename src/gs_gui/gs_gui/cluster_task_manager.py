@@ -102,10 +102,6 @@ class ClusterTaskManager:
                                 f"Step 节点 number='{raw_step_number}' 解析失败，使用顺序值 {idx}"
                             )
 
-                        # 获取 sync 属性，默认为 true
-                        sync_attr = step.get("sync", "true").lower()
-                        sync_val = (sync_attr == "true")
-                        
                         # ========== 导航模式解析 ==========
                         # 支持的导航模式: async(0), sync(1), rotate(2), terminal(3)
                         NAV_MODE_MAP = {
@@ -116,6 +112,19 @@ class ClusterTaskManager:
                         }
                         nav_mode_attr = step.get("nav_mode", "async").lower()
                         step_nav_mode = NAV_MODE_MAP.get(nav_mode_attr, 0)
+                        
+                        # 获取 GS 端步骤间同步属性
+                        # 如果 XML 显式指定了 sync 属性，则使用该值
+                        # 否则根据 nav_mode 自动推导:
+                        #   - nav_mode="async" → sync=false (GS端不等待, USV到达即推进)
+                        #   - nav_mode="sync"  → sync=true  (GS端等待所有USV完成当前step)
+                        #   - nav_mode="rotate"/"terminal" → sync=true
+                        explicit_sync = step.get("sync")
+                        if explicit_sync is not None:
+                            sync_val = (explicit_sync.lower() == "true")
+                        else:
+                            # 自动推导: async模式默认不同步, 其他模式默认同步
+                            sync_val = (step_nav_mode != 0)
                         
                         # 同步模式参数
                         step_sync_timeout = float(step.get("sync_timeout", "10.0"))

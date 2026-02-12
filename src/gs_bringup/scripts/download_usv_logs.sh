@@ -30,7 +30,7 @@
 #
 
 # ==================== 配置 ====================
-USV_HOST="192.168.68.54"      # USV 的 IP 地址
+USV_HOST="192.168.68.52"      # USV 的 IP 地址
 #USV_HOST="192.168.68.52"      # USV 的 IP 地址
 USV_USER="chenhangwei"         # USV 的用户名
 USV_LOG_DIR="~/usv_logs"       # USV 上的日志目录
@@ -86,16 +86,22 @@ list_logs() {
 get_remote_meta() {
     local remote_path="$1"
     local header
-    local version="V5"
+    local version="V_unknown"
     local usv_id="usv_unknown"
 
     header=$(ssh "${USV_USER}@${USV_HOST}" "head -n 30 ${remote_path} 2>/dev/null")
-    if echo "$header" | grep -qi "v7"; then
-        version="V7"
-    elif echo "$header" | grep -qi "v6"; then
-        version="V6"
-    elif echo "$header" | grep -qi "v5"; then
-        version="V5"
+    
+    # 通用版本检测: 从 "MPC Parameters Configuration (vXX)" 或 "(vXX)" 中提取版本号
+    # 支持 v5 ~ v99+，按最高版本号匹配
+    detected_version=$(echo "$header" | grep -oiE '\(v([0-9]+)\)' | grep -oiE '[0-9]+' | sort -rn | head -1)
+    if [[ -n "$detected_version" ]]; then
+        version="V${detected_version}"
+    else
+        # 回退: 尝试匹配独立的 vXX 关键字
+        detected_version=$(echo "$header" | grep -oiE '\bv([0-9]+)\b' | grep -oiE '[0-9]+' | sort -rn | head -1)
+        if [[ -n "$detected_version" ]]; then
+            version="V${detected_version}"
+        fi
     fi
 
     usv_id=$(echo "$header" | grep -i "usv_id" | head -1 | sed -E 's/.*usv_id[^:]*:[[:space:]]*//I' | tr -d '\r' | awk '{print $1}')
