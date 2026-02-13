@@ -315,6 +315,9 @@ class MainWindow(QMainWindow):
         
         # 导航反馈信号（连接到主窗口进行日志显示）
         self.ros_signal.navigation_feedback.connect(self.handle_navigation_feedback)
+        
+        # 编队状态更新信号
+        self.ros_signal.formation_status_update.connect(self._handle_formation_status_update)
 
     def on_area_center_updated(self, offset_dict):
         """处理 Area Center 更新信号"""
@@ -368,6 +371,7 @@ class MainWindow(QMainWindow):
         # ============== 集群控制按钮 ==============
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)
+        self.ui.set_cluster_manual_pushButton.clicked.connect(self.set_cluster_manual_command)
         self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)
         self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_hold_command)
         self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task)
@@ -426,6 +430,18 @@ class MainWindow(QMainWindow):
         self.action_param_config.triggered.connect(self.open_param_config_window)
         # removed geofence toggle and nav arrival threshold menu items
 
+        # ============== 编队控制菜单 ==============
+        self.action_start_formation.triggered.connect(self.open_formation_dialog)
+        self.action_stop_formation.triggered.connect(self.stop_formation_mode)
+        self.action_formation_v.triggered.connect(lambda: self._switch_formation_type(0))
+        self.action_formation_line.triggered.connect(lambda: self._switch_formation_type(1))
+        self.action_formation_column.triggered.connect(lambda: self._switch_formation_type(4))
+        self.action_formation_diamond.triggered.connect(lambda: self._switch_formation_type(2))
+        self.action_formation_triangle.triggered.connect(lambda: self._switch_formation_type(3))
+        self.action_formation_s_shape.triggered.connect(lambda: self._switch_formation_type(5))
+        self.action_formation_escort.triggered.connect(lambda: self._switch_formation_type(6))
+        self.action_adjust_spacing.triggered.connect(self._adjust_formation_spacing)
+
     def _init_custom_menu(self):
         """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
         # USV控制菜单
@@ -452,6 +468,41 @@ class MainWindow(QMainWindow):
         self.action_led_infection_mode.setCheckable(True)
         self.action_led_infection_mode.setChecked(False)  # 默认关闭
         led_menu.addAction(self.action_led_infection_mode)
+        
+        # 编队控制菜单
+        formation_menu = self.ui.menubar.addMenu("编队控制(&F)")
+        self.action_start_formation = QAction("🔱 启动编队模式...", self)
+        self.action_start_formation.setShortcut("Ctrl+F")
+        self.action_start_formation.setToolTip("配置并启动 Leader-Follower 编队模式")
+        formation_menu.addAction(self.action_start_formation)
+        
+        self.action_stop_formation = QAction("⏹ 停止编队", self)
+        self.action_stop_formation.setToolTip("停止当前编队，所有跟随者切换到 HOLD")
+        formation_menu.addAction(self.action_stop_formation)
+        
+        formation_menu.addSeparator()
+        
+        # 快速切换队形子菜单
+        self.formation_type_menu = formation_menu.addMenu("切换队形")
+        self.action_formation_v = QAction("人字形 (V-Shape)", self)
+        self.action_formation_line = QAction("横排一字形 (Line)", self)
+        self.action_formation_column = QAction("纵列一字形 (Column)", self)
+        self.action_formation_diamond = QAction("菱形 (Diamond)", self)
+        self.action_formation_triangle = QAction("三角形 (Triangle)", self)
+        self.action_formation_s_shape = QAction("S形 (S-Shape)", self)
+        self.action_formation_escort = QAction("护卫队形 (Escort)", self)
+        self.formation_type_menu.addAction(self.action_formation_v)
+        self.formation_type_menu.addAction(self.action_formation_line)
+        self.formation_type_menu.addAction(self.action_formation_column)
+        self.formation_type_menu.addAction(self.action_formation_diamond)
+        self.formation_type_menu.addAction(self.action_formation_triangle)
+        self.formation_type_menu.addAction(self.action_formation_s_shape)
+        self.formation_type_menu.addAction(self.action_formation_escort)
+        
+        # 间距调整
+        self.action_adjust_spacing = QAction("📏 调整编队间距...", self)
+        self.action_adjust_spacing.setToolTip("运行中调整编队前后/左右间距")
+        formation_menu.addAction(self.action_adjust_spacing)
         
         # 工具菜单
         tools_menu = self.ui.menubar.addMenu("工具(&T)")
@@ -1061,6 +1112,50 @@ limitations under the License.
             return
         self._last_hold_time = now
         self.command_handler.set_cluster_hold(self.list_manager.usv_cluster_list)
+
+    def set_cluster_manual_command(self):
+        """
+        集群 Manual 模式切换
+        
+        编队模式下且只有 1 个编队组时：
+        - 只将领队切到 MANUAL，跟随者保持 GUIDED 继续跟随
+        - 用户可通过遥控器控制领队运动
+        
+        非编队模式 / 多编队组时：
+        - 将所有集群 USV 切到 MANUAL
+        """
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_manual_time'):
+            self._last_manual_time = 0
+        if now - self._last_manual_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_manual_time = now
+
+        if self.task_manager._is_formation_active():
+            # 编队模式下：检查是否只有一个编队组
+            formation_config = self.task_manager._formation_config
+            if isinstance(formation_config, list) and len(formation_config) == 1:
+                leader_id = formation_config[0].get('leader_id', '')
+                if leader_id:
+                    # 只将领队切到 MANUAL
+                    self.command_handler.set_cluster_manual([leader_id])
+                    self.ui_utils.append_info(
+                        f"🎮 编队模式: 领队 {leader_id} 已切换到 MANUAL\n"
+                        f"    跟随者保持 GUIDED 继续跟随领队"
+                    )
+                    return
+                else:
+                    self.ui_utils.append_warning("编队配置中未找到领队 ID")
+            else:
+                self.ui_utils.append_warning(
+                    "多编队组模式下不支持单独切换领队到 MANUAL\n"
+                    "将所有集群 USV 切换到 MANUAL"
+                )
+
+        # 非编队模式 或 多组: 所有集群 USV 切到 MANUAL
+        self.command_handler.set_cluster_manual(self.list_manager.usv_cluster_list)
     
     # ============== 离群命令包装方法 ==============
     def departed_arming_command(self):
@@ -1133,6 +1228,134 @@ limitations under the License.
         """停止集群任务并刷新按钮文本"""
         self.task_manager.stop_task()
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+
+    # ============== 编队模式控制 ==============
+    def open_formation_dialog(self):
+        """打开编队配置对话框"""
+        from gs_gui.formation_dialog import FormationDialog
+        
+        # 使用集群列表中的 USV
+        usv_list = self.list_manager.usv_cluster_list
+        if not usv_list or len(usv_list) < 2:
+            self.ui_utils.append_warning("编队模式至少需要 2 艘 USV 在集群列表中")
+            QMessageBox.warning(self, "编队模式", 
+                "编队模式至少需要 2 艘 USV 在集群列表中。\n"
+                "请先将 USV 添加到集群列表。")
+            return
+
+        dialog = FormationDialog(usv_list, self)
+        dialog.formation_confirmed.connect(self._on_formation_confirmed)
+        dialog.exec_()
+
+    def _on_formation_confirmed(self, group_configs: list):
+        """编队配置确认后启动多编队"""
+        self.task_manager.start_formation(group_configs)
+        # 编队启动后，stop 按钮切换为"停止编队"，集群按钮保持不变以便启动集群任务
+        self.ui.stop_cluster_task_pushButton.setText("停止编队")
+        # 编队产生状态提示
+        from .formation_controller import FormationType
+        type_names = {0: "人字形", 1: "横排一字形", 2: "菱形", 3: "三角形", 4: "纵列一字形", 5: "S形", 6: "护卫"}
+        n_groups = len(group_configs)
+        total_usvs = sum(1 + len(g.get('follower_ids', [])) for g in group_configs)
+        leader_ids = [g.get('leader_id', '') for g in group_configs]
+        follower_ids = []
+        for g in group_configs:
+            follower_ids.extend(g.get('follower_ids', []))
+
+        if n_groups == 1:
+            cfg = group_configs[0]
+            ft_name = type_names.get(cfg.get('formation_type', 0), '未知')
+            self.ui_utils.append_info(
+                f"✅ 编队已产生: {ft_name}\n"
+                f"   领队: {cfg['leader_id']} (集群任务控制)\n"
+                f"   跟随者: {', '.join(cfg.get('follower_ids', []))} (自动跟随)\n"
+                f"   跟随者已排除在集群任务之外\n"
+                f"   💡 请点击 cluster start 启动集群任务来驱动领队"
+            )
+        else:
+            self.ui_utils.append_info(
+                f"✅ 多编队已产生: {n_groups} 组, 共 {total_usvs} 艘\n"
+                f"   领队: {', '.join(leader_ids)} (集群任务控制)\n"
+                f"   {len(follower_ids)} 艘跟随者已排除在集群任务之外\n"
+                f"   💡 请点击 cluster start 启动集群任务来驱动领队"
+            )
+        # 更新编队状态到 2D 绘图窗口
+        if hasattr(self, 'usv_plot_window'):
+            self.usv_plot_window.set_formation_info(leader_ids, follower_ids)
+
+    def stop_formation_mode(self):
+        """停止编队模式"""
+        if self.task_manager._is_formation_active():
+            self.ros_signal.formation_stop_request.emit()
+            self.task_manager._formation_running = False
+            self.task_manager._formation_config = None
+            self.task_manager._update_status("⏹ 编队已解散", "stopped")
+            # 恢复 stop 按钮文本为原始状态
+            self.ui.stop_cluster_task_pushButton.setText("cluster stop")
+            self.ui_utils.append_info("❌ 编队已解散，所有 USV 已恢复集群任务参与")
+            # 清除绘图窗口的编队信息
+            if hasattr(self, 'usv_plot_window'):
+                self.usv_plot_window.set_formation_info([], [])
+        else:
+            self.ui_utils.append_info("当前没有正在运行的编队")
+
+    def _switch_formation_type(self, formation_type: int):
+        """运行中切换编队队形"""
+        if self.task_manager._is_formation_active():
+            self.ros_signal.formation_type_change.emit(formation_type)
+            type_names = {0: "人字形", 1: "横排一字形", 2: "菱形", 3: "三角形", 4: "纵列一字形", 5: "S形", 6: "护卫"}
+            self.ui_utils.append_info(f"编队队形切换为: {type_names.get(formation_type, '未知')}")
+        else:
+            self.ui_utils.append_warning("编队未运行，无法切换队形")
+
+    def _adjust_formation_spacing(self):
+        """运行中调整编队间距（应用到所有活跃组）"""
+        if not self.task_manager._is_formation_active():
+            self.ui_utils.append_warning("编队未运行，无法调整间距")
+            return
+        from PyQt5.QtWidgets import QDialog, QFormLayout, QDoubleSpinBox, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("调整编队间距 (所有活跃组)")
+        layout = QFormLayout(dlg)
+        spin_along = QDoubleSpinBox()
+        spin_along.setRange(0.5, 10.0)
+        spin_along.setSingleStep(0.1)
+        spin_along.setSuffix(" m")
+        # 从第一个组配置取初始值
+        init_along = 1.0
+        init_cross = 1.0
+        if self.task_manager._formation_config and isinstance(self.task_manager._formation_config, list) and len(self.task_manager._formation_config) > 0:
+            init_along = self.task_manager._formation_config[0].get('spacing_along', 1.0)
+            init_cross = self.task_manager._formation_config[0].get('spacing_cross', 1.0)
+        spin_along.setValue(init_along)
+        spin_cross = QDoubleSpinBox()
+        spin_cross.setRange(0.5, 10.0)
+        spin_cross.setSingleStep(0.1)
+        spin_cross.setSuffix(" m")
+        spin_cross.setValue(init_cross)
+        layout.addRow("前后间距:", spin_along)
+        layout.addRow("左右间距:", spin_cross)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+        if dlg.exec_() == QDialog.Accepted:
+            along = spin_along.value()
+            cross = spin_cross.value()
+            self.ros_signal.formation_spacing_change.emit(along, cross)
+            # 更新所有组配置缓存
+            if self.task_manager._formation_config and isinstance(self.task_manager._formation_config, list):
+                for cfg in self.task_manager._formation_config:
+                    cfg['spacing_along'] = along
+                    cfg['spacing_cross'] = cross
+            self.ui_utils.append_info(f"所有编队组间距已调整: 前后={along:.1f}m, 左右={cross:.1f}m")
+    
+    def _handle_formation_status_update(self, status_info: dict):
+        """处理编队状态更新"""
+        self.task_manager.update_formation_status(status_info)
+        if status_info.get('status') == 'stopped':
+            # 编队停止后恢复 stop 按钮文本
+            self.ui.stop_cluster_task_pushButton.setText("cluster stop")
 
     def _handle_cluster_progress_update(self, progress_info):
         """处理集群任务进度更新并同步按钮文本"""
@@ -2379,6 +2602,18 @@ def main(argv=None):
     except Exception:
         try:
             main_window.ui_utils.append_info('警告: 无法将 led_infection_mode_changed 信号连接到 GroundStationNode')
+        except Exception:
+            pass
+    
+    # 连接编队模式信号
+    try:
+        ros_signal.formation_start_request.connect(node.start_formation_callback)
+        ros_signal.formation_stop_request.connect(node.stop_formation_callback)
+        ros_signal.formation_type_change.connect(node.change_formation_type_callback)
+        ros_signal.formation_spacing_change.connect(node.change_formation_spacing_callback)
+    except Exception:
+        try:
+            main_window.ui_utils.append_info('警告: 无法连接编队模式信号')
         except Exception:
             pass
     

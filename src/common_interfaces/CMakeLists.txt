@@ -23,6 +23,7 @@ rosidl_generate_interfaces(
   "msg/NavigationFeedback.msg"
   "msg/NavigationResult.msg"
   "msg/MpcDebug.msg"
+  "msg/FormationConfig.msg"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
 

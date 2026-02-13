@@ -599,6 +599,77 @@ topics:
     from_domain: 13
 
 
+  # ===========================================================================
+  #                     编队跟随 (Formation Following)
+  # ===========================================================================
+  #
+  # 方案 A: GS 中转架构
+  #   GS 一次性下发 FormationConfig 到每台跟随者 USV
+  #   GS 持续转发领队 usv_state 到每台跟随者 USV (leader_state)
+  #   跟随者 USV 本地 10Hz 计算编队目标，零延迟控制
+  #
+  # 话题方向:
+  #   formation/config       : GS → USV (一次性配置)
+  #   formation/leader_state : GS → USV (领队状态中转)
+  #   formation/follower_status : USV → GS (跟随状态反馈)
+  # ===========================================================================
+
+  # --------------- 编队配置 (GS → 每台 USV) ---------------------------------
+
+  usv_01/formation/config:
+    type: common_interfaces/msg/FormationConfig
+    from_domain: 11
+    reversed: true
+    qos:
+      durability: transient_local
+
+  usv_02/formation/config:
+    type: common_interfaces/msg/FormationConfig
+    from_domain: 12
+    reversed: true
+    qos:
+      durability: transient_local
+
+  usv_03/formation/config:
+    type: common_interfaces/msg/FormationConfig
+    from_domain: 13
+    reversed: true
+    qos:
+      durability: transient_local
+
+  # --------------- 领队状态中转 (GS → 每台跟随者 USV) ----------------------
+  # GS 订阅领队的 usv_state，转发到 /{follower}/formation/leader_state
+
+  usv_01/formation/leader_state:
+    type: common_interfaces/msg/UsvStatus
+    from_domain: 11
+    reversed: true
+
+  usv_02/formation/leader_state:
+    type: common_interfaces/msg/UsvStatus
+    from_domain: 12
+    reversed: true
+
+  usv_03/formation/leader_state:
+    type: common_interfaces/msg/UsvStatus
+    from_domain: 13
+    reversed: true
+
+  # --------------- 跟随者状态反馈 (每台 USV → GS) --------------------------
+
+  usv_01/formation/follower_status:
+    type: std_msgs/msg/String
+    from_domain: 11
+
+  usv_02/formation/follower_status:
+    type: std_msgs/msg/String
+    from_domain: 12
+
+  usv_03/formation/follower_status:
+    type: std_msgs/msg/String
+    from_domain: 13
+
+
 # =============================================================================
 # 新增 USV 配置模板
 # =============================================================================

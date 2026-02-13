@@ -259,8 +259,8 @@ class VelocityControllerNode(Node):
         # ==================== 健壮性增强 ====================
         self._last_pose_time: float = 0.0
         self._last_state_time: float = 0.0
-        self._pose_timeout: float = 2.0   # 位姿超时 (秒)
-        self._state_timeout: float = 3.0  # 飞控状态超时 (秒)
+        self._pose_timeout: float = 5.0   # 位姿超时 (秒), 适配非实时仿真
+        self._state_timeout: float = 10.0  # 飞控状态超时 (秒), 适配非实时仿真(~0.2x)
         self._consecutive_timeout_count: int = 0
         self._max_timeout_before_stop: int = 5  # 连续超时次数阈值
         
@@ -1070,9 +1070,12 @@ class VelocityControllerNode(Node):
             # 确保导航状态为 ACTIVE (从 PAUSED 恢复的情况)
             if self._navigation_state != NavigationState.ACTIVE:
                 self._set_navigation_state(NavigationState.ACTIVE, "继续导航")
-            self.tracker.add_waypoint(waypoint)
+            # 使用 update_waypoint 原地更新目标位置，保留 MPC 状态
+            # 这对编队跟随等高频更新场景至关重要：
+            # 避免每次更新都重置 MPC / 角速度滤波器 / 路径历史
+            self.tracker.update_waypoint(waypoint)
             self.get_logger().debug(
-                f'📥 添加航点到队列: ({target.x:.2f}, {target.y:.2f})'
+                f'📥 原地更新航点: ({target.x:.2f}, {target.y:.2f})'
             )
     
     def _avoidance_position_callback(self, msg: PositionTarget):

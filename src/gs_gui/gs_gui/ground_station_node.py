@@ -39,6 +39,7 @@ from .usv_manager import UsvManager
 from .cluster_controller import ClusterController
 from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
+from .formation_controller import FormationManager, FormationType
 
 # 导入线程安全工具
 from common_utils import ThreadSafeDict
@@ -97,6 +98,7 @@ class GroundStationNode(Node):
         self.cluster_controller = ClusterController(self)
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
+        self.formation_manager = FormationManager(self)
 
         # 预检与状态文本缓存 (线程安全)
         self._vehicle_messages = defaultdict(lambda: deque(maxlen=50))
@@ -482,6 +484,51 @@ class GroundStationNode(Node):
         """处理来自 GUI 的集群停止请求。"""
         self.get_logger().info("接收到集群停止请求")
         self.cluster_controller.stop_cluster_task("GUI 手动停止")
+
+    # ==================== 编队模式回调 ====================
+
+    def start_formation_callback(self, group_configs: list):
+        """
+        处理多编队组启动请求
+        
+        编队模式与集群任务共存：
+        - 领队由集群导航任务控制
+        - 跟随者被排除在集群任务之外，由编队控制器计算偏移目标
+        
+        Args:
+            group_configs: 编队组配置列表
+        """
+        # 先停止可能正在运行的编队
+        if self.formation_manager.is_any_active():
+            self.formation_manager.stop_all("重新配置编队")
+
+        # 配置所有编队组
+        success = self.formation_manager.configure_groups(group_configs)
+        if success:
+            # 获取所有跟随者 ID，加入集群控制器的排除列表
+            follower_ids = self.formation_manager.get_all_follower_ids()
+            self.cluster_controller.set_excluded_ids(follower_ids)
+            self.get_logger().info(
+                f"编队已启动，{len(follower_ids)} 艘跟随者已排除在集群任务之外"
+            )
+            self.formation_manager.start_all()
+
+    def stop_formation_callback(self):
+        """处理编队停止请求"""
+        self.formation_manager.stop_all("GUI 手动停止")
+        # 清除集群控制器中的跟随者排除列表
+        self.cluster_controller.clear_excluded_ids()
+        self.get_logger().info("编队已停止，集群任务排除列表已清除")
+
+    def change_formation_type_callback(self, formation_type: int):
+        """处理编队队形切换 — 应用到所有活跃组"""
+        if self.formation_manager.is_any_active():
+            self.formation_manager.update_formation_type_all(FormationType(formation_type))
+
+    def change_formation_spacing_callback(self, along: float, cross: float):
+        """处理编队间距变更 — 应用到所有活跃组"""
+        if self.formation_manager.is_any_active():
+            self.formation_manager.update_spacing_all(along, cross)
 
     # 在独立线程中异步处理消息发布队列
     def process_publish_queue(self):
@@ -892,17 +939,17 @@ class GroundStationNode(Node):
 
     @staticmethod
     def _compute_goal_id(usv_id: str, step: int) -> int:
-        """计算确定性 goal_id: usv编号 × 10000 + step步骤号.
+        """计算确定性 goal_id: usv编号 × 100000 + step步骤号.
 
-        编码格式: usv_XX → XX * 10000 + step
-        例: usv_01 step 1 → 10001, usv_03 step 5 → 30005
+        编码格式: usv_XX → XX * 100000 + step
+        例: usv_01 step 1 → 100001, usv_03 step 5 → 300005
         可通过 _parse_goal_id() 反向解析出 usv 编号和步骤号.
         """
         try:
             usv_num = int(usv_id.split('_')[-1])
         except (ValueError, IndexError):
             usv_num = 0
-        return usv_num * 10000 + step
+        return usv_num * 100000 + step
 
     @staticmethod
     def _parse_goal_id(goal_id: int) -> tuple:
@@ -911,7 +958,7 @@ class GroundStationNode(Node):
         Returns:
             (usv_number, step_number)
         """
-        return goal_id // 10000, goal_id % 10000
+        return goal_id // 100000, goal_id % 100000
 
     def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, 
                                  maneuver_type=0, maneuver_param=0.0, step=None,

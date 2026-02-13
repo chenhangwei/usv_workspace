@@ -80,6 +80,24 @@ def generate_launch_description():
         default_value='usv_02',
         description='无人船节点的命名空间'
     )
+
+    # SITL 目标系统 ID（多 USV 时每艘不同，匹配 SYSID_THISMAV）
+    target_system_id_arg = DeclareLaunchArgument(
+        'target_system_id',
+        default_value='1',
+        description='MAVROS 目标飞控系统 ID（SITL 模式，需匹配 SYSID_THISMAV）'
+    )
+
+    # SITL 参数文件（用于覆盖 SITL 特有参数）
+    sitl_param_file_arg = DeclareLaunchArgument(
+        'sitl_param_file',
+        default_value=PathJoinSubstitution([
+            FindPackageShare('usv_bringup'),
+            'config',
+            'usv_params_sitl.yaml'
+        ]),
+        description='SITL 仿真模式的参数覆盖文件'
+    )
     
     # 日志收集开关参数
     enable_log_collector_arg = DeclareLaunchArgument(
@@ -153,12 +171,14 @@ def generate_launch_description():
     # =============================================================================
 
     param_file = LaunchConfiguration('param_file')
+    sitl_param_file = LaunchConfiguration('sitl_param_file')
 
     namespace = LaunchConfiguration('namespace')
     fcu_url = LaunchConfiguration('fcu_url')
     gcs_url = LaunchConfiguration('gcs_url')
     enable_log_collector = LaunchConfiguration('enable_log_collector')
     simulation_mode = LaunchConfiguration('simulation_mode')
+    target_system_id = LaunchConfiguration('target_system_id')
     #lidar_port = LaunchConfiguration('lidar_port')
 
     # =============================================================================
@@ -257,6 +277,17 @@ def generate_launch_description():
         parameters=[param_file]
     )
     
+    # 编队跟随节点 (USV 端计算)
+    # 接收 GS 下发的 FormationConfig，订阅领队状态中转，本地高频计算编队目标
+    formation_follower_node = Node(
+        package='usv_control',
+        executable='formation_follower_node',
+        name='formation_follower_node',
+        namespace=namespace,
+        output='screen',
+        parameters=[param_file, {'usv_id': namespace}]
+    )
+
     # 日志收集节点（可选，用于调试导航）
     log_collector_node = Node(
         package='usv_control',
@@ -481,7 +512,7 @@ def generate_launch_description():
                 # ✅ setpoint_raw    - 原始目标点（GUIDED 模式主要控制方式）
                 
                 # ==================== 性能优化参数 ====================
-                'sys.disable_diag': True,           # 禁用版本查询（节省 10-15 秒）
+                'disable_diag': True,               # 禁用版本查询（节省 10-15 秒）
                 # 注意: 由于已禁用 waypoint/rallypoint/geofence 插件，
                 # 以下参数不再需要（插件都不加载了）
                 # 'mission.pull_after_gcs': False,
@@ -489,10 +520,10 @@ def generate_launch_description():
                 # 'rallypoint.pull_after_gcs': False,
                 # 'geofence.pull_after_gcs': False,
                 
-                # 连接参数
-                'conn.timeout': 30.0,               # 连接超时 30 秒 (增加超时时间，提升断连容忍度)
-                'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
-                'conn.heartbeat_rate': 1.0,         # 心跳频率 1 Hz
+                # 连接参数 (MAVROS sys_status 插件参数)
+                'conn_timeout': 30.0,               # 连接超时 30 秒 (增加超时时间，提升断连容忍度)
+                'heartbeat_mav_type': 'SURFACE_BOAT',  # MAV_TYPE 字符串 (MAVROS 要求 string 类型)
+                'heartbeat_rate': 1.0,              # 心跳频率 1 Hz
             },
         ]
     )
@@ -513,6 +544,7 @@ def generate_launch_description():
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'sitl')),
         parameters=[
             param_file,
+            sitl_param_file,
             {
                 # 核心连接参数
                 'fcu_url': fcu_url,
@@ -520,12 +552,15 @@ def generate_launch_description():
                 
                 # MAVLink 身份配置 (SITL 模式)
                 # ⚠️ system_id 不能用 255，因为 MAVProxy 已经用了 255，会冲突
+                # 多 USV: target_system_id 通过 launch 参数传入，匹配 SYSID_THISMAV
                 'system_id': 240,           # MAVROS 系统 ID (避开 MAVProxy 的 255)
                 'component_id': 191,        # MAVROS 组件 ID
-                'target_system_id': 1,      # SITL 默认系统 ID = 1
+                'target_system_id': target_system_id,   # 匹配 SYSID_THISMAV
                 'target_component_id': 1,   # 飞控组件 ID
                 
-                # SITL 模式下的插件黑名单（比硬件模式少禁用一些）
+                # SITL 模式下的插件黑名单
+                # ⚠️ param 插件已禁用: SITL 参数通过 .parm 文件加载，无需 MAVROS 拉取
+                #    启用 param 会导致下载 1233 个参数，严重拖慢启动并引起心跳超时
                 'plugin_denylist': [
                     'actuator_control',
                     'adsb',
@@ -555,6 +590,7 @@ def generate_launch_description():
                     'onboard_computer_status',
                     'open_drone_id',
                     'optical_flow',
+                    'param',                # ← SITL 不需要参数同步
                     'play_tune',
                     'px4flow',
                     'rangefinder',
@@ -570,6 +606,7 @@ def generate_launch_description():
                     'vibration',
                     'vision_pose',
                     'vision_speed',
+                    'waypoint',             # ← SITL GUIDED 模式不需要航点
                     'wheel_odometry',
                     'wind_estimation',
                     'rallypoint',
@@ -577,12 +614,12 @@ def generate_launch_description():
                 ],
                 
                 # 性能参数
-                'sys.disable_diag': True,
+                'disable_diag': True,
                 
-                # 连接参数（SITL 连接更快，超时可以短一些）
-                'conn.timeout': 15.0,
-                'conn.heartbeat_mav_type': 6,       # MAV_TYPE_SURFACE_BOAT
-                'conn.heartbeat_rate': 1.0,
+                # 连接参数 (MAVROS sys_status 插件参数)
+                'conn_timeout': 30.0,               # 30s (多实例时 SITL 响应慢)
+                'heartbeat_mav_type': 'SURFACE_BOAT',  # MAV_TYPE 字符串
+                'heartbeat_rate': 1.0,
             },
         ]
     )
@@ -663,6 +700,7 @@ def generate_launch_description():
             usv_control_node,         # 核心控制器（依赖 MAVROS 和 EKF 原点）
             usv_command_node,         # 命令处理（依赖 MAVROS）
             velocity_controller_node, # 速度控制器（MPC，速度模式下使用）
+            formation_follower_node, # 编队跟随（USV 端计算）
             # usv_avoidance_node,     # 避障功能（已注释）
         ]
     )
@@ -689,6 +727,7 @@ def generate_launch_description():
             usv_control_node,
             usv_command_node,
             velocity_controller_node,
+            formation_follower_node,  # 编队跟随（USV 端计算）
         ]
     )
     
@@ -718,6 +757,8 @@ def generate_launch_description():
         fcu_url_arg,
         gcs_url_arg,
         enable_log_collector_arg,
+        target_system_id_arg,
+        sitl_param_file_arg,
         #lidar_port_arg,
         
         # ============================

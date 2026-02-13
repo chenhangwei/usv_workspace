@@ -134,6 +134,11 @@ class UsvPlotWindow(QWidget):
         # Callback for Set Home Request
         self.request_set_home_callback = None
 
+        # ========== 编队信息 ==========
+        self._formation_leader_ids = set()    # 编队领队 ID 集合
+        self._formation_follower_ids = set()  # 编队跟随者 ID 集合
+        self._formation_rings = {}  # {usv_id: artist} 领队外圈artist缓存
+
         # ========== Timer ==========
         # Update at 5Hz to prevent blocking main thread
         self.timer = QTimer(self)
@@ -322,6 +327,26 @@ class UsvPlotWindow(QWidget):
             zorder=3, # Below USVs but above grid
             label='Home'
         )
+
+    def set_formation_info(self, leader_ids: list, follower_ids: list):
+        """
+        设置编队信息，用于在绘图中区分领队和跟随者
+        
+        领队标记会比普通USV大一圈，并带有金色外环。
+        
+        Args:
+            leader_ids: 领队 USV ID 列表（空列表表示清除编队信息）
+            follower_ids: 跟随者 USV ID 列表
+        """
+        self._formation_leader_ids = set(leader_ids) if leader_ids else set()
+        self._formation_follower_ids = set(follower_ids) if follower_ids else set()
+        # 清除旧的外圈标记
+        for uid, ring in self._formation_rings.items():
+            try:
+                ring.remove()
+            except Exception:
+                pass
+        self._formation_rings.clear()
 
     def draw_area_center_marker(self, x, y):
         """Draw or update the Area Center marker (Red Cross)"""
@@ -746,11 +771,17 @@ class UsvPlotWindow(QWidget):
             # 创建旋转后的箭头标记
             rotated_marker = MarkerStyle(self._usv_arrow_path).rotated(rad=yaw)
             
+            # 编队领队使用更大的标记 (s=700 vs s=400)
+            is_leader = usv_id in self._formation_leader_ids
+            marker_size = 700 if is_leader else 400
+            edge_color = '#FFD700' if is_leader else '#ecf0f1'  # 金色边框表示领队
+            edge_width = 2.5 if is_leader else 1.2
+            
             if usv_id not in self.artists['usv_polys']:
-                # 使用 scatter 创建固定像素大小的标记 (s=400 约等于 20x20 像素)
-                scatter = self.ax.scatter([x], [y], s=400, c=[color_hex], 
+                # 使用 scatter 创建固定像素大小的标记
+                scatter = self.ax.scatter([x], [y], s=marker_size, c=[color_hex], 
                                          marker=rotated_marker, 
-                                         edgecolors='#ecf0f1', linewidths=1.2,
+                                         edgecolors=edge_color, linewidths=edge_width,
                                          alpha=display_alpha, zorder=10)
                 self.artists['usv_polys'][usv_id] = scatter
             else:
@@ -759,9 +790,26 @@ class UsvPlotWindow(QWidget):
                 scatter.set_offsets([[x, y]])
                 scatter.set_facecolors([color_hex])
                 scatter.set_alpha(display_alpha)
+                scatter.set_sizes([marker_size])
+                scatter.set_edgecolors([edge_color])
+                scatter.set_linewidths([edge_width])
                 # 更新旋转标记 - 需要重新设置 paths
                 scatter.set_paths([rotated_marker.get_path().transformed(rotated_marker.get_transform())])
                 scatter.set_visible(True)
+            
+            # --- 3b. 领队外圈光环 ---
+            if is_leader:
+                if usv_id not in self._formation_rings:
+                    ring = self.ax.scatter([x], [y], s=1200, c='none',
+                                          marker='o', edgecolors='#FFD700',
+                                          linewidths=1.5, alpha=0.6, zorder=9)
+                    self._formation_rings[usv_id] = ring
+                else:
+                    ring = self._formation_rings[usv_id]
+                    ring.set_offsets([[x, y]])
+                    ring.set_visible(True)
+            elif usv_id in self._formation_rings:
+                self._formation_rings[usv_id].set_visible(False)
 
             # --- 4. Update/Create Trail ---
             if usv_id not in self.usv_trails:
@@ -861,15 +909,26 @@ class UsvPlotWindow(QWidget):
 
             # --- 6. Label ---
             if self.show_labels:
+                # 编队角色标注
+                role_prefix = ""
+                label_color = '#ecf0f1'
+                if usv_id in self._formation_leader_ids:
+                    role_prefix = "👑 "
+                    label_color = '#FFD700'  # 金色
+                elif usv_id in self._formation_follower_ids:
+                    role_prefix = "↝ "
+                
+                label_str = f"{role_prefix}{usv_id}"
                 if usv_id not in self.artists['usv_labels']:
-                    text = self.ax.text(x, y + 1.5, f"{usv_id}", 
-                            color='#ecf0f1', fontsize=9, ha='center',
+                    text = self.ax.text(x, y + 1.5, label_str, 
+                            color=label_color, fontsize=9, ha='center',
                             bbox=dict(facecolor='#2c3e50', alpha=0.5, edgecolor='none', pad=2))
                     self.artists['usv_labels'][usv_id] = text
                 else:
                     text = self.artists['usv_labels'][usv_id]
                     text.set_position((x, y + 1.5))
-                    text.set_text(f"{usv_id}")
+                    text.set_text(label_str)
+                    text.set_color(label_color)
                     text.set_visible(True)
             elif usv_id in self.artists['usv_labels']:
                 self.artists['usv_labels'][usv_id].set_visible(False)
@@ -885,6 +944,7 @@ class UsvPlotWindow(QWidget):
                 if uid in self.artists['usv_labels']: self.artists['usv_labels'][uid].set_visible(False)
                 if uid in self.artists['nav_labels']: self.artists['nav_labels'][uid].set_visible(False)
                 if uid in self.artists['nav_sync_markers']: self.artists['nav_sync_markers'][uid].set_visible(False)
+                if uid in self._formation_rings: self._formation_rings[uid].set_visible(False)
                 # Trails persist usually, but maybe hide them? Keeping them for now.
 
         # --- 7. Auto Scale ---

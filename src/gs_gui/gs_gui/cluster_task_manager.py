@@ -423,7 +423,12 @@ class ClusterTaskManager:
             return False
     
     def stop_task(self):
-        """停止集群任务执行"""
+        """停止集群任务执行（含编队模式）"""
+        # 如果编队模式正在运行，先停止编队
+        if self._is_formation_active():
+            self._stop_formation_task()
+            return
+
         # 如果没有正在运行的集群任务，直接返回
         if not self.cluster_task_running:
             self.append_info("当前没有正在运行的集群任务")
@@ -553,3 +558,132 @@ class ClusterTaskManager:
             if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
                 self.cluster_task_running = False
                 self.cluster_task_paused = False
+
+    # ==================== 编队模式管理方法 ====================
+
+    def _is_formation_active(self):
+        """检查编队模式是否正在运行"""
+        return getattr(self, '_formation_running', False)
+
+    def start_formation(self, group_configs: list):
+        """
+        启动多编队模式
+        
+        编队模式与集群任务共存：
+        - 领队由集群导航任务控制
+        - 跟随者被排除在集群任务之外，由编队控制器管理
+        
+        Args:
+            group_configs: 编队组配置列表，每个元素为 dict
+        """
+        self._formation_running = True
+        self._formation_config = group_configs
+
+        # 发送编队启动信号
+        self.ros_signal.formation_start_request.emit(group_configs)
+
+        # 更新状态
+        from .formation_controller import FormationType
+        type_names = {
+            0: "人字形",
+            1: "横排一字形",
+            2: "菱形",
+            3: "三角形",
+            4: "纵列一字形",
+            5: "S形",
+            6: "护卫",
+        }
+
+        n_groups = len(group_configs)
+        total_usvs = sum(1 + len(g.get('follower_ids', [])) for g in group_configs)
+
+        if n_groups == 1:
+            cfg = group_configs[0]
+            ft = cfg.get('formation_type', 0)
+            type_name = type_names.get(ft, "未知")
+            n_followers = len(cfg.get('follower_ids', []))
+            leader = cfg.get('leader_id', '')
+            self._update_status(
+                f"🔱 编队模式: {type_name} | 领队: {leader} | {n_followers} 艘跟随",
+                "running"
+            )
+            self.append_info(
+                f"编队模式已启动: {type_name}, 领队={leader}, "
+                f"跟随者={', '.join(cfg.get('follower_ids', []))}, "
+                f"间距=({cfg.get('spacing_along', 1.0)}m × {cfg.get('spacing_cross', 1.0)}m)"
+            )
+        else:
+            summaries = []
+            for cfg in group_configs:
+                ft = cfg.get('formation_type', 0)
+                type_name = type_names.get(ft, "未知")
+                leader = cfg.get('leader_id', '')
+                n_f = len(cfg.get('follower_ids', []))
+                summaries.append(f"{cfg.get('group_id', '')}: {type_name}/{leader}→{n_f}跟随")
+            self._update_status(
+                f"🔱 多编队模式: {n_groups} 组 | 共 {total_usvs} 艘 USV",
+                "running"
+            )
+            self.append_info(
+                f"多编队模式已启动: {n_groups} 组, 共 {total_usvs} 艘\n"
+                + "\n".join(f"  {s}" for s in summaries)
+            )
+
+    def _stop_formation_task(self):
+        """停止编队任务"""
+        reply = QMessageBox.question(
+            self.parent_widget,
+            "确认停止编队",
+            "确定要停止当前编队模式吗？\n所有跟随者将切换到 HOLD 模式。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.ros_signal.formation_stop_request.emit()
+            self._formation_running = False
+            self._formation_config = None
+            self.append_info("❌ 编队已解散，所有 USV 已恢复集群任务参与")
+            self._update_status("⏹ 编队已解散", "stopped")
+            # 恢复 stop 按钮文本
+            if self.parent_widget and hasattr(self.parent_widget, 'ui'):
+                self.parent_widget.ui.stop_cluster_task_pushButton.setText("cluster stop")
+            # 清除绘图窗口编队信息
+            if self.parent_widget and hasattr(self.parent_widget, 'usv_plot_window'):
+                self.parent_widget.usv_plot_window.set_formation_info([], [])
+        else:
+            self.append_info("取消停止操作")
+
+    def update_formation_status(self, status_info: dict):
+        """
+        处理编队状态更新
+        
+        Args:
+            status_info: 编队状态信息字典 (来自某个编队组)
+        """
+        status = status_info.get('status', 'unknown')
+        group_id = status_info.get('group_id', '')
+        if status == 'stopped':
+            # 单个组停止不一定全部停止，由外部决定
+            pass
+        elif status == 'running':
+            self._formation_running = True
+            type_name = status_info.get('formation_type_name', '')
+            leader = status_info.get('leader_id', '')
+            n = status_info.get('follower_count', 0)
+            if group_id:
+                self._update_status(
+                    f"🔱 {group_id}: {type_name} | 领队: {leader} | {n} 艘跟随",
+                    "running"
+                )
+            else:
+                self._update_status(
+                    f"🔱 编队运行中: {type_name} | 领队: {leader} | {n} 艘跟随",
+                    "running"
+                )
+
+    def get_button_text_with_formation(self):
+        """获取按钮文本 (编队模式感知)"""
+        if self._is_formation_active():
+            return "停止编队"
+        return self.get_button_text()

@@ -48,6 +48,7 @@ including path planning, obstacle avoidance, and autonomous navigation functiona
             'coord_transform_node = usv_control.coord_transform_node:main',
             'velocity_controller_node = usv_control.velocity_controller_node:main',
             'log_collector = usv_control.log_collector:main',
+            'formation_follower_node = usv_control.formation_follower_node:main',
         ],
     },
     classifiers=[

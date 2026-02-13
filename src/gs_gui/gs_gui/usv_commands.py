@@ -100,6 +100,15 @@ class USVCommandHandler:
             self.append_info(f"集群设置HOLD模式命令已发送: {namespace_list}")
         except Exception as e:
             self.append_info(f"发送集群HOLD模式命令失败: {e}")
+
+    def set_cluster_manual(self, usv_list):
+        """发送集群设置MANUAL模式命令"""
+        try:
+            namespace_list = self._extract_namespaces(usv_list)
+            self.ros_signal.manual_command.emit(namespace_list)
+            self.append_info(f"设置MANUAL模式命令已发送: {namespace_list}")
+        except Exception as e:
+            self.append_info(f"发送MANUAL模式命令失败: {e}")
     
     # ============== 离群命令 ==============
     def departed_arming(self, usv_departed_list):

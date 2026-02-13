@@ -79,6 +79,13 @@ class ROSSignal(QObject):
     # GUI警告信号（用于显示错误和警告消息）
     node_warning = pyqtSignal(str)  # 参数：警告字符串
 
+    # ==================== 编队模式信号 ====================
+    formation_start_request = pyqtSignal(list)     # 编队启动请求，参数：编队组配置列表
+    formation_stop_request = pyqtSignal()           # 编队停止请求
+    formation_status_update = pyqtSignal(dict)      # 编队状态更新，参数：编队状态信息字典
+    formation_type_change = pyqtSignal(int)         # 编队队形切换，参数：FormationType 整数值
+    formation_spacing_change = pyqtSignal(float, float)  # 编队间距变更，参数：(along, cross)
+
 
 
 

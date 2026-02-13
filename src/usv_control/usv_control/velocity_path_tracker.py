@@ -344,6 +344,41 @@ class VelocityPathTracker:
         # is_final 由调用者根据 nav_mode 决定
         # 这样可以支持平滑导航，让 navigate_to_point_node 统一管理到达判断
     
+    def update_waypoint(self, waypoint: Waypoint):
+        """
+        原地更新当前目标航点（不重置 MPC / 角速度滤波器 / 路径历史）
+
+        用于编队跟随等场景：目标位置持续小幅变化，需要平滑跟踪而非
+        每次都当作全新航点。保留 MPC 内部状态以确保控制器连续性。
+
+        Args:
+            waypoint: 更新后的目标航点
+        """
+        if not waypoint.is_valid():
+            waypoint.speed = np.clip(waypoint.speed, MIN_VALID_SPEED, MAX_VALID_SPEED)
+
+        if self._current_waypoint is None:
+            # 首次设置，走完整初始化
+            self._current_waypoint = waypoint
+            self._goal_reached = False
+            self._last_pose_time = time.time()
+        else:
+            # 仅更新坐标和速度，保留所有控制器状态
+            self._current_waypoint.x = waypoint.x
+            self._current_waypoint.y = waypoint.y
+            self._current_waypoint.speed = waypoint.speed
+            self._current_waypoint.goal_id = waypoint.goal_id
+            self._current_waypoint.is_final = waypoint.is_final
+            # 不清空 queue、不重置 MPC、不重置 angular velocity filter
+            # 不重置 _prev_waypoint_pos、不清空 path_history
+
+        # 目标已更新，必须重置到达标志和相关安全状态
+        # 否则一旦 _goal_reached 被任何瞬态原因置 True（如连续位姿错误、
+        # 偏离检测），compute_velocity 将永远返回零速
+        self._goal_reached = False
+        self._consecutive_errors = 0
+        self._reset_divergence_monitor()
+
     def add_waypoint(self, waypoint: Waypoint):
         """
         添加航点到队列末尾

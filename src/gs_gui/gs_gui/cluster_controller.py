@@ -52,7 +52,7 @@ class ClusterController:
         self._ack_states: Dict[str, AckState] = ThreadSafeDict()
         self._resend_interval = float(getattr(node, '_ack_resend_interval', 2.0))
         self._action_timeout = float(getattr(node, '_cluster_action_timeout', 300.0))
-        self._excluded_ids = set()  # 排除的 USV ID 集合
+        self._excluded_ids = set()  # 排除的 USV ID 集合（编队跟随者）
         
         # 新增：用于跟踪每个 USV 当前执行到的步骤 (usv_id -> step_number)
         self._usv_step_progress: Dict[str, int] = ThreadSafeDict()
@@ -71,6 +71,29 @@ class ClusterController:
     def _now(self) -> float:
         """返回当前 ROS 时钟的秒值。"""
         return self.node.get_clock().now().nanoseconds / 1e9
+
+    def set_excluded_ids(self, ids: set) -> None:
+        """
+        设置排除 USV 集合（编队跟随者）
+        
+        被排除的 USV 不会参与集群任务执行。
+        
+        Args:
+            ids: 要排除的 USV ID 集合
+        """
+        self._excluded_ids = set(ids)
+        self.node.get_logger().info(
+            f"集群控制器: 已设置排除列表 ({len(self._excluded_ids)} 艘): "
+            f"{', '.join(sorted(self._excluded_ids)) if self._excluded_ids else '无'}"
+        )
+
+    def clear_excluded_ids(self) -> None:
+        """清除排除列表，恢复所有 USV 参与集群任务"""
+        if self._excluded_ids:
+            self.node.get_logger().info(
+                f"集群控制器: 已清除排除列表 (移除 {len(self._excluded_ids)} 艘)"
+            )
+        self._excluded_ids.clear()
 
     def configure(self, resend_interval: Optional[float] = None, action_timeout: Optional[float] = None) -> None:
         """更新控制参数，可在节点参数加载后调用。"""
@@ -510,7 +533,7 @@ class ClusterController:
                  state.acked = False
                  # 只在首次到达最大重试次数时输出错误日志，避免刷屏
                  if not state.timeout_logged:
-                     self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+                     self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，将在确认率检查时跳过该USV继续下一步")
                      state.timeout_logged = True
 
     def _old_publish_cluster_targets_callback(self):
@@ -732,7 +755,7 @@ class ClusterController:
             state.acked = False  # 明确标记为未确认
             # 只在首次到达最大重试次数时输出错误日志，避免刷屏
             if not state.timeout_logged:
-                self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，标记为失败（不进入下一步）")
+                self.node.get_logger().error(f"{usv_id} 超时且已达最大重试次数，将在确认率检查时跳过该USV继续下一步")
                 state.timeout_logged = True
 
     def _area_to_global(self, p_area):
@@ -879,28 +902,56 @@ class ClusterController:
     def pause_cluster_task(self):
         """
         暂停集群任务
+        
+        暂停时仅让 USV 进入 HOLD 模式（保持当前位置），
+        不发送 stop_navigation，保留导航缓存和 ack 状态，
+        以便恢复时能重新下发目标继续任务。
         """
         if self._state == ClusterTaskState.PAUSED:
             self.node.get_logger().warn("集群任务已处于暂停状态")
             return
 
         self._set_state(ClusterTaskState.PAUSED, "用户请求暂停")
-        # 取消所有活动的导航任务
-        for usv_id in list(self.node._usv_nav_target_cache.keys()):
-            self._cancel_active_goal(usv_id)
-        self.node.get_logger().info("集群任务已暂停")
+
+        # 仅切换到 HOLD 模式，不发送 stop_navigation
+        hold_usvs = list(self.node._usv_nav_target_cache.keys())
+        if hold_usvs:
+            self.node.command_processor._set_mode_for_usvs(hold_usvs, "HOLD")
+            for usv_id in hold_usvs:
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已暂停")
+
+        self.node.get_logger().info(f"集群任务已暂停，{len(hold_usvs)} 艘 USV 进入 HOLD 模式")
 
     def resume_cluster_task(self):
         """
         恢复集群任务
+        
+        重置所有未完成步骤的发送时间和重试计数，
+        使定时回调立即重新下发目标。同时清空预发送记录，
+        确保 lookahead 目标也会被重新发送。
         """
         if self._state != ClusterTaskState.PAUSED:
             self.node.get_logger().warn("集群任务未处于暂停状态，无需恢复")
             return
 
         self._cluster_start_time = self._now()
+
+        # 重置所有未确认 USV 的 ack 状态，强制重新下发目标
+        resend_count = 0
+        for usv_id, state in self._ack_states.items():
+            if not state.acked:
+                state.last_send_time = None
+                state.retry = 0
+                state.received = False
+                resend_count += 1
+
+        # 清空 lookahead 发送记录，确保预发送目标也会被重新发送
+        self._lookahead_sent.clear()
+
         self._set_state(ClusterTaskState.RUNNING, "恢复集群任务")
-        self.node.get_logger().info("集群任务已恢复")
+        self.node.get_logger().info(
+            f"集群任务已恢复，{resend_count} 个目标将被重新下发"
+        )
 
     def is_cluster_task_paused(self):
         """
@@ -937,9 +988,11 @@ class ClusterController:
         
         # 如果确认率超过阈值且当前步骤尚未完成，则进入下一步
         if ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
-            # 检查是否所有USV都已成功确认（超时失败不算已处理）
-            all_confirmed = True
+            # 检查是否所有USV都已「处理完毕」
+            # 已处理 = 成功确认(acked) 或 超时且重试次数耗尽(retry >= max_retries)
+            all_resolved = True
             pending_usvs = []
+            timeout_failed_usvs = []
             for usv in cluster_usv_list:
                 if not isinstance(usv, dict):
                     continue
@@ -951,25 +1004,31 @@ class ClusterController:
 
                 state = self._ack_states.get(usv_id) if usv_id else None
                 if not state or state.step != self.node.run_step:
-                    all_confirmed = False
+                    all_resolved = False
                     pending_usvs.append(f"{usv_id}(未初始化)")
                     break
-                # ✅ 修复：只有成功确认才算完成，超时失败也视为未完成
-                if not state.acked:
-                    all_confirmed = False
-                    if state.retry >= self.node._max_retries:
-                        pending_usvs.append(f"{usv_id}(超时失败)")
-                    else:
-                        pending_usvs.append(f"{usv_id}(等待中)")
+                if state.acked:
+                    # 成功确认
+                    pass
+                elif state.retry >= self.node._max_retries:
+                    # 超时失败但重试已耗尽 → 视为「已处理」，不阻塞进入下一步
+                    timeout_failed_usvs.append(usv_id)
+                else:
+                    # 仍在等待中
+                    all_resolved = False
+                    pending_usvs.append(f"{usv_id}(等待中)")
             
-            # 只有当所有USV都成功确认时才进入下一步
-            if all_confirmed and ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
+            # 所有USV都已处理（确认或超时耗尽）时进入下一步
+            if all_resolved and ack_rate >= self.node.MIN_ACK_RATE_FOR_PROCEED:
+                if timeout_failed_usvs:
+                    self.node.get_logger().warning(
+                        f"⚠️ {', '.join(timeout_failed_usvs)} 超时失败，跳过继续下一步"
+                    )
                 self.node.get_logger().info(
                     f"确认率达到 {ack_rate*100:.1f}% (阈值: {self.node.MIN_ACK_RATE_FOR_PROCEED*100:.1f}%)，"
                     f"其中 {acked_usvs}/{total_usvs} 个USV已确认，进入下一步"
                 )
                 self._proceed_to_next_step()
-                # ✅ 修复：进入下一步后返回True，通知调用者已进入下一步
                 return True
             elif pending_usvs:
                 self.node.get_logger().debug(
@@ -1144,9 +1203,13 @@ class ClusterController:
                 # self.node.get_logger().info(f"✅ {usv_id} 标记为已确认 (step={state.step})")
                 self._emit_current_progress()
         else:
-            # 失败情况下保持未确认状态，等待重试或人工处理
+            # 失败情况下保持未确认状态
+            # 如果重试次数已耗尽，_check_and_proceed_on_ack_rate 会将其视为已处理并推进
             state.last_send_time = self._now()
-            self.node.get_logger().warning(f"❌ {usv_id} 导航失败，保持未确认状态")
+            if state.retry >= self.node._max_retries:
+                self.node.get_logger().warning(f"❌ {usv_id} 导航失败（重试已耗尽），等待确认率检查推进下一步")
+            else:
+                self.node.get_logger().warning(f"❌ {usv_id} 导航失败，保持未确认状态等待重试")
             self._emit_current_progress()
 
 
