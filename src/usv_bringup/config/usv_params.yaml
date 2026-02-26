@@ -288,6 +288,117 @@ mavros:
     ampc_rebuild_threshold: 0.15            # τ 变化超此比例才重建 MPC
     ampc_saturation_tau_boost: 1.02          # 慢性饱和时 τ 升压因子 (v9b: 1.15→1.02, 让RLS自行辨识)
 
+    # ==================== 分布式 APF 多船避碰 ====================
+    # 设计目标: 不替换现有MPC导航，仅在局部近距离叠加排斥修正
+    # 建议启用步骤:
+    # 1) 先保持 apf_enabled=false 回归验证
+    # 2) 打开后从小增益开始 (apf_repulsion_gain=0.6~0.8)
+    # 3) 逐步增大安全半径和修正限幅
+    apf_enabled: true
+    apf_use_fleet_neighbors_topic: true
+    apf_fleet_neighbors_topic: 'apf/neighbors'
+    # 邻船位姿话题列表(绝对话题名). 每艘USV请填“其他船”话题,不要包含本船。
+    # 示例(以 usv_02 为例): ['/usv_01/local_position/pose_from_gps', '/usv_03/local_position/pose_from_gps']
+    apf_neighbor_pose_topics: []
+    apf_safe_distance: 1.0                  # APF 生效半径 (m)
+    apf_repulsion_gain: 0.7                 # 排斥增益 η（SITL 验证值）
+    apf_lateral_to_yaw_gain: 1.2            # 横向排斥 → 角速度映射增益（SITL 验证值）
+    apf_max_linear_correction: 0.20         # 线速度修正限幅 (m/s)
+    apf_max_angular_correction: 0.45        # 角速度修正限幅 (rad/s)
+    apf_neighbor_timeout: 0.8               # 邻船位姿超时剔除 (s)
+    apf_orca_enabled: true                  # 启用 ORCA 风格速度障碍修正（优先于传统 APF）
+    apf_orca_time_horizon: 10.0             # ORCA 时间地平线 T (s)
+    apf_orca_min_separation: 2.0            # ORCA 最小分离距离 (m)
+    apf_orca_influence_distance: 8.0        # ORCA 邻船影响距离上限 (m)
+    # ---- 侧承诺（打破对称避让） ----
+    apf_orca_side_commit_enabled: true      # 交汇时启用固定左右承诺
+    apf_orca_commit_policy: starboard       # 对遇优先右舷规避（两船都向右转）
+    apf_orca_side_commit_distance: 1.5      # 触发左右承诺距离（米）
+    apf_orca_side_commit_hold_time: 2.5     # 左右承诺保持时间（秒）
+    apf_orca_side_bias_lateral: 0.20        # 左右承诺附加转向偏置（rad/s）
+    apf_orca_min_angular_near: 0.12         # 超近距最小角速度下限（rad/s）
+    apf_orca_min_angular_distance: 0.7      # 触发最小角速度下限距离（米）
+    apf_orca_near_apf_fallback_enabled: true  # 超近距叠加 APF 兜底
+    apf_orca_near_apf_distance: 0.8         # APF 兜底触发距离（米）
+    apf_orca_near_apf_weight: 1.0           # APF 兜底权重
+    apf_orca_enforce_commit_direction: true  # 承诺生效时强约束最终角速度方向
+    apf_orca_enforce_min_angular: 0.12      # 方向强约束最小角速度（rad/s）
+    # ---- 共同转向（近距双边分担） ----
+    apf_orca_shared_turn_enabled: true      # 近距时双方都承担最小转向份额
+    apf_orca_shared_turn_distance: 1.2      # 双边分担触发距离（米）
+    apf_orca_shared_turn_min_angular: 0.24  # 双边分担最小角速度（rad/s）
+    # ---- 死锁脱困 ----
+    apf_orca_deadlock_enabled: true         # 近距长时间不分离时启用脱困模式
+    apf_orca_deadlock_distance: 1.0         # 脱困触发距离（米）
+    apf_orca_deadlock_hold_time: 3.0        # 近距持续时长超过该值触发脱困（秒）
+    apf_orca_deadlock_turn_boost: 0.08      # 脱困附加转向增量（rad/s）
+    apf_orca_deadlock_speed_reduction: 0.10 # 脱困附加减速量（m/s）
+    # ---- 虚拟走廊（降低轨迹重合） ----
+    apf_orca_lane_guidance_enabled: true    # 启用虚拟通行走廊
+    apf_orca_lane_guidance_distance: 2.5    # 走廊引导触发距离（米）
+    apf_orca_lane_offset: 1.0               # 目标横向偏移（米）
+    apf_orca_lane_gain: 0.20                # 走廊横向误差转向增益
+    # ---- 同轨防陷入（优先让速） ----
+    apf_orca_overlap_guard_enabled: true    # 同轨迹跟随防陷入
+    apf_orca_overlap_ahead_distance: 2.2    # 邻船在前触发距离（米）
+    apf_orca_overlap_lateral_threshold: 0.8 # 同车道判定横向阈值（米）
+    apf_orca_overlap_speed_cut: 0.06        # 防陷入附加减速量（m/s）
+    apf_orca_overlap_turn_scale: 0.85       # 防陷入时转向缩放（0~1）
+    # ---- 伴行耦合保护 ----
+    apf_orca_coupling_guard_enabled: true   # 长时间近距同向伴行时触发解耦
+    apf_orca_coupling_distance: 1.2         # 伴行耦合判定距离阈值（米）
+    apf_orca_coupling_release_distance: 1.6 # 解耦释放距离阈值（米，带迟滞）
+    apf_orca_coupling_lateral_threshold: 0.45  # 伴行耦合横向重合阈值（米）
+    apf_orca_coupling_rel_speed_max: 0.12   # 相对速度小于该值才认为"伴行锁定"（m/s）
+    apf_orca_coupling_hold_time: 8.0        # 满足伴行条件持续该时长后触发解耦（秒）
+    apf_orca_coupling_speed_min: 0.20       # 双船速度都高于该值才判定"推着走"（m/s）
+    apf_orca_coupling_speed_cut: 0.12       # 解耦时附加减速量（m/s）
+    apf_orca_coupling_turn_boost: 0.10      # 解耦时附加转向增量（rad/s）
+    apf_orca_coupling_lane_push: 0.10       # 解耦时横向分离推力（rad/s）
+    # ---- CPA / TCPA 预测风险加权 ----
+    apf_orca_cpa_enabled: true              # 启用 CPA/TCPA 预测风险加权
+    apf_orca_cpa_distance_threshold: 1.2    # CPA 风险阈值（米）
+    apf_orca_tcpa_threshold: 6.0            # TCPA 风险阈值（秒）
+    # ---- 预测性早避让 ----
+    apf_orca_predictive_early_enabled: true # 提前轻微转向与减速
+    apf_orca_predictive_tcpa_threshold: 18.0  # 预测 TCPA 阈值（秒）
+    apf_orca_predictive_cpa_threshold: 3.0  # 预测 CPA 阈值（米）
+    apf_orca_predictive_max_distance: 6.0   # 提前介入的最远距离（米）
+    apf_orca_predictive_angular_max: 0.16   # 提前转向最大增量（rad/s）
+    apf_orca_predictive_speed_cut_max: 0.10 # 提前减速最大增量（m/s）
+    # ---- 选边有效性与自动换边 ----
+    apf_orca_side_effectiveness_enabled: true     # 启用选边有效性判据与自动换边重试
+    apf_orca_side_effectiveness_window: 2.0       # 有效性评估窗口（秒）
+    apf_orca_side_effectiveness_min_sep_gain: 0.25  # 窗口内最小分离距离增益阈值（米）
+    apf_orca_side_effectiveness_min_cpa_gain: 0.20  # 窗口内最小 CPA 改善阈值（米）
+    apf_orca_side_switch_cooldown: 2.0            # 自动换边冷却时间（秒）
+    apf_orca_side_switch_max_retries: 2           # 每次近距接触最大自动换边次数
+    apf_orca_side_switch_turn_boost: 0.12         # 触发换边当拍附加转向增量（rad/s）
+    # ---- 紧急增益 ----
+    apf_orca_urgency_scale_max: 2.0         # 高风险时角速度放大上限
+    apf_orca_linear_slowdown_max: 0.12      # 高风险时线速度附加减速上限（m/s）
+    # ---- 转向预算保护 ----
+    apf_orca_turn_budget_enabled: true      # 基础转向接近饱和时抑制同向避让增量
+    apf_orca_turn_budget_ratio: 0.85        # 判定"接近饱和"的基础角速度比例
+    apf_orca_turn_budget_same_side_scale: 0.25  # 接近饱和时同向避让增量最小保留比例
+    # ---- 智能选边 ----
+    apf_orca_smart_side_enabled: true       # 基于短时预测分离效果自动选择左右避让方向
+    apf_orca_smart_side_horizon: 2.5        # 智能选边预测时域（秒）
+    apf_orca_smart_side_ref_yaw_rate: 0.25  # 评估参考转向角速度（rad/s）
+    apf_orca_smart_side_clearance_weight: 1.2   # 分离距离收益权重
+    apf_orca_smart_side_colreg_weight: 0.5      # 规则偏置权重（对遇/右舷来船）
+    apf_orca_smart_side_goal_weight: 0.3        # 基础导航转向冲突惩罚权重
+    # ---- 健康监测 ----
+    apf_health_monitor_enabled: true        # 启用在线数据健康监测（位姿冻结检测）
+    apf_health_freeze_pos_epsilon: 0.01     # 判定"位姿冻结"的位置变化阈值（米）
+    apf_health_min_speed_for_freeze: 0.15   # 仅当速度超过该阈值才判定冻结异常（m/s）
+    apf_health_own_freeze_warn_duration: 0.8      # 本船冻结持续告警阈值（秒）
+    apf_health_neighbor_freeze_warn_duration: 0.8 # 邻船冻结持续告警阈值（秒）
+    apf_health_warn_interval: 2.0           # 同类健康告警最小间隔（秒）
+    # ---- 到点削弱 ----
+    apf_goal_slow_speed_threshold: 0.40     # 到点削弱阈值（m/s）（SITL 验证值）
+    apf_goal_relax_min_scale: 0.20          # 到点最小保留比例（0~1）
+
 # =============================================================================
 # 传感器驱动模块参数
 # =============================================================================
@@ -336,7 +447,7 @@ mavros:
     max_play_count: 3                       # 最大播放次数
 
 # =============================================================================
-# USV_03 专用参数配置 (v8 更新)
+# USV_03 专用参数配置 (仅 MPC 动力学差异)
 # 
 # v8 更新 (2026-02-09):
 # AMPC 启用后，不再需要逐船手工调参。

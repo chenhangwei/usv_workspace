@@ -42,16 +42,24 @@ from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from rclpy.exceptions import ParameterUninitializedException
+from rcl_interfaces.msg import ParameterDescriptor, ParameterType
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
 from std_msgs.msg import String, Float32, Bool
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug
+from common_interfaces.msg import (
+    NavigationGoal,
+    NavigationFeedback,
+    NavigationResult,
+    MpcDebug,
+    FleetNeighborPoses,
+)
 
 import math
 import time
 import threading
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from enum import Enum, auto
 
 from .velocity_path_tracker import (
@@ -156,6 +164,116 @@ class VelocityControllerNode(Node):
         # v14 新增: 模式保护和渐进减速参数
         self.declare_parameter('consecutive_hold_threshold', 3)      # 连续 HOLD 强制暂停阈值
         self.declare_parameter('soft_decel_duration', 3.0)           # 渐进减速持续时间 (秒)
+
+        # 分布式 APF 参数（本地计算，多船排斥避碰）
+        self.declare_parameter('apf_enabled', False)
+        self.declare_parameter('apf_use_fleet_neighbors_topic', True)
+        self.declare_parameter('apf_fleet_neighbors_topic', 'apf/neighbors')
+        self.declare_parameter(
+            'apf_neighbor_pose_topics',
+            [],
+            ParameterDescriptor(type=ParameterType.PARAMETER_STRING_ARRAY),
+        )
+        self.declare_parameter('apf_safe_distance', 3.0)
+        self.declare_parameter('apf_repulsion_gain', 0.8)
+        self.declare_parameter('apf_lateral_to_yaw_gain', 0.8)
+        self.declare_parameter('apf_max_linear_correction', 0.50)
+        self.declare_parameter('apf_max_angular_correction', 0.60)
+        self.declare_parameter('apf_neighbor_timeout', 0.8)
+        self.declare_parameter('apf_goal_slow_speed_threshold', 0.25)
+        self.declare_parameter('apf_goal_relax_min_scale', 0.20)
+        self.declare_parameter('apf_orca_enabled', True)
+        self.declare_parameter('apf_orca_time_horizon', 6.0)
+        self.declare_parameter('apf_orca_min_separation', 1.0)
+        self.declare_parameter('apf_orca_influence_distance', 4.0)
+        self.declare_parameter('apf_orca_side_commit_enabled', True)
+        self.declare_parameter('apf_orca_commit_policy', 'starboard')
+        self.declare_parameter('apf_orca_side_commit_distance', 1.2)
+        self.declare_parameter('apf_orca_side_commit_hold_time', 2.5)
+        self.declare_parameter('apf_orca_side_bias_lateral', 0.12)
+        self.declare_parameter('apf_orca_min_angular_near', 0.12)
+        self.declare_parameter('apf_orca_min_angular_distance', 0.7)
+        self.declare_parameter('apf_orca_near_apf_fallback_enabled', True)
+        self.declare_parameter('apf_orca_near_apf_distance', 0.8)
+        self.declare_parameter('apf_orca_near_apf_weight', 1.0)
+        self.declare_parameter('apf_orca_enforce_commit_direction', True)
+        self.declare_parameter('apf_orca_enforce_min_angular', 0.12)
+        self.declare_parameter('apf_orca_shared_turn_enabled', True)
+        self.declare_parameter('apf_orca_shared_turn_distance', 1.2)
+        self.declare_parameter('apf_orca_shared_turn_min_angular', 0.18)
+        self.declare_parameter('apf_orca_deadlock_enabled', True)
+        self.declare_parameter('apf_orca_deadlock_distance', 1.0)
+        self.declare_parameter('apf_orca_deadlock_hold_time', 3.0)
+        self.declare_parameter('apf_orca_deadlock_turn_boost', 0.08)
+        self.declare_parameter('apf_orca_deadlock_speed_reduction', 0.10)
+        self.declare_parameter('apf_orca_lane_guidance_enabled', True)
+        self.declare_parameter('apf_orca_lane_guidance_distance', 2.5)
+        self.declare_parameter('apf_orca_lane_offset', 1.0)
+        self.declare_parameter('apf_orca_lane_gain', 0.20)
+        self.declare_parameter('apf_orca_overlap_guard_enabled', True)
+        self.declare_parameter('apf_orca_overlap_ahead_distance', 2.2)
+        self.declare_parameter('apf_orca_overlap_lateral_threshold', 0.8)
+        self.declare_parameter('apf_orca_overlap_speed_cut', 0.12)
+        self.declare_parameter('apf_orca_overlap_turn_scale', 0.65)
+        self.declare_parameter('apf_orca_coupling_guard_enabled', True)
+        self.declare_parameter('apf_orca_coupling_distance', 1.2)
+        self.declare_parameter('apf_orca_coupling_release_distance', 1.6)
+        self.declare_parameter('apf_orca_coupling_lateral_threshold', 0.45)
+        self.declare_parameter('apf_orca_coupling_rel_speed_max', 0.12)
+        self.declare_parameter('apf_orca_coupling_hold_time', 8.0)
+        self.declare_parameter('apf_orca_coupling_speed_min', 0.20)
+        self.declare_parameter('apf_orca_coupling_speed_cut', 0.12)
+        self.declare_parameter('apf_orca_coupling_turn_boost', 0.10)
+        self.declare_parameter('apf_orca_coupling_lane_push', 0.10)
+        self.declare_parameter('apf_orca_predictive_early_enabled', True)
+        self.declare_parameter('apf_orca_predictive_tcpa_threshold', 12.0)
+        self.declare_parameter('apf_orca_predictive_cpa_threshold', 2.0)
+        self.declare_parameter('apf_orca_predictive_max_distance', 6.0)
+        self.declare_parameter('apf_orca_predictive_angular_max', 0.10)
+        self.declare_parameter('apf_orca_predictive_speed_cut_max', 0.06)
+        self.declare_parameter('apf_orca_side_effectiveness_enabled', False)  # P3: 已废弃，保留参数兼容性
+        self.declare_parameter('apf_orca_side_effectiveness_window', 3.0)
+        self.declare_parameter('apf_orca_side_effectiveness_min_sep_gain', 0.25)
+        self.declare_parameter('apf_orca_side_effectiveness_min_cpa_gain', 0.20)
+        self.declare_parameter('apf_orca_side_switch_cooldown', 2.0)
+        self.declare_parameter('apf_orca_side_switch_max_retries', 1)
+        self.declare_parameter('apf_orca_side_switch_turn_boost', 0.08)
+        self.declare_parameter('apf_orca_cpa_enabled', True)
+        self.declare_parameter('apf_orca_cpa_distance_threshold', 1.2)
+        self.declare_parameter('apf_orca_tcpa_threshold', 6.0)
+        self.declare_parameter('apf_orca_urgency_scale_max', 2.0)
+        self.declare_parameter('apf_orca_linear_slowdown_max', 0.12)
+        self.declare_parameter('apf_orca_turn_budget_enabled', True)
+        self.declare_parameter('apf_orca_turn_budget_ratio', 0.85)
+        self.declare_parameter('apf_orca_turn_budget_same_side_scale', 0.25)
+        self.declare_parameter('apf_orca_smart_side_enabled', True)
+        self.declare_parameter('apf_orca_smart_side_horizon', 2.5)
+        self.declare_parameter('apf_orca_smart_side_ref_yaw_rate', 0.25)
+        self.declare_parameter('apf_orca_smart_side_clearance_weight', 1.2)
+        self.declare_parameter('apf_orca_smart_side_colreg_weight', 0.5)
+        self.declare_parameter('apf_orca_smart_side_goal_weight', 0.3)
+        self.declare_parameter('apf_orca_encounter_rule_enabled', True)
+        self.declare_parameter('apf_orca_encounter_guidance_distance', 3.0)
+        self.declare_parameter('apf_orca_encounter_bias_angular', 0.08)
+        self.declare_parameter('apf_orca_encounter_head_on_deg', 20.0)
+        self.declare_parameter('apf_orca_encounter_crossing_deg', 112.5)
+        self.declare_parameter('apf_orca_encounter_overtake_deg', 22.5)
+        # P2: ORCA 迟滞防振荡 (防止 MPC↔ORCA 快速切换)
+        self.declare_parameter('apf_orca_hysteresis_margin', 1.5)      # 退出 ORCA 需额外超出的距离余量 (m)
+        self.declare_parameter('apf_orca_min_hold_time', 5.0)          # ORCA 最小保持时间 (秒)
+        # P1: COLREGS 强化 (使航行规则成为方向选择主决策)
+        self.declare_parameter('apf_orca_colregs_override', True)      # COLREGS 方向覆盖其他选边逻辑
+        self.declare_parameter('apf_orca_colregs_standon_scale', 0.3)  # 直航权船 ORCA 修正缩减比
+        self.declare_parameter('apf_orca_colregs_head_on_bias', 0.25)  # 对遇强制右转角速度 (rad/s)
+        # P4: NH-ORCA 非完整运动学约束
+        self.declare_parameter('apf_orca_nh_enabled', True)            # 启用非完整运动学约束投影
+        self.declare_parameter('apf_orca_nh_reachable_horizon', 2.0)   # 可达航向弧计算时域 (秒)
+        self.declare_parameter('apf_health_monitor_enabled', True)
+        self.declare_parameter('apf_health_freeze_pos_epsilon', 0.01)
+        self.declare_parameter('apf_health_min_speed_for_freeze', 0.15)
+        self.declare_parameter('apf_health_own_freeze_warn_duration', 0.8)
+        self.declare_parameter('apf_health_neighbor_freeze_warn_duration', 0.8)
+        self.declare_parameter('apf_health_warn_interval', 2.0)
         
         # ==================== 获取参数 ====================
         self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
@@ -166,6 +284,194 @@ class VelocityControllerNode(Node):
         
         self.require_guided_mode = bool(self.get_parameter('require_guided_mode').value)
         self.require_armed = bool(self.get_parameter('require_armed').value)
+
+        # ==================== APF 配置 ====================
+        self._apf_enabled = bool(self.get_parameter('apf_enabled').value)
+        self._apf_use_fleet_topic = bool(self.get_parameter('apf_use_fleet_neighbors_topic').value)
+        self._apf_fleet_topic = str(self.get_parameter('apf_fleet_neighbors_topic').value or 'apf/neighbors')
+        try:
+            neighbor_topics = self.get_parameter('apf_neighbor_pose_topics').value
+        except ParameterUninitializedException:
+            neighbor_topics = []
+        if isinstance(neighbor_topics, str):
+            neighbor_topics = [neighbor_topics]
+        self._apf_neighbor_topics = [str(topic) for topic in (neighbor_topics or []) if str(topic)]
+        self._apf_safe_distance = float(self.get_parameter('apf_safe_distance').value or 3.0)
+        self._apf_repulsion_gain = float(self.get_parameter('apf_repulsion_gain').value or 0.8)
+        self._apf_lateral_to_yaw_gain = float(self.get_parameter('apf_lateral_to_yaw_gain').value or 0.8)
+        self._apf_max_linear_correction = float(self.get_parameter('apf_max_linear_correction').value or 0.50)
+        self._apf_max_angular_correction = float(self.get_parameter('apf_max_angular_correction').value or 0.60)
+        self._apf_neighbor_timeout = float(self.get_parameter('apf_neighbor_timeout').value or 0.8)
+        self._apf_goal_slow_speed_threshold = float(
+            self.get_parameter('apf_goal_slow_speed_threshold').value or 0.25
+        )
+        self._apf_goal_relax_min_scale = float(
+            self.get_parameter('apf_goal_relax_min_scale').value or 0.20
+        )
+        self._apf_orca_enabled = bool(self.get_parameter('apf_orca_enabled').value)
+        self._apf_orca_time_horizon = float(self.get_parameter('apf_orca_time_horizon').value or 6.0)
+        self._apf_orca_min_separation = float(self.get_parameter('apf_orca_min_separation').value or 1.0)
+        self._apf_orca_influence_distance = float(self.get_parameter('apf_orca_influence_distance').value or 4.0)
+        self._apf_orca_side_commit_enabled = bool(self.get_parameter('apf_orca_side_commit_enabled').value)
+        self._apf_orca_commit_policy = str(
+            self.get_parameter('apf_orca_commit_policy').value or 'starboard'
+        ).strip().lower()
+        self._apf_orca_side_commit_distance = float(self.get_parameter('apf_orca_side_commit_distance').value or 1.2)
+        self._apf_orca_side_commit_hold_time = float(self.get_parameter('apf_orca_side_commit_hold_time').value or 2.5)
+        self._apf_orca_side_bias_lateral = float(self.get_parameter('apf_orca_side_bias_lateral').value or 0.12)
+        self._apf_orca_min_angular_near = float(self.get_parameter('apf_orca_min_angular_near').value or 0.12)
+        self._apf_orca_min_angular_distance = float(self.get_parameter('apf_orca_min_angular_distance').value or 0.7)
+        self._apf_orca_near_apf_fallback_enabled = bool(self.get_parameter('apf_orca_near_apf_fallback_enabled').value)
+        self._apf_orca_near_apf_distance = float(self.get_parameter('apf_orca_near_apf_distance').value or 0.8)
+        self._apf_orca_near_apf_weight = float(self.get_parameter('apf_orca_near_apf_weight').value or 1.0)
+        self._apf_orca_enforce_commit_direction = bool(self.get_parameter('apf_orca_enforce_commit_direction').value)
+        self._apf_orca_enforce_min_angular = float(self.get_parameter('apf_orca_enforce_min_angular').value or 0.12)
+        self._apf_orca_shared_turn_enabled = bool(self.get_parameter('apf_orca_shared_turn_enabled').value)
+        self._apf_orca_shared_turn_distance = float(self.get_parameter('apf_orca_shared_turn_distance').value or 1.2)
+        self._apf_orca_shared_turn_min_angular = float(self.get_parameter('apf_orca_shared_turn_min_angular').value or 0.18)
+        self._apf_orca_deadlock_enabled = bool(self.get_parameter('apf_orca_deadlock_enabled').value)
+        self._apf_orca_deadlock_distance = float(self.get_parameter('apf_orca_deadlock_distance').value or 1.0)
+        self._apf_orca_deadlock_hold_time = float(self.get_parameter('apf_orca_deadlock_hold_time').value or 3.0)
+        self._apf_orca_deadlock_turn_boost = float(self.get_parameter('apf_orca_deadlock_turn_boost').value or 0.08)
+        self._apf_orca_deadlock_speed_reduction = float(self.get_parameter('apf_orca_deadlock_speed_reduction').value or 0.10)
+        self._apf_orca_lane_guidance_enabled = bool(self.get_parameter('apf_orca_lane_guidance_enabled').value)
+        self._apf_orca_lane_guidance_distance = float(self.get_parameter('apf_orca_lane_guidance_distance').value or 2.5)
+        self._apf_orca_lane_offset = float(self.get_parameter('apf_orca_lane_offset').value or 1.0)
+        self._apf_orca_lane_gain = float(self.get_parameter('apf_orca_lane_gain').value or 0.20)
+        self._apf_orca_overlap_guard_enabled = bool(self.get_parameter('apf_orca_overlap_guard_enabled').value)
+        self._apf_orca_overlap_ahead_distance = float(self.get_parameter('apf_orca_overlap_ahead_distance').value or 2.2)
+        self._apf_orca_overlap_lateral_threshold = float(self.get_parameter('apf_orca_overlap_lateral_threshold').value or 0.8)
+        self._apf_orca_overlap_speed_cut = float(self.get_parameter('apf_orca_overlap_speed_cut').value or 0.12)
+        self._apf_orca_overlap_turn_scale = float(self.get_parameter('apf_orca_overlap_turn_scale').value or 0.65)
+        self._apf_orca_coupling_guard_enabled = bool(self.get_parameter('apf_orca_coupling_guard_enabled').value)
+        self._apf_orca_coupling_distance = float(self.get_parameter('apf_orca_coupling_distance').value or 1.2)
+        self._apf_orca_coupling_release_distance = float(
+            self.get_parameter('apf_orca_coupling_release_distance').value or 1.6
+        )
+        self._apf_orca_coupling_lateral_threshold = float(
+            self.get_parameter('apf_orca_coupling_lateral_threshold').value or 0.45
+        )
+        self._apf_orca_coupling_rel_speed_max = float(
+            self.get_parameter('apf_orca_coupling_rel_speed_max').value or 0.12
+        )
+        self._apf_orca_coupling_hold_time = float(self.get_parameter('apf_orca_coupling_hold_time').value or 8.0)
+        self._apf_orca_coupling_speed_min = float(self.get_parameter('apf_orca_coupling_speed_min').value or 0.20)
+        self._apf_orca_coupling_speed_cut = float(self.get_parameter('apf_orca_coupling_speed_cut').value or 0.12)
+        self._apf_orca_coupling_turn_boost = float(self.get_parameter('apf_orca_coupling_turn_boost').value or 0.10)
+        self._apf_orca_coupling_lane_push = float(self.get_parameter('apf_orca_coupling_lane_push').value or 0.10)
+        self._apf_orca_predictive_early_enabled = bool(self.get_parameter('apf_orca_predictive_early_enabled').value)
+        self._apf_orca_predictive_tcpa_threshold = float(
+            self.get_parameter('apf_orca_predictive_tcpa_threshold').value or 12.0
+        )
+        self._apf_orca_predictive_cpa_threshold = float(
+            self.get_parameter('apf_orca_predictive_cpa_threshold').value or 2.0
+        )
+        self._apf_orca_predictive_max_distance = float(
+            self.get_parameter('apf_orca_predictive_max_distance').value or 6.0
+        )
+        self._apf_orca_predictive_angular_max = float(
+            self.get_parameter('apf_orca_predictive_angular_max').value or 0.10
+        )
+        self._apf_orca_predictive_speed_cut_max = float(
+            self.get_parameter('apf_orca_predictive_speed_cut_max').value or 0.06
+        )
+        self._apf_orca_side_effectiveness_enabled = bool(
+            self.get_parameter('apf_orca_side_effectiveness_enabled').value
+        )
+        self._apf_orca_side_effectiveness_window = float(
+            self.get_parameter('apf_orca_side_effectiveness_window').value or 3.0
+        )
+        self._apf_orca_side_effectiveness_min_sep_gain = float(
+            self.get_parameter('apf_orca_side_effectiveness_min_sep_gain').value or 0.25
+        )
+        self._apf_orca_side_effectiveness_min_cpa_gain = float(
+            self.get_parameter('apf_orca_side_effectiveness_min_cpa_gain').value or 0.20
+        )
+        self._apf_orca_side_switch_cooldown = float(
+            self.get_parameter('apf_orca_side_switch_cooldown').value or 2.0
+        )
+        self._apf_orca_side_switch_max_retries = int(
+            self.get_parameter('apf_orca_side_switch_max_retries').value or 1
+        )
+        self._apf_orca_side_switch_turn_boost = float(
+            self.get_parameter('apf_orca_side_switch_turn_boost').value or 0.08
+        )
+        self._apf_orca_cpa_enabled = bool(self.get_parameter('apf_orca_cpa_enabled').value)
+        self._apf_orca_cpa_distance_threshold = float(self.get_parameter('apf_orca_cpa_distance_threshold').value or 1.2)
+        self._apf_orca_tcpa_threshold = float(self.get_parameter('apf_orca_tcpa_threshold').value or 6.0)
+        self._apf_orca_urgency_scale_max = float(self.get_parameter('apf_orca_urgency_scale_max').value or 2.0)
+        self._apf_orca_linear_slowdown_max = float(self.get_parameter('apf_orca_linear_slowdown_max').value or 0.12)
+        self._apf_orca_turn_budget_enabled = bool(self.get_parameter('apf_orca_turn_budget_enabled').value)
+        self._apf_orca_turn_budget_ratio = float(self.get_parameter('apf_orca_turn_budget_ratio').value or 0.85)
+        self._apf_orca_turn_budget_same_side_scale = float(
+            self.get_parameter('apf_orca_turn_budget_same_side_scale').value or 0.25
+        )
+        self._apf_orca_smart_side_enabled = bool(self.get_parameter('apf_orca_smart_side_enabled').value)
+        self._apf_orca_smart_side_horizon = float(self.get_parameter('apf_orca_smart_side_horizon').value or 2.5)
+        self._apf_orca_smart_side_ref_yaw_rate = float(
+            self.get_parameter('apf_orca_smart_side_ref_yaw_rate').value or 0.25
+        )
+        self._apf_orca_smart_side_clearance_weight = float(
+            self.get_parameter('apf_orca_smart_side_clearance_weight').value or 1.2
+        )
+        self._apf_orca_smart_side_colreg_weight = float(
+            self.get_parameter('apf_orca_smart_side_colreg_weight').value or 0.5
+        )
+        self._apf_orca_smart_side_goal_weight = float(
+            self.get_parameter('apf_orca_smart_side_goal_weight').value or 0.3
+        )
+        self._apf_orca_encounter_rule_enabled = bool(self.get_parameter('apf_orca_encounter_rule_enabled').value)
+        self._apf_orca_encounter_guidance_distance = float(
+            self.get_parameter('apf_orca_encounter_guidance_distance').value or 3.0
+        )
+        self._apf_orca_encounter_bias_angular = float(
+            self.get_parameter('apf_orca_encounter_bias_angular').value or 0.08
+        )
+        self._apf_orca_encounter_head_on_deg = float(
+            self.get_parameter('apf_orca_encounter_head_on_deg').value or 20.0
+        )
+        self._apf_orca_encounter_crossing_deg = float(
+            self.get_parameter('apf_orca_encounter_crossing_deg').value or 112.5
+        )
+        self._apf_orca_encounter_overtake_deg = float(
+            self.get_parameter('apf_orca_encounter_overtake_deg').value or 22.5
+        )
+        # P2: ORCA 迟滞
+        self._apf_orca_hysteresis_margin = float(
+            self.get_parameter('apf_orca_hysteresis_margin').value or 1.5
+        )
+        self._apf_orca_min_hold_time = float(
+            self.get_parameter('apf_orca_min_hold_time').value or 5.0
+        )
+        # P1: COLREGS 强化
+        self._apf_orca_colregs_override = bool(self.get_parameter('apf_orca_colregs_override').value)
+        self._apf_orca_colregs_standon_scale = float(
+            self.get_parameter('apf_orca_colregs_standon_scale').value or 0.3
+        )
+        self._apf_orca_colregs_head_on_bias = float(
+            self.get_parameter('apf_orca_colregs_head_on_bias').value or 0.25
+        )
+        # P4: NH-ORCA
+        self._apf_orca_nh_enabled = bool(self.get_parameter('apf_orca_nh_enabled').value)
+        self._apf_orca_nh_reachable_horizon = float(
+            self.get_parameter('apf_orca_nh_reachable_horizon').value or 2.0
+        )
+        self._apf_health_monitor_enabled = bool(self.get_parameter('apf_health_monitor_enabled').value)
+        self._apf_health_freeze_pos_epsilon = float(
+            self.get_parameter('apf_health_freeze_pos_epsilon').value or 0.01
+        )
+        self._apf_health_min_speed_for_freeze = float(
+            self.get_parameter('apf_health_min_speed_for_freeze').value or 0.15
+        )
+        self._apf_health_own_freeze_warn_duration = float(
+            self.get_parameter('apf_health_own_freeze_warn_duration').value or 0.8
+        )
+        self._apf_health_neighbor_freeze_warn_duration = float(
+            self.get_parameter('apf_health_neighbor_freeze_warn_duration').value or 0.8
+        )
+        self._apf_health_warn_interval = float(
+            self.get_parameter('apf_health_warn_interval').value or 2.0
+        )
         
         # ==================== 初始化路径跟踪器 ====================
         self.get_logger().info(f'🛠️ 正在创建 VelocityPathTracker (MPC)...')
@@ -318,6 +624,39 @@ class VelocityControllerNode(Node):
         
         self._last_valid_pose: Optional[Pose2D] = None  # 用于跳变检测
         self._pose_jump_threshold: float = 3.0  # 位姿跳变阈值 (m) - 降低以检测小幅漂移
+
+        # APF 邻船状态缓存: topic/usv_id -> (x, y, vx, vy, timestamp)
+        self._apf_neighbor_states: Dict[str, Tuple[float, float, float, float, float]] = {}
+        self._health_last_own_pose: Optional[Tuple[float, float]] = None
+        self._health_own_freeze_start: float = 0.0
+        self._health_own_last_warn: float = 0.0
+        self._health_neighbor_freeze: Dict[str, Dict[str, float]] = {}
+        # P2: ORCA 迟滞状态
+        self._orca_active: bool = False                # ORCA 当前是否激活
+        self._orca_activate_time: float = 0.0          # 上次激活时间
+        self._orca_committed_side: int = 0
+        self._orca_commit_deadline: float = 0.0
+        self._orca_close_enter_time: float = 0.0
+        self._orca_coupling_enter_time: float = 0.0
+        self._orca_coupling_active: bool = False
+        self._orca_side_eval_active: bool = False
+        self._orca_side_eval_start_time: float = 0.0
+        self._orca_side_eval_side: int = 0
+        self._orca_side_eval_start_dist: float = 0.0
+        self._orca_side_eval_start_cpa: float = 0.0
+        self._orca_side_switch_retry_count: int = 0
+        self._orca_side_switch_cooldown_until: float = 0.0
+        # 制动迟滞状态: 避免通信延迟导致的交替制动振荡
+        self._orca_soft_brake_active: bool = False
+        self._orca_hard_brake_active: bool = False
+        # 输出平滑: 限制每 tick 的速度变化率，避免急停急走
+        self._orca_smooth_vx: float = 0.0    # 上一帧输出的 cmd_vx
+        self._orca_smooth_omega: float = 0.0 # 上一帧输出的 cmd_omega
+        self._orca_smooth_initialized: bool = False
+        # 安全锁: 诸船距离记录，近距时禁止 ORCA 退出
+        self._orca_last_closest_distance: float = float('inf')
+        self._apf_neighbor_subs = []
+        self._apf_fleet_sub = None
         self._recovery_enabled: bool = True  # 启用自动恢复
         self._was_timed_out: bool = False  # 是否曾经超时
         
@@ -334,6 +673,8 @@ class VelocityControllerNode(Node):
         self._velocity_based_yaw: float = 0.0  # 基于速度向量的航向
         self._velocity_yaw_valid: bool = False  # 速度航向是否有效
         self._current_speed: float = 0.0  # 当前速度 (m/s)
+        self._current_vx: float = 0.0  # 当前速度 x (map)
+        self._current_vy: float = 0.0  # 当前速度 y (map)
         
         # ==================== v6: 速度自适应 tau_omega ====================
         # 低速时舵效差，转向惯性相对更大，需要更大的 tau_omega
@@ -480,6 +821,27 @@ class VelocityControllerNode(Node):
             qos_reliable,
             callback_group=self.callback_group
         )
+
+        # ==================== 分布式 APF 邻船位姿订阅 ====================
+        if self._apf_enabled:
+            if self._apf_use_fleet_topic:
+                self._apf_fleet_sub = self.create_subscription(
+                    FleetNeighborPoses,
+                    self._apf_fleet_topic,
+                    self._apf_fleet_neighbors_callback,
+                    qos_best_effort,
+                    callback_group=self.callback_group
+                )
+            elif self._apf_neighbor_topics:
+                for topic_name in self._apf_neighbor_topics:
+                    sub = self.create_subscription(
+                        PoseStamped,
+                        str(topic_name),
+                        lambda msg, t=str(topic_name): self._apf_neighbor_pose_callback(msg, t),
+                        qos_best_effort,
+                        callback_group=self.callback_group
+                    )
+                    self._apf_neighbor_subs.append(sub)
         
         # ==================== 发布者 ====================
         # 速度指令发布
@@ -550,6 +912,27 @@ class VelocityControllerNode(Node):
         if self.control_mode == 'velocity':
             self.get_logger().info('  功能: 常规导航 + 避障 + 旋转机动')
             self.get_logger().info('  输出: 速度指令 → setpoint_raw/local')
+            if self._apf_enabled:
+                if self._apf_use_fleet_topic:
+                    self.get_logger().info(
+                        f'  APF避碰: 已启用 (统一邻船话题={self._apf_fleet_topic}, 安全半径={self._apf_safe_distance:.2f}m)'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'  APF避碰: 已启用 (邻船话题数={len(self._apf_neighbor_topics)}, 安全半径={self._apf_safe_distance:.2f}m)'
+                    )
+                if self._apf_orca_enabled:
+                    self.get_logger().info(
+                        f'  ORCA避让: 已启用 (T={self._apf_orca_time_horizon:.1f}s, 最小分离={self._apf_orca_min_separation:.2f}m, '
+                        f'左右承诺={self._apf_orca_side_commit_enabled}, 策略={self._apf_orca_commit_policy})'
+                    )
+                    if self._apf_orca_encounter_rule_enabled:
+                        self.get_logger().info(
+                            f'  会遇规则: 已启用 (引导距离={self._apf_orca_encounter_guidance_distance:.1f}m, '
+                            f'head_on={self._apf_orca_encounter_head_on_deg:.1f}°, crossing={self._apf_orca_encounter_crossing_deg:.1f}°)'
+                        )
+            else:
+                self.get_logger().info('  APF避碰: 未启用')
             if self._use_velocity_heading:
                 self.get_logger().info('  航向估计: L1风格（飞控EKF速度向量优先，低速回退磁力计）')
             else:
@@ -583,6 +966,8 @@ class VelocityControllerNode(Node):
         
         vx = msg.twist.linear.x
         vy = msg.twist.linear.y
+        self._current_vx = vx
+        self._current_vy = vy
         speed = math.sqrt(vx * vx + vy * vy)
         self._current_speed = speed
         
@@ -684,6 +1069,7 @@ class VelocityControllerNode(Node):
         self._last_valid_pose = new_pose
         self._last_pose_time = current_time
         self._consecutive_timeout_count = 0  # 重置超时计数
+        self._update_own_freeze_health(new_pose, current_time)
     
     def _update_adaptive_tau_omega(self, current_speed: float):
         """
@@ -1139,6 +1525,1015 @@ class VelocityControllerNode(Node):
             old_val = self.tracker.max_angular_velocity
             self.tracker.max_angular_velocity = msg.data
             self.get_logger().info(f'最大角速度更新: {old_val:.2f} → {msg.data:.2f} rad/s')
+
+    def _apf_neighbor_pose_callback(self, msg: PoseStamped, topic_name: str):
+        """缓存邻船位姿（用于分布式 APF 本地计算）"""
+        now_sec = time.time()
+        self._apf_neighbor_states[topic_name] = (
+            float(msg.pose.position.x),
+            float(msg.pose.position.y),
+            0.0,
+            0.0,
+            now_sec,
+        )
+
+    def _apf_fleet_neighbors_callback(self, msg: FleetNeighborPoses):
+        """处理 GS 统一下发的邻船位姿列表"""
+        if msg.target_usv_id and msg.target_usv_id != self._usv_id:
+            return
+
+        now_sec = time.time()
+        updated_states: Dict[str, Tuple[float, float, float, float, float]] = {}
+        updated_ids = set()
+        for neighbor in msg.neighbors:
+            if not neighbor.usv_id or neighbor.usv_id == self._usv_id:
+                continue
+
+            # 忽略消息自带的时间戳，直接使用本地接收时间，避免分布式系统时钟不同步导致数据被丢弃
+            stamp_sec = now_sec
+
+            updated_states[neighbor.usv_id] = (
+                float(neighbor.x),
+                float(neighbor.y),
+                float(neighbor.vx),
+                float(neighbor.vy),
+                stamp_sec,
+            )
+            updated_ids.add(str(neighbor.usv_id))
+            self._update_neighbor_freeze_health(
+                str(neighbor.usv_id),
+                float(neighbor.x),
+                float(neighbor.y),
+                float(neighbor.vx),
+                float(neighbor.vy),
+                now_sec,
+            )
+
+        stale_neighbor_ids = [nid for nid in self._health_neighbor_freeze.keys() if nid not in updated_ids]
+        for nid in stale_neighbor_ids:
+            self._health_neighbor_freeze.pop(nid, None)
+
+        self._apf_neighbor_states = updated_states
+
+    def _update_own_freeze_health(self, pose: Pose2D, now_sec: float):
+        if not self._apf_health_monitor_enabled:
+            return
+
+        if self._health_last_own_pose is None:
+            self._health_last_own_pose = (pose.x, pose.y)
+            self._health_own_freeze_start = 0.0
+            return
+
+        last_x, last_y = self._health_last_own_pose
+        moved = math.hypot(pose.x - last_x, pose.y - last_y)
+        freeze_eps = max(1e-4, self._apf_health_freeze_pos_epsilon)
+        speed_threshold = max(0.0, self._apf_health_min_speed_for_freeze)
+
+        if moved <= freeze_eps and self._current_speed >= speed_threshold:
+            if self._health_own_freeze_start <= 0.0:
+                self._health_own_freeze_start = now_sec
+            freeze_duration = now_sec - self._health_own_freeze_start
+            warn_duration = max(0.1, self._apf_health_own_freeze_warn_duration)
+            warn_interval = max(0.2, self._apf_health_warn_interval)
+            if freeze_duration >= warn_duration and (now_sec - self._health_own_last_warn) >= warn_interval:
+                self._health_own_last_warn = now_sec
+                # self.get_logger().warn(
+                #     f'⚠️ 数据健康告警: 本船位姿冻结 {freeze_duration:.2f}s '
+                #     f'(Δpos={moved:.3f}m, speed={self._current_speed:.2f}m/s)'
+                # )
+        else:
+            self._health_own_freeze_start = 0.0
+
+        self._health_last_own_pose = (pose.x, pose.y)
+
+    def _update_neighbor_freeze_health(
+        self,
+        neighbor_id: str,
+        x: float,
+        y: float,
+        vx: float,
+        vy: float,
+        now_sec: float,
+    ):
+        if not self._apf_health_monitor_enabled:
+            return
+
+        state = self._health_neighbor_freeze.get(neighbor_id)
+        if state is None:
+            self._health_neighbor_freeze[neighbor_id] = {
+                'x': x,
+                'y': y,
+                'freeze_start': 0.0,
+                'last_warn': 0.0,
+            }
+            return
+
+        moved = math.hypot(x - float(state.get('x', x)), y - float(state.get('y', y)))
+        speed = math.hypot(vx, vy)
+        freeze_eps = max(1e-4, self._apf_health_freeze_pos_epsilon)
+        speed_threshold = max(0.0, self._apf_health_min_speed_for_freeze)
+
+        freeze_start = float(state.get('freeze_start', 0.0))
+        if moved <= freeze_eps and speed >= speed_threshold:
+            if freeze_start <= 0.0:
+                freeze_start = now_sec
+            freeze_duration = now_sec - freeze_start
+            warn_duration = max(0.1, self._apf_health_neighbor_freeze_warn_duration)
+            warn_interval = max(0.2, self._apf_health_warn_interval)
+            last_warn = float(state.get('last_warn', 0.0))
+            if freeze_duration >= warn_duration and (now_sec - last_warn) >= warn_interval:
+                state['last_warn'] = now_sec
+                # self.get_logger().warn(
+                #     f'⚠️ 数据健康告警: 邻船[{neighbor_id}]位姿冻结 {freeze_duration:.2f}s '
+                #     f'(Δpos={moved:.3f}m, speed={speed:.2f}m/s)'
+                # )
+        else:
+            freeze_start = 0.0
+
+        state['x'] = x
+        state['y'] = y
+        state['freeze_start'] = freeze_start
+        self._health_neighbor_freeze[neighbor_id] = state
+
+    def _get_health_freeze_summary(self, now_sec: float) -> Tuple[float, int]:
+        own_freeze_duration = 0.0
+        if self._health_own_freeze_start > 0.0:
+            own_freeze_duration = max(0.0, now_sec - self._health_own_freeze_start)
+
+        neighbor_freeze_count = 0
+        for state in self._health_neighbor_freeze.values():
+            freeze_start = float(state.get('freeze_start', 0.0))
+            if freeze_start > 0.0 and (now_sec - freeze_start) >= max(0.1, self._apf_health_neighbor_freeze_warn_duration):
+                neighbor_freeze_count += 1
+
+        return own_freeze_duration, neighbor_freeze_count
+
+    def _apply_apf_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
+        """
+        将 APF 排斥修正叠加到导航速度指令。
+
+        保持导航主算法为主，APF 仅作局部避碰修正。
+        """
+        if (not self._apf_enabled) or (self.current_pose is None):
+            return cmd
+
+        if self._apf_orca_enabled:
+            return self._apply_orca_to_command(cmd)
+
+        linear_correction, angular_correction, valid_neighbor_count = self._compute_apf_corrections()
+        if valid_neighbor_count == 0:
+            return cmd
+
+        # 到点阶段削弱 APF，避免目标点附近不可达
+        nav_speed_abs = abs(cmd.linear_x)
+        if self._apf_goal_slow_speed_threshold > 1e-6:
+            relax_scale = nav_speed_abs / self._apf_goal_slow_speed_threshold
+            relax_scale = max(self._apf_goal_relax_min_scale, min(1.0, relax_scale))
+        else:
+            relax_scale = 1.0
+
+        corrected_linear_x = cmd.linear_x + linear_correction * relax_scale
+        corrected_angular_z = cmd.angular_z + angular_correction * relax_scale
+
+        # 承诺生效期间强约束最终角速度方向，避免被基础导航项抵消
+        if (
+            self._apf_orca_enforce_commit_direction
+            and commit_side != 0
+            and closest_distance <= commit_distance
+        ):
+            enforce_min = max(0.0, self._apf_orca_enforce_min_angular)
+            if corrected_angular_z * commit_side < 0.0:
+                corrected_angular_z = commit_side * max(enforce_min, abs(corrected_angular_z))
+            elif abs(corrected_angular_z) < enforce_min:
+                corrected_angular_z = commit_side * enforce_min
+
+        corrected = VelocityCommand(
+            linear_x=corrected_linear_x,
+            linear_y=cmd.linear_y,
+            angular_z=corrected_angular_z,
+        )
+        return corrected.sanitize()
+
+    def _compute_apf_corrections(self, distance_limit: Optional[float] = None) -> Tuple[float, float, int]:
+        """计算 APF 在当前邻船场景下的线/角速度修正（不含到点 relax）。"""
+        if (not self._apf_enabled) or (self.current_pose is None):
+            return 0.0, 0.0, 0
+
+        now_sec = time.time()
+        fx_global_sum = 0.0
+        fy_global_sum = 0.0
+        valid_neighbor_count = 0
+        active_distance = float(distance_limit) if distance_limit is not None else self._apf_safe_distance
+        if active_distance <= 1e-3:
+            return 0.0, 0.0, 0
+
+        for _, (neighbor_x, neighbor_y, _, _, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+
+            dx = self.current_pose.x - neighbor_x
+            dy = self.current_pose.y - neighbor_y
+            distance = math.hypot(dx, dy)
+
+            if distance < 1e-3 or distance >= active_distance:
+                continue
+
+            inv_distance = 1.0 / distance
+            inv_safe = 1.0 / active_distance
+            repulsion_force = self._apf_repulsion_gain * (inv_distance - inv_safe) * (inv_distance ** 2)
+
+            ux = dx * inv_distance
+            uy = dy * inv_distance
+            fx_global_sum += repulsion_force * ux
+            fy_global_sum += repulsion_force * uy
+            valid_neighbor_count += 1
+
+        if valid_neighbor_count == 0:
+            return 0.0, 0.0, 0
+
+        cos_yaw = math.cos(self.current_pose.yaw)
+        sin_yaw = math.sin(self.current_pose.yaw)
+
+        fx_body = cos_yaw * fx_global_sum + sin_yaw * fy_global_sum
+        fy_body = -sin_yaw * fx_global_sum + cos_yaw * fy_global_sum
+
+        linear_correction = max(
+            -self._apf_max_linear_correction,
+            min(self._apf_max_linear_correction, fx_body)
+        )
+        angular_correction = self._apf_lateral_to_yaw_gain * fy_body
+        angular_correction = max(
+            -self._apf_max_angular_correction,
+            min(self._apf_max_angular_correction, angular_correction)
+        )
+        return linear_correction, angular_correction, valid_neighbor_count
+
+    def _default_avoid_side(self) -> int:
+        """返回默认避让方向: +1 左转, -1 右转。"""
+        policy = self._apf_orca_commit_policy
+        if policy in ('starboard', 'right'):
+            return -1
+        if policy in ('port', 'left'):
+            return 1
+
+        digits = ''.join(ch for ch in self._usv_id if ch.isdigit())
+        if digits:
+            return -1 if (int(digits) % 2 == 0) else 1
+        score = sum(ord(ch) for ch in self._usv_id)
+        return -1 if (score % 2 == 0) else 1
+
+    @staticmethod
+    def _wrap_angle(angle: float) -> float:
+        while angle > math.pi:
+            angle -= 2.0 * math.pi
+        while angle < -math.pi:
+            angle += 2.0 * math.pi
+        return angle
+
+    def _classify_encounter_and_side(
+        self,
+        rx: float,
+        ry: float,
+        neighbor_vx: float,
+        neighbor_vy: float,
+        yaw: float,
+    ) -> Tuple[str, int]:
+        if self.current_pose is None:
+            return 'unknown', 0
+
+        own_to_neighbor_x = -rx
+        own_to_neighbor_y = -ry
+        rel_body_x = math.cos(yaw) * own_to_neighbor_x + math.sin(yaw) * own_to_neighbor_y
+        rel_body_y = -math.sin(yaw) * own_to_neighbor_x + math.cos(yaw) * own_to_neighbor_y
+        bearing = math.atan2(rel_body_y, rel_body_x)
+
+        own_speed = math.hypot(self._current_vx, self._current_vy)
+        nei_speed = math.hypot(neighbor_vx, neighbor_vy)
+        own_course = math.atan2(self._current_vy, self._current_vx) if own_speed > 0.05 else yaw
+        # 修复: 邻船低速时用相对位置反推航向(而非回退到自船航向)
+        # 原 bug: nei_course=own_course → rel_course=0 → 无法识别 head_on
+        if nei_speed > 0.05:
+            nei_course = math.atan2(neighbor_vy, neighbor_vx)
+        else:
+            # 低速时假设邻船朝向自船方向（因为它正在接近）
+            # 或者使用相对位置的反向作为邻船航向估计
+            nei_course = math.atan2(-ry, -rx)  # 指向自船 = 邻船大致面朝方向
+        rel_course = abs(self._wrap_angle(nei_course - own_course))
+
+        head_on_rad = math.radians(max(5.0, self._apf_orca_encounter_head_on_deg))
+        crossing_rad = math.radians(max(20.0, self._apf_orca_encounter_crossing_deg))
+        overtaking_rad = math.radians(max(5.0, self._apf_orca_encounter_overtake_deg))
+
+        is_ahead = abs(bearing) <= crossing_rad
+        # 放宽 head_on 判据: 航向差 > 135° 即视为对遇(原为 180°±20°)
+        # 避免 ~147° 的近似对遇被误判为交叉导致双方都成直航权船
+        is_head_on = is_ahead and rel_course > math.radians(135.0)
+        is_overtaking = abs(bearing) >= (math.pi - overtaking_rad)
+
+        if is_head_on:
+            # COLREGS Rule 14: 对遇 → 双方右转 (starboard = -1)
+            return 'head_on', -1
+        if is_overtaking:
+            # COLREGS Rule 13: 追越 → 追越船让路，从右侧通过
+            # 判断是否为追越船: 邻船在正前方附近 → 我方是追越船
+            if abs(bearing) >= (math.pi - overtaking_rad):
+                return 'overtaking', -1  # 我方追越 → 右转避让
+            return 'being_overtaken', 0  # 被追越 → 保持航向
+
+        if is_ahead:
+            if bearing < 0.0:
+                # COLREGS Rule 15: 交叉相遇，他船在我右舷 → 我方让路 → 右转
+                return 'crossing_give_way', -1
+            if bearing > 0.0:
+                # COLREGS Rule 17: 交叉相遇，他船在我左舷 → 我方直航权 → 保持航向
+                return 'crossing_stand_on', 0
+
+        return 'other', 0
+
+    def _compute_cpa_tcpa_risk(self) -> Tuple[Optional[float], Optional[float]]:
+        """计算最危险邻船的 CPA/TCPA（预测碰撞风险）。"""
+        if self.current_pose is None:
+            return None, None
+
+        now_sec = time.time()
+        own_vx = self._current_vx
+        own_vy = self._current_vy
+
+        min_cpa: Optional[float] = None
+        min_tcpa: Optional[float] = None
+        tcpa_limit = max(0.1, self._apf_orca_tcpa_threshold)
+
+        for _, (neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+
+            rx = self.current_pose.x - neighbor_x
+            ry = self.current_pose.y - neighbor_y
+            rvx = own_vx - neighbor_vx
+            rvy = own_vy - neighbor_vy
+
+            v2 = rvx * rvx + rvy * rvy
+            if v2 < 1e-6:
+                cpa = math.hypot(rx, ry)
+                tcpa = None
+            else:
+                tcpa_raw = - (rx * rvx + ry * rvy) / v2
+                if tcpa_raw < 0.0:
+                    # 远离趋势，不作为前向风险
+                    continue
+                if tcpa_raw > tcpa_limit:
+                    continue
+                cpa_rx = rx + rvx * tcpa_raw
+                cpa_ry = ry + rvy * tcpa_raw
+                cpa = math.hypot(cpa_rx, cpa_ry)
+                tcpa = tcpa_raw
+
+            if (min_cpa is None) or (cpa < min_cpa):
+                min_cpa = cpa
+                min_tcpa = tcpa
+
+        return min_cpa, min_tcpa
+
+    def _select_smart_avoid_side(
+        self,
+        cmd: VelocityCommand,
+        yaw: float,
+        rx: float,
+        ry: float,
+        neighbor_vx: float,
+        neighbor_vy: float,
+        encounter_side: int,
+        min_sep: float,
+    ) -> int:
+        """根据短时预测分离效果 + 规则偏置，智能选择左/右避让方向。"""
+        if not self._apf_orca_smart_side_enabled:
+            return 0
+
+        horizon = max(0.5, self._apf_orca_smart_side_horizon)
+        yaw_rate_ref = max(0.05, self._apf_orca_smart_side_ref_yaw_rate)
+        clearance_w = max(0.0, self._apf_orca_smart_side_clearance_weight)
+        colreg_w = max(0.0, self._apf_orca_smart_side_colreg_weight)
+        goal_w = max(0.0, self._apf_orca_smart_side_goal_weight)
+
+        cmd_speed = max(0.0, abs(cmd.linear_x))
+        own_vx = math.cos(yaw) * cmd_speed
+        own_vy = math.sin(yaw) * cmd_speed
+
+        best_side = 0
+        best_score = -1e9
+        second_score = -1e9
+        for side in (-1, 1):
+            yaw_future = yaw + side * yaw_rate_ref * horizon
+            own_vx_future = math.cos(yaw_future) * cmd_speed
+            own_vy_future = math.sin(yaw_future) * cmd_speed
+
+            rvx = own_vx_future - neighbor_vx
+            rvy = own_vy_future - neighbor_vy
+            rx_future = rx + rvx * horizon
+            ry_future = ry + rvy * horizon
+            clearance = math.hypot(rx_future, ry_future)
+            clearance_score = (clearance - min_sep) / max(0.2, min_sep)
+
+            colreg_score = 1.0 if (encounter_side != 0 and side == encounter_side) else 0.0
+
+            # 倾向减少对基础导航转向的反向对抗
+            goal_conflict = 1.0 if (cmd.angular_z * side) < 0.0 else 0.0
+
+            score = clearance_w * clearance_score + colreg_w * colreg_score - goal_w * goal_conflict
+
+            if score > best_score:
+                second_score = best_score
+                best_score = score
+                best_side = side
+            elif score > second_score:
+                second_score = score
+
+        # 分数过于接近时保持中立，交给既有规则/承诺处理
+        if (best_score - second_score) < 0.05:
+            return 0
+        return best_side
+
+    def _apply_orca_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
+        """ORCA 风格速度障碍修正：多船场景下以最小速度改动实现分离。"""
+        if self.current_pose is None:
+            return cmd
+
+        now_sec = time.time()
+        yaw = self.current_pose.yaw
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+
+        # 优选速度（导航器给出的速度）转到全局系
+        v_pref_x = cos_yaw * cmd.linear_x - sin_yaw * cmd.linear_y
+        v_pref_y = sin_yaw * cmd.linear_x + cos_yaw * cmd.linear_y
+        v_new_x = v_pref_x
+        v_new_y = v_pref_y
+
+        horizon_base = max(0.5, self._apf_orca_time_horizon)
+        min_sep = max(0.1, self._apf_orca_min_separation)
+        influence_distance = max(min_sep, self._apf_orca_influence_distance)
+
+        # P2: 迟滞 — ORCA 激活状态下使用扩展影响距离，防止快速抖动切换
+        hysteresis_margin = max(0.0, self._apf_orca_hysteresis_margin)
+        effective_influence = (influence_distance + hysteresis_margin) if self._orca_active else influence_distance
+
+        has_risk_neighbor = False
+        has_entry_neighbor = False           # 是否有邻船在标准 influence_distance 内
+        closest_distance = float('inf')
+        closest_rx = 0.0
+        closest_ry = 0.0
+        closest_neighbor_vx = 0.0
+        closest_neighbor_vy = 0.0
+
+        # 第 1 遍: 找到最近邻船距离 (用于距离自适应 horizon)
+        for _, (neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+            rx = self.current_pose.x - neighbor_x
+            ry = self.current_pose.y - neighbor_y
+            distance = math.hypot(rx, ry)
+            if distance < 1e-3 or distance > effective_influence:
+                continue
+            has_risk_neighbor = True
+            if distance <= influence_distance:
+                has_entry_neighbor = True
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_rx = rx
+                closest_ry = ry
+                closest_neighbor_vx = neighbor_vx
+                closest_neighbor_vy = neighbor_vy
+
+        # 距离自适应时间地平线: 距离越近 → horizon 越短 → VO 修正越强
+        # horizon_eff = clamp(distance * 1.0, 0.3, horizon_base)
+        # 示例: d=4m→T=4.0(柔), d=2m→T=2.0(中), d=1m→T=1.0(强), d=0.5m→T=0.5(急), d=0.3m→T=0.3(极急)
+        if closest_distance < float('inf'):
+            horizon = max(0.3, min(horizon_base, closest_distance * 1.0))
+        else:
+            horizon = horizon_base
+        radius = min_sep / horizon
+
+        # 第 2 遍: 基于自适应 horizon 计算 VO 投影
+        for _, (neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+            rx = self.current_pose.x - neighbor_x
+            ry = self.current_pose.y - neighbor_y
+            distance = math.hypot(rx, ry)
+            if distance < 1e-3 or distance > effective_influence:
+                continue
+
+            # 速度障碍圆盘近似中心（距离自适应时间地平线 T）
+            center_x = neighbor_vx - rx / horizon
+            center_y = neighbor_vy - ry / horizon
+
+            dx = v_new_x - center_x
+            dy = v_new_y - center_y
+            norm = math.hypot(dx, dy)
+
+            # 若优选速度落入禁区，投影到边界最近点（最小改动）
+            if norm < radius:
+                if norm < 1e-6:
+                    # 完全重合时，沿相对位置方向推出禁区
+                    inv_dist = 1.0 / max(distance, 1e-6)
+                    ux = rx * inv_dist
+                    uy = ry * inv_dist
+                else:
+                    ux = dx / norm
+                    uy = dy / norm
+                v_new_x = center_x + ux * radius
+                v_new_y = center_y + uy * radius
+
+        # 更新安全锁距离记录
+        if closest_distance < float('inf'):
+            self._orca_last_closest_distance = closest_distance
+
+        # P2: ORCA 迟滞进入/退出逻辑
+        if not self._orca_active:
+            if has_entry_neighbor:
+                # 首次进入: 邻船在标准 influence_distance 内 → 激活 ORCA
+                self._orca_active = True
+                self._orca_activate_time = now_sec
+                self._orca_smooth_initialized = False  # 重置平滑器
+            else:
+                # 未激活且无邻船在标准范围内 → 不做 ORCA 修正
+                return cmd
+        else:
+            # 已激活: 检查退出条件
+            hold_elapsed = now_sec - self._orca_activate_time
+            min_hold = max(0.0, self._apf_orca_min_hold_time)
+            # 安全锁: 上次已知距离<3m时，禁止因数据超时而退出 ORCA
+            safety_lock = self._orca_last_closest_distance < 3.0 * min_sep
+            if not has_risk_neighbor and hold_elapsed >= min_hold and not safety_lock:
+                # 所有邻船已超出扩展范围 且 保持时间已满 且 安全 → 退出 ORCA
+                self._orca_active = False
+                self._orca_activate_time = 0.0
+                self._orca_committed_side = 0
+                self._orca_close_enter_time = 0.0
+                self._orca_coupling_enter_time = 0.0
+                self._orca_coupling_active = False
+                self._orca_last_closest_distance = float('inf')
+                return cmd
+            # 最小保持期内或仍有邻船在扩展范围 → 保持 ORCA 激活
+            if not has_risk_neighbor:
+                # 扩展范围外但保持期未满或安全锁激活 → 应用缓出修正
+                if self._orca_committed_side != 0:
+                    fadeout_angular = self._orca_committed_side * 0.05
+                    corrected_hold = VelocityCommand(
+                        linear_x=cmd.linear_x,
+                        linear_y=cmd.linear_y,
+                        angular_z=cmd.angular_z + fadeout_angular,
+                    )
+                    self.tracker.debug_info['active_controller'] = 'ORCA'
+                    return corrected_hold.sanitize()
+                return cmd
+
+        # 将 ORCA 速度修正映射回船体系（线速度+角速度）
+        v_body_x = cos_yaw * v_new_x + sin_yaw * v_new_y
+        v_body_y = -sin_yaw * v_new_x + cos_yaw * v_new_y
+
+        linear_correction = v_body_x - cmd.linear_x
+        angular_correction = self._apf_lateral_to_yaw_gain * v_body_y
+
+        encounter_type = 'other'
+        encounter_side = 0
+        smart_side = 0
+        is_stand_on = False                # P1: 标记直航权状态
+        guidance_distance = max(0.1, self._apf_orca_encounter_guidance_distance)
+        if self._apf_orca_encounter_rule_enabled and closest_distance <= guidance_distance:
+            encounter_type, encounter_side = self._classify_encounter_and_side(
+                closest_rx,
+                closest_ry,
+                closest_neighbor_vx,
+                closest_neighbor_vy,
+                yaw,
+            )
+            # P1: COLREGS 强化 — 对遇时加强右转偏置
+            if encounter_type == 'head_on':
+                head_on_bias = max(0.0, self._apf_orca_colregs_head_on_bias)
+                proximity = max(0.0, min(1.0, (guidance_distance - closest_distance) / guidance_distance))
+                # 近距时加倍偏置: d<2m时额外增加最多2x
+                close_boost = 1.0
+                if closest_distance < 2.0 * min_sep:
+                    close_boost = 1.0 + max(0.0, min(1.0, (2.0 * min_sep - closest_distance) / (2.0 * min_sep)))
+                angular_correction += -1 * head_on_bias * (0.5 + 0.5 * proximity) * close_boost
+            elif encounter_side != 0:
+                proximity = max(0.0, min(1.0, (guidance_distance - closest_distance) / guidance_distance))
+                angular_correction += encounter_side * max(0.0, self._apf_orca_encounter_bias_angular) * (0.4 + 0.6 * proximity)
+
+            # P1: 直航权船标记— crossing_stand_on / being_overtaken 时减弱 ORCA 干预
+            if encounter_type in ('crossing_stand_on', 'being_overtaken'):
+                is_stand_on = True
+
+        if closest_distance <= guidance_distance:
+            smart_side = self._select_smart_avoid_side(
+                cmd=cmd,
+                yaw=yaw,
+                rx=closest_rx,
+                ry=closest_ry,
+                neighbor_vx=closest_neighbor_vx,
+                neighbor_vy=closest_neighbor_vy,
+                encounter_side=encounter_side,
+                min_sep=min_sep,
+            )
+
+        # 预测性早避让：在进入近距承诺前，根据 CPA/TCPA 提前进行轻微转向与减速
+        early_commit_distance = max(0.1, self._apf_orca_side_commit_distance)
+        if (
+            self._apf_orca_predictive_early_enabled
+            and closest_distance > early_commit_distance
+            and closest_distance <= max(early_commit_distance, self._apf_orca_predictive_max_distance)
+        ):
+            rvx = v_pref_x - closest_neighbor_vx
+            rvy = v_pref_y - closest_neighbor_vy
+            v2 = rvx * rvx + rvy * rvy
+            if v2 > 1e-6:
+                tcpa_raw = - (closest_rx * rvx + closest_ry * rvy) / v2
+                tcpa_limit = max(0.1, self._apf_orca_predictive_tcpa_threshold)
+                if 0.0 <= tcpa_raw <= tcpa_limit:
+                    cpa_rx = closest_rx + rvx * tcpa_raw
+                    cpa_ry = closest_ry + rvy * tcpa_raw
+                    cpa_pred = math.hypot(cpa_rx, cpa_ry)
+                    cpa_limit = max(0.1, self._apf_orca_predictive_cpa_threshold)
+                    if cpa_pred <= cpa_limit:
+                        risk_tcpa = max(0.0, min(1.0, (tcpa_limit - tcpa_raw) / tcpa_limit))
+                        risk_cpa = max(0.0, min(1.0, (cpa_limit - cpa_pred) / cpa_limit))
+                        risk = max(risk_tcpa, risk_cpa)
+
+                        if smart_side != 0:
+                            early_side = smart_side
+                        elif encounter_side != 0:
+                            early_side = encounter_side
+                        else:
+                            early_side = self._default_avoid_side()
+
+                        angular_max = max(0.0, self._apf_orca_predictive_angular_max)
+                        speed_cut_max = max(0.0, self._apf_orca_predictive_speed_cut_max)
+                        angular_correction += early_side * angular_max * risk
+                        if cmd.linear_x >= 0.0:
+                            linear_correction -= speed_cut_max * risk
+                        else:
+                            linear_correction += speed_cut_max * risk
+
+        # 近距固定左右承诺 + 滞回，打破对称避让
+        commit_distance = max(0.1, self._apf_orca_side_commit_distance)
+        commit_side = 0
+        side_changed = False
+        if self._apf_orca_side_commit_enabled and closest_distance <= commit_distance:
+            if self._orca_committed_side != 0 and now_sec < self._orca_commit_deadline:
+                commit_side = self._orca_committed_side
+                # P1: COLREGS 覆盖 — 当 COLREGS 有明确方向且与已承诺方向冲突时，强制修正
+                if self._apf_orca_colregs_override and encounter_side != 0 and encounter_side != commit_side:
+                    commit_side = encounter_side
+                    self._orca_committed_side = encounter_side
+                    self._orca_commit_deadline = now_sec + max(0.2, self._apf_orca_side_commit_hold_time)
+            else:
+                # P1: COLREGS 优先 → smart_side → 默认
+                if self._apf_orca_colregs_override and encounter_side != 0:
+                    commit_side = encounter_side
+                elif smart_side != 0:
+                    commit_side = smart_side
+                elif encounter_side != 0:
+                    commit_side = encounter_side
+                else:
+                    commit_side = self._default_avoid_side()
+                side_changed = (commit_side != self._orca_committed_side)
+                self._orca_committed_side = commit_side
+                self._orca_commit_deadline = now_sec + max(0.2, self._apf_orca_side_commit_hold_time)
+
+        # P3: 选边有效性判据已移除 — 分析显示自动换边会导致振荡加剧(omega方向翻转12-23次/分钟)
+        # COLREGS 方向规则(P1)取代了选边有效性评估的职责
+
+        if commit_side != 0:
+            proximity = max(0.0, min(1.0, (commit_distance - closest_distance) / commit_distance))
+            angular_correction += commit_side * self._apf_orca_side_bias_lateral * (0.5 + 0.5 * proximity)
+
+        rel_body_x = cos_yaw * closest_rx + sin_yaw * closest_ry
+        rel_body_y = -sin_yaw * closest_rx + cos_yaw * closest_ry
+        closest_neighbor_speed = math.hypot(closest_neighbor_vx, closest_neighbor_vy)
+        own_pref_speed = math.hypot(v_pref_x, v_pref_y)
+        rel_speed = math.hypot(v_pref_x - closest_neighbor_vx, v_pref_y - closest_neighbor_vy)
+
+        # 伴行耦合保护：长时间近距并行/推行时，强制解耦（减速+横向分离）
+        if self._apf_orca_coupling_guard_enabled:
+            coupling_distance = max(0.1, self._apf_orca_coupling_distance)
+            release_distance = max(coupling_distance + 0.05, self._apf_orca_coupling_release_distance)
+            lateral_limit = max(0.05, self._apf_orca_coupling_lateral_threshold)
+            rel_speed_max = max(0.01, self._apf_orca_coupling_rel_speed_max)
+            speed_min = max(0.0, self._apf_orca_coupling_speed_min)
+            hold_time = max(0.2, self._apf_orca_coupling_hold_time)
+
+            coupling_candidate = (
+                closest_distance <= coupling_distance
+                and abs(rel_body_y) <= lateral_limit
+                and own_pref_speed >= speed_min
+                and closest_neighbor_speed >= speed_min
+                and rel_speed <= rel_speed_max
+            )
+
+            if coupling_candidate:
+                if self._orca_coupling_enter_time <= 0.0:
+                    self._orca_coupling_enter_time = now_sec
+                elif (now_sec - self._orca_coupling_enter_time) >= hold_time:
+                    self._orca_coupling_active = True
+            elif closest_distance >= release_distance:
+                self._orca_coupling_enter_time = 0.0
+                self._orca_coupling_active = False
+
+            if self._orca_coupling_active:
+                # P3: 简化解耦方向 — 优先使用 COLREGS/commit 方向
+                if commit_side != 0:
+                    decouple_side = commit_side
+                elif abs(rel_body_y) > 0.03:
+                    decouple_side = 1 if rel_body_y > 0.0 else -1
+                else:
+                    decouple_side = self._default_avoid_side()
+
+                proximity = max(0.0, min(1.0, (release_distance - closest_distance) / max(0.05, release_distance)))
+                turn_boost = max(0.0, self._apf_orca_coupling_turn_boost)
+                lane_push = max(0.0, self._apf_orca_coupling_lane_push)
+                angular_correction += decouple_side * (turn_boost + lane_push * (0.4 + 0.6 * proximity))
+
+                speed_cut = max(0.0, self._apf_orca_coupling_speed_cut)
+                if cmd.linear_x >= 0.0:
+                    linear_correction -= speed_cut
+                else:
+                    linear_correction += speed_cut
+
+                if commit_side == 0:
+                    commit_side = decouple_side
+
+        # 虚拟通行走廊：通过横向偏置将双方分到不同“车道”，减少轨迹重合
+        lane_distance = max(0.1, self._apf_orca_lane_guidance_distance)
+        if self._apf_orca_lane_guidance_enabled and commit_side != 0 and closest_distance <= lane_distance:
+            desired_neighbor_y = -commit_side * max(0.0, self._apf_orca_lane_offset)
+            lane_error = desired_neighbor_y - rel_body_y
+            lane_proximity = max(0.0, min(1.0, (lane_distance - closest_distance) / lane_distance))
+            angular_correction += self._apf_orca_lane_gain * lane_error * (0.4 + 0.6 * lane_proximity)
+
+        # 双边分担：近距时保证双方都有最小转向份额，避免“单船硬躲”
+        shared_turn_distance = max(0.1, self._apf_orca_shared_turn_distance)
+        if self._apf_orca_shared_turn_enabled and closest_distance <= shared_turn_distance:
+            share_side = commit_side if commit_side != 0 else (1 if angular_correction >= 0.0 else -1)
+            share_min = max(0.0, self._apf_orca_shared_turn_min_angular)
+            if abs(angular_correction) < share_min:
+                angular_correction = share_side * share_min
+
+        # ORCA 近距叠加 APF 兜底，避免最近点修正塌缩
+        near_apf_distance = max(0.1, self._apf_orca_near_apf_distance)
+        if self._apf_orca_near_apf_fallback_enabled and closest_distance <= near_apf_distance:
+            apf_linear, apf_angular, apf_count = self._compute_apf_corrections(distance_limit=near_apf_distance)
+            if apf_count > 0:
+                weight = max(0.0, self._apf_orca_near_apf_weight)
+                linear_correction += weight * apf_linear
+                angular_correction += weight * apf_angular
+
+        # CPA/TCPA 预测风险加权（让预测指标真正参与控制）
+        if self._apf_orca_cpa_enabled:
+            min_cpa, min_tcpa = self._compute_cpa_tcpa_risk()
+            cpa_threshold = max(0.1, self._apf_orca_cpa_distance_threshold)
+            tcpa_threshold = max(0.1, self._apf_orca_tcpa_threshold)
+            if min_cpa is not None:
+                cpa_risk = max(0.0, min(1.0, (cpa_threshold - min_cpa) / cpa_threshold))
+                if min_tcpa is None:
+                    tcpa_risk = 0.5 if min_cpa <= cpa_threshold else 0.0
+                else:
+                    tcpa_risk = max(0.0, min(1.0, (tcpa_threshold - min_tcpa) / tcpa_threshold))
+                risk_level = max(cpa_risk, tcpa_risk)
+
+                urgency_max = max(1.0, self._apf_orca_urgency_scale_max)
+                urgency = 1.0 + (urgency_max - 1.0) * risk_level
+                angular_correction *= urgency
+
+                # 同时适度降低线速度，给分离腾时间
+                slowdown = max(0.0, self._apf_orca_linear_slowdown_max) * risk_level
+                if cmd.linear_x >= 0.0:
+                    linear_correction -= slowdown
+                else:
+                    linear_correction += slowdown
+
+        # 近距脱困：若长时间贴近不分离，增加转向并适度降速
+        deadlock_distance = max(0.1, self._apf_orca_deadlock_distance)
+        deadlock_hold = max(0.2, self._apf_orca_deadlock_hold_time)
+        deadlock_active = False
+        if self._apf_orca_deadlock_enabled and closest_distance <= deadlock_distance:
+            if self._orca_close_enter_time <= 0.0:
+                self._orca_close_enter_time = now_sec
+            elif (now_sec - self._orca_close_enter_time) >= deadlock_hold:
+                deadlock_active = True
+        else:
+            self._orca_close_enter_time = 0.0
+
+        if deadlock_active:
+            deadlock_side = commit_side if commit_side != 0 else (1 if angular_correction >= 0.0 else -1)
+            angular_correction += deadlock_side * max(0.0, self._apf_orca_deadlock_turn_boost)
+            speed_cut = max(0.0, self._apf_orca_deadlock_speed_reduction)
+            if cmd.linear_x >= 0.0:
+                linear_correction -= speed_cut
+            else:
+                linear_correction += speed_cut
+
+        # 轨迹重合同向跟随防陷入：邻船在前且横向重合时优先减速让路，避免持续侧推
+        if self._apf_orca_overlap_guard_enabled and closest_distance <= max(0.1, self._apf_orca_overlap_ahead_distance):
+            is_neighbor_ahead = rel_body_x < 0.0
+            near_same_lane = abs(rel_body_y) <= max(0.05, self._apf_orca_overlap_lateral_threshold)
+            if is_neighbor_ahead and near_same_lane:
+                speed_cut = max(0.0, self._apf_orca_overlap_speed_cut)
+                if cmd.linear_x >= 0.0:
+                    linear_correction -= speed_cut
+                else:
+                    linear_correction += speed_cut
+                turn_scale = max(0.2, min(1.0, self._apf_orca_overlap_turn_scale))
+                angular_correction *= turn_scale
+
+        # 超近距设置最小转向下限，确保动作可见
+        min_turn_distance = max(0.1, self._apf_orca_min_angular_distance)
+        min_turn = max(0.0, self._apf_orca_min_angular_near)
+        if closest_distance <= min_turn_distance and min_turn > 1e-6:
+            side = commit_side if commit_side != 0 else (1 if angular_correction >= 0.0 else -1)
+            if angular_correction * side <= 0.0 or abs(angular_correction) < min_turn:
+                angular_correction = side * min_turn
+
+        # 转向预算保护：当基础控制已接近角速度饱和，抑制同向避让增量，避免单船过激规避
+        if self._apf_orca_turn_budget_enabled:
+            max_turn = max(1e-3, float(self.tracker.max_angular_velocity))
+            base_turn_abs = abs(cmd.angular_z)
+            ratio = max(0.5, min(0.99, self._apf_orca_turn_budget_ratio))
+            if base_turn_abs >= ratio * max_turn and (cmd.angular_z * angular_correction) > 0.0:
+                near_sat = (base_turn_abs / max_turn - ratio) / max(1e-6, (1.0 - ratio))
+                near_sat = max(0.0, min(1.0, near_sat))
+                same_scale_min = max(0.0, min(1.0, self._apf_orca_turn_budget_same_side_scale))
+                scale = 1.0 - (1.0 - same_scale_min) * near_sat
+                angular_correction *= scale
+                linear_correction *= max(0.4, scale)
+
+        # P1: 直航权船修正缩减 — 减小 ORCA 对保持航向船的干预强度
+        # 安全兜底: 当距离 < 2*min_sep 时恢复全力避让 (COLREGS Rule 17(b))
+        if is_stand_on and self._apf_orca_colregs_override:
+            standon_scale = max(0.0, min(1.0, self._apf_orca_colregs_standon_scale))
+            emergency_dist = 2.0 * min_sep  # 紧急距离阈值
+            if closest_distance < emergency_dist:
+                # 距离过近 → 线性插值恢复到全力避让
+                emergency_ratio = max(0.0, min(1.0, closest_distance / emergency_dist))
+                standon_scale = standon_scale + (1.0 - standon_scale) * (1.0 - emergency_ratio)
+            angular_correction *= standon_scale
+            linear_correction *= standon_scale
+
+        # P4: NH-ORCA 非完整运动学约束投影
+        # 将 ORCA 速度约束到 USV 实际可达集合 (前向速度 + 有限转向率)
+        if self._apf_orca_nh_enabled:
+            v_orca_speed = math.hypot(v_new_x, v_new_y)
+            if v_orca_speed > 1e-6:
+                v_orca_angle = math.atan2(v_new_y, v_new_x)
+                angle_diff = self._wrap_angle(v_orca_angle - yaw)
+                nh_horizon = max(0.5, self._apf_orca_nh_reachable_horizon)
+                max_angle_change = self.tracker.max_angular_velocity * nh_horizon
+                if abs(angle_diff) > max_angle_change:
+                    # ORCA 建议方向超出 USV 可达航向弧 → 钳位到最近可达方向
+                    clamped_angle = yaw + math.copysign(max_angle_change, angle_diff)
+                    # 大偏角时降速，因为转向需要时间
+                    speed_factor = max(0.3, math.cos(max_angle_change))
+                    v_new_x_nh = v_orca_speed * speed_factor * math.cos(clamped_angle)
+                    v_new_y_nh = v_orca_speed * speed_factor * math.sin(clamped_angle)
+                    # 重新计算修正量
+                    v_body_x_nh = cos_yaw * v_new_x_nh + sin_yaw * v_new_y_nh
+                    v_body_y_nh = -sin_yaw * v_new_x_nh + cos_yaw * v_new_y_nh
+                    linear_correction = v_body_x_nh - cmd.linear_x
+                    angular_correction = self._apf_lateral_to_yaw_gain * v_body_y_nh
+
+        # 紧急减速 (软): 距离 < 1.5*min_sep 时叠加减速修正
+        # 范围缩小避免死锁，stand_on 免制动 (head_on 除外)
+        # 保留最低速度 0.08m/s，保证 USV 有足够前进速度来执行转向避让
+        emergency_brake_dist = max(0.5, 1.5 * min_sep)  # 1.5m
+        emergency_brake_release = max(0.8, 2.0 * min_sep)  # 2.0m，迟滞释放
+        if closest_distance < emergency_brake_dist:
+            self._orca_soft_brake_active = True
+        elif closest_distance > emergency_brake_release:
+            self._orca_soft_brake_active = False
+        # head_on 时双方都减速 (Rule 14); 其他情况 stand_on 免减速
+        soft_brake_exempt = is_stand_on and encounter_type != 'head_on'
+        if self._orca_soft_brake_active and not soft_brake_exempt:
+            # d=1.5m→keep=1.0, d=1.0m→keep=0.67, d=0.5m→keep=0.33
+            speed_keep = max(0.05, closest_distance / emergency_brake_dist)
+            target_speed = max(0.08, cmd.linear_x * speed_keep)  # 最低保留 0.08m/s
+            emergency_speed_cut = max(0.0, cmd.linear_x - target_speed)
+            if cmd.linear_x >= 0.0:
+                linear_correction -= emergency_speed_cut
+            else:
+                linear_correction += emergency_speed_cut
+
+        # 近距强制最小转向: 距离 < 2*min_sep 时，确保有足够转向幅值
+        # 不再要求 commit_side!=0，缺失时使用 encounter_side 或默认右转(COLREGS)
+        if closest_distance < 2.0 * min_sep:
+            effective_turn_side = commit_side if commit_side != 0 else (encounter_side if encounter_side != 0 else -1)
+            # 距离越近，最小omega越大: d=2m→0.12, d=1m→0.25, d=0.5m→0.35
+            dist_ratio = max(0.0, min(1.0, closest_distance / (2.0 * min_sep)))
+            min_omega_close = 0.08 + 0.12 * (1.0 - dist_ratio)  # 0.08-0.20, 降低避免振荡
+            if abs(angular_correction) < min_omega_close:
+                angular_correction = effective_turn_side * min_omega_close
+
+        linear_correction = max(
+            -self._apf_max_linear_correction,
+            min(self._apf_max_linear_correction, linear_correction)
+        )
+        angular_correction = max(
+            -self._apf_max_angular_correction,
+            min(self._apf_max_angular_correction, angular_correction)
+        )
+
+        # 到点阶段削弱避让修正，保持终点可达
+        nav_speed_abs = abs(cmd.linear_x)
+        if self._apf_goal_slow_speed_threshold > 1e-6:
+            relax_scale = nav_speed_abs / self._apf_goal_slow_speed_threshold
+            relax_scale = max(self._apf_goal_relax_min_scale, min(1.0, relax_scale))
+        else:
+            relax_scale = 1.0
+
+        # 目标优先: 仅在最终航点(is_final)时削弱ORCA修正，允许错时到达
+        # 中间航点不削弱，避免路径交叉时丧失避碰能力
+        goal_priority_scale = 1.0
+        cur_wp = self.tracker.get_current_waypoint()
+        if self.current_pose is not None and cur_wp is not None and cur_wp.is_final:
+            dtg = self.tracker.get_distance_to_goal(self.current_pose)
+            if dtg < 1.5:
+                goal_priority_scale = 0.10
+            elif dtg < 3.0:
+                goal_priority_scale = 0.10 + 0.90 * (dtg - 1.5) / 1.5
+        relax_scale *= goal_priority_scale
+
+        corrected = VelocityCommand(
+            linear_x=cmd.linear_x + linear_correction * relax_scale,
+            linear_y=cmd.linear_y,
+            angular_z=cmd.angular_z + angular_correction * relax_scale,
+        )
+
+        # 紧急减速 (硬上限): d < 1.0*min_sep 时激活，真正碰撞风险
+        # Rule 17(b): 极近距时所有船都必须硬刹，不论 stand_on
+        hard_brake_dist = max(0.3, 1.0 * min_sep)  # 1.0m
+        hard_brake_release = max(0.5, 1.5 * min_sep)  # 1.5m，迟滞释放
+        if closest_distance < hard_brake_dist:
+            self._orca_hard_brake_active = True
+        elif closest_distance > hard_brake_release:
+            self._orca_hard_brake_active = False
+        # 硬刹不豁免 stand_on (d<1.0m 是真正碰撞风险)
+        if self._orca_hard_brake_active and cmd.linear_x > 0.0:
+            # d=1.0m→keep=1.0, d=0.5m→keep=0.25, d=0.3m→keep=0.09
+            hard_speed_keep = max(0.03, (closest_distance / hard_brake_dist) ** 2.0)
+            hard_max_speed = max(0.05, cmd.linear_x * hard_speed_keep)  # 最低 0.05m/s
+            if corrected.linear_x > hard_max_speed:
+                corrected = VelocityCommand(
+                    linear_x=hard_max_speed,
+                    linear_y=corrected.linear_y,
+                    angular_z=corrected.angular_z,
+                )
+
+        # --- 记录 ORCA 触发日志 ---
+        if not hasattr(self, '_last_orca_log_time'):
+            self._last_orca_log_time = 0.0
+        # 只要 ORCA 处于激活状态就标记，而非仅在修正幅度>0.01时
+        if self._orca_active:
+            self.tracker.debug_info['active_controller'] = 'ORCA'
+        if abs(linear_correction) > 0.01 or abs(angular_correction) > 0.01:
+            if now_sec - self._last_orca_log_time > 1.0:
+                self._last_orca_log_time = now_sec
+                self.get_logger().info(
+                    f'🛡️ ORCA 避让触发: 距离={closest_distance:.2f}m, '
+                    f'遭遇={encounter_type}, 选边={commit_side}, '
+                    f'T_eff={horizon:.2f}s, VO_r={radius:.3f}, '
+                    f'原指令(v={cmd.linear_x:.2f}, w={cmd.angular_z:.2f}), '
+                    f'修正后(v={corrected.linear_x:.3f}, w={corrected.angular_z:.3f})'
+                )
+
+        # === 输出平滑: 速率限制器，防止急停急走/角速度振荡 ===
+        result = corrected.sanitize()
+        if not self._orca_smooth_initialized:
+            # ORCA 刚激活时，以当前指令初始化平滑器
+            self._orca_smooth_vx = result.linear_x
+            self._orca_smooth_omega = result.angular_z
+            self._orca_smooth_initialized = True
+        else:
+            # 速率限制: 每 tick (0.1s) 最大变化量
+            max_dvx = 0.03    # 0.3 m/s²
+            max_domega = 0.08  # 0.8 rad/s²
+            # 线速度平滑
+            dvx = result.linear_x - self._orca_smooth_vx
+            if abs(dvx) > max_dvx:
+                dvx = max_dvx if dvx > 0 else -max_dvx
+            smoothed_vx = self._orca_smooth_vx + dvx
+            # 角速度平滑
+            domega = result.angular_z - self._orca_smooth_omega
+            if abs(domega) > max_domega:
+                domega = max_domega if domega > 0 else -max_domega
+            smoothed_omega = self._orca_smooth_omega + domega
+            # 更新状态并输出
+            self._orca_smooth_vx = smoothed_vx
+            self._orca_smooth_omega = smoothed_omega
+            result = VelocityCommand(
+                linear_x=smoothed_vx,
+                linear_y=result.linear_y,
+                angular_z=smoothed_omega,
+            )
+        return result.sanitize()
     
     # ==================== 控制循环 ====================
     
@@ -1197,6 +2592,7 @@ class VelocityControllerNode(Node):
         
         # 计算速度指令
         cmd = self.tracker.compute_velocity(self.current_pose)
+        cmd = self._apply_apf_to_command(cmd)
         self._last_velocity_cmd = cmd
         
         # 发布速度指令
@@ -1264,6 +2660,7 @@ class VelocityControllerNode(Node):
         linear_x = self.tracker.cruise_speed * speed_factor
         
         cmd = VelocityCommand(linear_x=linear_x, linear_y=0.0, angular_z=angular_z)
+        cmd = self._apply_apf_to_command(cmd)
         self._last_velocity_cmd = cmd
         self._publish_velocity_command(cmd)
         
@@ -1818,6 +3215,15 @@ class VelocityControllerNode(Node):
         # 健康状态
         if self._consecutive_timeout_count > 0:
             status_parts.append(f'timeouts:{self._consecutive_timeout_count}')
+        if self._apf_health_monitor_enabled:
+            own_freeze_s, neighbor_freeze_n = self._get_health_freeze_summary(current_time)
+            if own_freeze_s > 0.0:
+                status_parts.append(f'freeze_own:{own_freeze_s:.1f}s')
+            if neighbor_freeze_n > 0:
+                status_parts.append(f'freeze_neighbor:{neighbor_freeze_n}')
+        if self._orca_active:
+            orca_hold = max(0.0, current_time - self._orca_activate_time)
+            status_parts.append(f'orca_active:{orca_hold:.1f}s')
         
         status_msg = String()
         status_msg.data = ','.join(status_parts)

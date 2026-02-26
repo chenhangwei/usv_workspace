@@ -46,8 +46,8 @@ class UsvPlotWindow(QWidget):
         self.set_theme('modern_dark')
         
         main_layout = QVBoxLayout(self)
-        main_layout.setSpacing(5)
-        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(0)
+        main_layout.setContentsMargins(0, 0, 0, 0)
 
         # ========== Visibility Flags (Controls removed from UI) ==========
         self.show_labels = True
@@ -115,6 +115,12 @@ class UsvPlotWindow(QWidget):
             'home_marker': None, # Home marker aritst
             'area_center_marker': None # Area Center marker (Red Cross)
         }
+
+        # Ensure 1:1 plot scaling is active from startup
+        self._init_axes()
+
+        # Keep enough room for XY ticks/labels while maximizing plot area
+        self.figure.subplots_adjust(left=0.09, right=0.995, bottom=0.10, top=0.95)
         
         # 创建自定义USV箭头标记 (固定像素大小)
         # 箭头形状: 指向右侧的船形
@@ -284,11 +290,45 @@ class UsvPlotWindow(QWidget):
 
     def _init_axes(self):
         """Initialize fixed axes properties."""
-        self.ax.set_aspect('equal')
+        # Keep 1:1 metric scale (no shape distortion)
+        self.ax.set_aspect('equal', adjustable='datalim')
         # Detailed styling is now handled in set_theme()
         
         # Draw initial home marker
         self._draw_home_marker()
+
+    def _enforce_equal_aspect_fill(self):
+        """Keep x/y metric scale at 1:1 while filling the available axes box."""
+        xlim = self.ax.get_xlim()
+        ylim = self.ax.get_ylim()
+
+        data_w = float(xlim[1] - xlim[0])
+        data_h = float(ylim[1] - ylim[0])
+        if data_w <= 0.0 or data_h <= 0.0:
+            return
+
+        bbox = self.ax.get_window_extent()
+        view_w = float(bbox.width)
+        view_h = float(bbox.height)
+        if view_w <= 0.0 or view_h <= 0.0:
+            return
+
+        target_ratio = view_w / view_h
+        current_ratio = data_w / data_h
+
+        cx = 0.5 * (xlim[0] + xlim[1])
+        cy = 0.5 * (ylim[0] + ylim[1])
+
+        self._updating_limits = True
+        if current_ratio < target_ratio:
+            new_w = data_h * target_ratio
+            half_w = 0.5 * new_w
+            self.ax.set_xlim(cx - half_w, cx + half_w)
+        elif current_ratio > target_ratio:
+            new_h = data_w / target_ratio
+            half_h = 0.5 * new_h
+            self.ax.set_ylim(cy - half_h, cy + half_h)
+        self._updating_limits = False
         
     def _draw_home_marker(self):
         """Draw or update the Home marker at current home position"""
@@ -977,6 +1017,7 @@ class UsvPlotWindow(QWidget):
         self.info_label.setText(f"Active: {len(active_usv_ids)} | Preview Pts: {preview_count} | Scale: {'Auto' if self.auto_scale else 'Manual'} | {datetime.datetime.now().strftime('%H:%M:%S')}")
 
         # Optimize draw call
+        self._enforce_equal_aspect_fill()
         self.canvas.draw_idle()
 
     def on_scroll(self, event):
@@ -1107,6 +1148,7 @@ class UsvPlotWindow(QWidget):
         """Update Home position and redraw marker"""
         self.home_pos = (x, y)
         self._draw_home_marker()
+        self._enforce_equal_aspect_fill()
         self.canvas.draw_idle()
         # Emit signal to notify parent (MainGuiApp) to send ROS command
         if hasattr(self, 'request_set_home_callback') and self.request_set_home_callback:
@@ -1151,3 +1193,8 @@ class UsvPlotWindow(QWidget):
             (screen.width() - size.width()) // 2,
             (screen.height() - size.height()) // 2
         )
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._enforce_equal_aspect_fill()
+        self.canvas.draw_idle()

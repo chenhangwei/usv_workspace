@@ -238,6 +238,13 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 11
 
+  # ------------------------- APF 邻船位姿统一下发 (GS -> USV) ------------
+
+  usv_01/apf/neighbors:
+    type: common_interfaces/msg/FleetNeighborPoses
+    from_domain: 11
+    reversed: true
+
   # ===========================================================================
   #                              USV_02 (Domain 12)
   # ===========================================================================
@@ -418,6 +425,13 @@ topics:
     type: common_interfaces/msg/NavigationResult
     from_domain: 12
 
+  # ------------------------- APF 邻船位姿统一下发 (GS -> USV) ------------
+
+  usv_02/apf/neighbors:
+    type: common_interfaces/msg/FleetNeighborPoses
+    from_domain: 12
+    reversed: true
+
   # ===========================================================================
   #                              USV_03 (Domain 13)
   # ===========================================================================
@@ -597,6 +611,13 @@ topics:
   usv_03/velocity_controller/result:
     type: common_interfaces/msg/NavigationResult
     from_domain: 13
+
+  # ------------------------- APF 邻船位姿统一下发 (GS -> USV) ------------
+
+  usv_03/apf/neighbors:
+    type: common_interfaces/msg/FleetNeighborPoses
+    from_domain: 13
+    reversed: true
 
 
   # ===========================================================================

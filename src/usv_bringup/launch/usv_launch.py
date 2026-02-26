@@ -194,7 +194,7 @@ def generate_launch_description():
         name='gps_to_local_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
         # ⚠️ 移除重映射，避免与 MAVROS 的 local_position/pose 冲突
         # 其他节点可以选择订阅：
         # - local_position/pose (MAVROS 原生，飞控 EKF Origin)
@@ -208,7 +208,7 @@ def generate_launch_description():
         name='usv_status_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
 
     # 自动设置home点节点
@@ -242,7 +242,7 @@ def generate_launch_description():
         name='usv_command_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
 
     # 控制器节点
@@ -252,7 +252,7 @@ def generate_launch_description():
         name='usv_control_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
 
     # 速度控制器节点 (MPC 控制)
@@ -264,7 +264,7 @@ def generate_launch_description():
         name='velocity_controller_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
 
     # 坐标转换节点（XYZ → GPS）（新增）
@@ -274,7 +274,7 @@ def generate_launch_description():
         name='coord_transform_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
     
     # 编队跟随节点 (USV 端计算)
@@ -285,7 +285,7 @@ def generate_launch_description():
         name='formation_follower_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file, {'usv_id': namespace}]
+        parameters=[param_file, sitl_param_file, {'usv_id': namespace}]
     )
 
     # 日志收集节点（可选，用于调试导航）
@@ -408,7 +408,7 @@ def generate_launch_description():
         name='navigate_to_point_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file]
+        parameters=[param_file, sitl_param_file]
     )
 
 

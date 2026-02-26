@@ -59,6 +59,7 @@ and convenient operation and management.""",
     entry_points={
         'console_scripts': [
             'main_gui_app = gs_gui.main_gui_app:main',
+            'apf_neighbor_relay_node = gs_gui.apf_neighbor_relay_node:main',
         ],
     },
     classifiers=[

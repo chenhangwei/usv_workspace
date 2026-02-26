@@ -299,10 +299,10 @@ class VelocityPathTracker:
         # ==================== 偏离检测 (Divergence Detection) ====================
         # 当 USV 进入监控半径后，如果距离持续增大（越来越远），
         # 说明无法到达目标点，强制判定为"偏离到达"并切换到下一航点
-        self._divergence_monitor_radius: float = 3.0    # 开始监控的半径 (m)
+        self._divergence_monitor_radius: float = 8.0    # 开始监控的半径 (m)
         self._divergence_min_distance: float = float('inf')  # 监控期间的最小距离
         self._divergence_increase_count: int = 0         # 距离连续增大的计数
-        self._divergence_increase_threshold: int = 8     # 连续增大多少次判定为偏离
+        self._divergence_increase_threshold: int = 3     # 连续增大多少次判定为偏离
         self._divergence_monitoring: bool = False         # 是否处于偏离监控状态
         self._divergence_last_distance: float = float('inf')  # 上次检测的距离
         
@@ -545,8 +545,9 @@ class VelocityPathTracker:
             #   120° → cos(60°) = 0.50 → 0.15 m/s  (Z形拐角)
             #   150° → cos(75°) = 0.26 → 0.08 m/s  (紧弧)
             #   180° → cos(90°) = 0.00 → min_speed  (掉头)
-            heading_speed_factor = math.cos(abs(heading_error) / 2.0)
-            heading_speed_factor = max(heading_speed_factor, 0.12)
+            # 优化：放宽航向减速，避免避让后速度骤降
+            heading_speed_factor = math.cos(abs(heading_error) / 3.0)
+            heading_speed_factor = max(heading_speed_factor, 0.3)
             linear_speed = target.speed * heading_speed_factor
             
             # 最终航点接近时额外减速 (防止飘过)
@@ -575,8 +576,10 @@ class VelocityPathTracker:
         # === MPC 跟踪模式 (heading_error ≤ 60°) ===
         # MPC 在此范围内工作良好: CTE 偏差可控, 角速度需求在 R_w=80 可承受范围
         # 额外应用 cos() 降速为 MPC 提供转向裕度
-        heading_speed_factor = math.cos(abs(heading_error) / 2.0)
-        # 60° 边界: cos(30°) = 0.87, 速度降至 87% — 平滑过渡到弧形模式的 87%
+        # 优化：放宽航向减速，避免避让后速度骤降
+        heading_speed_factor = math.cos(abs(heading_error) / 3.0)
+        heading_speed_factor = max(heading_speed_factor, 0.5)
+        # 60° 边界: cos(20°) = 0.94, 速度降至 94% — 平滑过渡到弧形模式的 94%
         
         # ==================== 计算控制指令 (MPC) ====================
         self.debug_info['active_controller'] = 'MPC'
@@ -602,6 +605,16 @@ class VelocityPathTracker:
             [target.x, target.y], 
             target_speed=adaptive_speed,
             prev_waypoint=self._prev_waypoint_pos
+        )
+        
+        # 修复: MPC 模式下同步更新 _last_angular_velocity
+        # 之前此变量仅在 ARC_TURN 分支更新, 导致 ARC_TURN→MPC 切换后
+        # _last_angular_velocity 永远锁定在 max_angular_velocity (0.5),
+        # 使得 _compute_adaptive_speed 的曲率减速永远将速度限制在
+        # cruise_speed * 0.3 = 0.15 m/s
+        self._last_angular_velocity = (
+            self.angular_velocity_filter * w_cmd +
+            (1 - self.angular_velocity_filter) * self._last_angular_velocity
         )
         
         # 获取调试信息
@@ -834,9 +847,9 @@ class VelocityPathTracker:
                 # t >= 1.0 表示已经越过了目标点
                 if t >= 1.0:
                     # 为了安全，限制最大偏离距离。如果偏离太远(比如漏了20米)，可能还是应该回头或报错
-                    # 这里放宽阈值：只要横向距离在 2.5倍 阈值以内，就算“擦肩而过”成功
-                    # 比如阈值1m，只要在2.5m范围内路过，都算过
-                    pass_by_threshold = max(threshold * 2.5, 3.0)
+                    # 这里放宽阈值：只要横向距离在 10.0倍 阈值以内，就算“擦肩而过”成功
+                    # 比如阈值1m，只要在10.0m范围内路过，都算过
+                    pass_by_threshold = max(threshold * 10.0, 15.0)
                     if distance < pass_by_threshold:
                         # 记录日志或调试信息通常在这里，但在纯算法类通过返回值处理
                         return self._handle_arrival_or_switch()

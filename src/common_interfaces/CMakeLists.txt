@@ -24,6 +24,8 @@ rosidl_generate_interfaces(
   "msg/NavigationResult.msg"
   "msg/MpcDebug.msg"
   "msg/FormationConfig.msg"
+  "msg/NeighborPose.msg"
+  "msg/FleetNeighborPoses.msg"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
 

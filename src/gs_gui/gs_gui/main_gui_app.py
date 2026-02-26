@@ -17,6 +17,7 @@ from http.client import UNAVAILABLE_FOR_LEGAL_REASONS
 import sys
 import threading
 import os
+import math
 import yaml
 import logging
 import subprocess
@@ -1037,8 +1038,10 @@ limitations under the License.
     def _init_navigation_feedback_table(self):
         """初始化导航反馈表格，采用科幻风格设计"""
         self.nav_feedback_table = QTableWidget()
-        self.nav_feedback_table.setColumnCount(6)
-        self.nav_feedback_table.setHorizontalHeaderLabels(["STATUS", "USV ID", "TARGET", "DISTANCE", "HEADING ERR", "ETA"])
+        self.nav_feedback_table.setColumnCount(10)
+        self.nav_feedback_table.setHorizontalHeaderLabels([
+            "STATUS", "USV ID", "TARGET", "DISTANCE", "HEADING ERR", "ETA", "NN DIST", "AVOID RISK", "CPA", "TCPA"
+        ])
         
         # 设置表头自适应
         header = self.nav_feedback_table.horizontalHeader()
@@ -1719,6 +1722,144 @@ limitations under the License.
         if 0 < eta < 10:
             eta_item.setForeground(QColor("#00f2ff"))
         self.nav_feedback_table.setItem(row, 5, eta_item)
+
+        # 6-7. 避让特征（最近邻距离 + 风险等级）
+        nn_distance, nn_usv_id, risk_label, risk_color = self._compute_avoidance_metrics(usv_id)
+
+        if nn_distance is None:
+            nn_text = "--"
+        else:
+            nn_text = f"{nn_distance:.2f}m ({nn_usv_id})" if nn_usv_id else f"{nn_distance:.2f}m"
+
+        nn_item = QTableWidgetItem(nn_text)
+        nn_item.setTextAlignment(Qt.AlignCenter)
+        nn_item.setForeground(risk_color)
+        self.nav_feedback_table.setItem(row, 6, nn_item)
+
+        risk_item = QTableWidgetItem(risk_label)
+        risk_item.setTextAlignment(Qt.AlignCenter)
+        risk_item.setForeground(risk_color)
+        self.nav_feedback_table.setItem(row, 7, risk_item)
+
+        cpa_distance, tcpa_seconds, cpa_color = self._compute_cpa_tcpa(usv_id, nn_usv_id)
+
+        cpa_text = "--" if cpa_distance is None else f"{cpa_distance:.2f}m"
+        cpa_item = QTableWidgetItem(cpa_text)
+        cpa_item.setTextAlignment(Qt.AlignCenter)
+        cpa_item.setForeground(cpa_color)
+        self.nav_feedback_table.setItem(row, 8, cpa_item)
+
+        tcpa_text = "--" if tcpa_seconds is None else f"{tcpa_seconds:.1f}s"
+        tcpa_item = QTableWidgetItem(tcpa_text)
+        tcpa_item.setTextAlignment(Qt.AlignCenter)
+        tcpa_item.setForeground(cpa_color)
+        self.nav_feedback_table.setItem(row, 9, tcpa_item)
+
+    def _compute_avoidance_metrics(self, usv_id):
+        """基于当前舰队状态计算最近邻距离与避让风险等级。"""
+        default_color = QColor("#9e9e9e")
+        try:
+            if not hasattr(self, 'ros_node') or self.ros_node is None:
+                return None, None, "N/A", default_color
+
+            usv_states = getattr(self.ros_node, 'usv_states', {}) or {}
+            own_state = usv_states.get(usv_id)
+            if not own_state:
+                return None, None, "N/A", default_color
+
+            own_pos = own_state.get('position', {})
+            own_x = float(own_pos.get('x'))
+            own_y = float(own_pos.get('y'))
+
+            min_dist = None
+            nearest_usv = None
+            for other_id, other_state in usv_states.items():
+                if other_id == usv_id:
+                    continue
+                other_pos = (other_state or {}).get('position', {})
+                if 'x' not in other_pos or 'y' not in other_pos:
+                    continue
+                ox = float(other_pos.get('x'))
+                oy = float(other_pos.get('y'))
+                dist = math.hypot(own_x - ox, own_y - oy)
+                if min_dist is None or dist < min_dist:
+                    min_dist = dist
+                    nearest_usv = other_id
+
+            if min_dist is None:
+                return None, None, "N/A", default_color
+
+            # 与当前参数基线一致：apf_safe_distance = 1.0m
+            safe_distance = 1.0
+            caution_distance = 1.5
+            if min_dist <= safe_distance:
+                return min_dist, nearest_usv, "DANGER", QColor("#f44336")
+            if min_dist <= caution_distance:
+                return min_dist, nearest_usv, "CAUTION", QColor("#ff9800")
+            return min_dist, nearest_usv, "SAFE", QColor("#4caf50")
+        except Exception:
+            return None, None, "N/A", default_color
+
+    def _compute_cpa_tcpa(self, usv_id, neighbor_usv_id):
+        """计算当前 USV 相对最近邻船的 CPA/TCPA。"""
+        default_color = QColor("#9e9e9e")
+        try:
+            if not neighbor_usv_id:
+                return None, None, default_color
+            if not hasattr(self, 'ros_node') or self.ros_node is None:
+                return None, None, default_color
+
+            usv_states = getattr(self.ros_node, 'usv_states', {}) or {}
+            own_state = usv_states.get(usv_id)
+            nbr_state = usv_states.get(neighbor_usv_id)
+            if not own_state or not nbr_state:
+                return None, None, default_color
+
+            own_pos = own_state.get('position', {})
+            nbr_pos = nbr_state.get('position', {})
+            own_vel = (own_state.get('velocity', {}) or {}).get('linear', {})
+            nbr_vel = (nbr_state.get('velocity', {}) or {}).get('linear', {})
+
+            ox = float(own_pos.get('x'))
+            oy = float(own_pos.get('y'))
+            nx = float(nbr_pos.get('x'))
+            ny = float(nbr_pos.get('y'))
+            ovx = float(own_vel.get('x', 0.0))
+            ovy = float(own_vel.get('y', 0.0))
+            nvx = float(nbr_vel.get('x', 0.0))
+            nvy = float(nbr_vel.get('y', 0.0))
+
+            # 相对运动：r = own - neighbor, v = own_vel - neighbor_vel
+            rx = ox - nx
+            ry = oy - ny
+            rvx = ovx - nvx
+            rvy = ovy - nvy
+
+            v2 = rvx * rvx + rvy * rvy
+            if v2 < 1e-6:
+                # 相对速度几乎为0，CPA 退化为当前距离，TCPA 无意义
+                cpa_dist = math.hypot(rx, ry)
+                cpa_color = QColor("#f44336") if cpa_dist <= 1.0 else (QColor("#ff9800") if cpa_dist <= 1.5 else QColor("#4caf50"))
+                return cpa_dist, None, cpa_color
+
+            tcpa = - (rx * rvx + ry * rvy) / v2
+            if tcpa < 0.0:
+                tcpa = 0.0
+
+            cpa_rx = rx + rvx * tcpa
+            cpa_ry = ry + rvy * tcpa
+            cpa_dist = math.hypot(cpa_rx, cpa_ry)
+
+            if cpa_dist <= 1.0:
+                cpa_color = QColor("#f44336")
+            elif cpa_dist <= 1.5:
+                cpa_color = QColor("#ff9800")
+            else:
+                cpa_color = QColor("#4caf50")
+
+            return cpa_dist, tcpa, cpa_color
+        except Exception:
+            return None, None, default_color
 
     def _trigger_progress_highlight(self, row, usv_id):
         """

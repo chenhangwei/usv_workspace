@@ -11,7 +11,8 @@
 # Date: 2026-01-26
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration, IncludeLaunchDescription, SetEnvironmentVariable
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, SetLaunchConfiguration, IncludeLaunchDescription, SetEnvironmentVariable, GroupAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -108,11 +109,18 @@ def generate_launch_description():
         description='Domain Bridge YAML 配置文件路径（启用 Domain Bridge 时使用）'
     )
 
+    enable_apf_neighbor_relay_arg = DeclareLaunchArgument(
+        'enable_apf_neighbor_relay',
+        default_value='true',
+        description='是否启用 APF 邻船位姿统一下发节点'
+    )
+
     gs_param_file = LaunchConfiguration('gs_param_file')
     fleet_config_file = LaunchConfiguration('fleet_config_file')
     enable_domain_bridge = LaunchConfiguration('enable_domain_bridge')
     gs_domain_id = LaunchConfiguration('gs_domain_id')
     domain_bridge_config = LaunchConfiguration('domain_bridge_config')
+    enable_apf_neighbor_relay = LaunchConfiguration('enable_apf_neighbor_relay')
 
     def _resolve_gs_param_file(context, *args, **kwargs):
         """Resolve gs_params.yaml path at runtime: prefer package share, fallback to workspace src."""
@@ -152,11 +160,35 @@ def generate_launch_description():
         ]
     )
 
+    apf_neighbor_relay_node = Node(
+        package='gs_gui',
+        executable='apf_neighbor_relay_node',
+        name='apf_neighbor_relay_node',
+        output='screen',
+        parameters=[
+            {
+                'fleet_config_file': fleet_config_file,
+                'source_pose_topic_suffix': 'local_position/pose_from_gps',
+                'source_velocity_topic_suffix': 'local_position/velocity_local',
+                'apf_neighbors_topic_suffix': 'apf/neighbors',
+                'publish_rate': 10.0,
+                'neighbor_timeout': 0.8,
+                'max_neighbor_distance': 12.0,
+                'prefer_velocity_topic': True,
+            }
+        ],
+        condition=IfCondition(enable_apf_neighbor_relay)
+    )
+
     # =============================================================================
     # Domain Bridge 节点（条件启动）
     # =============================================================================
     # 设置地面站 Domain ID（仅在启用 Domain Bridge 时生效）
-    set_domain_id = SetEnvironmentVariable('ROS_DOMAIN_ID', gs_domain_id)
+    set_domain_id = SetEnvironmentVariable(
+        'ROS_DOMAIN_ID', 
+        gs_domain_id,
+        condition=IfCondition(enable_domain_bridge)
+    )
     
     # 获取 common_interfaces 包路径，确保 domain_bridge 能找到自定义消息
     try:
@@ -166,8 +198,6 @@ def generate_launch_description():
         }
     except Exception:
         additional_env = {}
-    
-    from launch.conditions import IfCondition
     
     domain_bridge_node = Node(
         package='domain_bridge',
@@ -190,11 +220,13 @@ def generate_launch_description():
         enable_domain_bridge_arg,
         gs_domain_id_arg,
         domain_bridge_config_arg,
+        enable_apf_neighbor_relay_arg,
         
         # 条件环境变量（仅在启用 Domain Bridge 时设置）
         set_domain_id,
         
         # 节点
         main_gui_app,
+        apf_neighbor_relay_node,
         domain_bridge_node,  # 条件启动的 Domain Bridge
     ])
