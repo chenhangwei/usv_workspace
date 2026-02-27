@@ -99,7 +99,8 @@ class UsvPlotWindow(QWidget):
         self.ax.callbacks.connect('ylim_changed', self.on_limits_changed)
         
         self.artists = {
-            'usv_polys': {},    # {usv_id: Polygon (数据坐标1:1真实尺寸)}
+            'usv_polys': {},    # {usv_id: Polygon (数据坐标1:1, grid≤2m时使用)}
+            'usv_scatters': {}, # {usv_id: PathCollection (scatter, grid>2m时使用)}
             'usv_labels': {},   # {usv_id: Text}
             'usv_trails': {},   # {usv_id: Line2D}
             'nav_lines': {},    # {usv_id: Line2D}
@@ -137,12 +138,14 @@ class UsvPlotWindow(QWidget):
             [-L * 0.15,     0.0],         # 尾部凹陷
             [-L * 0.35, -W * 0.5],        # 右后角
         ])  # shape: (4, 2)
-        # 保留旧路径用于兼容 (如果其他地方引用)
+        # 旧箭头路径 (用于 scatter 固定像素模式, grid>2m时使用)
         arrow_verts = [
             (1.0, 0.0), (-0.8, 0.6), (-0.4, 0.0), (-0.8, -0.6), (1.0, 0.0),
         ]
         arrow_codes = [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY]
         self._usv_arrow_path = MplPath(arrow_verts, arrow_codes)
+        # 渲染模式: 'polygon' (1:1真实尺寸) 或 'scatter' (固定像素)
+        self._usv_render_mode = None  # 初始未定, 首帧时决定
         
         # Apply theme to axes
         self.set_theme('modern_dark')
@@ -784,6 +787,23 @@ class UsvPlotWindow(QWidget):
                  for artist in self.artists[cat].values():
                      artist.set_visible(False)
 
+        # --- 判断渲染模式: 根据Y轴网格间距 ---
+        yticks = self.ax.get_yticks()
+        if len(yticks) >= 2:
+            grid_spacing = abs(yticks[1] - yticks[0])
+        else:
+            ylim = self.ax.get_ylim()
+            grid_spacing = abs(ylim[1] - ylim[0]) / 5.0  # 估算
+        new_mode = 'polygon' if grid_spacing <= 2.0 else 'scatter'
+        
+        # 切换模式时, 移除所有旧的 USV 标记
+        if self._usv_render_mode is not None and new_mode != self._usv_render_mode:
+            old_key = 'usv_polys' if self._usv_render_mode == 'polygon' else 'usv_scatters'
+            for uid, artist in list(self.artists[old_key].items()):
+                artist.remove()
+            self.artists[old_key].clear()
+        self._usv_render_mode = new_mode
+
         # --- Track current USVs to handle removals ---
         active_usv_ids = set()
 
@@ -817,31 +837,52 @@ class UsvPlotWindow(QWidget):
             is_moving = speed > 0.1
             display_alpha = 1.0 if (not is_moving or blink_on) else 0.4
             
-            # --- 3. Update/Create USV Marker (数据坐标1:1真实尺寸, 随缩放等比变化) ---
-            # 计算旋转后的船形顶点 (数据坐标, 单位: 米)
-            cos_y, sin_y = cos(yaw), sin(yaw)
-            rot_matrix = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
-            rotated_verts = self._usv_base_verts @ rot_matrix.T + np.array([x, y])
-            
+            # --- 3. Update/Create USV Marker ---
             is_leader = usv_id in self._formation_leader_ids
             edge_color = '#FFD700' if is_leader else '#ecf0f1'  # 金色边框表示领队
             edge_width = 2.5 if is_leader else 1.2
             
-            if usv_id not in self.artists['usv_polys']:
-                # 使用 Polygon patch (数据坐标, 1:1 真实尺寸)
-                poly = MplPolygon(rotated_verts, closed=True,
-                                  facecolor=color_hex, edgecolor=edge_color,
-                                  linewidth=edge_width, alpha=display_alpha, zorder=10)
-                self.ax.add_patch(poly)
-                self.artists['usv_polys'][usv_id] = poly
+            if self._usv_render_mode == 'polygon':
+                # ===== 模式A: Polygon (1:1真实尺寸, grid≤2m) =====
+                cos_y, sin_y = cos(yaw), sin(yaw)
+                rot_matrix = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
+                rotated_verts = self._usv_base_verts @ rot_matrix.T + np.array([x, y])
+                
+                if usv_id not in self.artists['usv_polys']:
+                    poly = MplPolygon(rotated_verts, closed=True,
+                                      facecolor=color_hex, edgecolor=edge_color,
+                                      linewidth=edge_width, alpha=display_alpha, zorder=10)
+                    self.ax.add_patch(poly)
+                    self.artists['usv_polys'][usv_id] = poly
+                else:
+                    poly = self.artists['usv_polys'][usv_id]
+                    poly.set_xy(rotated_verts)
+                    poly.set_facecolor(color_hex)
+                    poly.set_alpha(display_alpha)
+                    poly.set_edgecolor(edge_color)
+                    poly.set_linewidth(edge_width)
+                    poly.set_visible(True)
             else:
-                poly = self.artists['usv_polys'][usv_id]
-                poly.set_xy(rotated_verts)
-                poly.set_facecolor(color_hex)
-                poly.set_alpha(display_alpha)
-                poly.set_edgecolor(edge_color)
-                poly.set_linewidth(edge_width)
-                poly.set_visible(True)
+                # ===== 模式B: Scatter (固定像素大小, grid>2m) =====
+                rotated_marker = MarkerStyle(self._usv_arrow_path).rotated(rad=yaw)
+                marker_size = 700 if is_leader else 400
+                
+                if usv_id not in self.artists['usv_scatters']:
+                    scatter = self.ax.scatter([x], [y], s=marker_size, c=[color_hex],
+                                             marker=rotated_marker,
+                                             edgecolors=edge_color, linewidths=edge_width,
+                                             alpha=display_alpha, zorder=10)
+                    self.artists['usv_scatters'][usv_id] = scatter
+                else:
+                    scatter = self.artists['usv_scatters'][usv_id]
+                    scatter.set_offsets([[x, y]])
+                    scatter.set_facecolors([color_hex])
+                    scatter.set_alpha(display_alpha)
+                    scatter.set_sizes([marker_size])
+                    scatter.set_edgecolors([edge_color])
+                    scatter.set_linewidths([edge_width])
+                    scatter.set_paths([rotated_marker.get_path().transformed(rotated_marker.get_transform())])
+                    scatter.set_visible(True)
             
             # --- 3b. 领队外圈光环 ---
             if is_leader:
@@ -984,9 +1025,10 @@ class UsvPlotWindow(QWidget):
             })
 
         # --- Cleanup stale artists ---
-        for uid in list(self.artists['usv_polys'].keys()):
+        active_key = 'usv_polys' if self._usv_render_mode == 'polygon' else 'usv_scatters'
+        for uid in list(self.artists[active_key].keys()):
             if uid not in active_usv_ids:
-                self.artists['usv_polys'][uid].set_visible(False)
+                self.artists[active_key][uid].set_visible(False)
                 if uid in self.artists['usv_labels']: self.artists['usv_labels'][uid].set_visible(False)
                 if uid in self.artists['nav_labels']: self.artists['nav_labels'][uid].set_visible(False)
                 if uid in self.artists['nav_sync_markers']: self.artists['nav_sync_markers'][uid].set_visible(False)
