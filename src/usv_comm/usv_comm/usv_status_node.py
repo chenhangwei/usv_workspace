@@ -22,6 +22,8 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import psutil
 import time
 from collections import deque
+import subprocess
+import re
 
 
 class UsvStatusNode(Node):
@@ -172,6 +174,14 @@ class UsvStatusNode(Node):
         self.cached_temperature = 0.0
         self.last_temp_update = 0.0
         self.temp_cache_interval = 5.0  # 温度缓存5秒
+
+        # WiFi 信号缓存（避免频繁调用 subprocess）
+        self.cached_wifi_rssi = -100  # dBm
+        self.cached_wifi_link_quality = 0  # 0-100%
+        self.cached_wifi_interface = ''  # 接口名
+        self.last_wifi_update = 0.0
+        self.wifi_cache_interval = 3.0  # WiFi信号缓存3秒
+        self.wifi_interface_name = self._detect_wifi_interface()  # 自动检测WiFi接口
 
         self.get_logger().info(f'状态报告节点已启动 (usv_id: {self.usv_id}, 发布频率: {publish_rate} Hz)')
 
@@ -694,6 +704,14 @@ class UsvStatusNode(Node):
             # 系统运行时间
             msg.uptime_sec = int(current_time - self.start_time)
 
+            # ==================== WiFi 信号 ====================
+            if current_time - self.last_wifi_update > self.wifi_cache_interval:
+                self.cached_wifi_rssi, self.cached_wifi_link_quality, self.cached_wifi_interface = self.get_wifi_signal()
+                self.last_wifi_update = current_time
+            msg.wifi_rssi_dbm = self.cached_wifi_rssi
+            msg.wifi_link_quality = self.cached_wifi_link_quality
+            msg.wifi_interface = self.cached_wifi_interface
+
             # ==================== 发布消息前验证 ====================
             # 验证关键字段类型
             if not isinstance(msg.gps_satellites_visible, int):
@@ -712,6 +730,108 @@ class UsvStatusNode(Node):
             import traceback
             self.get_logger().error(f'状态信息发布过程中发生错误: {e}', throttle_duration_sec=5.0)
             self.get_logger().error(f'完整堆栈:\n{traceback.format_exc()}', throttle_duration_sec=10.0)
+
+    def _detect_wifi_interface(self):
+        """自动检测可用的WiFi无线接口名称
+        
+        Returns:
+            str: WiFi接口名称（如 'wlan0'），无可用接口返回空字符串
+        """
+        try:
+            # 方法1：从 /sys/class/net 检测无线接口
+            import os
+            net_dir = '/sys/class/net'
+            if os.path.exists(net_dir):
+                for iface in sorted(os.listdir(net_dir)):
+                    wireless_dir = os.path.join(net_dir, iface, 'wireless')
+                    if os.path.exists(wireless_dir):
+                        self.get_logger().info(f'检测到WiFi接口: {iface}')
+                        return iface
+            
+            # 方法2：使用 iw dev 命令
+            result = subprocess.run(
+                ['iw', 'dev'], capture_output=True, text=True, timeout=3)
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if line.startswith('Interface '):
+                    iface = line.split()[1]
+                    self.get_logger().info(f'通过 iw dev 检测到WiFi接口: {iface}')
+                    return iface
+        except Exception as e:
+            self.get_logger().warn(f'WiFi接口检测失败: {e}')
+        
+        self.get_logger().warn('未检测到WiFi无线接口，WiFi信号监测不可用')
+        return ''
+
+    def get_wifi_signal(self):
+        """获取WiFi信号强度和链路质量
+        
+        通过读取 /proc/net/wireless 或调用 iw 命令获取真实的WiFi RSSI。
+        使用缓存机制避免频繁调用系统命令。
+        
+        Returns:
+            tuple: (rssi_dbm: int, link_quality: int, interface: str)
+                   rssi_dbm: 信号强度 dBm（典型 -30 到 -90，-100 表示不可用）
+                   link_quality: 链路质量百分比 0-100
+                   interface: WiFi接口名称
+        """
+        if not self.wifi_interface_name:
+            return (-100, 0, '')
+        
+        rssi = -100
+        quality = 0
+        
+        try:
+            # 方法1（首选）：读取 /proc/net/wireless，零开销
+            with open('/proc/net/wireless', 'r') as f:
+                for line in f:
+                    if self.wifi_interface_name in line:
+                        # 格式: "wlan0: 0000  70.  -40.  -256  ..."
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            # 第3列：链路质量（整数或小数），第4列：信号电平 dBm
+                            try:
+                                raw_quality = float(parts[2].rstrip('.'))
+                                raw_signal = float(parts[3].rstrip('.'))
+                                
+                                # 信号电平（dBm）
+                                rssi = int(raw_signal)
+                                
+                                # 链路质量：/proc/net/wireless 给出 0-70 的值
+                                quality = min(100, max(0, int(raw_quality * 100.0 / 70.0)))
+                            except (ValueError, IndexError):
+                                pass
+                        break
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        
+        # 方法2（回退）：如果 /proc/net/wireless 未获取到有效值，使用 iw 命令
+        if rssi <= -100:
+            try:
+                result = subprocess.run(
+                    ['iw', 'dev', self.wifi_interface_name, 'link'],
+                    capture_output=True, text=True, timeout=2)
+                for line in result.stdout.split('\n'):
+                    line = line.strip()
+                    if 'signal:' in line:
+                        # 格式: "signal: -52 dBm"
+                        match = re.search(r'signal:\s*(-?\d+)', line)
+                        if match:
+                            rssi = int(match.group(1))
+                            # 将 dBm 转换为质量百分比（经验公式）
+                            if rssi >= -50:
+                                quality = 100
+                            elif rssi <= -100:
+                                quality = 0
+                            else:
+                                quality = 2 * (rssi + 100)
+                        break
+            except Exception:
+                pass
+        
+        return (rssi, quality, self.wifi_interface_name)
 
     def get_temperature(self):
         """获取系统温度

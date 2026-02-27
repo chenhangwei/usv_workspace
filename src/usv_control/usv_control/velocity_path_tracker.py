@@ -208,8 +208,9 @@ class VelocityPathTracker:
         
         # v5 新增参数 (一阶惯性转向模型)
         # tau_omega: 转向时间常数 (秒). 模拟船的转向惯性.
-        # 推荐 0.3 ~ 0.6, 越大MPC预测转向越慢, 需根据实船辨识.
-        mpc_tau_omega: float = 0.4,
+        # v11: 默认值从 0.4 提高到 0.55, 更接近实船在线辨识收敛值 (~0.55-0.58)
+        # 减少航点切换时的 Phase 1 低 ω 期
+        mpc_tau_omega: float = 0.55,
         
         # q_cte: Cross Track Error权重. 控制横向偏差.
         # 推荐 10.0 ~ 30.0, 越大走线越精确.
@@ -335,7 +336,12 @@ class VelocityPathTracker:
         
         # v5: 重置航线起点 (新航点任务，没有上一个航点)
         self._prev_waypoint_pos = None
-        self.mpc_tracker.reset()  # 重置 MPC 状态
+        # v11: 使用 soft_reset 保留已学习的 tau_omega 估计值
+        # 航点切换时船体物理特性不变，不应丢失 AMPC 学习成果
+        if hasattr(self.mpc_tracker, 'soft_reset'):
+            self.mpc_tracker.soft_reset()
+        else:
+            self.mpc_tracker.reset()  # 向后兼容标准 MPC
         
         # 重置偏离检测状态
         self._reset_divergence_monitor()
@@ -509,80 +515,43 @@ class VelocityPathTracker:
         target_yaw = math.atan2(dy, dx)
         heading_error = self._normalize_angle(target_yaw - pose.yaw)
         
-        # ==================== 双模式转弯控制 (v15) ====================
+        # ==================== 统一 AMPC 控制 (v14) ====================
         #
-        # 问题背景:
-        #   MPC 在 heading_error > 60° 时几乎瘫痪:
-        #     - R_w=80 抑制角速度 → ω ≈ 0.10 rad/s (远低于 w_max=0.4)
-        #     - CTE 代价阻止前进 → v = 0 (前进会偏离航线)
-        #     - 结果: 无法前进也无法有效旋转，USV 死锁
+        # 旧版使用 ARC_TURN + MPC 双模式，存在以下问题:
+        #   1. ARC_TURN 期间 AMPC 完全不参与，τ 辨识被中断
+        #   2. ARC_TURN → MPC 模式切换时产生过渡震荡
+        #   3. ARC_TURN 使用固定 cos() 曲线，不是最优弧形轨迹
+        #   4. 两套控制逻辑维护复杂、难以调试
         #
-        # 解决方案: 分两个模式——
-        #   1. heading_error > 60°: 弧形转弯 (Arc Turn)
-        #      - 绕过 MPC，直接输出 max_angular_velocity 旋转
-        #      - 保持 cos(|error|/2) × speed 的前进分量 → 弧形而非点转
-        #      - 效果: 120° Z形拐角，半速弧形过渡，~5秒完成
-        #   2. heading_error ≤ 60°: MPC 跟踪
-        #      - MPC 在此范围内工作良好 (CTE 偏差可控)
-        #      - cos() 降速提供额外裕度
-        #      - tau_omega 一阶惯性模型防 S 形振荡
-
-        ARC_TURN_THRESHOLD = math.radians(60)  # 60°: MPC 可靠工作的上限
+        # v14 改进: 消除 ARC_TURN，全程使用 AMPC/MPC:
+        #   核心技术 — 动态路径起点 (Dynamic Path Start):
+        #     当 heading_error > 45° 时，将路径起点设为当前位置
+        #     → CTE 初始 = 0 (消除 CTE 阻止前进的死锁)
+        #     → path_theta = 船→目标方向 (MPC 自然规划弧形转弯)
+        #     → AMPC 全程在线辨识 τ，不被中断
+        #
+        #   航向误差 ≤ 45°: 正常 CTE 航线跟踪 (精确贴线)
+        #   航向误差 > 45°: 动态路径起点 + 降速 → MPC 优化弧形转弯
+        #
+        # 优势:
+        #   - 统一控制路径，消除模式切换震荡
+        #   - AMPC τ 辨识全程连续，大角度转弯也在积累辨识数据
+        #   - MPC 优化器产生最优弧形轨迹 (优于固定 cos 曲线)
+        #   - 一阶惯性模型在大角度时同样有效，防止 S 形振荡
         
-        if abs(heading_error) > ARC_TURN_THRESHOLD:
-            # === 弧形转弯模式 (Arc Turn) ===
-            # MPC 在此角度范围无法有效控制，直接指令旋转 + 前进
-            
-            # 角速度: 最大角速度，方向跟随误差符号
-            if heading_error > 0:
-                angular_velocity = self.max_angular_velocity
-            else:
-                angular_velocity = -self.max_angular_velocity
-            
-            # 前进速度: cos(|error|/2) 曲线，保证弧形转弯
-            #   60°  → cos(30°) = 0.87 → 0.26 m/s  (大弧转弯)
-            #   90°  → cos(45°) = 0.71 → 0.21 m/s
-            #   120° → cos(60°) = 0.50 → 0.15 m/s  (Z形拐角)
-            #   150° → cos(75°) = 0.26 → 0.08 m/s  (紧弧)
-            #   180° → cos(90°) = 0.00 → min_speed  (掉头)
-            # 优化：放宽航向减速，避免避让后速度骤降
-            heading_speed_factor = math.cos(abs(heading_error) / 3.0)
-            heading_speed_factor = max(heading_speed_factor, 0.3)
-            linear_speed = target.speed * heading_speed_factor
-            
-            # 最终航点接近时额外减速 (防止飘过)
-            if target.is_final and distance_to_target < 3.0:
-                approach_factor = max(distance_to_target / 3.0, 0.2)
-                linear_speed *= approach_factor
-            
-            linear_speed = max(linear_speed, self.min_speed)
-            
-            # 角速度滤波 (平滑切换到弧形模式，防止突变)
-            angular_velocity = (
-                self.angular_velocity_filter * angular_velocity +
-                (1 - self.angular_velocity_filter) * self._last_angular_velocity
-            )
-            self._last_angular_velocity = angular_velocity
-            
-            self.debug_info['active_controller'] = 'ARC_TURN'
-            
-            cmd = VelocityCommand(
-                linear_x=linear_speed,
-                linear_y=0.0,
-                angular_z=angular_velocity
-            )
-            return cmd.sanitize()
-        
-        # === MPC 跟踪模式 (heading_error ≤ 60°) ===
-        # MPC 在此范围内工作良好: CTE 偏差可控, 角速度需求在 R_w=80 可承受范围
-        # 额外应用 cos() 降速为 MPC 提供转向裕度
-        # 优化：放宽航向减速，避免避让后速度骤降
-        heading_speed_factor = math.cos(abs(heading_error) / 3.0)
-        heading_speed_factor = max(heading_speed_factor, 0.5)
-        # 60° 边界: cos(20°) = 0.94, 速度降至 94% — 平滑过渡到弧形模式的 94%
-        
-        # ==================== 计算控制指令 (MPC) ====================
         self.debug_info['active_controller'] = 'MPC'
+        
+        # ==================== 航向自适应降速 ====================
+        # 统一降速曲线: cos(|error|/2)
+        #   0°   → 1.00 (全速)
+        #   45°  → cos(22.5°) = 0.92
+        #   60°  → cos(30°)   = 0.87
+        #   90°  → cos(45°)   = 0.71
+        #   120° → cos(60°)   = 0.50
+        #   150° → cos(75°)   = 0.26
+        #   180° → cos(90°)   = 0.00 → min_speed
+        heading_speed_factor = math.cos(abs(heading_error) / 2.0)
+        heading_speed_factor = max(heading_speed_factor, 0.15)
         
         # L1 改进：使用有效航向(可能基于速度向量)
         # 当速度 > 0.3m/s 时使用 Course (航迹角)，否则使用 Heading (罗盘角)
@@ -600,18 +569,54 @@ class VelocityPathTracker:
         adaptive_speed *= heading_speed_factor
         adaptive_speed = max(adaptive_speed, self.min_speed)
         
+        # ==================== 动态路径起点 (核心改进) ====================
+        # MPC 大角度瘫痪的根因: CTE 代价阻止前进 (前进 = 偏离航线)
+        # 解决: 当航向误差大时，将路径起点设为当前位置
+        #   → CTE 初始 = 0，前进不被惩罚
+        #   → path_theta = 当前位置→目标方向，MPC 自然规划弧形转弯
+        #   → 随着航向误差缩小，自动恢复正常 CTE 航线跟踪
+        DYNAMIC_PATH_THRESHOLD = math.radians(45)  # 45°: 切换到动态路径起点
+        
+        if abs(heading_error) > DYNAMIC_PATH_THRESHOLD:
+            # 大角度: 使用当前位置作为路径起点 (追踪模式)
+            # MPC 优化器会规划: 低速前进 + 最优角速度 → 自然弧形转弯
+            effective_prev_waypoint = (pose.x, pose.y)
+        else:
+            # 小角度: 使用真实上一航点 (CTE 航线跟踪模式)
+            effective_prev_waypoint = self._prev_waypoint_pos
+        
         v_cmd, w_cmd = self.mpc_tracker.compute_velocity_command(
             [pose.x, pose.y, effective_yaw], 
             [target.x, target.y], 
             target_speed=adaptive_speed,
-            prev_waypoint=self._prev_waypoint_pos
+            prev_waypoint=effective_prev_waypoint
         )
         
-        # 修复: MPC 模式下同步更新 _last_angular_velocity
-        # 之前此变量仅在 ARC_TURN 分支更新, 导致 ARC_TURN→MPC 切换后
-        # _last_angular_velocity 永远锁定在 max_angular_velocity (0.5),
-        # 使得 _compute_adaptive_speed 的曲率减速永远将速度限制在
-        # cruise_speed * 0.3 = 0.15 m/s
+        # ==================== 大角度弧形保速 ====================
+        # 问题: MPC 在大航向误差时输出 v=0 (原地掉头)
+        #   根因: 预测视野内前进会使 CTE 持续增长 (Q_cte=15 × N=20 步累积)
+        #         而 R_vel=0.1 的速度激励远不够对抗 CTE 代价
+        #         优化器认为 v=0+旋转 的总代价更低
+        #
+        # 解决: 强制最低弧形速度, 保证弧形转弯而非原地掉头
+        #   - 角速度仍由 AMPC 优化输出 (保留 τ 在线辨识的优势)
+        #   - 前进速度保底 = adaptive_speed (已经过 cos(error/2) 降速)
+        #   - 效果: AMPC 最优角速度 + 保底前进速度 → 自然弧形转弯
+        #
+        # 为什么不直接改 MPC 代价函数:
+        #   增大 R_vel 会导致小角度时速度调节不灵活 (减速不够快)
+        #   减小 Q_cte 会导致航线跟踪精度下降
+        #   动态调权需要重建求解器, 计算开销太大
+        if abs(heading_error) > DYNAMIC_PATH_THRESHOLD:
+            # adaptive_speed 已包含 cos(error/2) 降速曲线:
+            #   45°  → 0.92 × speed (大弧)
+            #   90°  → 0.71 × speed
+            #   120° → 0.50 × speed (中弧)
+            #   150° → 0.26 × speed (紧弧)
+            #   180° → 0.15 × speed (极慢弧, 接近最小速度)
+            v_cmd = max(v_cmd, adaptive_speed)
+        
+        # 同步更新角速度滤波 (用于曲率减速计算)
         self._last_angular_velocity = (
             self.angular_velocity_filter * w_cmd +
             (1 - self.angular_velocity_filter) * self._last_angular_velocity

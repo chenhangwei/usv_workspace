@@ -293,17 +293,28 @@ class TableManager:
         power_status = state.get('power_supply_status', 0)
         power_status_text = self.map_power_supply_status(power_status)
 
-        # 信号强度模拟 (基于连接状态和数据延迟)
-        # 这里使用 'connected' 字段。未来可从 state 扩展字段读取 real RSSI
+        # 信号强度：使用 USV 上报的真实 WiFi RSSI（dBm）分级显示
         is_connected = state.get('connected', False)
-        if is_connected:
-            # 这里简单模拟：如果在线则显示满格，后续可结合延迟/丢包率
-            signal_text = "▂▃▄▅" # 4格信号
-            # 或者使用 data_age 来降级信号
-            # latency = state.get('latency', 0.0) 
-            # if latency > 1.0: signal_text = "▂▃▄_"
+        wifi_rssi = state.get('wifi_rssi_dbm', -100)
+        wifi_quality = state.get('wifi_link_quality', 0)
+        if is_connected and wifi_rssi > -100:
+            # 基于真实 RSSI 分级显示
+            if wifi_rssi >= -50:
+                signal_text = "▂▃▄▅"   # 优秀 (>= -50 dBm)
+            elif wifi_rssi >= -60:
+                signal_text = "▂▃▄_"   # 良好 (-60 ~ -50 dBm)
+            elif wifi_rssi >= -70:
+                signal_text = "▂▃__"   # 一般 (-70 ~ -60 dBm)
+            elif wifi_rssi >= -80:
+                signal_text = "▂___"   # 较弱 (-80 ~ -70 dBm)
+            else:
+                signal_text = "▂___"   # 极弱 (< -80 dBm)
+            signal_text += f" {wifi_rssi}dBm"
+        elif is_connected:
+            # 已连接但 WiFi RSSI 不可用（可能通过有线连接等）
+            signal_text = "▂▃▄▅ N/A"
         else:
-            signal_text = "____" # 无信号
+            signal_text = "____ 离线"
 
         cells = [
             ns,                             # 编号

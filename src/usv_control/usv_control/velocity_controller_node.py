@@ -120,7 +120,7 @@ class VelocityControllerNode(Node):
         self.declare_parameter('mpc_weight_steering_rate', 10.0)  # R_dw: 角加速度惩罚
         
         # v5 新增参数 (一阶惯性转向模型)
-        self.declare_parameter('mpc_tau_omega', 0.4)              # 转向时间常数 (秒)
+        self.declare_parameter('mpc_tau_omega', 0.55)             # 转向时间常数 (秒) v11: 0.4→0.55, 更接近实船收敛值
         self.declare_parameter('mpc_weight_cte', 15.0)            # Cross Track Error 权重
         
         # v6 新增: 速度自适应 tau_omega 参数 (解决低速S形振荡)
@@ -184,7 +184,7 @@ class VelocityControllerNode(Node):
         self.declare_parameter('apf_goal_relax_min_scale', 0.20)
         self.declare_parameter('apf_orca_enabled', True)
         self.declare_parameter('apf_orca_time_horizon', 6.0)
-        self.declare_parameter('apf_orca_min_separation', 1.0)
+        self.declare_parameter('apf_orca_min_separation', 1.5)   # v11: 1.0→1.5, 增大安全距离避免过近接触
         self.declare_parameter('apf_orca_influence_distance', 4.0)
         self.declare_parameter('apf_orca_side_commit_enabled', True)
         self.declare_parameter('apf_orca_commit_policy', 'starboard')
@@ -231,13 +231,6 @@ class VelocityControllerNode(Node):
         self.declare_parameter('apf_orca_predictive_max_distance', 6.0)
         self.declare_parameter('apf_orca_predictive_angular_max', 0.10)
         self.declare_parameter('apf_orca_predictive_speed_cut_max', 0.06)
-        self.declare_parameter('apf_orca_side_effectiveness_enabled', False)  # P3: 已废弃，保留参数兼容性
-        self.declare_parameter('apf_orca_side_effectiveness_window', 3.0)
-        self.declare_parameter('apf_orca_side_effectiveness_min_sep_gain', 0.25)
-        self.declare_parameter('apf_orca_side_effectiveness_min_cpa_gain', 0.20)
-        self.declare_parameter('apf_orca_side_switch_cooldown', 2.0)
-        self.declare_parameter('apf_orca_side_switch_max_retries', 1)
-        self.declare_parameter('apf_orca_side_switch_turn_boost', 0.08)
         self.declare_parameter('apf_orca_cpa_enabled', True)
         self.declare_parameter('apf_orca_cpa_distance_threshold', 1.2)
         self.declare_parameter('apf_orca_tcpa_threshold', 6.0)
@@ -256,8 +249,11 @@ class VelocityControllerNode(Node):
         self.declare_parameter('apf_orca_encounter_guidance_distance', 3.0)
         self.declare_parameter('apf_orca_encounter_bias_angular', 0.08)
         self.declare_parameter('apf_orca_encounter_head_on_deg', 20.0)
+        self.declare_parameter('apf_orca_encounter_head_on_bearing_deg', 15.0)
+        self.declare_parameter('apf_orca_encounter_head_on_course_deg', 165.0)
         self.declare_parameter('apf_orca_encounter_crossing_deg', 112.5)
         self.declare_parameter('apf_orca_encounter_overtake_deg', 22.5)
+        self.declare_parameter('apf_orca_encounter_hold_time', 0.6)
         # P2: ORCA 迟滞防振荡 (防止 MPC↔ORCA 快速切换)
         self.declare_parameter('apf_orca_hysteresis_margin', 1.5)      # 退出 ORCA 需额外超出的距离余量 (m)
         self.declare_parameter('apf_orca_min_hold_time', 5.0)          # ORCA 最小保持时间 (秒)
@@ -375,27 +371,6 @@ class VelocityControllerNode(Node):
         self._apf_orca_predictive_speed_cut_max = float(
             self.get_parameter('apf_orca_predictive_speed_cut_max').value or 0.06
         )
-        self._apf_orca_side_effectiveness_enabled = bool(
-            self.get_parameter('apf_orca_side_effectiveness_enabled').value
-        )
-        self._apf_orca_side_effectiveness_window = float(
-            self.get_parameter('apf_orca_side_effectiveness_window').value or 3.0
-        )
-        self._apf_orca_side_effectiveness_min_sep_gain = float(
-            self.get_parameter('apf_orca_side_effectiveness_min_sep_gain').value or 0.25
-        )
-        self._apf_orca_side_effectiveness_min_cpa_gain = float(
-            self.get_parameter('apf_orca_side_effectiveness_min_cpa_gain').value or 0.20
-        )
-        self._apf_orca_side_switch_cooldown = float(
-            self.get_parameter('apf_orca_side_switch_cooldown').value or 2.0
-        )
-        self._apf_orca_side_switch_max_retries = int(
-            self.get_parameter('apf_orca_side_switch_max_retries').value or 1
-        )
-        self._apf_orca_side_switch_turn_boost = float(
-            self.get_parameter('apf_orca_side_switch_turn_boost').value or 0.08
-        )
         self._apf_orca_cpa_enabled = bool(self.get_parameter('apf_orca_cpa_enabled').value)
         self._apf_orca_cpa_distance_threshold = float(self.get_parameter('apf_orca_cpa_distance_threshold').value or 1.2)
         self._apf_orca_tcpa_threshold = float(self.get_parameter('apf_orca_tcpa_threshold').value or 6.0)
@@ -430,11 +405,20 @@ class VelocityControllerNode(Node):
         self._apf_orca_encounter_head_on_deg = float(
             self.get_parameter('apf_orca_encounter_head_on_deg').value or 20.0
         )
+        self._apf_orca_encounter_head_on_bearing_deg = float(
+            self.get_parameter('apf_orca_encounter_head_on_bearing_deg').value or 15.0
+        )
+        self._apf_orca_encounter_head_on_course_deg = float(
+            self.get_parameter('apf_orca_encounter_head_on_course_deg').value or 165.0
+        )
         self._apf_orca_encounter_crossing_deg = float(
             self.get_parameter('apf_orca_encounter_crossing_deg').value or 112.5
         )
         self._apf_orca_encounter_overtake_deg = float(
             self.get_parameter('apf_orca_encounter_overtake_deg').value or 22.5
+        )
+        self._apf_orca_encounter_hold_time = float(
+            self.get_parameter('apf_orca_encounter_hold_time').value or 0.6
         )
         # P2: ORCA 迟滞
         self._apf_orca_hysteresis_margin = float(
@@ -639,13 +623,6 @@ class VelocityControllerNode(Node):
         self._orca_close_enter_time: float = 0.0
         self._orca_coupling_enter_time: float = 0.0
         self._orca_coupling_active: bool = False
-        self._orca_side_eval_active: bool = False
-        self._orca_side_eval_start_time: float = 0.0
-        self._orca_side_eval_side: int = 0
-        self._orca_side_eval_start_dist: float = 0.0
-        self._orca_side_eval_start_cpa: float = 0.0
-        self._orca_side_switch_retry_count: int = 0
-        self._orca_side_switch_cooldown_until: float = 0.0
         # 制动迟滞状态: 避免通信延迟导致的交替制动振荡
         self._orca_soft_brake_active: bool = False
         self._orca_hard_brake_active: bool = False
@@ -655,6 +632,22 @@ class VelocityControllerNode(Node):
         self._orca_smooth_initialized: bool = False
         # 安全锁: 诸船距离记录，近距时禁止 ORCA 退出
         self._orca_last_closest_distance: float = float('inf')
+        # v14 新增: ORCA 调试状态 (每 tick 更新，供 debug_msg 发布)
+        self._orca_debug_closest_distance: float = -1.0
+        self._orca_debug_encounter_type: str = 'none'
+        self._orca_debug_encounter_type_raw: str = 'none'
+        self._orca_debug_commit_side: int = 0
+        self._orca_debug_linear_correction: float = 0.0
+        self._orca_debug_angular_correction: float = 0.0
+        self._orca_debug_neighbor_count: int = 0
+        self._orca_debug_rel_bearing_deg: float = -1.0
+        self._orca_debug_rel_course_deg: float = -1.0
+        self._orca_debug_rel_speed: float = -1.0
+        self._orca_debug_tcpa: float = -1.0
+        self._orca_debug_dcpa: float = -1.0
+        self._orca_encounter_type_smoothed: str = 'none'
+        self._orca_encounter_candidate: Optional[str] = None
+        self._orca_encounter_candidate_since: float = 0.0
         self._apf_neighbor_subs = []
         self._apf_fleet_sub = None
         self._recovery_enabled: bool = True  # 启用自动恢复
@@ -1188,6 +1181,25 @@ class VelocityControllerNode(Node):
                 self.get_logger().debug(
                     f'收到到达通知 [ID={goal_id}], message="{message}", 忽略'
                 )
+        else:
+            # ===== 失败结果处理 (超时/取消/异常) =====
+            # navigate_to_point_node 发送 success=False 表示导航失败:
+            #   error_code=1: 导航超时
+            #   error_code=2: 暂停
+            #   error_code=3: 停止
+            # 必须清除 _control_active，否则 velocity_controller 会永远停留在
+            # "导航中 vx=0.00" 的僵尸状态 (tracker 已 goal_reached 但 _control_active 未清除)
+            error_code = getattr(msg, 'error_code', 0)
+            is_nav_active = self._navigation_state in (NavigationState.ACTIVE, NavigationState.PAUSED)
+            
+            if is_nav_active:
+                self.get_logger().warn(
+                    f'⚠️ 收到导航失败通知 [ID={goal_id}], error_code={error_code}, '
+                    f'message="{message}", 停止追踪 (当前追踪ID={self._current_goal_id})')
+                self._end_navigation(NavigationState.FAILED, f"导航失败: {message}")
+            else:
+                self.get_logger().debug(
+                    f'收到导航失败通知 [ID={goal_id}], 但当前非导航状态({self._navigation_state.name}), 忽略')
     
     def _cancel_navigation_callback(self, msg: Bool):
         """
@@ -1790,6 +1802,77 @@ class VelocityControllerNode(Node):
             angle += 2.0 * math.pi
         return angle
 
+    def _smooth_encounter_type(self, encounter_type: str, now_sec: float) -> str:
+        if encounter_type == self._orca_encounter_type_smoothed:
+            self._orca_encounter_candidate = None
+            self._orca_encounter_candidate_since = 0.0
+            return encounter_type
+
+        if encounter_type != self._orca_encounter_candidate:
+            self._orca_encounter_candidate = encounter_type
+            self._orca_encounter_candidate_since = now_sec
+            return self._orca_encounter_type_smoothed
+
+        hold_time = max(0.0, self._apf_orca_encounter_hold_time)
+        if now_sec - self._orca_encounter_candidate_since >= hold_time:
+            self._orca_encounter_type_smoothed = encounter_type
+            self._orca_encounter_candidate = None
+            self._orca_encounter_candidate_since = 0.0
+        return self._orca_encounter_type_smoothed
+
+    def _compute_encounter_geometry(
+        self,
+        rx: float,
+        ry: float,
+        neighbor_vx: float,
+        neighbor_vy: float,
+        yaw: float,
+    ) -> Tuple[float, float, float, float, float]:
+        if self.current_pose is None:
+            return -1.0, -1.0, -1.0, -1.0, -1.0
+
+        own_to_neighbor_x = -rx
+        own_to_neighbor_y = -ry
+        rel_body_x = math.cos(yaw) * own_to_neighbor_x + math.sin(yaw) * own_to_neighbor_y
+        rel_body_y = -math.sin(yaw) * own_to_neighbor_x + math.cos(yaw) * own_to_neighbor_y
+        bearing = math.atan2(rel_body_y, rel_body_x)
+
+        own_speed = math.hypot(self._current_vx, self._current_vy)
+        nei_speed = math.hypot(neighbor_vx, neighbor_vy)
+        own_course = math.atan2(self._current_vy, self._current_vx) if own_speed > 0.05 else yaw
+        if nei_speed > 0.05:
+            nei_course = math.atan2(neighbor_vy, neighbor_vx)
+        else:
+            nei_course = math.atan2(-ry, -rx)
+
+        rel_course = self._wrap_angle(nei_course - own_course)
+        rel_speed = math.hypot(self._current_vx - neighbor_vx, self._current_vy - neighbor_vy)
+
+        rvx = self._current_vx - neighbor_vx
+        rvy = self._current_vy - neighbor_vy
+        v2 = rvx * rvx + rvy * rvy
+        if v2 < 1e-6:
+            tcpa = -1.0
+            dcpa = math.hypot(rx, ry)
+        else:
+            tcpa_raw = - (rx * rvx + ry * rvy) / v2
+            if tcpa_raw < 0.0:
+                tcpa = -1.0
+                dcpa = math.hypot(rx, ry)
+            else:
+                cpa_rx = rx + rvx * tcpa_raw
+                cpa_ry = ry + rvy * tcpa_raw
+                tcpa = tcpa_raw
+                dcpa = math.hypot(cpa_rx, cpa_ry)
+
+        return (
+            math.degrees(bearing),
+            math.degrees(rel_course),
+            rel_speed,
+            tcpa,
+            dcpa,
+        )
+
     def _classify_encounter_and_side(
         self,
         rx: float,
@@ -1821,13 +1904,14 @@ class VelocityControllerNode(Node):
         rel_course = abs(self._wrap_angle(nei_course - own_course))
 
         head_on_rad = math.radians(max(5.0, self._apf_orca_encounter_head_on_deg))
+        head_on_bearing_rad = math.radians(max(5.0, self._apf_orca_encounter_head_on_bearing_deg))
+        head_on_course_rad = math.radians(max(120.0, self._apf_orca_encounter_head_on_course_deg))
         crossing_rad = math.radians(max(20.0, self._apf_orca_encounter_crossing_deg))
         overtaking_rad = math.radians(max(5.0, self._apf_orca_encounter_overtake_deg))
 
         is_ahead = abs(bearing) <= crossing_rad
-        # 放宽 head_on 判据: 航向差 > 135° 即视为对遇(原为 180°±20°)
-        # 避免 ~147° 的近似对遇被误判为交叉导致双方都成直航权船
-        is_head_on = is_ahead and rel_course > math.radians(135.0)
+        # 更严格 head_on 判据: 航向差接近 180° 且在前方扇区
+        is_head_on = abs(bearing) <= head_on_bearing_rad and rel_course >= head_on_course_rad
         is_overtaking = abs(bearing) >= (math.pi - overtaking_rad)
 
         if is_head_on:
@@ -2095,19 +2179,35 @@ class VelocityControllerNode(Node):
         linear_correction = v_body_x - cmd.linear_x
         angular_correction = self._apf_lateral_to_yaw_gain * v_body_y
 
+        encounter_type_raw = 'other'
         encounter_type = 'other'
         encounter_side = 0
         smart_side = 0
         is_stand_on = False                # P1: 标记直航权状态
         guidance_distance = max(0.1, self._apf_orca_encounter_guidance_distance)
-        if self._apf_orca_encounter_rule_enabled and closest_distance <= guidance_distance:
-            encounter_type, encounter_side = self._classify_encounter_and_side(
+        rel_bearing_deg = -1.0
+        rel_course_deg = -1.0
+        rel_speed = -1.0
+        rel_tcpa = -1.0
+        rel_dcpa = -1.0
+        if closest_distance < float('inf'):
+            rel_bearing_deg, rel_course_deg, rel_speed, rel_tcpa, rel_dcpa = self._compute_encounter_geometry(
                 closest_rx,
                 closest_ry,
                 closest_neighbor_vx,
                 closest_neighbor_vy,
                 yaw,
             )
+
+        if self._apf_orca_encounter_rule_enabled and closest_distance <= guidance_distance:
+            encounter_type_raw, encounter_side = self._classify_encounter_and_side(
+                closest_rx,
+                closest_ry,
+                closest_neighbor_vx,
+                closest_neighbor_vy,
+                yaw,
+            )
+            encounter_type = self._smooth_encounter_type(encounter_type_raw, now_sec)
             # P1: COLREGS 强化 — 对遇时加强右转偏置
             if encounter_type == 'head_on':
                 head_on_bias = max(0.0, self._apf_orca_colregs_head_on_bias)
@@ -2486,6 +2586,25 @@ class VelocityControllerNode(Node):
                     linear_y=corrected.linear_y,
                     angular_z=corrected.angular_z,
                 )
+
+        # --- 更新 ORCA 调试状态 (供 MpcDebug 发布) ---
+        self._orca_debug_closest_distance = closest_distance
+        self._orca_debug_encounter_type = encounter_type if isinstance(encounter_type, str) else 'none'
+        self._orca_debug_encounter_type_raw = encounter_type_raw if isinstance(encounter_type_raw, str) else 'none'
+        self._orca_debug_commit_side = commit_side
+        self._orca_debug_linear_correction = linear_correction
+        self._orca_debug_angular_correction = angular_correction
+        self._orca_debug_rel_bearing_deg = rel_bearing_deg
+        self._orca_debug_rel_course_deg = rel_course_deg
+        self._orca_debug_rel_speed = rel_speed
+        self._orca_debug_tcpa = rel_tcpa
+        self._orca_debug_dcpa = rel_dcpa
+        # 统计有效邻居数
+        valid_count = 0
+        for _, (_, _, _, _, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec <= self._apf_neighbor_timeout:
+                valid_count += 1
+        self._orca_debug_neighbor_count = valid_count
 
         # --- 记录 ORCA 触发日志 ---
         if not hasattr(self, '_last_orca_log_time'):
@@ -3000,6 +3119,22 @@ class VelocityControllerNode(Node):
                 debug_msg.current_tau_omega = float(self._current_tau_omega)
                 debug_msg.ampc_enabled = False
             
+            # v14 新增: ORCA/APF 避障状态
+            debug_msg.orca_active = self._orca_active
+            debug_msg.orca_closest_distance = self._orca_debug_closest_distance
+            debug_msg.orca_encounter_type = self._orca_debug_encounter_type
+            debug_msg.orca_encounter_type_raw = self._orca_debug_encounter_type_raw
+            debug_msg.orca_commit_side = int(self._orca_debug_commit_side)
+            debug_msg.orca_linear_correction = self._orca_debug_linear_correction
+            debug_msg.orca_angular_correction = self._orca_debug_angular_correction
+            debug_msg.orca_hard_brake_active = self._orca_hard_brake_active
+            debug_msg.apf_neighbor_count = int(self._orca_debug_neighbor_count)
+            debug_msg.orca_rel_bearing_deg = float(self._orca_debug_rel_bearing_deg)
+            debug_msg.orca_rel_course_deg = float(self._orca_debug_rel_course_deg)
+            debug_msg.orca_rel_speed = float(self._orca_debug_rel_speed)
+            debug_msg.orca_tcpa = float(self._orca_debug_tcpa)
+            debug_msg.orca_dcpa = float(self._orca_debug_dcpa)
+
             self.debug_pub.publish(debug_msg)
         except Exception as e:
             # 调试信息发布失败不影响主循环

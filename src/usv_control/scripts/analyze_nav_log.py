@@ -31,9 +31,11 @@ USV 导航日志分析脚本 (v2)
     8. v8_ampc_analysis.png - V8 AMPC 在线辨识 (v8+)
     9. dashboard.png        - 综合仪表盘 (一页总览)
     10. per_goal_stats.png  - 每航点统计柱状图
+    11. orca_analysis.png   - ORCA/APF 避障分析 (v14+)
 
 作者: chenhangwei
 日期: 2026-02-10
+Updated: 2026-02-27 - v14 新增 ORCA/APF 避障分析和 nav_mode 分析
 """
 
 import sys
@@ -423,6 +425,12 @@ def analyze_statistics(data: list, header_info: dict = None):
     # 每航点统计
     _print_per_goal_stats(data)
     
+    # v14 ORCA/APF 避障统计
+    _print_orca_stats(data)
+    
+    # v14 导航模式统计
+    _print_nav_mode_stats(data)
+    
     # 质量评分总结
     _print_quality_score(data)
 
@@ -528,6 +536,262 @@ def _print_quality_score(data: list):
     
     total_grade = "优秀" if total >= 80 else "良好" if total >= 60 else "一般" if total >= 40 else "较差"
     print(f"\n   📊 综合评分: {total:.0f}/100 → 【{total_grade}】")
+
+
+def _print_orca_stats(data: list):
+    """打印 ORCA/APF 避障统计 (v14+)"""
+    if 'orca_active' not in data[0]:
+        return
+
+    orca_active_samples = [d for d in data if d.get('orca_active') == 1]
+    total = len(data)
+    active_count = len(orca_active_samples)
+
+    if active_count == 0:
+        print(f"\n{'='*60}")
+        print("🛡️ ORCA/APF 避障统计")
+        print("=" * 60)
+        print(f"   ORCA 未触发 (0/{total} = 0%)")
+        return
+
+    print(f"\n{'='*60}")
+    print("🛡️ ORCA/APF 避障统计")
+    print("=" * 60)
+    print(f"\n   ORCA 激活: {active_count}/{total} 次 ({active_count/total*100:.1f}%)")
+
+    # 最近距离统计
+    distances = [d.get('orca_closest_distance', -1) for d in orca_active_samples
+                 if isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
+    if distances:
+        print(f"   最近邻居距离: 最小={min(distances):.2f}m, 平均={sum(distances)/len(distances):.2f}m")
+
+    # 计算 ORCA 持续时间段
+    duration_total = 0.0
+    episode_count = 0
+    i = 0
+    while i < len(data):
+        if data[i].get('orca_active') == 1:
+            episode_start = data[i]['timestamp']
+            j = i
+            while j < len(data) and data[j].get('orca_active') == 1:
+                j += 1
+            episode_end = data[j - 1]['timestamp']
+            duration_total += (episode_end - episode_start)
+            episode_count += 1
+            i = j
+        else:
+            i += 1
+    if episode_count > 0:
+        total_time = data[-1]['timestamp'] - data[0]['timestamp']
+        print(f"   激活段数: {episode_count} 段, 总时长={duration_total:.1f}s ({duration_total/total_time*100:.1f}%)")
+        print(f"   平均每段: {duration_total/episode_count:.1f}s")
+
+    # 遭遇类型分布
+    encounters = {}
+    for d in orca_active_samples:
+        etype = d.get('orca_encounter_type', 'none')
+        if isinstance(etype, str) and etype != 'none' and etype != 'other':
+            encounters[etype] = encounters.get(etype, 0) + 1
+    if encounters:
+        print(f"\n   遭遇类型 (COLREGS):")
+        for etype, count in sorted(encounters.items(), key=lambda x: -x[1]):
+            print(f"   - {etype}: {count} ({count/active_count*100:.1f}%)")
+
+    # 选边统计
+    sides = [d.get('orca_commit_side', 0) for d in orca_active_samples
+             if isinstance(d.get('orca_commit_side'), (int, float)) and d['orca_commit_side'] != 0]
+    if sides:
+        left = sum(1 for s in sides if s > 0)
+        right = sum(1 for s in sides if s < 0)
+        print(f"\n   选边决策: 左转(+1)={left}, 右转(-1)={right}")
+
+    # 修正量统计
+    lin_corrs = [d.get('orca_linear_correction', 0) for d in orca_active_samples
+                 if isinstance(d.get('orca_linear_correction'), (int, float))]
+    ang_corrs = [d.get('orca_angular_correction', 0) for d in orca_active_samples
+                 if isinstance(d.get('orca_angular_correction'), (int, float))]
+    if lin_corrs:
+        print(f"\n   线速度修正: 均值={sum(lin_corrs)/len(lin_corrs):.4f} m/s, "
+              f"最大减速={min(lin_corrs):.4f} m/s")
+    if ang_corrs:
+        print(f"   角速度修正: 均值={sum(ang_corrs)/len(ang_corrs):.4f} rad/s, "
+              f"最大={max(abs(a) for a in ang_corrs):.4f} rad/s")
+
+    # 硬刹车统计
+    hard_brakes = [d for d in data if d.get('orca_hard_brake') == 1]
+    if hard_brakes:
+        print(f"\n   ⚠️ 硬刹车触发: {len(hard_brakes)} 次 ({len(hard_brakes)/total*100:.1f}%)")
+
+    # 邻居数统计
+    neighbor_counts = [d.get('apf_neighbor_count', 0) for d in orca_active_samples
+                       if isinstance(d.get('apf_neighbor_count'), (int, float))]
+    if neighbor_counts:
+        max_neighbors = max(neighbor_counts)
+        print(f"   最大同时邻居数: {max_neighbors}")
+
+
+def _print_nav_mode_stats(data: list):
+    """打印导航模式统计 (v14+)"""
+    if 'nav_mode' not in data[0]:
+        return
+    
+    mode_names = {0: 'async(异步)', 1: 'sync(同步)', 2: 'rotate(旋转)', 3: 'terminal(末端)'}
+    modes = {}
+    for d in data:
+        m = d.get('nav_mode')
+        if isinstance(m, (int, float)):
+            m = int(m)
+            modes[m] = modes.get(m, 0) + 1
+    
+    if not modes or (len(modes) == 1 and 0 in modes):
+        return  # 全部是 async(0)，不用特意显示
+    
+    total = len(data)
+    print(f"\n{'='*60}")
+    print("🔄 导航模式统计 (v14)")
+    print("=" * 60)
+    for m in sorted(modes.keys()):
+        name = mode_names.get(m, f'unknown({m})')
+        count = modes[m]
+        print(f"   {name}: {count} ({count/total*100:.1f}%)")
+
+    # 同步模式等待时间分析
+    if 1 in modes:
+        # 找同步模式的航点段，估算等待时间（HOLD期间的时长）
+        sync_goals = {}
+        for d in data:
+            if int(d.get('nav_mode', 0)) == 1 and isinstance(d.get('goal_id'), (int, float)):
+                gid = int(d['goal_id'])
+                if gid not in sync_goals:
+                    sync_goals[gid] = []
+                sync_goals[gid].append(d)
+        
+        if sync_goals:
+            print(f"\n   同步航点详情:")
+            for gid in sorted(sync_goals.keys()):
+                gdata = sync_goals[gid]
+                hold_time = sum(1 for d in gdata if d.get('flight_mode') == 'HOLD') * 0.1  # 10Hz采样
+                total_time = gdata[-1]['timestamp'] - gdata[0]['timestamp'] if len(gdata) > 1 else 0
+                print(f"   - Goal {gid}: 总时长={total_time:.1f}s, HOLD等待={hold_time:.1f}s")
+
+
+def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
+    """绘制 ORCA/APF 避障分析图 (v14+)"""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    if 'orca_active' not in data[0]:
+        return
+    
+    # 检查是否有 ORCA 触发
+    any_active = any(d.get('orca_active') == 1 for d in data)
+    if not any_active:
+        return
+    
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    
+    fig, axes = plt.subplots(5, 1, figsize=(14, 16), sharex=True)
+    fig.suptitle(f'ORCA/APF Avoidance Analysis - {usv_id}', fontsize=14, fontweight='bold')
+    
+    # 1. 最近邻居距离 + ORCA 激活状态背景
+    ax = axes[0]
+    orca_active = [d.get('orca_active', 0) for d in data]
+    closest_dist = [d.get('orca_closest_distance', -1) for d in data]
+    # 将 -1 替换为 NaN 以避免绘制
+    closest_dist_plot = [d if d > 0 else float('nan') for d in closest_dist]
+    
+    # ORCA 激活区域背景着色
+    i = 0
+    while i < len(data):
+        if orca_active[i] == 1:
+            j = i
+            while j < len(data) and orca_active[j] == 1:
+                j += 1
+            ax.axvspan(t[i], t[min(j-1, len(t)-1)], alpha=0.15, color='red', label='ORCA active' if i == 0 or not any(orca_active[k] == 1 for k in range(i)) else '')
+            i = j
+        else:
+            i += 1
+    
+    ax.plot(t, closest_dist_plot, 'b-', linewidth=1.2, label='Closest Distance')
+    if 'apf_orca_min_separation' in str(header_info):
+        ax.axhline(y=1.0, color='red', linestyle='--', linewidth=0.8, label='Min Separation')
+    ax.axhline(y=4.0, color='orange', linestyle=':', linewidth=0.8, label='Influence Distance')
+    ax.set_ylabel('Distance (m)')
+    ax.set_title('Nearest Neighbor Distance')
+    ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3)
+    
+    # 2. 遭遇类型 (分类散点)
+    ax = axes[1]
+    encounter_map = {'head_on': 3, 'crossing': 2, 'overtaking': 1, 'other': 0.5, 'none': 0}
+    encounter_colors = {'head_on': 'red', 'crossing': 'orange', 'overtaking': 'blue', 'other': 'gray', 'none': 'lightgray'}
+    
+    for etype, yval in encounter_map.items():
+        indices = [idx for idx, d in enumerate(data) if d.get('orca_encounter_type') == etype and d.get('orca_active') == 1]
+        if indices:
+            ax.scatter([t[i] for i in indices], [yval] * len(indices),
+                      c=encounter_colors.get(etype, 'gray'), s=3, alpha=0.6, label=etype)
+    
+    ax.set_ylabel('Encounter Type')
+    ax.set_yticks(list(encounter_map.values()))
+    ax.set_yticklabels(list(encounter_map.keys()), fontsize=8)
+    ax.set_title('COLREGS Encounter Classification')
+    ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3, axis='x')
+    
+    # 3. 选边方向 + 硬刹车标记
+    ax = axes[2]
+    commit_side = [d.get('orca_commit_side', 0) for d in data]
+    hard_brake = [d.get('orca_hard_brake', 0) for d in data]
+    
+    # 只绘制 ORCA 激活时的选边
+    active_t = [t[i] for i in range(len(data)) if orca_active[i] == 1]
+    active_side = [commit_side[i] for i in range(len(data)) if orca_active[i] == 1]
+    if active_t:
+        colors = ['green' if s > 0 else 'red' if s < 0 else 'gray' for s in active_side]
+        ax.scatter(active_t, active_side, c=colors, s=4, alpha=0.5)
+    
+    # 硬刹车标记
+    brake_t = [t[i] for i in range(len(data)) if hard_brake[i] == 1]
+    if brake_t:
+        ax.scatter(brake_t, [0] * len(brake_t), c='black', s=20, marker='x', zorder=5, label='Hard Brake')
+    
+    ax.set_ylabel('Side')
+    ax.set_yticks([-1, 0, 1])
+    ax.set_yticklabels(['Right(-1)', 'None', 'Left(+1)'])
+    ax.set_title('Commit Side & Hard Brake Events')
+    ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3)
+    
+    # 4. 线速度修正量
+    ax = axes[3]
+    lin_corr = [d.get('orca_linear_correction', 0) for d in data]
+    ang_corr = [d.get('orca_angular_correction', 0) for d in data]
+    
+    ax.plot(t, lin_corr, 'r-', linewidth=0.8, alpha=0.8, label='Linear Correction (m/s)')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.fill_between(t, lin_corr, alpha=0.2, color='red')
+    ax.set_ylabel('Linear Corr (m/s)')
+    ax.set_title('Speed Correction (negative = deceleration)')
+    ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3)
+    
+    # 5. 角速度修正量
+    ax = axes[4]
+    ax.plot(t, ang_corr, 'b-', linewidth=0.8, alpha=0.8, label='Angular Correction (rad/s)')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.fill_between(t, ang_corr, alpha=0.2, color='blue')
+    ax.set_ylabel('Angular Corr (rad/s)')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('Heading Correction')
+    ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.savefig(output_path / 'orca_analysis.png', dpi=150)
+    plt.close()
+    print(f"   📈 ORCA 避障分析图: {output_path / 'orca_analysis.png'}")
 
 
 def plot_errors(data: list, output_path: Path):
@@ -665,6 +929,7 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
             plot_errors(data, output_path)
             plot_v6_adaptive_tau(data, output_path, header_info)
             plot_v8_ampc(data, output_path, header_info)
+            plot_orca_analysis(data, output_path, header_info)
             plot_dashboard(data, output_path, header_info)
             plot_per_goal_stats(data, output_path, header_info)
             print(f"\n✅ 图表已保存到: {output_path}")
@@ -1282,6 +1547,17 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     total = s_cte * 0.4 + s_he * 0.4 + s_mpc * 0.1 + s_spd * 0.1
     grade = "A+" if total >= 80 else "B" if total >= 60 else "C" if total >= 40 else "D"
     
+    # ORCA 统计
+    orca_active_count = sum(1 for d in data if d.get('orca_active') == 1)
+    orca_pct = orca_active_count / len(data) * 100 if data else 0
+    orca_min_dist = -1.0
+    if orca_active_count > 0:
+        orca_dists = [d.get('orca_closest_distance', -1) for d in data
+                      if d.get('orca_active') == 1 and isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
+        orca_min_dist = min(orca_dists) if orca_dists else -1.0
+
+    orca_line = f"ORCA:      {orca_pct:.0f}% (min {orca_min_dist:.2f}m)" if orca_active_count > 0 else "ORCA:      off"
+
     stats_text = (
         f"━━━ Summary ━━━\n"
         f"Duration:  {duration:.1f}s ({duration/60:.1f}min)\n"
@@ -1293,6 +1569,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"Avg CTE:   {avg_cte:.4f} m\n"
         f"Avg HdgErr:{avg_he:.1f}°\n"
         f"MPC Time:  {avg_mpc:.1f} ms\n"
+        f"{orca_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
     )

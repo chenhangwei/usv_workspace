@@ -348,6 +348,9 @@ class UsvManager:
                 'gps_satellites_visible': msg.gps_satellites_visible,
                 'gps_eph': msg.gps_eph,
                 'gps_epv': msg.gps_epv,
+                'wifi_rssi_dbm': msg.wifi_rssi_dbm,
+                'wifi_link_quality': msg.wifi_link_quality,
+                'wifi_interface': msg.wifi_interface,
             }
             
             # 补充附加状态信息（预检&传感器状态等）

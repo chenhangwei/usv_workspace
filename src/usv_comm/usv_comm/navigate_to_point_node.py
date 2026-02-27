@@ -131,6 +131,24 @@ class NavigateToPointNode(Node):
         self._divergence_monitoring: bool = False         # 是否处于偏离监控状态
         self._divergence_last_distance: float = float('inf')  # 上次检测的距离
         
+        # ==================== 进度感知超时 (Progress-Aware Timeout) ====================
+        # 如果 USV 在持续接近目标点，超时计时器会重置，避免远距离航点因固定超时而失败
+        self.declare_parameter('nav_timeout_progress_check_interval', 30.0)  # 进度检查间隔(秒)
+        self.declare_parameter('nav_timeout_progress_min_decrease', 0.5)    # 判定为有进度的最小距离减少(米)
+        self.declare_parameter('nav_timeout_max_multiplier', 5.0)           # 硬性最大超时倍率
+        
+        self._timeout_progress_check_interval: float = self.get_parameter(
+            'nav_timeout_progress_check_interval').value
+        self._timeout_progress_min_decrease: float = self.get_parameter(
+            'nav_timeout_progress_min_decrease').value
+        self._timeout_max_multiplier: float = self.get_parameter(
+            'nav_timeout_max_multiplier').value
+        
+        # 进度追踪状态
+        self._timeout_original_start_time = None       # 绝对起始时间 (不会因进度重置)
+        self._timeout_last_progress_time = None        # 上次进度检查时间
+        self._timeout_progress_last_distance = None    # 上次进度检查时的距离
+        
         # ==================== 航点队列 ====================
         self.waypoint_queue: deque = deque(maxlen=self.waypoint_queue_size)
         
@@ -589,6 +607,11 @@ class NavigateToPointNode(Node):
         self.goal_start_time = self.get_clock().now()
         self._last_dedup_goal_id = None
         
+        # 重置进度感知超时状态
+        self._timeout_original_start_time = None
+        self._timeout_last_progress_time = None
+        self._timeout_progress_last_distance = None
+        
         # 转发目标到控制节点
         self.target_pub.publish(msg)
         self.get_logger().info(f'✓ 目标已转发 [ID={msg.goal_id}]')
@@ -1004,6 +1027,11 @@ class NavigateToPointNode(Node):
         # 重置偏离检测状态
         self._reset_divergence_monitor()
         
+        # 重置进度感知超时状态
+        self._timeout_original_start_time = None
+        self._timeout_last_progress_time = None
+        self._timeout_progress_last_distance = None
+        
         # 设置新目标
         self.current_goal = next_goal
         self.current_goal_id = next_goal.goal_id
@@ -1145,22 +1173,77 @@ class NavigateToPointNode(Node):
             self._clear_current_goal()
 
     def _check_timeout(self, distance: float):
-        """检查是否超时"""
-        if self.goal_start_time is None:
-            self.goal_start_time = self.get_clock().now()
+        """检查是否超时 - 支持进度感知的智能超时
         
-        elapsed = (self.get_clock().now() - self.goal_start_time).nanoseconds / 1e9
+        如果 USV 在持续接近目标点(有进度)，超时计时器会重置，
+        避免远距离航点因固定超时而失败。
+        同时设置硬性最大时间限制(timeout * max_multiplier)，防止无限导航。
+        """
+        now = self.get_clock().now()
+        
+        if self.goal_start_time is None:
+            self.goal_start_time = now
+        
+        # 初始化进度追踪
+        if self._timeout_original_start_time is None:
+            self._timeout_original_start_time = now
+            self._timeout_last_progress_time = now
+            self._timeout_progress_last_distance = distance
+        
+        elapsed = (now - self.goal_start_time).nanoseconds / 1e9
+        total_elapsed = (now - self._timeout_original_start_time).nanoseconds / 1e9
+        
+        # 定期检查进度
+        progress_check_elapsed = (now - self._timeout_last_progress_time).nanoseconds / 1e9
+        if progress_check_elapsed >= self._timeout_progress_check_interval:
+            distance_decrease = self._timeout_progress_last_distance - distance
+            if distance_decrease >= self._timeout_progress_min_decrease:
+                # USV 正在接近目标 → 重置超时计时器
+                self.get_logger().info(
+                    f'🔄 导航有进度: 距离减少 {distance_decrease:.2f}m '
+                    f'({self._timeout_progress_last_distance:.1f}→{distance:.1f}m), '
+                    f'超时计时器已重置 [ID={self.current_goal_id}], '
+                    f'总耗时={total_elapsed:.0f}s')
+                self.goal_start_time = now
+                elapsed = 0.0
+            else:
+                self.get_logger().info(
+                    f'⚠️ 导航无明显进度: 距离变化={distance_decrease:.2f}m '
+                    f'(需>{self._timeout_progress_min_decrease:.1f}m), '
+                    f'剩余超时={self.current_goal.timeout - elapsed:.0f}s '
+                    f'[ID={self.current_goal_id}]')
+            # 更新检查点
+            self._timeout_last_progress_time = now
+            self._timeout_progress_last_distance = distance
+        
+        # 硬性最大时间限制
+        hard_max = self.current_goal.timeout * self._timeout_max_multiplier
+        
         if elapsed > self.current_goal.timeout:
+            # 超时且无进度
             self.get_logger().warn(
-                f'⏱️ 导航超时! [ID={self.current_goal_id}] '
-                f'耗时={elapsed:.1f}s, 剩余距离={distance:.2f}m')
-            
+                f'⏱️ 导航超时(无进度)! [ID={self.current_goal_id}] '
+                f'无进度耗时={elapsed:.1f}s, 总耗时={total_elapsed:.1f}s, '
+                f'剩余距离={distance:.2f}m')
             self._publish_result(
                 self.current_goal_id,
                 success=False,
                 error_code=1,
-                message=f'导航超时(耗时={elapsed:.1f}s, 距离={distance:.2f}m)')
-            
+                message=f'导航超时-无进度(无进度耗时={elapsed:.1f}s, '
+                        f'总耗时={total_elapsed:.1f}s, 距离={distance:.2f}m)')
+            self._clear_current_goal()
+        elif total_elapsed > hard_max:
+            # 绝对最大时间限制
+            self.get_logger().warn(
+                f'⏱️ 导航硬性超时! [ID={self.current_goal_id}] '
+                f'总耗时={total_elapsed:.1f}s > 最大限制={hard_max:.0f}s, '
+                f'剩余距离={distance:.2f}m')
+            self._publish_result(
+                self.current_goal_id,
+                success=False,
+                error_code=1,
+                message=f'导航硬性超时(总耗时={total_elapsed:.1f}s, '
+                        f'最大限制={hard_max:.0f}s, 距离={distance:.2f}m)')
             self._clear_current_goal()
 
     def _publish_feedback(self, distance: float, heading_error: float, estimated_time: float):
@@ -1239,6 +1322,11 @@ class NavigateToPointNode(Node):
         
         # 重置偏离检测状态
         self._reset_divergence_monitor()
+        
+        # 重置进度感知超时状态
+        self._timeout_original_start_time = None
+        self._timeout_last_progress_time = None
+        self._timeout_progress_last_distance = None
     
     def _check_idle_protection(self):
         """

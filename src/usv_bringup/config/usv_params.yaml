@@ -209,8 +209,8 @@ mavros:
     mpc_prediction_steps: 20                # 预测步数 N (dt=0.1s, N=20 -> 预测2.0秒)
     mpc_weight_pos: 10.0                    # Q_pos: 沿航线进度权重
     mpc_weight_heading: 3.0                 # Q_theta: 航向误差权重 (v12: 5→3, 不急于修正航向)
-    mpc_weight_steering: 60.0               # R_w: 角速度惩罚 (v13: 55→60, 配合τ_min提升)
-    mpc_weight_steering_rate: 100.0         # R_dw: 角加速度惩罚 (v13: 80→100, 极平滑角速度变化率)
+    mpc_weight_steering: 60.0               # R_w: 角速度惩罚 (v14: 全船统一)
+    mpc_weight_steering_rate: 120.0         # R_dw: 角加速度惩罚 (v14: 100→120, 全船统一, 极平滑角速度变化率)
     
     # v5 新增参数 (一阶惯性转向模型)
     mpc_tau_omega: 0.4                      # 转向时间常数 (秒) - 核心参数!
@@ -241,9 +241,9 @@ mavros:
     tau_speed_threshold_high: 0.50          # 高速阈值 (m/s)
     
     # ==================== 速度参数 ====================
-    cruise_speed: 0.35                      # 巡航速度（m/s）(v11: 0.4→0.35, 略降速配合更稳定行驶)
-    max_angular_velocity: 0.40              # 最大角速度（rad/s）(v13: 0.50→0.40, 配合高R_w+高τ_min不需要那么大范围)
-    min_speed: 0.25                         # 最小速度（m/s）(v10: 0.3→0.25, 允许更低速转弯)
+    cruise_speed: 0.30                      # 巡航速度（m/s）(v14: 0.35→0.30, 全船统一)
+    max_angular_velocity: 0.40              # 最大角速度（rad/s）(v14: 全船统一)
+    min_speed: 0.25                         # 最小速度（m/s）(v14: 全船统一, 允许更低速转弯)
     
     # ==================== 到达判断 ====================
     # ⚠️ 这两个参数与 navigate_to_point_node 的阈值通过话题自动同步
@@ -366,14 +366,6 @@ mavros:
     apf_orca_predictive_max_distance: 6.0   # 提前介入的最远距离（米）
     apf_orca_predictive_angular_max: 0.16   # 提前转向最大增量（rad/s）
     apf_orca_predictive_speed_cut_max: 0.10 # 提前减速最大增量（m/s）
-    # ---- 选边有效性与自动换边 ----
-    apf_orca_side_effectiveness_enabled: true     # 启用选边有效性判据与自动换边重试
-    apf_orca_side_effectiveness_window: 2.0       # 有效性评估窗口（秒）
-    apf_orca_side_effectiveness_min_sep_gain: 0.25  # 窗口内最小分离距离增益阈值（米）
-    apf_orca_side_effectiveness_min_cpa_gain: 0.20  # 窗口内最小 CPA 改善阈值（米）
-    apf_orca_side_switch_cooldown: 2.0            # 自动换边冷却时间（秒）
-    apf_orca_side_switch_max_retries: 2           # 每次近距接触最大自动换边次数
-    apf_orca_side_switch_turn_boost: 0.12         # 触发换边当拍附加转向增量（rad/s）
     # ---- 紧急增益 ----
     apf_orca_urgency_scale_max: 2.0         # 高风险时角速度放大上限
     apf_orca_linear_slowdown_max: 0.12      # 高风险时线速度附加减速上限（m/s）
@@ -447,38 +439,15 @@ mavros:
     max_play_count: 3                       # 最大播放次数
 
 # =============================================================================
-# USV_03 专用参数配置 (仅 MPC 动力学差异)
+# v14: 全船统一参数 — USV_03 专属配置已移除
 # 
-# v8 更新 (2026-02-09):
-# AMPC 启用后，不再需要逐船手工调参。
-# 以下参数全部回退到与 USV_02 相同的默认值。
-# AMPC 会在线辨识 USV_03 的真实 τ_omega，自动补偿硬件差异。
+# AMPC 在线辨识 τ_omega，自动补偿各船硬件差异，无需逐船调参。
+# 所有 USV 共享上方 /**/velocity_controller_node 的统一参数。
 #
-# 历史记录 (v7, 已废弃):
-# - 问题: USV_03 在 yaw_rate 模式下 S 形振荡(47%转向饱和)
-# - v7 方案: 手工增大 tau=1.2s, r_w=15, w_max=0.35 → 治标不治本
-# - v8 方案: AMPC 在线辨识 → 自动适应，无需单独调参
+# 历史记录:
+# - v7: USV_03 手工调参 (tau=1.2, r_w=15, w_max=0.35)
+# - v8~v13: USV_03 专属覆盖 (R_w=80, R_dw=120)
+# - v14: 统一参数，移除专属配置
 # =============================================================================
-/usv_03/velocity_controller_node:
-  ros__parameters:
-    # v10: USV_03 专属抗震荡参数
-    # 数据分析: USV_03 τ_est≈0.26s, CTE_std=0.22m, 饱和率62%, S形严重
-    # 策略: 在共享v10参数基础上进一步增大转向惩罚
-    ampc_enabled: true                      # AMPC 在线辨识
-    mpc_weight_steering: 80.0              # R_w: 65→80 (v13: USV_03专属, 配合τ_min=0.30强力压饱和)
-    mpc_weight_steering_rate: 120.0         # R_dw: 90→120 (v13: USV_03专属, 极平滑角速度变化率)
-    mpc_weight_cte: 3.0                     # Q_cte: 慢慢修正到航线即可
-    cruise_speed: 0.30                      # 巡航速度 (USV_03低速行驶)
-    
-    # v7 参数备份 (如果 AMPC 效果不理想，取消以下注释并设 ampc_enabled: false)
-    # mpc_tau_omega: 1.2
-    # adaptive_tau_enabled: true
-    # tau_omega_low_speed: 1.5
-    # tau_omega_high_speed: 1.0
-    # tau_speed_threshold_low: 0.15
-    # tau_speed_threshold_high: 0.35
-    # mpc_weight_steering: 15.0
-    # mpc_weight_steering_rate: 20.0
-    # mpc_weight_cte: 20.0
     # max_angular_velocity: 0.35
     # angular_velocity_filter: 0.5

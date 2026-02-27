@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
-# Copyright (c) 2026 chenhangwei
-# 
-# This file is part of the USV Workspace project.
-# 
-# Python setup script for usv_control.
+# Copyright (c) 2026 Chen Hangwei
 #
-# Author: chenhangwei
-# Date: 2026-01-26
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """
 无人船控制包(usv_control)的Python打包配置文件
 该文件定义了ROS 2包的元数据和安装要求
@@ -38,7 +43,7 @@ setup(
 包括路径规划、避障和自主导航等功能。
 This package implements control algorithms and modules for Unmanned Surface Vehicle systems,
 including path planning, obstacle avoidance, and autonomous navigation functionalities.""",
-    license='Apache License 2.0',
+    license='Apache-2.0',
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
@@ -60,6 +65,6 @@ including path planning, obstacle avoidance, and autonomous navigation functiona
         'Topic :: Scientific/Engineering :: Artificial Intelligence',
     ],
     keywords=['ROS', 'ROS2', 'USV', 'Unmanned Surface Vehicle', 'Control'],
-    python_requires='>=3.6',
+    python_requires='>=3.8',
     url='https://github.com/chenhangwei/usv_workspace',
 )

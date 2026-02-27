@@ -57,6 +57,11 @@ float32 cpu_percent              # CPU 使用率（0.0-100.0）
 float32 memory_percent           # 内存使用率（0.0-100.0）
 uint32 uptime_sec                # 系统运行时间（单位：秒）
 
+# ==================== WiFi 信号 ====================
+int8 wifi_rssi_dbm               # WiFi信号强度（单位：dBm，典型范围 -30 到 -90，-100 表示不可用）
+uint8 wifi_link_quality          # WiFi链路质量（0-100%，0 表示不可用）
+string wifi_interface             # WiFi接口名称（如 "wlan0"）
+
 # ==================== 数据质量指标 ====================
 float32 data_age_sec             # 数据年龄（单位：秒，距离最后更新的时间）
 bool data_valid                  # 数据有效性标志

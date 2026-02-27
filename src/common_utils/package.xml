@@ -1,21 +1,37 @@
 <?xml version="1.0"?>
 <!--
-  Copyright (c) 2026 chenhangwei
-  
-  This file is part of the USV Workspace project.
-  
-  ROS 2 package configuration for src.
-  
-  Author: chenhangwei
-  Date: 2026-01-26
+  Copyright (c) 2026 Chen Hangwei
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
 -->
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>common_utils</name>
-  <version>1.0.0</version>
-  <description>Common utility classes for USV project (parameter loading, resource management, thread safety)</description>
-  <maintainer email="chenhangwei@example.com">Chen Hangwei</maintainer>
+  <version>0.0.0</version>
+  <description>
+    Common utility classes for USV project.
+    This package provides shared utilities including parameter loading,
+    resource management, and thread-safe helpers used across the USV system.
+  </description>
+
+  <maintainer email="chenhangwei77777@hotmail.com">Chen Hangwei</maintainer>
   <license>Apache-2.0</license>
+
+  <url type="website">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="repository">https://github.com/chenhangwei/usv_workspace</url>
+  <url type="bugtracker">https://github.com/chenhangwei/usv_workspace/issues</url>
+
+  <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
 
   <depend>rclpy</depend>
 

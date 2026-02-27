@@ -20,6 +20,7 @@ from matplotlib.path import Path as MplPath
 from math import cos, sin, pi, atan2, sqrt, radians
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+from matplotlib.patches import Polygon as MplPolygon
 from matplotlib.transforms import offset_copy
 import numpy as np
 import time
@@ -98,7 +99,7 @@ class UsvPlotWindow(QWidget):
         self.ax.callbacks.connect('ylim_changed', self.on_limits_changed)
         
         self.artists = {
-            'usv_polys': {},    # {usv_id: PathCollection (scatter)}
+            'usv_polys': {},    # {usv_id: Polygon (数据坐标1:1真实尺寸)}
             'usv_labels': {},   # {usv_id: Text}
             'usv_trails': {},   # {usv_id: Line2D}
             'nav_lines': {},    # {usv_id: Line2D}
@@ -122,14 +123,23 @@ class UsvPlotWindow(QWidget):
         # Keep enough room for XY ticks/labels while maximizing plot area
         self.figure.subplots_adjust(left=0.09, right=0.995, bottom=0.10, top=0.95)
         
-        # 创建自定义USV箭头标记 (固定像素大小)
-        # 箭头形状: 指向右侧的船形
+        # 创建自定义USV船形顶点 (数据坐标, 1:1 真实尺寸)
+        # USV 实际尺寸: 长度 0.6m, 宽度 0.4m
+        # 船形比例: 船头尖端 + 后部凹陷, 指向 x 正方向 (yaw=0)
+        self._usv_length = 0.6   # 米
+        self._usv_width = 0.4    # 米
+        # 基础顶点 (以重心为原点, 单位: 米)
+        # 船头在 +x 方向, 左舷在 +y 方向
+        L, W = self._usv_length, self._usv_width
+        self._usv_base_verts = np.array([
+            [ L * 0.5,      0.0],         # 船头
+            [-L * 0.35,  W * 0.5],        # 左后角
+            [-L * 0.15,     0.0],         # 尾部凹陷
+            [-L * 0.35, -W * 0.5],        # 右后角
+        ])  # shape: (4, 2)
+        # 保留旧路径用于兼容 (如果其他地方引用)
         arrow_verts = [
-            (1.0, 0.0),    # 船头
-            (-0.8, 0.6),   # 左后角
-            (-0.4, 0.0),   # 中心凹陷
-            (-0.8, -0.6),  # 右后角
-            (1.0, 0.0),    # 闭合回船头
+            (1.0, 0.0), (-0.8, 0.6), (-0.4, 0.0), (-0.8, -0.6), (1.0, 0.0),
         ]
         arrow_codes = [MplPath.MOVETO, MplPath.LINETO, MplPath.LINETO, MplPath.LINETO, MplPath.CLOSEPOLY]
         self._usv_arrow_path = MplPath(arrow_verts, arrow_codes)
@@ -807,35 +817,31 @@ class UsvPlotWindow(QWidget):
             is_moving = speed > 0.1
             display_alpha = 1.0 if (not is_moving or blink_on) else 0.4
             
-            # --- 3. Update/Create USV Marker (固定像素大小，不随缩放变化) ---
-            # 创建旋转后的箭头标记
-            rotated_marker = MarkerStyle(self._usv_arrow_path).rotated(rad=yaw)
+            # --- 3. Update/Create USV Marker (数据坐标1:1真实尺寸, 随缩放等比变化) ---
+            # 计算旋转后的船形顶点 (数据坐标, 单位: 米)
+            cos_y, sin_y = cos(yaw), sin(yaw)
+            rot_matrix = np.array([[cos_y, -sin_y], [sin_y, cos_y]])
+            rotated_verts = self._usv_base_verts @ rot_matrix.T + np.array([x, y])
             
-            # 编队领队使用更大的标记 (s=700 vs s=400)
             is_leader = usv_id in self._formation_leader_ids
-            marker_size = 700 if is_leader else 400
             edge_color = '#FFD700' if is_leader else '#ecf0f1'  # 金色边框表示领队
             edge_width = 2.5 if is_leader else 1.2
             
             if usv_id not in self.artists['usv_polys']:
-                # 使用 scatter 创建固定像素大小的标记
-                scatter = self.ax.scatter([x], [y], s=marker_size, c=[color_hex], 
-                                         marker=rotated_marker, 
-                                         edgecolors=edge_color, linewidths=edge_width,
-                                         alpha=display_alpha, zorder=10)
-                self.artists['usv_polys'][usv_id] = scatter
+                # 使用 Polygon patch (数据坐标, 1:1 真实尺寸)
+                poly = MplPolygon(rotated_verts, closed=True,
+                                  facecolor=color_hex, edgecolor=edge_color,
+                                  linewidth=edge_width, alpha=display_alpha, zorder=10)
+                self.ax.add_patch(poly)
+                self.artists['usv_polys'][usv_id] = poly
             else:
-                scatter = self.artists['usv_polys'][usv_id]
-                # 更新位置和外观
-                scatter.set_offsets([[x, y]])
-                scatter.set_facecolors([color_hex])
-                scatter.set_alpha(display_alpha)
-                scatter.set_sizes([marker_size])
-                scatter.set_edgecolors([edge_color])
-                scatter.set_linewidths([edge_width])
-                # 更新旋转标记 - 需要重新设置 paths
-                scatter.set_paths([rotated_marker.get_path().transformed(rotated_marker.get_transform())])
-                scatter.set_visible(True)
+                poly = self.artists['usv_polys'][usv_id]
+                poly.set_xy(rotated_verts)
+                poly.set_facecolor(color_hex)
+                poly.set_alpha(display_alpha)
+                poly.set_edgecolor(edge_color)
+                poly.set_linewidth(edge_width)
+                poly.set_visible(True)
             
             # --- 3b. 领队外圈光环 ---
             if is_leader:

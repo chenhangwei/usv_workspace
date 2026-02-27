@@ -124,6 +124,22 @@ class LogCollectorNode(Node):
         self._ampc_rebuild_count = 0
         self._ampc_converged = False
         
+        # v14 新增: ORCA/APF 避障状态
+        self._orca_active = False
+        self._orca_closest_distance = -1.0
+        self._orca_encounter_type = 'none'
+        self._orca_encounter_type_raw = 'none'
+        self._orca_commit_side = 0
+        self._orca_linear_correction = 0.0
+        self._orca_angular_correction = 0.0
+        self._orca_hard_brake_active = False
+        self._apf_neighbor_count = 0
+        self._orca_rel_bearing_deg = -1.0
+        self._orca_rel_course_deg = -1.0
+        self._orca_rel_speed = -1.0
+        self._orca_tcpa = -1.0
+        self._orca_dcpa = -1.0
+        
         # 飞控状态 (用于记录模式切换)
         self._flight_mode = ''
         self._is_armed = False
@@ -267,7 +283,14 @@ class LogCollectorNode(Node):
                 'ampc_omega_measured', 'ampc_saturation_ratio',
                 'ampc_heading_noise', 'ampc_rebuild_count', 'ampc_converged',
                 # v14 新增字段
-                'nav_mode'
+                'nav_mode',
+                # v14 新增: ORCA/APF 避障字段
+                'orca_active', 'orca_closest_distance', 'orca_encounter_type',
+                'orca_encounter_type_raw',
+                'orca_commit_side', 'orca_linear_correction', 'orca_angular_correction',
+                'orca_hard_brake', 'apf_neighbor_count',
+                'orca_rel_bearing_deg', 'orca_rel_course_deg', 'orca_rel_speed',
+                'orca_tcpa', 'orca_dcpa'
             ])
             
             # 清空模式切换事件列表
@@ -437,6 +460,22 @@ class LogCollectorNode(Node):
         self._ampc_heading_noise = getattr(msg, 'ampc_heading_noise', 0.0)
         self._ampc_rebuild_count = getattr(msg, 'ampc_rebuild_count', 0)
         self._ampc_converged = getattr(msg, 'ampc_converged', False)
+        
+        # v14 新增: ORCA/APF 避障状态
+        self._orca_active = getattr(msg, 'orca_active', False)
+        self._orca_closest_distance = getattr(msg, 'orca_closest_distance', -1.0)
+        self._orca_encounter_type = getattr(msg, 'orca_encounter_type', 'none')
+        self._orca_encounter_type_raw = getattr(msg, 'orca_encounter_type_raw', 'none')
+        self._orca_commit_side = getattr(msg, 'orca_commit_side', 0)
+        self._orca_linear_correction = getattr(msg, 'orca_linear_correction', 0.0)
+        self._orca_angular_correction = getattr(msg, 'orca_angular_correction', 0.0)
+        self._orca_hard_brake_active = getattr(msg, 'orca_hard_brake_active', False)
+        self._apf_neighbor_count = getattr(msg, 'apf_neighbor_count', 0)
+        self._orca_rel_bearing_deg = getattr(msg, 'orca_rel_bearing_deg', -1.0)
+        self._orca_rel_course_deg = getattr(msg, 'orca_rel_course_deg', -1.0)
+        self._orca_rel_speed = getattr(msg, 'orca_rel_speed', -1.0)
+        self._orca_tcpa = getattr(msg, 'orca_tcpa', -1.0)
+        self._orca_dcpa = getattr(msg, 'orca_dcpa', -1.0)
         
         self._mpc_params_received = True
 
@@ -609,7 +648,22 @@ class LogCollectorNode(Node):
             f'{self._ampc_rebuild_count}',
             f'{1 if self._ampc_converged else 0}',
             # v14 新增字段
-            f'{self._nav_mode}'
+            f'{self._nav_mode}',
+            # v14 新增: ORCA/APF 避障字段
+            f'{1 if self._orca_active else 0}',
+            f'{self._orca_closest_distance:.3f}',
+            f'{self._orca_encounter_type}',
+            f'{self._orca_encounter_type_raw}',
+            f'{self._orca_commit_side}',
+            f'{self._orca_linear_correction:.4f}',
+            f'{self._orca_angular_correction:.4f}',
+            f'{1 if self._orca_hard_brake_active else 0}',
+            f'{self._apf_neighbor_count}',
+            f'{self._orca_rel_bearing_deg:.2f}',
+            f'{self._orca_rel_course_deg:.2f}',
+            f'{self._orca_rel_speed:.3f}',
+            f'{self._orca_tcpa:.3f}',
+            f'{self._orca_dcpa:.3f}'
         ])
         self._record_count += 1
     

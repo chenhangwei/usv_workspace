@@ -199,7 +199,7 @@ class TauOmegaEstimator:
     - 标量 RLS 计算量极小 (一次乘法 + 一次除法)
     """
     
-    def __init__(self, initial_tau=0.4, dt=0.1, forgetting_factor=0.97,
+    def __init__(self, initial_tau=0.55, dt=0.1, forgetting_factor=0.97,
                  tau_min=0.1, tau_max=3.0, excitation_threshold=0.03):
         """
         Args:
@@ -239,6 +239,10 @@ class TauOmegaEstimator:
         # 平滑输出 (防止 τ 突变导致 MPC 性能退化)
         self._tau_smoothed = initial_tau
         self._tau_smooth_factor = 0.04  # 平滑因子 (v10: 0.08→0.04, 更平缓的τ变化减少模型跳变震荡)
+        
+        # v11 新增: 大角度转弯加速收敛
+        self._tau_smooth_factor_fast = 0.12  # 大航向误差时的快速平滑因子
+        self._fast_convergence_active = False  # 是否处于快速收敛模式
         
     def update(self, omega_cmd: float, omega_actual: float) -> float:
         """
@@ -305,9 +309,15 @@ class TauOmegaEstimator:
                     tau_raw = float(np.clip(tau_raw, self._tau_min, self._tau_max))
                     
                     # 指数平滑 (防止突变)
+                    # v11: 大角度转弯时使用更快的平滑因子
+                    smooth_factor = (
+                        self._tau_smooth_factor_fast
+                        if self._fast_convergence_active
+                        else self._tau_smooth_factor
+                    )
                     self._tau_smoothed = (
-                        self._tau_smooth_factor * tau_raw +
-                        (1 - self._tau_smooth_factor) * self._tau_smoothed
+                        smooth_factor * tau_raw +
+                        (1 - smooth_factor) * self._tau_smoothed
                     )
                     self._tau = float(self._tau_smoothed)
         
@@ -356,8 +366,20 @@ class TauOmegaEstimator:
         self._tau = min(self._tau * factor, self._tau_max)
         self._tau_smoothed = self._tau
     
+    def set_fast_convergence(self, active: bool):
+        """
+        设置快速收敛模式 (v11)
+        
+        大角度转弯时启用，加速 tau 的平滑跟踪速度.
+        正常巡航时关闭，避免噪声放大.
+        
+        Args:
+            active: True 启用快速收敛, False 恢复正常速度
+        """
+        self._fast_convergence_active = active
+    
     def reset(self):
-        """重置估计器状态"""
+        """重置估计器状态 (完全重置，丢失所有学习数据)"""
         self._alpha = math.exp(-self._dt / max(self._initial_tau, 0.01))
         self._P = 10.0
         self._prev_omega_actual = 0.0
@@ -366,6 +388,30 @@ class TauOmegaEstimator:
         self._excited_count = 0
         self._tau_smoothed = self._initial_tau
         self._tau = self._initial_tau
+
+    def soft_reset(self):
+        """
+        软重置: 保留已收敛的 tau 估计值，仅重置过程状态
+        
+        用于航点切换场景：下一个航点的物理特性（船体惯性）不变，
+        不应该丢失之前学到的 tau 值。只需要重置 RLS 过程状态，
+        以便在新的航段上重新积累激励样本。
+        
+        与 reset() 的区别:
+        - reset(): tau → initial_tau (丢失学习), 用于全新任务
+        - soft_reset(): tau 保留 (保持学习成果), 用于航点切换
+        """
+        # 保留当前已收敛的 tau 值作为新段的起点
+        preserved_tau = self._tau
+        self._alpha = math.exp(-self._dt / max(preserved_tau, 0.01))
+        self._P = 5.0  # 保留一定置信度 (低于初始的10, 高于完全收敛的~0.01)
+        self._prev_omega_actual = 0.0
+        self._prev_omega_cmd = 0.0
+        self._sample_count = 0
+        # 保留部分激励样本数，使收敛判断更快
+        self._excited_count = min(self._excited_count, self._warmup_samples // 2)
+        self._tau_smoothed = preserved_tau
+        # tau 保持不变
 
 
 # ==================== 饱和监测器 ====================
@@ -464,7 +510,7 @@ class AdaptiveMpcTracker:
         # ==================== MPC 基础参数 (透传给 MpcPathTracker) ====================
         prediction_steps=20, dt=0.1, v_max=0.4, w_max=0.5,
         q_pos=10.0, q_theta=8.0, r_vel=0.1, r_w=5.0, r_acc=2.0, r_dw=10.0,
-        tau_omega=0.4, q_cte=15.0,
+        tau_omega=0.55, q_cte=15.0,
         
         # ==================== AMPC 特有参数 ====================
         ampc_enabled=True,                   # 是否启用 AMPC
@@ -617,6 +663,23 @@ class AdaptiveMpcTracker:
             
             # ==================== Step 3: 在线 τ 辨识 ====================
             # 用 (上一周期的命令, 本周期的实测) 更新 RLS
+            
+            # v11: 大角度转弯时启用快速收敛模式
+            # 计算当前航向误差
+            dx = float(target_waypoint[0]) - float(current_pose[0])
+            dy = float(target_waypoint[1]) - float(current_pose[1])
+            target_heading = math.atan2(dy, dx)
+            heading_error = abs(target_heading - yaw)
+            while heading_error > math.pi:
+                heading_error = abs(heading_error - 2 * math.pi)
+            heading_error_deg = math.degrees(heading_error)
+            
+            # 航向误差 > 60° 时启用快速收敛, < 30° 时恢复正常
+            if heading_error_deg > 60.0:
+                self._tau_estimator.set_fast_convergence(True)
+            elif heading_error_deg < 30.0:
+                self._tau_estimator.set_fast_convergence(False)
+            
             new_tau = self._tau_estimator.update(self._last_omega_cmd, omega_measured)
             
             # ==================== Step 4: 饱和监测 ====================
@@ -709,6 +772,23 @@ class AdaptiveMpcTracker:
             self.mpc.reset()
             self._heading_observer.reset()
             self._tau_estimator.reset()
+            self._saturation_monitor.reset()
+            self._last_omega_cmd = 0.0
+
+    def soft_reset(self):
+        """
+        软重置: 保留已学习的 tau_omega 估计值
+        
+        用于航点切换场景。船体物理特性在航点间不变，
+        不应该每次切换航点都丢失已收敛的 tau 估计值。
+        
+        保留: tau 估计值、部分收敛信息
+        重置: MPC 求解器状态、航向观测器、饱和监测、angular velocity
+        """
+        with self._lock:
+            self.mpc.reset()
+            self._heading_observer.reset()
+            self._tau_estimator.soft_reset()  # 保留 tau 估计值
             self._saturation_monitor.reset()
             self._last_omega_cmd = 0.0
     

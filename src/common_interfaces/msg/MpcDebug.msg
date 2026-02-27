@@ -9,6 +9,7 @@
 # Date: 2026-01-29
 # Updated: 2026-02-03 - v5 添加一阶惯性模型相关字段
 # Updated: 2026-02-09 - v8 添加 AMPC 在线辨识相关字段
+# Updated: 2026-02-27 - v14 添加 ORCA/APF 避障状态字段
 # =============================================================================
 # MPC 控制器调试信息
 
@@ -64,3 +65,19 @@ float32 ampc_saturation_ratio   # 角速度饱和率 (0-1)
 float32 ampc_heading_noise      # 航向噪声标准差 (rad/s)
 int32 ampc_rebuild_count        # MPC 求解器重建次数
 bool ampc_converged             # RLS 估计是否已收敛
+
+# v14 新增: ORCA/APF 避障状态
+bool orca_active                    # ORCA 是否处于激活状态
+float32 orca_closest_distance       # 最近邻居距离 (m), 无邻居时为 -1
+string orca_encounter_type          # 遭遇类型: head_on/crossing/overtaking/none
+string orca_encounter_type_raw      # 遭遇类型(原始, 未平滑)
+int8 orca_commit_side               # 选边方向: +1=左, -1=右, 0=无
+float32 orca_linear_correction      # 线速度修正量 (m/s)
+float32 orca_angular_correction     # 角速度修正量 (rad/s)
+bool orca_hard_brake_active         # 硬刹车是否激活
+int8 apf_neighbor_count             # 有效邻居数量
+float32 orca_rel_bearing_deg        # 相对方位角(本船体系, deg)
+float32 orca_rel_course_deg         # 相对航向差(相对航向-本船航向, deg)
+float32 orca_rel_speed              # 相对速度模值 (m/s)
+float32 orca_tcpa                   # 时间最近点 (s), 无效时为 -1
+float32 orca_dcpa                   # 最近点距离 (m), 无效时为 -1
