@@ -27,8 +27,8 @@ USV 导航日志分析脚本 (v2)
     4. control_commands.png - 控制指令图 (含 omega 跟踪对比)
     5. errors.png           - 误差图 (距离/航向/CTE)
     6. mpc_debug.png        - MPC 调试 (求解时间/代价/预测航向)
-    7. v6_adaptive_tau.png  - V6 自适应 Tau 分析 (v6+)
-    8. v8_ampc_analysis.png - V8 AMPC 在线辨识 (v8+)
+    7. adaptive_tau.png    - 自适应 Tau 分析
+    8. ampc_analysis.png    - AMPC 在线辨识分析
     9. dashboard.png        - 综合仪表盘 (一页总览)
     10. per_goal_stats.png  - 每航点统计柱状图
     11. orca_analysis.png   - ORCA/APF 避障分析 (v14+)
@@ -47,6 +47,28 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
 
+# HTML 交互式报告生成器
+try:
+    from nav_report_html import extract_report_data, generate_html_report, generate_multi_html_report
+    HAS_HTML_REPORT = True
+except ImportError:
+    try:
+        # 当脚本从其他目录调用时，尝试相对路径导入
+        import importlib.util
+        _spec = importlib.util.spec_from_file_location(
+            'nav_report_html', Path(__file__).parent / 'nav_report_html.py')
+        if _spec and _spec.loader:
+            _mod = importlib.util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+            extract_report_data = _mod.extract_report_data
+            generate_html_report = _mod.generate_html_report
+            generate_multi_html_report = _mod.generate_multi_html_report
+            HAS_HTML_REPORT = True
+        else:
+            HAS_HTML_REPORT = False
+    except Exception:
+        HAS_HTML_REPORT = False
+
 # 尝试导入可视化库
 try:
     import matplotlib
@@ -63,10 +85,21 @@ except ImportError:
 
 # 全局图表风格
 if HAS_MATPLOTLIB:
-    plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'SimHei', 'WenQuanYi Micro Hei', 'Arial']
+    # 中文字体优先级：先尝试中文字体，再回退到英文字体
+    # 系统已安装 WenQuanYi Micro Hei，必须排在 DejaVu Sans 前面
+    _zh_fonts = ['WenQuanYi Micro Hei', 'WenQuanYi Zen Hei', 'SimHei',
+                 'Noto Sans CJK SC', 'Microsoft YaHei', 'DejaVu Sans', 'Arial']
+    plt.rcParams['font.sans-serif'] = _zh_fonts
+    plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['axes.unicode_minus'] = False
     plt.rcParams['figure.dpi'] = 120
     plt.rcParams['savefig.bbox'] = 'tight'
+    # 清除 matplotlib 字体缓存（首次修正字体后可能需要）
+    try:
+        from matplotlib.font_manager import fontManager
+        fontManager._load_fontmanager(try_read_cache=False) if hasattr(fontManager, '_load_fontmanager') else None
+    except Exception:
+        pass
 
 
 def load_csv(filepath: str) -> tuple:
@@ -156,13 +189,29 @@ def load_csv(filepath: str) -> tuple:
                 parsed[key] = _to_number(value)
             data.append(parsed)
     
-    # 检测 v6/v8 特有字段
+    # 检测 v6/v8/v14 特有字段
     if data and 'current_tau_omega' in data[0]:
         if header_info['version'] == 'v5':
             header_info['version'] = 'v6'
     if data and 'ampc_tau_estimated' in data[0]:
         header_info['version'] = 'v8'
-    
+    if data and ('orca_active' in data[0] or 'wifi_rssi_dbm' in data[0]):
+        header_info['version'] = 'v14'
+
+    # 从文件路径提取 USV ID (如 .../usv_02/xxx.csv)
+    if header_info['usv_id'] == 'unknown':
+        import re as _re
+        fp = str(filepath)
+        # 尝试从路径中匹配 usv_XX
+        m = _re.search(r'(usv_\d+)', fp)
+        if m:
+            header_info['usv_id'] = m.group(1)
+        else:
+            # 尝试从 goal_id 推断: 200001 → usv_02, 300001 → usv_03
+            m2 = _re.search(r'goal_(\d)', fp)
+            if m2:
+                header_info['usv_id'] = f'usv_{m2.group(1).zfill(2)}'
+
     return data, header_info
 
 
@@ -422,6 +471,9 @@ def analyze_statistics(data: list, header_info: dict = None):
             if osc_freq > 0.3:
                 print(f"   ⚠️  振荡频率较高，可能存在 S 形轨迹问题")
 
+    # WiFi 信号统计
+    _print_wifi_stats(data)
+    
     # 每航点统计
     _print_per_goal_stats(data)
     
@@ -433,6 +485,87 @@ def analyze_statistics(data: list, header_info: dict = None):
     
     # 质量评分总结
     _print_quality_score(data)
+
+
+def _print_wifi_stats(data: list):
+    """打印 WiFi 信号强度统计"""
+    if 'wifi_rssi_dbm' not in data[0]:
+        return
+    
+    wifi_values = [d.get('wifi_rssi_dbm', -100) for d in data
+                   if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+    
+    if not wifi_values:
+        return
+    
+    avg_rssi = sum(wifi_values) / len(wifi_values)
+    min_rssi = min(wifi_values)
+    max_rssi = max(wifi_values)
+    
+    # 标准差
+    variance = sum((x - avg_rssi) ** 2 for x in wifi_values) / len(wifi_values)
+    std_rssi = math.sqrt(variance)
+    
+    # 信号质量等级分布
+    excellent = sum(1 for v in wifi_values if v >= -50)     # 优秀
+    good = sum(1 for v in wifi_values if -60 <= v < -50)    # 良好
+    fair = sum(1 for v in wifi_values if -70 <= v < -60)    # 一般
+    weak = sum(1 for v in wifi_values if v < -70)           # 较弱
+    total = len(wifi_values)
+    
+    # 链路质量
+    wifi_quality = [d.get('wifi_link_quality', 0) for d in data
+                    if isinstance(d.get('wifi_link_quality'), (int, float)) and d.get('wifi_rssi_dbm', -100) > -100]
+    avg_quality = sum(wifi_quality) / len(wifi_quality) if wifi_quality else 0
+    
+    print(f"\n{'='*60}")
+    print("📶 WiFi 信号强度统计")
+    print("=" * 60)
+    print(f"   有效样本: {total}/{len(data)} ({total/len(data)*100:.1f}%)")
+    print(f"   平均 RSSI: {avg_rssi:.1f} dBm")
+    print(f"   最强信号: {max_rssi:.0f} dBm")
+    print(f"   最弱信号: {min_rssi:.0f} dBm")
+    print(f"   信号波动: ±{std_rssi:.1f} dBm")
+    print(f"   平均链路质量: {avg_quality:.0f}%")
+    print(f"\n   信号质量分布:")
+    print(f"   • 优秀 (≥-50dBm): {excellent:>5} ({excellent/total*100:>5.1f}%)")
+    print(f"   • 良好 (-60~-50):  {good:>5} ({good/total*100:>5.1f}%)")
+    print(f"   • 一般 (-70~-60):  {fair:>5} ({fair/total*100:>5.1f}%)")
+    print(f"   • 较弱 (<-70dBm): {weak:>5} ({weak/total*100:>5.1f}%)")
+    
+    # 信号质量评价
+    if avg_rssi >= -50:
+        grade = "优秀"
+    elif avg_rssi >= -60:
+        grade = "良好"
+    elif avg_rssi >= -70:
+        grade = "一般"
+    else:
+        grade = "较弱"
+    print(f"\n   📊 信号评级: 【{grade}】")
+    
+    if weak / total > 0.1:
+        print(f"   ⚠️  较弱信号占比 {weak/total*100:.1f}%，建议优化天线位置或缩短通信距离")
+    if std_rssi > 8:
+        print(f"   ⚠️  信号波动较大 (±{std_rssi:.1f}dBm)，可能存在间歇遮挡")
+
+    # 每航点WiFi统计
+    goals = {}
+    for d in data:
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)) and isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100:
+            gid = int(gid)
+            if gid not in goals:
+                goals[gid] = []
+            goals[gid].append(d['wifi_rssi_dbm'])
+    
+    if len(goals) > 1:
+        print(f"\n   每航点平均信号:")
+        for gid in sorted(goals.keys()):
+            vals = goals[gid]
+            g_avg = sum(vals) / len(vals)
+            g_min = min(vals)
+            print(f"   • Goal {gid:>3}: 平均 {g_avg:.1f}dBm, 最弱 {g_min:.0f}dBm")
 
 
 def _print_per_goal_stats(data: list):
@@ -450,11 +583,16 @@ def _print_per_goal_stats(data: list):
     if not goals:
         return
     
+    has_wifi = 'wifi_rssi_dbm' in data[0]
+    
     print(f"\n{'='*60}")
     print("📋 每航点详细统计")
     print("=" * 60)
-    print(f"   {'GoalID':>6} {'时长(s)':>8} {'最近距(m)':>9} {'均CTE(m)':>9} "
-          f"{'均航向误差°':>10} {'均速(m/s)':>9} {'模式':>8}")
+    header = (f"   {'GoalID':>6} {'时长(s)':>8} {'最近距(m)':>9} {'均CTE(m)':>9} "
+              f"{'均航向误差°':>10} {'均速(m/s)':>9} {'模式':>8}")
+    if has_wifi:
+        header += f" {'信号(dBm)':>10}"
+    print(header)
     
     for gid in sorted(goals.keys()):
         gdata = goals[gid]
@@ -483,8 +621,19 @@ def _print_per_goal_stats(data: list):
         guided_pct = len(g_guided) / len(gdata) * 100 if gdata else 0
         mode_str = f"G{guided_pct:.0f}%"
         
-        print(f"   {gid:>6} {dur:>8.1f} {min_dist:>9.3f} {avg_cte:>9.4f} "
-              f"{avg_he:>10.1f} {avg_spd:>9.3f} {mode_str:>8}")
+        line = (f"   {gid:>6} {dur:>8.1f} {min_dist:>9.3f} {avg_cte:>9.4f} "
+                f"{avg_he:>10.1f} {avg_spd:>9.3f} {mode_str:>8}")
+        
+        if has_wifi:
+            wifi_vals = [d.get('wifi_rssi_dbm', -100) for d in gdata
+                         if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+            if wifi_vals:
+                avg_wifi = sum(wifi_vals) / len(wifi_vals)
+                line += f" {avg_wifi:>10.1f}"
+            else:
+                line += f" {'N/A':>10}"
+        
+        print(line)
 
 
 def _print_quality_score(data: list):
@@ -675,6 +824,24 @@ def _print_nav_mode_stats(data: list):
                 print(f"   - Goal {gid}: 总时长={total_time:.1f}s, HOLD等待={hold_time:.1f}s")
 
 
+def _add_reading_guide(fig, text: str, bottom: float = 0.10):
+    """在图表底部添加阅读指南说明框
+
+    Args:
+        fig: matplotlib figure
+        text: 阅读指南文字（支持换行）
+        bottom: 为指南预留的底部空间比例 (0-1)
+    """
+    fig.subplots_adjust(bottom=bottom)
+    fig.text(
+        0.5, 0.005, text,
+        ha='center', va='bottom', fontsize=7.5,
+        color='#444444', linespacing=1.6,
+        bbox=dict(boxstyle='round,pad=0.5', facecolor='#FFFDE7',
+                  alpha=0.95, edgecolor='#E0E0E0'),
+    )
+
+
 def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
     """绘制 ORCA/APF 避障分析图 (v14+)"""
     if not HAS_MATPLOTLIB:
@@ -788,10 +955,156 @@ def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
     ax.legend(loc='upper right', fontsize=7)
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】第1行: 蓝=最近邻居距离，红色背景=ORCA避障激活中; 距离>4m安全，<1m危险。\n'
+        '第2行: 遇见类型分类—head_on(红)=对向、crossing(橙)=交叉、overtaking(蓝)=超越。\n'
+        '第3行: 选边+1=左避，-1=右避，X=紧急制动。 第4行: 红填充=线速度修正(负值=减速)。 第5行: 蓝填充=角速度修正(避让转向)。',
+        bottom=0.06)
     plt.savefig(output_path / 'orca_analysis.png', dpi=150)
     plt.close()
     print(f"   📈 ORCA 避障分析图: {output_path / 'orca_analysis.png'}")
+
+
+def plot_wifi_signal(data: list, output_path: Path, header_info: dict = None):
+    """绘制 WiFi 信号强度分析图"""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    if 'wifi_rssi_dbm' not in data[0]:
+        return
+    
+    # 检查是否有有效 WiFi 数据
+    wifi_valid = [d for d in data if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+    if not wifi_valid:
+        return
+    
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    t0 = data[0]['timestamp']
+    
+    fig, axes = plt.subplots(3, 1, figsize=(14, 12), sharex=False)
+    fig.suptitle(f'WiFi Signal Analysis - {usv_id}', fontsize=14, fontweight='bold')
+    
+    # ─── 1. WiFi RSSI 时序图 + 模式背景 ───
+    ax = axes[0]
+    # 模式着色背景
+    i = 0
+    while i < len(data):
+        mode = data[i].get('flight_mode', '')
+        j = i
+        while j < len(data) and data[j].get('flight_mode', '') == mode:
+            j += 1
+        if mode == 'HOLD':
+            ax.axvspan(t[i], t[min(j-1, len(t)-1)], alpha=0.08, color='red')
+        i = j
+    
+    rssi = [d.get('wifi_rssi_dbm', -100) for d in data]
+    rssi_plot = [r if r > -100 else float('nan') for r in rssi]
+    ax.plot(t, rssi_plot, 'b-', linewidth=1.0, alpha=0.8, label='WiFi RSSI')
+    
+    # 信号质量参考线
+    ax.axhline(y=-50, color='green', linestyle='--', linewidth=0.8, alpha=0.6, label='优秀 (-50dBm)')
+    ax.axhline(y=-60, color='#FFC107', linestyle='--', linewidth=0.8, alpha=0.6, label='良好 (-60dBm)')
+    ax.axhline(y=-70, color='orange', linestyle='--', linewidth=0.8, alpha=0.6, label='一般 (-70dBm)')
+    ax.axhline(y=-80, color='red', linestyle='--', linewidth=0.8, alpha=0.6, label='较弱 (-80dBm)')
+    
+    # 标注目标点切换时刻
+    prev_gid = None
+    for idx, d in enumerate(data):
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)) and gid != prev_gid and prev_gid is not None:
+            ax.axvline(x=t[idx], color='gray', linestyle=':', linewidth=0.8, alpha=0.5)
+            ax.text(t[idx], ax.get_ylim()[1], f'G{int(gid)}', fontsize=7, ha='left', va='top', color='gray')
+        prev_gid = gid
+    
+    ax.set_ylabel('RSSI (dBm)')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('WiFi Signal Strength Over Time')
+    ax.legend(loc='lower left', fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.3)
+    
+    # ─── 2. WiFi RSSI 分布直方图 ───
+    ax = axes[1]
+    valid_rssi = [r for r in rssi if r > -100]
+    if valid_rssi:
+        n, bins, patches_hist = ax.hist(valid_rssi, bins=30, color='#42A5F5', alpha=0.7, edgecolor='white')
+        # 按信号质量着色
+        for patch, left_edge in zip(patches_hist, bins[:-1]):
+            if left_edge >= -50:
+                patch.set_facecolor('#4CAF50')  # 绿色-优秀
+            elif left_edge >= -60:
+                patch.set_facecolor('#8BC34A')  # 浅绿-良好
+            elif left_edge >= -70:
+                patch.set_facecolor('#FFC107')  # 黄色-一般
+            else:
+                patch.set_facecolor('#F44336')  # 红色-较弱
+        
+        avg_rssi = sum(valid_rssi) / len(valid_rssi)
+        ax.axvline(x=avg_rssi, color='blue', linestyle='-', linewidth=2, label=f'均值 {avg_rssi:.1f}dBm')
+    
+    ax.set_xlabel('RSSI (dBm)')
+    ax.set_ylabel('Count')
+    ax.set_title('WiFi Signal Distribution')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    # ─── 3. 每航点 WiFi 信号柱状图 ───
+    ax = axes[2]
+    goals = {}
+    for d in data:
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)) and isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100:
+            gid = int(gid)
+            if gid not in goals:
+                goals[gid] = []
+            goals[gid].append(d['wifi_rssi_dbm'])
+    
+    if len(goals) >= 2:
+        gids = sorted(goals.keys())
+        avg_rssis = [sum(goals[g]) / len(goals[g]) for g in gids]
+        min_rssis = [min(goals[g]) for g in gids]
+        max_rssis = [max(goals[g]) for g in gids]
+        
+        x_pos = range(len(gids))
+        labels = [f'G{g}' for g in gids]
+        
+        # 绘制柱状图 + 误差线
+        errors_low = [avg - mn for avg, mn in zip(avg_rssis, min_rssis)]
+        errors_high = [mx - avg for avg, mx in zip(avg_rssis, max_rssis)]
+        bars = ax.bar(x_pos, avg_rssis, color='#42A5F5', alpha=0.8,
+                      yerr=[errors_low, errors_high], capsize=4, error_kw={'linewidth': 1})
+        
+        # 按信号质量着色
+        for bar, v in zip(bars, avg_rssis):
+            if v >= -50:
+                bar.set_facecolor('#4CAF50')
+            elif v >= -60:
+                bar.set_facecolor('#8BC34A')
+            elif v >= -70:
+                bar.set_facecolor('#FFC107')
+            else:
+                bar.set_facecolor('#F44336')
+        
+        ax.axhline(y=-50, color='green', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax.axhline(y=-70, color='orange', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(labels, rotation=45, fontsize=8)
+        ax.set_ylabel('RSSI (dBm)')
+        ax.set_xlabel('Goal ID')
+        ax.set_title('WiFi Signal per Waypoint (mean ± min/max)')
+        ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax.text(0.5, 0.5, 'Single waypoint - no per-goal comparison',
+                transform=ax.transAxes, ha='center', va='center', fontsize=12, color='gray')
+        ax.axis('off')
+    
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 蓝线=WiFi信号强度(RSSI)随时间变化，绿线≥-50dBm优秀，黄≥-60良好，橙≥-70一般，红<-80较弱。\n'
+        '中图: 信号分布直方图，绿色占比越高信号越好，蓝罄1线=均值。\n'
+        '下图: 每航点WiFi均值±极值，黄/红柱体的航点可能存在信号盲区。')
+    plt.savefig(output_path / 'wifi_signal.png', dpi=150)
+    plt.close()
+    print(f"   📈 WiFi 信号图: {output_path / 'wifi_signal.png'}")
 
 
 def plot_errors(data: list, output_path: Path):
@@ -832,7 +1145,10 @@ def plot_errors(data: list, output_path: Path):
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 紫线=到目标距离，降至红虚线(1.5m)以下表示到达航点。\n'
+        '中图: 蓝线=航向误差(度)，接近0°表示航向对准，长期偏大说明转弯困难。\n'
+        '下图: 绿线=横向偏差 CTE(m)，接近0表示紧贴航线，偏大说明路径跟踪精度不足。')
     plt.savefig(output_path / 'errors.png', dpi=150)
     plt.close()
     print(f"   📈 误差图: {output_path / 'errors.png'}")
@@ -930,13 +1246,30 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
             plot_v6_adaptive_tau(data, output_path, header_info)
             plot_v8_ampc(data, output_path, header_info)
             plot_orca_analysis(data, output_path, header_info)
+            plot_wifi_signal(data, output_path, header_info)
             plot_dashboard(data, output_path, header_info)
             plot_per_goal_stats(data, output_path, header_info)
             print(f"\n✅ 图表已保存到: {output_path}")
 
     report_path.write_text(report_buffer.getvalue(), encoding='utf-8')
     print(f"   📝 说明文件: {report_path}")
-    return True
+
+    # 提取 HTML 报告数据 (单文件模式下直接生成, 多文件模式下由 main 统一生成)
+    report_data = None
+    if HAS_HTML_REPORT:
+        try:
+            report_data = extract_report_data(data, header_info)
+            report_data['csv_name'] = log_file.name
+            if not batch_mode:
+                # 单文件模式: 直接生成独立 HTML 报告
+                html_path = generate_html_report(report_data, output_path, csv_name=log_file.name)
+                print(f"   🌐 HTML报告: {html_path}")
+                print(f"   💡 浏览器打开: file://{html_path.resolve()}")
+        except Exception as e:
+            print(f"   ⚠️  HTML报告数据提取失败: {e}")
+            report_data = None
+
+    return True, report_data
 
 
 def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
@@ -1010,7 +1343,10 @@ def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
     ax.grid(True, alpha=0.3)
     ax.set_aspect('equal')
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】蓝色线=自动导航(GUIDED)轨迹，灰色线=悬停等待(HOLD)阶段；\n'
+        '绿●=起点，红■=终点，橙★=目标航点(G1,G2...)，蓝色箭头=USV航向方向。\n'
+        '理想状态：轨迹平滑且紧贴各目标点连线，弯道处无大幅振荡。', bottom=0.08)
     plt.savefig(output_path / 'trajectory.png', dpi=150)
     plt.close()
     print(f"   📈 轨迹图: {output_path / 'trajectory.png'}")
@@ -1073,7 +1409,10 @@ def plot_velocity(data: list, output_path: Path, header_info: dict = None):
     ax.legend()
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 蓝线=实际速度，红虚线=指令速度，两者越重合说明速度跟踪越准确。\n'
+        '中图: 红Vx=东向分量，绿Vy=北向分量，用于分析运动方向。\n'
+        '下图: 紫线=到目标距离，降至红虚线(1.5m)以下=已到达。 淡红背景=HOLD悬停模式。')
     plt.savefig(output_path / 'velocity.png', dpi=150)
     plt.close()
     print(f"   📈 速度图: {output_path / 'velocity.png'}")
@@ -1110,7 +1449,10 @@ def plot_heading_comparison(data: list, output_path: Path):
     ax.set_title('Heading Difference (Blue=Moving, Gray=Low Speed)')
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 蓝线=速度方向推算航向，红线=磁力计航向，运动时两者应一致。\n'
+        '下图: 蓝点=运动中的航向差(可信)，灰点=低速时航向差(速度航向不可靠)。\n'
+        '差值长期偏离0°说明磁力计可能需要校准。')
     plt.savefig(output_path / 'heading_comparison.png', dpi=150)
     plt.close()
     print(f"   📈 航向对比图: {output_path / 'heading_comparison.png'}")
@@ -1167,7 +1509,11 @@ def plot_control_commands(data: list, output_path: Path, header_info: dict = Non
     
     axes[-1].set_xlabel('Time (s)')
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】第1行: 红=速度指令Cmd Vx，蓝=实际速度，重合度反映速度执行精度。\n'
+        '第2行: 横向速度指令Cmd Vy，纯路径跟踪时应接近0。\n'
+        '第3行: 角速度指令Cmd Omega，正=左转，负=右转。\n'
+        '第4行(若有): 红=角速度指令ω_cmd，蓝=实际角速度ω_actual，跟踪越紧密转弯控制越好。')
     plt.savefig(output_path / 'control_commands.png', dpi=150)
     plt.close()
     print(f"   📈 控制指令图: {output_path / 'control_commands.png'}")
@@ -1216,7 +1562,10 @@ def plot_mpc_debug(data: list, output_path: Path):
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 蓝线=MPC求解时间(ms)，超过红虚线(50ms)警戒线说明计算负荷过高。\n'
+        '中图: 绿线=优化代价函数，值越低控制效果越优，突然飙升可能表示控制困难。\n'
+        '下图: 黑=实际航向，红虚线=MPC参考航向，重合度反映航向预测准确性。')
     plt.savefig(output_path / 'mpc_debug.png', dpi=150)
     plt.close()
     print(f"   📈 MPC 调试图: {output_path / 'mpc_debug.png'}")
@@ -1288,10 +1637,13 @@ def plot_v6_adaptive_tau(data: list, output_path: Path, header_info: dict = None
     ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
-    plt.savefig(output_path / 'v6_adaptive_tau.png', dpi=150)
+    _add_reading_guide(fig,
+        '【阅读指南】上图: 蓝线=当前tau_omega(转弯响应时间常数)，绿线=速度; tau随速度自动调节，虚线=配置阈值。\n'
+        '中图: 红=角速度指令，蓝=实际角速度，跟踪延迟越小转弯控制越好。\n'
+        '下图: 紫色填充=横向偏差(CTE)，填充面积越小表示航迹越精确，负值=偏左，正值=偏右。')
+    plt.savefig(output_path / 'adaptive_tau.png', dpi=150)
     plt.close()
-    print(f"   📈 V6 自适应 Tau 图: {output_path / 'v6_adaptive_tau.png'}")
+    print(f"   📈 自适应 Tau 图: {output_path / 'adaptive_tau.png'}")
 
 
 def plot_v8_ampc(data: list, output_path: Path, header_info: dict = None):
@@ -1393,10 +1745,14 @@ def plot_v8_ampc(data: list, output_path: Path, header_info: dict = None):
     ax.legend(lns, labs, loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
     
-    plt.tight_layout()
-    plt.savefig(output_path / 'v8_ampc_analysis.png', dpi=150)
+    _add_reading_guide(fig,
+        '【阅读指南】第1行: 蓝=RLS在线估计的τ，红虚=MPC实际使用的τ，绿=置信度(0~1)，"converged"标记=参数收敛。\n'
+        '第2行: 红=角速度指令，蓝虚=MPC状态，黑=观测器测量值。 第3行: 橙填充=饱和率，超红线(35%)则执行器长期饱和，紫=重建次数。\n'
+        '第4行: 橙=航向噪声，虚线=基线水平(0.05)，紫=横向偏差rCTE。 整体趋势平稳且τ收敛为最佳。',
+        bottom=0.07)
+    plt.savefig(output_path / 'ampc_analysis.png', dpi=150)
     plt.close()
-    print(f"   📈 V8 AMPC 分析图: {output_path / 'v8_ampc_analysis.png'}")
+    print(f"   📈 AMPC 分析图: {output_path / 'ampc_analysis.png'}")
 
 
 def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
@@ -1545,7 +1901,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     s_mpc = max(0, 100 - avg_mpc * 1.5)
     s_spd = min(100, avg_spd / 0.3 * 100)
     total = s_cte * 0.4 + s_he * 0.4 + s_mpc * 0.1 + s_spd * 0.1
-    grade = "A+" if total >= 80 else "B" if total >= 60 else "C" if total >= 40 else "D"
+    grade = "A+" if total >= 80 else "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 40 else "D"
     
     # ORCA 统计
     orca_active_count = sum(1 for d in data if d.get('orca_active') == 1)
@@ -1558,6 +1914,17 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
 
     orca_line = f"ORCA:      {orca_pct:.0f}% (min {orca_min_dist:.2f}m)" if orca_active_count > 0 else "ORCA:      off"
 
+    # WiFi 信号摘要
+    wifi_line = "WiFi:      N/A"
+    if 'wifi_rssi_dbm' in data[0]:
+        wifi_vals = [d.get('wifi_rssi_dbm', -100) for d in data
+                     if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+        if wifi_vals:
+            wifi_avg = sum(wifi_vals) / len(wifi_vals)
+            wifi_min = min(wifi_vals)
+            wifi_grade = "Excellent" if wifi_avg >= -50 else "Good" if wifi_avg >= -60 else "Fair" if wifi_avg >= -70 else "Weak"
+            wifi_line = f"WiFi:      {wifi_avg:.0f}dBm [{wifi_grade}]"
+    
     stats_text = (
         f"━━━ Summary ━━━\n"
         f"Duration:  {duration:.1f}s ({duration/60:.1f}min)\n"
@@ -1570,6 +1937,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"Avg HdgErr:{avg_he:.1f}°\n"
         f"MPC Time:  {avg_mpc:.1f} ms\n"
         f"{orca_line}\n"
+        f"{wifi_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
     )
@@ -1577,6 +1945,12 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
             verticalalignment='top', fontfamily='monospace',
             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
     
+    fig.text(
+        0.5, 0.005,
+        '【阅读指南】仪表盘一页总览: 左上=轨迹 | 中上=速度 | 右上=横向偏差 | 左中=到目标距离 | 中中=航向误差 | 右中=MPC耗时 | '
+        '左下=角速度 | 中下=Tau | 右下=综合评分(A+≥80分,A≥70,B≥60,C≥40,D<40)。',
+        ha='center', va='bottom', fontsize=7, color='#555555',
+        bbox=dict(boxstyle='round,pad=0.4', facecolor='#FFFDE7', alpha=0.9, edgecolor='#E0E0E0'))
     plt.savefig(output_path / 'dashboard.png', dpi=150)
     plt.close()
     print(f"   📈 综合仪表盘: {output_path / 'dashboard.png'}")
@@ -1675,26 +2049,73 @@ def plot_per_goal_stats(data: list, output_path: Path, header_info: dict = None)
     ax.legend(fontsize=7)
     ax.grid(True, alpha=0.3, axis='y')
     
-    # 4. 速度
-    ax = axes[1, 1]
-    ax.bar(x, avg_speeds, color='#FFA726', alpha=0.8)
-    ax.set_ylabel('Avg Speed (m/s)')
-    ax.set_title('Average Speed (GUIDED)')
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, fontsize=8)
-    ax.set_xlabel('Goal ID')
-    ax.grid(True, alpha=0.3, axis='y')
+    # 4. 速度 或 WiFi 信号
+    has_wifi = 'wifi_rssi_dbm' in data[0]
+    if has_wifi:
+        ax = axes[1, 1]
+        avg_rssis = []
+        for gid in gids:
+            gdata = goals[gid]
+            wifi_vals = [d.get('wifi_rssi_dbm', -100) for d in gdata
+                         if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+            avg_rssis.append(sum(wifi_vals) / len(wifi_vals) if wifi_vals else -100)
+        
+        bars = ax.bar(x, avg_rssis, color='#42A5F5', alpha=0.8)
+        for bar, v in zip(bars, avg_rssis):
+            if v >= -50:
+                bar.set_facecolor('#4CAF50')
+            elif v >= -60:
+                bar.set_facecolor('#8BC34A')
+            elif v >= -70:
+                bar.set_facecolor('#FFC107')
+            else:
+                bar.set_facecolor('#F44336')
+        ax.axhline(y=-50, color='green', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax.axhline(y=-70, color='orange', linestyle='--', linewidth=0.8, alpha=0.5)
+        ax.set_ylabel('Avg WiFi RSSI (dBm)')
+        ax.set_title('WiFi Signal per Goal')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, fontsize=8)
+        ax.set_xlabel('Goal ID')
+        ax.grid(True, alpha=0.3, axis='y')
+    else:
+        ax = axes[1, 1]
+        ax.bar(x, avg_speeds, color='#FFA726', alpha=0.8)
+        ax.set_ylabel('Avg Speed (m/s)')
+        ax.set_title('Average Speed (GUIDED)')
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=45, fontsize=8)
+        ax.set_xlabel('Goal ID')
+        ax.grid(True, alpha=0.3, axis='y')
     
-    plt.tight_layout()
+    _add_reading_guide(fig,
+        '【阅读指南】左上: 各航点平均横向偏差|CTE|，橙虚线=良好阈值0.3m，红色柱=超标(>0.5m)。\n'
+        '右上: 各航点平均航向误差，橙虚线=良好阈值10°，红色柱=超标(>30°)。\n'
+        '左下: 最近到达距离，红虚线=到达阈值1.5m，柱体低于红线表示成功到达。\n'
+        '右下: 各航点WiFi信号或平均速度，用于发现特定航点的异常。')
     plt.savefig(output_path / 'per_goal_stats.png', dpi=150)
     plt.close()
     print(f"   📈 每航点统计: {output_path / 'per_goal_stats.png'}")
 
 
 def main():
-    # 确定日志路径
+    # 确定日志路径 — 支持多个参数
+    log_files = []
+
     if len(sys.argv) > 1:
-        input_path = Path(sys.argv[1])
+        for arg in sys.argv[1:]:
+            p = Path(arg)
+            if not p.exists():
+                print(f"⚠️  路径不存在，已跳过: {p}")
+                continue
+            if p.is_dir():
+                found = sorted(p.rglob('nav_log_*.csv'))
+                if found:
+                    log_files.extend(found)
+                else:
+                    print(f"⚠️  目录下未找到日志: {p}")
+            else:
+                log_files.append(p)
     else:
         log_dir = Path.home() / 'usv_logs'
         if not log_dir.exists():
@@ -1704,31 +2125,46 @@ def main():
         if not log_files:
             print("❌ 未找到日志文件")
             sys.exit(1)
-        input_path = log_files[-1]
-        print(f"📂 使用最新日志: {input_path}")
+        print(f"📂 自动发现 {len(log_files)} 个日志文件")
 
-    if not input_path.exists():
-        print(f"❌ 路径不存在: {input_path}")
+    if not log_files:
+        print("❌ 未找到任何可用日志文件")
         sys.exit(1)
 
-    if input_path.is_dir():
-        log_files = sorted(input_path.rglob('nav_log_*.csv'))
-        if not log_files:
-            print(f"❌ 目录下未找到日志文件: {input_path}")
-            sys.exit(1)
-    else:
-        log_files = [input_path]
-
     batch_mode = len(log_files) > 1
+    all_report_data = []
+
     for idx, log_file in enumerate(log_files, start=1):
         if batch_mode:
             print("\n" + "="*60)
             print(f"[{idx}/{len(log_files)}] {log_file}")
             print("="*60)
-        analyze_log_file(log_file, batch_mode=batch_mode)
+        result = analyze_log_file(log_file, batch_mode=batch_mode)
+        # result 可能是 (bool, data) 或旧版的 bool
+        if isinstance(result, tuple):
+            success, report_data = result
+        else:
+            success, report_data = result, None
+        if report_data:
+            all_report_data.append(report_data)
+
+    # 多文件模式: 生成合并 HTML 报告
+    if batch_mode and HAS_HTML_REPORT and len(all_report_data) >= 1:
+        try:
+            # 输出到第一个文件的上级目录
+            multi_output = log_files[0].parent.parent if log_files[0].parent.name.startswith('nav_log_') else log_files[0].parent
+            multi_output = multi_output / 'multi_report'
+            multi_output.mkdir(parents=True, exist_ok=True)
+            title = f'USV 多航次分析报告 ({len(all_report_data)} 条记录)'
+            html_path = generate_multi_html_report(all_report_data, multi_output, title=title)
+            print(f"\n🌐 多USV合并HTML报告: {html_path}")
+            print(f"💡 浏览器打开: file://{html_path.resolve()}")
+        except Exception as e:
+            print(f"⚠️  多USV HTML报告生成失败: {e}")
+            import traceback; traceback.print_exc()
 
     print("\n" + "="*60)
-    print("分析完成!")
+    print(f"分析完成! ({len(all_report_data)}/{len(log_files)} 文件成功)")
     print("="*60)
 
 

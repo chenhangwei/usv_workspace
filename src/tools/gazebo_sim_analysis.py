@@ -95,6 +95,19 @@ def compute_metrics(df_guided, usv_id):
     # 航点数量
     metrics['航点数量'] = df_guided['goal_id'].nunique()
     
+    # WiFi 信号强度统计
+    if 'wifi_rssi_dbm' in df_guided.columns:
+        wifi_valid = df_guided[df_guided['wifi_rssi_dbm'] > -100]['wifi_rssi_dbm']
+        if len(wifi_valid) > 0:
+            metrics['平均WiFi信号(dBm)'] = wifi_valid.mean()
+            metrics['最弱WiFi信号(dBm)'] = wifi_valid.min()
+            metrics['最强WiFi信号(dBm)'] = wifi_valid.max()
+            metrics['WiFi信号标准差(dBm)'] = wifi_valid.std()
+            # 信号质量等级分布
+            metrics['WiFi优秀占比(>=-50)'] = (wifi_valid >= -50).sum() / len(wifi_valid) * 100
+            metrics['WiFi良好占比(-60~-50)'] = ((wifi_valid >= -60) & (wifi_valid < -50)).sum() / len(wifi_valid) * 100
+            metrics['WiFi较弱占比(<-70)'] = (wifi_valid < -70).sum() / len(wifi_valid) * 100
+    
     return metrics
 
 
@@ -220,6 +233,39 @@ def plot_cmd_vx(ax, df03, df02):
     ax.grid(True, alpha=0.3)
 
 
+def plot_wifi_signal(ax, df03, df02):
+    """WiFi信号强度时序对比"""
+    has_wifi_03 = 'wifi_rssi_dbm' in df03.columns
+    has_wifi_02 = 'wifi_rssi_dbm' in df02.columns
+    
+    if has_wifi_03:
+        w03 = df03[df03['wifi_rssi_dbm'] > -100]
+        if len(w03) > 0:
+            ax.plot(w03['time_s'], w03['wifi_rssi_dbm'], 'b-', linewidth=0.8, alpha=0.7, label='USV_03')
+    if has_wifi_02:
+        w02 = df02[df02['wifi_rssi_dbm'] > -100]
+        if len(w02) > 0:
+            ax.plot(w02['time_s'], w02['wifi_rssi_dbm'], 'r-', linewidth=0.8, alpha=0.7, label='USV_02')
+    
+    # 信号质量参考线
+    ax.axhline(y=-50, color='green', linestyle='--', linewidth=0.5, alpha=0.5)
+    ax.axhline(y=-70, color='orange', linestyle='--', linewidth=0.5, alpha=0.5)
+    ax.axhline(y=-80, color='red', linestyle='--', linewidth=0.5, alpha=0.5)
+    ax.text(0.02, 0.95, '优秀(>-50)', transform=ax.transAxes, fontsize=6, color='green', va='top')
+    ax.text(0.02, 0.85, '一般(-70)', transform=ax.transAxes, fontsize=6, color='orange', va='top')
+    ax.text(0.02, 0.75, '较弱(-80)', transform=ax.transAxes, fontsize=6, color='red', va='top')
+    
+    ax.set_xlabel('Time (s)')
+    ax.set_ylabel('WiFi RSSI (dBm)')
+    ax.set_title('WiFi Signal Strength')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    
+    if not has_wifi_03 and not has_wifi_02:
+        ax.text(0.5, 0.5, 'No WiFi data', transform=ax.transAxes,
+                ha='center', va='center', fontsize=12, color='gray')
+
+
 def plot_yaw(ax, df03, df02):
     """航向角对比"""
     ax.plot(df03['time_s'], df03['pose_yaw_deg'], 'b-', linewidth=0.8, alpha=0.7, label='USV_03')
@@ -262,14 +308,19 @@ def main():
             print(f"  {key:<25} {str(v03):>15} {str(v02):>15}")
     print(f"{'='*60}")
     
+    # 预计算航点列表（后续多处使用）
+    goal_ids_03 = sorted(df03['goal_id'].unique())
+    goal_ids_02 = sorted(df02['goal_id'].unique())
+    all_goals = sorted(set(goal_ids_03) | set(goal_ids_02))
+    
     # ============================================================
-    # 图 1: 综合仪表板 (3x4 布局)
+    # 图 1: 综合仪表板 (4x4 布局)
     # ============================================================
-    fig = plt.figure(figsize=(22, 18))
+    fig = plt.figure(figsize=(22, 24))
     fig.suptitle('GAZEBO Simulation Analysis: USV_02 vs USV_03\n(2026-02-10)', 
                  fontsize=16, fontweight='bold', y=0.98)
     
-    gs = gridspec.GridSpec(3, 4, hspace=0.35, wspace=0.3,
+    gs = gridspec.GridSpec(4, 4, hspace=0.35, wspace=0.3,
                            left=0.05, right=0.97, top=0.93, bottom=0.05)
     
     # 轨迹 (占2格)
@@ -332,6 +383,48 @@ def main():
     table.set_fontsize(9)
     table.scale(1.0, 1.4)
     ax_table.set_title('Key Metrics Summary', fontsize=10, fontweight='bold')
+    
+    # WiFi信号强度时序图
+    ax_wifi = fig.add_subplot(gs[3, 0:2])
+    plot_wifi_signal(ax_wifi, df03, df02)
+    
+    # WiFi信号分航点统计
+    ax_wifi_wp = fig.add_subplot(gs[3, 2:4])
+    has_wifi_data = ('wifi_rssi_dbm' in df03.columns) or ('wifi_rssi_dbm' in df02.columns)
+    if has_wifi_data and len(all_goals) > 1:
+        x_wp = np.arange(len(all_goals))
+        w_wp = 0.35
+        rssi_03 = []
+        rssi_02 = []
+        for g in all_goals:
+            seg03 = df03[df03['goal_id'] == g]
+            seg02 = df02[df02['goal_id'] == g]
+            if 'wifi_rssi_dbm' in seg03.columns:
+                v03 = seg03[seg03['wifi_rssi_dbm'] > -100]['wifi_rssi_dbm']
+                rssi_03.append(v03.mean() if len(v03) > 0 else -100)
+            else:
+                rssi_03.append(-100)
+            if 'wifi_rssi_dbm' in seg02.columns:
+                v02 = seg02[seg02['wifi_rssi_dbm'] > -100]['wifi_rssi_dbm']
+                rssi_02.append(v02.mean() if len(v02) > 0 else -100)
+            else:
+                rssi_02.append(-100)
+        ax_wifi_wp.bar(x_wp - w_wp/2, rssi_03, w_wp, label='USV_03', color='blue', alpha=0.7)
+        ax_wifi_wp.bar(x_wp + w_wp/2, rssi_02, w_wp, label='USV_02', color='red', alpha=0.7)
+        ax_wifi_wp.axhline(y=-50, color='green', linestyle='--', linewidth=0.5, alpha=0.5)
+        ax_wifi_wp.axhline(y=-70, color='orange', linestyle='--', linewidth=0.5, alpha=0.5)
+        ax_wifi_wp.set_xlabel('Goal ID')
+        ax_wifi_wp.set_ylabel('Mean WiFi RSSI (dBm)')
+        ax_wifi_wp.set_title('WiFi Signal per Waypoint')
+        ax_wifi_wp.set_xticks(x_wp)
+        ax_wifi_wp.set_xticklabels([str(g) for g in all_goals])
+        ax_wifi_wp.legend(fontsize=8)
+        ax_wifi_wp.grid(True, alpha=0.3)
+    else:
+        ax_wifi_wp.axis('off')
+        ax_wifi_wp.text(0.5, 0.5, 'No WiFi data or single waypoint',
+                       transform=ax_wifi_wp.transAxes, ha='center', va='center',
+                       fontsize=12, color='gray')
     
     output_path = os.path.join(OUTPUT_DIR, "gazebo_sim_comparison.png")
     fig.savefig(output_path, dpi=150, bbox_inches='tight')
@@ -497,6 +590,31 @@ def main():
     ampc02 = m02.get('AMPC收敛率(%)', None)
     if ampc03 is not None and ampc02 is not None:
         print(f"  [AMPC] USV_03收敛率: {ampc03:.1f}%, USV_02收敛率: {ampc02:.1f}%")
+    
+    # WiFi 信号分析
+    wifi03 = m03.get('平均WiFi信号(dBm)', None)
+    wifi02 = m02.get('平均WiFi信号(dBm)', None)
+    if wifi03 is not None or wifi02 is not None:
+        print(f"  [WiFi信号]")
+        if wifi03 is not None:
+            weak03 = m03.get('WiFi较弱占比(<-70)', 0)
+            print(f"    USV_03: 平均 {wifi03:.1f}dBm, "
+                  f"最弱 {m03.get('最弱WiFi信号(dBm)', 0):.0f}dBm, "
+                  f"波动 ±{m03.get('WiFi信号标准差(dBm)', 0):.1f}dBm, "
+                  f"较弱占比 {weak03:.1f}%")
+        else:
+            print(f"    USV_03: 无WiFi数据")
+        if wifi02 is not None:
+            weak02 = m02.get('WiFi较弱占比(<-70)', 0)
+            print(f"    USV_02: 平均 {wifi02:.1f}dBm, "
+                  f"最弱 {m02.get('最弱WiFi信号(dBm)', 0):.0f}dBm, "
+                  f"波动 ±{m02.get('WiFi信号标准差(dBm)', 0):.1f}dBm, "
+                  f"较弱占比 {weak02:.1f}%")
+        else:
+            print(f"    USV_02: 无WiFi数据")
+        if wifi03 is not None and wifi02 is not None:
+            better_wifi = 'USV_03' if wifi03 > wifi02 else 'USV_02'
+            print(f"    {better_wifi} 信号更强 (差异: {abs(wifi03-wifi02):.1f}dBm)")
     
     print(f"\n[+] 所有分析图表已保存至: {OUTPUT_DIR}")
     print("=" * 60)

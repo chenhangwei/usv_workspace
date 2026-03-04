@@ -127,9 +127,20 @@ class NavigateToPointNode(Node):
         self._divergence_monitor_radius: float = 3.0    # 开始监控的半径 (m)
         self._divergence_min_distance: float = float('inf')  # 监控期间的最小距离
         self._divergence_increase_count: int = 0         # 距离连续增大的计数
-        self._divergence_increase_threshold: int = 8     # 连续增大多少次判定为偏离
+        self._divergence_increase_threshold: int = 15    # 连续增大多少次判定为偏离 (15次×0.2s=3s，留足转向时间)
         self._divergence_monitoring: bool = False         # 是否处于偏离监控状态
         self._divergence_last_distance: float = float('inf')  # 上次检测的距离
+        
+        # 偏离检测 - 切换冷却期
+        # 航点切换后给 USV 留出转向时间，冷却期内不启动偏离监控
+        self._divergence_cooldown_sec: float = 3.0       # 切换后冷却期 (秒)
+        self._divergence_cooldown_until: float = 0.0     # 冷却期截止时间戳
+        
+        # 偏离检测 - "先接近后远离" 前提条件
+        # 要求 USV 曾朝新目标接近过一段距离后再远离才可触发偏离
+        # 防止切换后 USV 因惯性还在远离时被误判
+        self._divergence_approach_required: float = 0.3  # 需要至少接近 0.3m 才算"曾接近"
+        self._divergence_initial_distance: float = float('inf')  # 进入监控时的初始距离
         
         # ==================== 进度感知超时 (Progress-Aware Timeout) ====================
         # 如果 USV 在持续接近目标点，超时计时器会重置，避免远距离航点因固定超时而失败
@@ -1024,8 +1035,8 @@ class NavigateToPointNode(Node):
         self._arrival_check_samples = []
         self._rotate_in_progress = False
         
-        # 重置偏离检测状态
-        self._reset_divergence_monitor()
+        # 重置偏离检测状态 (启动冷却期，给 USV 转向时间)
+        self._reset_divergence_monitor(start_cooldown=True)
         
         # 重置进度感知超时状态
         self._timeout_original_start_time = None
@@ -1080,21 +1091,30 @@ class NavigateToPointNode(Node):
         
         self._check_timeout(distance)
 
-    def _reset_divergence_monitor(self):
-        """重置偏离检测状态"""
+    def _reset_divergence_monitor(self, start_cooldown: bool = False):
+        """重置偏离检测状态
+        
+        Args:
+            start_cooldown: 是否启动冷却期 (航点切换时应为 True)
+        """
         self._divergence_monitoring = False
         self._divergence_min_distance = float('inf')
         self._divergence_increase_count = 0
         self._divergence_last_distance = float('inf')
+        self._divergence_initial_distance = float('inf')
+        if start_cooldown:
+            import time
+            self._divergence_cooldown_until = time.time() + self._divergence_cooldown_sec
     
     def _check_divergence(self, distance: float) -> bool:
         """
-        偏离检测补救机制
+        偏离检测补救机制 (v2 — 含冷却期 + 先接近后远离前提)
         
-        当 USV 进入监控半径 (默认3m) 后，持续追踪距离变化趋势:
-        - 记录最小距离 (最近接近点)
-        - 如果距离连续增大超过阈值次数，说明 USV 正在偏离目标
-        - 此时强制判定为"偏离到达"，切换到下一个航点，避免绕圈或卡死
+        改进:
+        1. 航点切换后有冷却期 (_divergence_cooldown_sec)，不立即监控
+        2. 要求 USV 曾朝目标接近过 (_divergence_approach_required) 才可触发偏离
+        3. 动态监控半径: max(配置值, switch_threshold + 1.0)，适配短距航点
+        4. 连续增大阈值由 8 提高到 15 (≈3s)，给 USV 足够转向时间
         
         Args:
             distance: 当前到目标的距离
@@ -1102,21 +1122,42 @@ class NavigateToPointNode(Node):
         Returns:
             True 如果检测到偏离并已执行切换
         """
-        if distance >= self._divergence_monitor_radius:
+        # ===== 冷却期: 航点切换后短暂跳过偏离检测 =====
+        import time as _time
+        if _time.time() < self._divergence_cooldown_until:
+            return False
+        
+        # ===== 动态监控半径: 确保不小于 switch_threshold + 1m =====
+        effective_radius = max(self._divergence_monitor_radius,
+                              self.switch_threshold + 1.0)
+        
+        if distance >= effective_radius:
             # 还没进入监控区域
             if self._divergence_monitoring:
-                # 曾经进入过监控区域后又离开了 → 立即判定为偏离
-                self.get_logger().warn(
-                    f'⚠️ 偏离检测: USV 已离开监控区域 [ID={self.current_goal_id}], '
-                    f'当前距离={distance:.2f}m, 最近距离={self._divergence_min_distance:.2f}m')
-                self._handle_divergence_arrival(distance)
-                return True
+                # 曾经进入过监控区域后又离开了
+                # 额外条件: 必须曾接近过目标才算真正偏离
+                approach_amount = self._divergence_initial_distance - self._divergence_min_distance
+                if approach_amount >= self._divergence_approach_required:
+                    self.get_logger().warn(
+                        f'⚠️ 偏离检测: USV 已离开监控区域 [ID={self.current_goal_id}], '
+                        f'当前距离={distance:.2f}m, 最近距离={self._divergence_min_distance:.2f}m, '
+                        f'曾接近={approach_amount:.2f}m')
+                    self._handle_divergence_arrival(distance)
+                    return True
+                else:
+                    # 从未真正接近过目标，可能是切换后惯性导致，不判定为偏离
+                    self.get_logger().info(
+                        f'ℹ️ 偏离检测: 离开监控区域但未充分接近 [ID={self.current_goal_id}], '
+                        f'接近量={approach_amount:.2f}m < 要求={self._divergence_approach_required:.2f}m, '
+                        f'重置监控')
+                    self._reset_divergence_monitor()
             return False
         
         # 进入监控区域
         if not self._divergence_monitoring:
             self._divergence_monitoring = True
             self._divergence_min_distance = distance
+            self._divergence_initial_distance = distance   # 记录进入时距离
             self._divergence_last_distance = distance
             self._divergence_increase_count = 0
             return False
@@ -1135,15 +1176,29 @@ class NavigateToPointNode(Node):
         self._divergence_last_distance = distance
         
         # 判定: 连续增大次数超过阈值，且最小距离未能进入到达阈值
+        # 额外条件: 必须曾接近过目标 (排除切换后惯性期的误判)
+        approach_amount = self._divergence_initial_distance - self._divergence_min_distance
+        has_approached = approach_amount >= self._divergence_approach_required
+        
         if (self._divergence_increase_count >= self._divergence_increase_threshold
-                and self._divergence_min_distance > self.nav_arrival_threshold):
+                and self._divergence_min_distance > self.nav_arrival_threshold
+                and has_approached):
             self.get_logger().warn(
                 f'⚠️ 偏离检测触发 [ID={self.current_goal_id}]: '
                 f'距离连续增大{self._divergence_increase_count}次, '
                 f'最近距离={self._divergence_min_distance:.2f}m > 到达阈值={self.nav_arrival_threshold:.2f}m, '
-                f'当前距离={distance:.2f}m')
+                f'当前距离={distance:.2f}m, 曾接近={approach_amount:.2f}m')
             self._handle_divergence_arrival(distance)
             return True
+        
+        # 没有曾接近过，且连续增大次数已经很多 → 只记录日志，不触发
+        if (self._divergence_increase_count >= self._divergence_increase_threshold
+                and not has_approached):
+            if self._divergence_increase_count == self._divergence_increase_threshold:
+                self.get_logger().info(
+                    f'ℹ️ 偏离检测: 距离连续增大但未曾接近目标 [ID={self.current_goal_id}], '
+                    f'接近量={approach_amount:.2f}m < 要求={self._divergence_approach_required:.2f}m, '
+                    f'继续等待转向完成')
         
         return False
     

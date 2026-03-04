@@ -30,6 +30,10 @@
 分析脚本: python3 usv_control/scripts/analyze_nav_log.py
 """
 
+import os
+import socket
+import subprocess
+
 from launch import LaunchDescription
 from launch_ros.actions import Node
 from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAction
@@ -38,6 +42,104 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, Text
 from launch_ros.substitutions import FindPackageShare
 from launch.conditions import IfCondition
 from launch.substitutions import EqualsSubstitution
+
+
+# =============================================================================
+# USV 自动识别配置表
+# =============================================================================
+# 每艘 USV 的固定参数映射表，新增 USV 时只需在此处添加一行
+#
+# ┌────────┬────────────┬───────────────────────────────────────────────────────┬────────────┬──────────────────┐
+# │ USV ID │ namespace  │ gcs_url                                               │ system_id  │ target_system_id │
+# ├────────┼────────────┼───────────────────────────────────────────────────────┼────────────┼──────────────────┤
+# │   1    │ usv_01     │ udp://192.168.68.55:14551@192.168.68.53:14550         │    101     │        1         │
+# │   2    │ usv_02     │ udp://192.168.68.54:14552@192.168.68.53:14560         │    102     │        2         │
+# │   3    │ usv_03     │ udp://192.168.68.52:14553@192.168.68.53:14570         │    103     │        3         │
+# └────────┴────────────┴───────────────────────────────────────────────────────┴────────────┴──────────────────┘
+USV_CONFIG = {
+    1: {
+        'namespace':        'usv_01',
+        'local_ip':         '192.168.68.55',
+        'gcs_url':          'udp://192.168.68.55:14551@192.168.68.53:14550',
+        'system_id':        101,
+        'target_system_id': 1,
+    },
+    2: {
+        'namespace':        'usv_02',
+        'local_ip':         '192.168.68.54',
+        'gcs_url':          'udp://192.168.68.54:14552@192.168.68.53:14560',
+        'system_id':        102,
+        'target_system_id': 2,
+    },
+    3: {
+        'namespace':        'usv_03',
+        'local_ip':         '192.168.68.52',
+        'gcs_url':          'udp://192.168.68.52:14553@192.168.68.53:14570',
+        'system_id':        103,
+        'target_system_id': 3,
+    },
+}
+
+# IP → USV ID 反向映射 (用于 IP 自动检测)
+_IP_TO_USV = {cfg['local_ip']: uid for uid, cfg in USV_CONFIG.items()}
+
+
+def detect_usv_id() -> int:
+    """
+    自动检测当前机载计算机对应的 USV ID
+
+    检测优先级：
+      1. /etc/usv_id 配置文件 (最可靠，推荐)
+      2. ~/.usv_id   配置文件
+      3. 主机名匹配  (如 usv-01, usv_01, usv01)
+      4. 本机 IP 地址匹配
+      5. 默认值 1    (兜底)
+
+    首次部署时，在每台机载计算机上执行一次:
+        echo 1 | sudo tee /etc/usv_id   # usv_01 的机载计算机
+        echo 2 | sudo tee /etc/usv_id   # usv_02 的机载计算机
+        echo 3 | sudo tee /etc/usv_id   # usv_03 的机载计算机
+    """
+    # ---- 方法 1 & 2: 配置文件 ----
+    for path in ['/etc/usv_id', os.path.expanduser('~/.usv_id')]:
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r') as f:
+                    usv_id = int(f.read().strip())
+                if usv_id in USV_CONFIG:
+                    print(f'[USV Auto-Detect] ✅ 从 {path} 读取 USV ID = {usv_id}')
+                    return usv_id
+                else:
+                    print(f'[USV Auto-Detect] ⚠️ {path} 中的 ID={usv_id} 不在配置表中')
+            except (ValueError, IOError) as e:
+                print(f'[USV Auto-Detect] ⚠️ 读取 {path} 失败: {e}')
+
+    # ---- 方法 3: 主机名 ----
+    hostname = socket.gethostname().lower()
+    for usv_id in USV_CONFIG:
+        patterns = [f'usv-{usv_id:02d}', f'usv_{usv_id:02d}', f'usv{usv_id:02d}',
+                    f'usv-{usv_id}', f'usv_{usv_id}', f'usv{usv_id}']
+        if any(p in hostname for p in patterns):
+            print(f'[USV Auto-Detect] ✅ 从主机名 "{hostname}" 检测 USV ID = {usv_id}')
+            return usv_id
+
+    # ---- 方法 4: 本机 IP ----
+    try:
+        result = subprocess.run(
+            ['hostname', '-I'], capture_output=True, text=True, timeout=5
+        )
+        for ip in result.stdout.strip().split():
+            if ip in _IP_TO_USV:
+                usv_id = _IP_TO_USV[ip]
+                print(f'[USV Auto-Detect] ✅ 从本机 IP {ip} 检测 USV ID = {usv_id}')
+                return usv_id
+    except Exception:
+        pass
+
+    # ---- 兜底 ----
+    print('[USV Auto-Detect] ⚠️ 无法自动检测，使用默认 USV ID = 1')
+    print('[USV Auto-Detect]    提示: echo <ID> | sudo tee /etc/usv_id')
+    return 1
 
 
 def generate_launch_description():
@@ -63,6 +165,15 @@ def generate_launch_description():
         LaunchDescription: 包含所有节点和参数的启动描述对象
     """
     # =============================================================================
+    # 自动检测 USV ID 并加载对应配置
+    # =============================================================================
+    usv_id = detect_usv_id()
+    cfg = USV_CONFIG[usv_id]
+    print(f'[USV Launch] 当前配置: namespace={cfg["namespace"]}, '
+          f'system_id={cfg["system_id"]}, target_system_id={cfg["target_system_id"]}')
+    print(f'[USV Launch] GCS URL: {cfg["gcs_url"]}')
+
+    # =============================================================================
     # 参数声明
     # =============================================================================
 
@@ -74,17 +185,17 @@ def generate_launch_description():
         description='运行模式: hardware(真实硬件), sitl(ArduPilot SITL), simple(简单仿真)'
     )
 
-    # 命名空间参数
+    # 命名空间参数（自动检测，可通过 launch 参数覆盖）
     namespace_arg = DeclareLaunchArgument(
         'namespace',
-        default_value='usv_02',
-        description='无人船节点的命名空间'
+        default_value=cfg['namespace'],
+        description='无人船节点的命名空间（自动检测）'
     )
 
     # SITL 目标系统 ID（多 USV 时每艘不同，匹配 SYSID_THISMAV）
     target_system_id_arg = DeclareLaunchArgument(
         'target_system_id',
-        default_value='1',
+        default_value=str(cfg['target_system_id']),
         description='MAVROS 目标飞控系统 ID（SITL 模式，需匹配 SYSID_THISMAV）'
     )
 
@@ -149,14 +260,12 @@ def generate_launch_description():
     # ⚠️ 重要: 启动前必须确保本机IP已正确配置为 192.168.68.52
     gcs_url_arg = DeclareLaunchArgument(
         'gcs_url',
-        #default_value='udp://192.168.68.55:14551@192.168.68.50:14550',  # usv_01 → 地面站端口14550
-        #default_value='udp://192.168.68.54:14552@192.168.68.50:14560',  # usv_02 → 地面站端口14560
-        #default_value='udp://192.168.68.52:14553@192.168.68.50:14570',  # usv_03 → 地面站端口14570
-
-        #default_value='udp://192.168.68.55:14551@192.168.68.53:14550',  # usv_01 → 地面站端口14550
-        default_value='udp://192.168.68.54:14551@192.168.68.53:14560',  # usv_02 → 地面站端口14560
-        #default_value='udp://192.168.68.52:14553@192.168.68.53:14570',  # usv_03 → 地面站端口14570
-        description='地面站MAVLink通信地址'
+        # 以下 URL 已由 USV_CONFIG 自动选择，无需手动切换:
+        # usv_01: udp://192.168.68.55:14551@192.168.68.53:14550
+        # usv_02: udp://192.168.68.54:14552@192.168.68.53:14560
+        # usv_03: udp://192.168.68.52:14553@192.168.68.53:14570
+        default_value=cfg['gcs_url'],  # ← 自动检测
+        description='地面站MAVLink通信地址（自动检测）'
     )
     
     # 激光雷达串口参数
@@ -434,10 +543,10 @@ def generate_launch_description():
                 'gcs_url': gcs_url,
                 
                 # MAVLink 身份配置 (硬件模式)
-                'system_id': 102,           # MAVROS 自身系统 ID
-                'component_id': 191,        # MAVROS 自身组件 ID
-                'target_system_id': 2,      # 目标飞控系统 ID (usv_02改为2, usv_03改为3)
-                'target_component_id': 1,   # 目标飞控组件 ID (固定为1)
+                'system_id': cfg['system_id'],           # MAVROS 自身系统 ID (自动检测)
+                'component_id': 191,                     # MAVROS 自身组件 ID
+                'target_system_id': cfg['target_system_id'],  # 目标飞控系统 ID (自动检测)
+                'target_component_id': 1,                # 目标飞控组件 ID (固定为1)
                 
                 # ==================== 插件黑名单（加速启动，关键优化！）====================
                 # 禁用不需要的插件，从 50+ 个插件减少到 15 个核心插件

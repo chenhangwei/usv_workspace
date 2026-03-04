@@ -734,19 +734,64 @@ class UsvStatusNode(Node):
     def _detect_wifi_interface(self):
         """自动检测可用的WiFi无线接口名称
         
+        优先选择已连接（operstate=up）的无线接口，避免选到未连接的接口。
+        
         Returns:
             str: WiFi接口名称（如 'wlan0'），无可用接口返回空字符串
         """
         try:
-            # 方法1：从 /sys/class/net 检测无线接口
             import os
             net_dir = '/sys/class/net'
             if os.path.exists(net_dir):
+                # 收集所有无线接口，按连接状态分类
+                up_interfaces = []
+                down_interfaces = []
                 for iface in sorted(os.listdir(net_dir)):
                     wireless_dir = os.path.join(net_dir, iface, 'wireless')
                     if os.path.exists(wireless_dir):
-                        self.get_logger().info(f'检测到WiFi接口: {iface}')
-                        return iface
+                        # 检查接口是否处于 UP 状态（有载波）
+                        operstate_path = os.path.join(net_dir, iface, 'operstate')
+                        try:
+                            with open(operstate_path, 'r') as f:
+                                state = f.read().strip().lower()
+                        except Exception:
+                            state = 'unknown'
+                        
+                        # 还可以检查 /proc/net/wireless 里是否有该接口的条目
+                        has_signal = False
+                        try:
+                            with open('/proc/net/wireless', 'r') as f:
+                                for line in f:
+                                    if iface in line:
+                                        has_signal = True
+                                        break
+                        except Exception:
+                            pass
+                        
+                        if state in ('up', 'dormant') and has_signal:
+                            up_interfaces.append(iface)
+                            self.get_logger().info(
+                                f'检测到已连接WiFi接口: {iface} (状态: {state})')
+                        elif state in ('up', 'dormant'):
+                            down_interfaces.append(iface)
+                            self.get_logger().info(
+                                f'检测到WiFi接口(无信号数据): {iface} (状态: {state})')
+                        else:
+                            down_interfaces.append(iface)
+                            self.get_logger().info(
+                                f'检测到WiFi接口(未连接): {iface} (状态: {state})')
+                
+                # 优先返回已连接且有信号数据的接口
+                if up_interfaces:
+                    selected = up_interfaces[0]
+                    self.get_logger().info(f'选择WiFi接口: {selected}')
+                    return selected
+                # 回退到有wireless目录但未活跃的接口
+                if down_interfaces:
+                    selected = down_interfaces[0]
+                    self.get_logger().warn(
+                        f'未找到活跃WiFi接口，回退使用: {selected}')
+                    return selected
             
             # 方法2：使用 iw dev 命令
             result = subprocess.run(

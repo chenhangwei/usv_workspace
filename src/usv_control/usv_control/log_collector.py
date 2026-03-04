@@ -32,7 +32,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
 from std_msgs.msg import Bool
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug, UsvStatus
 
 import math
 import csv
@@ -124,6 +124,11 @@ class LogCollectorNode(Node):
         self._ampc_rebuild_count = 0
         self._ampc_converged = False
         
+        # WiFi 信号状态 (来自 UsvStatus)
+        self._wifi_rssi_dbm = -100
+        self._wifi_link_quality = 0
+        self._wifi_interface = ''
+        
         # v14 新增: ORCA/APF 避障状态
         self._orca_active = False
         self._orca_closest_distance = -1.0
@@ -145,6 +150,9 @@ class LogCollectorNode(Node):
         self._is_armed = False
         self._last_flight_mode = ''  # 用于检测模式切换
         self._mode_change_events = []  # 模式切换事件列表
+        
+        # v15 新增: 导航事件记录 (到达/通过/偏离等)
+        self._nav_event = ''  # 当前帧的导航事件，写入CSV后清空
         
         # ==================== 任务状态 ====================
         self._is_navigating = False       # 是否正在导航
@@ -195,6 +203,11 @@ class LogCollectorNode(Node):
             MpcDebug, 'velocity_controller/debug',
             self._debug_callback, qos_best_effort)
         
+        # USV 状态订阅 (用于获取 WiFi 信号强度)
+        self.create_subscription(
+            UsvStatus, 'usv_state',
+            self._usv_status_callback, qos_best_effort)
+        
         # 飞控状态订阅 (用于记录模式切换)
         self.create_subscription(
             State, 'state',
@@ -241,9 +254,10 @@ class LogCollectorNode(Node):
             self._csv_writer = csv.writer(self._csv_file)
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
+            # 始终写入最小头部 (版本号和 USV ID)，即使 MPC 参数尚未到达
+            self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
+            self._csv_file.write(f'# USV ID: {self._usv_id}\n')
             if self._mpc_params_received:
-                self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
-                self._csv_file.write(f'# USV ID: {self._usv_id}\n')
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
                 self._csv_file.write(f'# R_w (steering weight): {self._mpc_param_r_w:.2f}\n')
@@ -290,7 +304,11 @@ class LogCollectorNode(Node):
                 'orca_commit_side', 'orca_linear_correction', 'orca_angular_correction',
                 'orca_hard_brake', 'apf_neighbor_count',
                 'orca_rel_bearing_deg', 'orca_rel_course_deg', 'orca_rel_speed',
-                'orca_tcpa', 'orca_dcpa'
+                'orca_tcpa', 'orca_dcpa',
+                # WiFi 信号字段
+                'wifi_rssi_dbm', 'wifi_link_quality',
+                # v15 新增: 导航事件字段
+                'nav_event'
             ])
             
             # 清空模式切换事件列表
@@ -479,6 +497,16 @@ class LogCollectorNode(Node):
         
         self._mpc_params_received = True
 
+    def _usv_status_callback(self, msg: UsvStatus):
+        """USV状态回调 - 获取WiFi信号强度和USV ID"""
+        self._wifi_rssi_dbm = msg.wifi_rssi_dbm
+        self._wifi_link_quality = msg.wifi_link_quality
+        self._wifi_interface = msg.wifi_interface
+        # 从 UsvStatus 获取 usv_id (作为 MpcDebug 之外的备用来源)
+        if msg.usv_id and not self._usv_id:
+            self._usv_id = msg.usv_id
+            self.get_logger().info(f'📡 从 UsvStatus 获取 USV ID: {self._usv_id}')
+
     def _state_callback(self, msg: State):
         """飞控状态回调 - 记录模式切换"""
         new_mode = msg.mode
@@ -560,12 +588,16 @@ class LogCollectorNode(Node):
             # 后续可能还有更多航点，由空闲超时自动关闭
             self._last_goal_time = self.get_clock().now().nanoseconds / 1e9
             goal_count = getattr(self, '_goal_count', 0)
+            # v15: 记录到达事件到CSV
+            self._nav_event = f'arrived:{goal_id}:{message}'
             self.get_logger().info(
                 f'🏁 目标到达 [ID={goal_id}], 日志继续记录 '
                 f'(已处理 {goal_count} 个目标, {self._record_count} 条记录)')
         elif is_waypoint_passed and self._is_navigating:
             # 中间航点通过：刷新时间戳，继续记录
             self._last_goal_time = self.get_clock().now().nanoseconds / 1e9
+            # v15: 记录通过事件到CSV
+            self._nav_event = f'passed:{goal_id}:{message}'
     
     def _log_data(self):
         """记录数据到 CSV（仅在导航任务进行时）"""
@@ -663,9 +695,16 @@ class LogCollectorNode(Node):
             f'{self._orca_rel_course_deg:.2f}',
             f'{self._orca_rel_speed:.3f}',
             f'{self._orca_tcpa:.3f}',
-            f'{self._orca_dcpa:.3f}'
+            f'{self._orca_dcpa:.3f}',
+            # WiFi 信号字段
+            f'{self._wifi_rssi_dbm}',
+            f'{self._wifi_link_quality}',
+            # v15 新增: 导航事件
+            f'{self._nav_event}'
         ])
         self._record_count += 1
+        # 事件只写一次，写入后立即清空
+        self._nav_event = ''
     
     def _flush_file(self):
         """刷新文件到磁盘"""

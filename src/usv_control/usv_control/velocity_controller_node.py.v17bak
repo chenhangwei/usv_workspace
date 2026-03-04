@@ -2468,19 +2468,16 @@ class VelocityControllerNode(Node):
                 if commit_side == 0:
                     commit_side = decouple_side
 
-        # 虚拟通行走廊：通过横向偏置将双方分到不同"车道"，减少轨迹重合
+        # 虚拟通行走廊：通过横向偏置将双方分到不同“车道”，减少轨迹重合
         lane_distance = max(0.1, self._apf_orca_lane_guidance_distance)
         if self._apf_orca_lane_guidance_enabled and commit_side != 0 and closest_distance <= lane_distance:
-            # v17-fix2 方向守卫：仅当邻船不在 commit 侧时才施加车道修正
-            #   commit_side=+1(左转避让) → 邻船应在右舷(rel_body_y>0) → 乘积>0 → 施加
-            #   commit_side=-1(右转避让) → 邻船应在左舷(rel_body_y<0) → 乘积>0 → 施加
-            #   若邻船已在 commit 侧(乘积<0)，车道修正会推向邻船，必须跳过
-            if commit_side * rel_body_y >= 0:
-                desired_neighbor_y = commit_side * max(0.0, self._apf_orca_lane_offset)
-                lane_error = desired_neighbor_y - rel_body_y
-                lane_proximity = max(0.0, min(1.0, (lane_distance - closest_distance) / lane_distance))
-                angular_correction += self._apf_orca_lane_gain * lane_error * (0.4 + 0.6 * lane_proximity)
-
+            # v17-fix: rel_body_y 基于 closest_rx=own-neighbor (NEI→OWN方向)
+            #   邻船在左舷 → rel_body_y < 0; commit_side=-1(右转) → desired=-offset
+            #   旧公式 -commit_side 产生相反期望, 导致车道修正反向指向邻船(内偏转根因)
+            desired_neighbor_y = commit_side * max(0.0, self._apf_orca_lane_offset)
+            lane_error = desired_neighbor_y - rel_body_y
+            lane_proximity = max(0.0, min(1.0, (lane_distance - closest_distance) / lane_distance))
+            angular_correction += self._apf_orca_lane_gain * lane_error * (0.4 + 0.6 * lane_proximity)
 
         # 双边分担：近距时保证双方都有最小转向份额，避免“单船硬躲”
         shared_turn_distance = max(0.1, self._apf_orca_shared_turn_distance)

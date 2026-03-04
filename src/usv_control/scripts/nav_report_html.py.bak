@@ -1,0 +1,934 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+USV 导航日志 HTML 交互式报告生成器
+
+生成单文件 HTML 报告，包含:
+- Plotly.js 交互图表 (缩放/悬停/框选)
+- 深色科技感主题 + 毛玻璃卡片
+- CSS 渐入动画 + 滚动触发
+- 分层布局：总览 → 轨迹 → 控制 → 误差 → 高级 → 评分
+
+作者: chenhangwei
+日期: 2026-03-03
+"""
+
+import json
+import math
+from pathlib import Path
+from datetime import datetime
+from typing import Any
+
+# ─── 数据提取：从原始 data list 中提取结构化统计 ──────────────────
+
+def extract_report_data(data: list, header_info: dict) -> dict:
+    """从导航日志数据中提取全部分析指标，返回结构化字典。
+
+    这是"数据层"——只做计算不做展示，供 HTML/文本/任何前端消费。
+    """
+    if not data:
+        return {}
+
+    t0 = data[0]['timestamp']
+    duration = data[-1]['timestamp'] - t0
+    t = [d['timestamp'] - t0 for d in data]
+
+    guided = [d for d in data if d.get('flight_mode') == 'GUIDED']
+    hold = [d for d in data if d.get('flight_mode') == 'HOLD']
+
+    # ── 基本信息 ──
+    info = {
+        'usv_id': header_info.get('usv_id', 'unknown'),
+        'version': header_info.get('version', '?'),
+        'params': header_info.get('params', {}),
+        'duration_s': duration,
+        'record_count': len(data),
+        'guided_count': len(guided),
+        'hold_count': len(hold),
+        'guided_pct': len(guided) / len(data) * 100 if data else 0,
+    }
+
+    # ── 采样率 ──
+    sampling = {}
+    if len(data) >= 3:
+        dts = sorted(data[i]['timestamp'] - data[i-1]['timestamp'] for i in range(1, len(data)))
+        sampling = {
+            'dt_median': dts[len(dts)//2],
+            'dt_p95': dts[int(len(dts)*0.95)],
+            'dt_max': dts[-1],
+            'hz': 1.0 / dts[len(dts)//2] if dts[len(dts)//2] > 1e-9 else 0,
+        }
+
+    # ── 速度 ──
+    speeds = [d['velocity_speed'] for d in data]
+    g_speeds = [d['velocity_speed'] for d in guided] if guided else []
+    velocity = {
+        'avg': sum(speeds) / len(speeds),
+        'max': max(speeds),
+        'guided_avg': sum(g_speeds) / len(g_speeds) if g_speeds else 0,
+        'guided_max': max(g_speeds) if g_speeds else 0,
+    }
+
+    # ── 目标点 ──
+    targets = []
+    seen = set()
+    for d in data:
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)) and gid > 0:
+            key = (round(d.get('target_x', 0), 2), round(d.get('target_y', 0), 2), int(gid))
+            if key not in seen:
+                seen.add(key)
+                targets.append({'x': key[0], 'y': key[1], 'id': key[2]})
+    goal_seq = []
+    prev_g = None
+    for d in data:
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)):
+            gid = int(gid)
+            if gid != prev_g:
+                goal_seq.append(gid)
+                prev_g = gid
+
+    # ── 距离 ──
+    distances = []
+    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
+        distances = [math.hypot(d['target_x']-d['pose_x'], d['target_y']-d['pose_y'])
+                     for d in data
+                     if all(isinstance(d.get(k), (int, float)) for k in ('pose_x','pose_y','target_x','target_y'))]
+    if not distances:
+        distances = [d.get('distance_to_goal', 0) for d in data
+                     if isinstance(d.get('distance_to_goal'), (int, float))]
+    min_dist = min(distances) if distances else None
+    threshold = 1.5
+    reach_t = None
+    for i, dist in enumerate(distances):
+        if dist <= threshold:
+            reach_t = t[i]
+            break
+
+    # ── CTE ──
+    ctes_guided = [abs(d.get('cross_track_error', 0)) for d in guided
+                   if isinstance(d.get('cross_track_error'), (int, float))]
+    cte_rms = math.sqrt(sum(x*x for x in ctes_guided)/len(ctes_guided)) if ctes_guided else None
+    cte_avg = sum(ctes_guided)/len(ctes_guided) if ctes_guided else None
+    cte_max = max(ctes_guided) if ctes_guided else None
+
+    # ── 航向误差 ──
+    hes_guided = [abs(d.get('heading_error_deg', 0)) for d in guided
+                  if isinstance(d.get('heading_error_deg'), (int, float))]
+    he_avg = sum(hes_guided)/len(hes_guided) if hes_guided else None
+    he_max = max(hes_guided) if hes_guided else None
+
+    # ── MPC ──
+    mpc = {}
+    if 'mpc_solve_time_ms' in data[0]:
+        st = sorted(d.get('mpc_solve_time_ms', 0) for d in data)
+        mpc = {
+            'avg': sum(st)/len(st),
+            'p95': st[int(len(st)*0.95)],
+            'max': st[-1],
+        }
+
+    # ── 角速度 ──
+    om_cmds = [d.get('cmd_omega', 0) for d in data if isinstance(d.get('cmd_omega'), (int, float))]
+    omega = {
+        'avg': sum(abs(o) for o in om_cmds)/len(om_cmds) if om_cmds else 0,
+        'max': max(abs(o) for o in om_cmds) if om_cmds else 0,
+    }
+    # 振荡分析
+    zero_crossings = sum(1 for i in range(1, len(om_cmds)) if om_cmds[i-1]*om_cmds[i] < 0) if len(om_cmds) > 20 else 0
+    osc_freq = zero_crossings / (2 * duration) if duration > 0 and zero_crossings > 0 else 0
+
+    # ── AMPC ──
+    ampc = {}
+    if 'ampc_tau_estimated' in data[0]:
+        ampc_on = [d for d in data if d.get('ampc_enabled', 0) == 1]
+        if ampc_on:
+            tau_ests = [d['ampc_tau_estimated'] for d in ampc_on
+                        if isinstance(d.get('ampc_tau_estimated'), (int, float)) and d['ampc_tau_estimated'] > 0]
+            confs = [d.get('ampc_tau_confidence', 0) for d in ampc_on
+                     if isinstance(d.get('ampc_tau_confidence'), (int, float))]
+            sat_r = [d.get('ampc_saturation_ratio', 0) for d in ampc_on
+                     if isinstance(d.get('ampc_saturation_ratio'), (int, float))]
+            noise = [d.get('ampc_heading_noise', 0) for d in ampc_on
+                     if isinstance(d.get('ampc_heading_noise'), (int, float))]
+            converged = [d for d in ampc_on if d.get('ampc_converged', 0) == 1]
+            ampc = {
+                'tau_min': min(tau_ests) if tau_ests else None,
+                'tau_max': max(tau_ests) if tau_ests else None,
+                'tau_final': tau_ests[-1] if tau_ests else None,
+                'confidence_final': confs[-1] if confs else None,
+                'converge_time': converged[0]['timestamp'] - t0 if converged else None,
+                'sat_avg': sum(sat_r)/len(sat_r) if sat_r else 0,
+                'sat_max': max(sat_r) if sat_r else 0,
+                'noise_avg': sum(noise)/len(noise) if noise else 0,
+                'rebuild_count': int(max(d.get('ampc_rebuild_count', 0) for d in ampc_on)),
+            }
+
+    # ── ORCA ──
+    orca = {}
+    if 'orca_active' in data[0]:
+        active_samples = [d for d in data if d.get('orca_active') == 1]
+        active_cnt = len(active_samples)
+        orca['active_count'] = active_cnt
+        orca['active_pct'] = active_cnt / len(data) * 100 if data else 0
+        if active_cnt > 0:
+            dists = [d.get('orca_closest_distance', -1) for d in active_samples
+                     if isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
+            orca['min_dist'] = min(dists) if dists else None
+            orca['avg_dist'] = sum(dists)/len(dists) if dists else None
+            hard_brakes = sum(1 for d in data if d.get('orca_hard_brake') == 1)
+            orca['hard_brake_count'] = hard_brakes
+            encounters = {}
+            for d in active_samples:
+                et = d.get('orca_encounter_type', 'none')
+                if isinstance(et, str) and et not in ('none', 'other'):
+                    encounters[et] = encounters.get(et, 0) + 1
+            orca['encounters'] = encounters
+
+    # ── WiFi ──
+    wifi = {}
+    if 'wifi_rssi_dbm' in data[0]:
+        vals = [d.get('wifi_rssi_dbm', -100) for d in data
+                if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+        if vals:
+            avg_rssi = sum(vals)/len(vals)
+            wifi = {
+                'avg': avg_rssi,
+                'min': min(vals),
+                'max': max(vals),
+                'std': math.sqrt(sum((x - avg_rssi)**2 for x in vals)/len(vals)),
+                'grade': 'Excellent' if avg_rssi >= -50 else 'Good' if avg_rssi >= -60 else 'Fair' if avg_rssi >= -70 else 'Weak',
+            }
+
+    # ── 每航点 ──
+    per_goal = []
+    goals_map = {}
+    for d in data:
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)):
+            gid = int(gid)
+            if gid not in goals_map:
+                goals_map[gid] = []
+            goals_map[gid].append(d)
+    for gid in sorted(goals_map.keys()):
+        gdata = goals_map[gid]
+        dur = gdata[-1]['timestamp'] - gdata[0]['timestamp']
+        gg = [d for d in gdata if d.get('flight_mode') == 'GUIDED']
+        dists = [d.get('distance_to_goal', 999) for d in gdata if isinstance(d.get('distance_to_goal'), (int, float))]
+        ctes_g = [abs(d.get('cross_track_error', 0)) for d in gg if isinstance(d.get('cross_track_error'), (int, float))]
+        hes_g = [abs(d.get('heading_error_deg', 0)) for d in gg if isinstance(d.get('heading_error_deg'), (int, float))]
+        spds_g = [d.get('velocity_speed', 0) for d in gg if isinstance(d.get('velocity_speed'), (int, float))]
+        pg = {
+            'id': gid,
+            'duration': dur,
+            'min_dist': min(dists) if dists else None,
+            'avg_cte': sum(ctes_g)/len(ctes_g) if ctes_g else None,
+            'avg_he': sum(hes_g)/len(hes_g) if hes_g else None,
+            'avg_speed': sum(spds_g)/len(spds_g) if spds_g else None,
+            'guided_pct': len(gg)/len(gdata)*100 if gdata else 0,
+        }
+        # wifi per goal
+        wv = [d.get('wifi_rssi_dbm', -100) for d in gdata
+              if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
+        if wv:
+            pg['wifi_avg'] = sum(wv)/len(wv)
+        per_goal.append(pg)
+
+    # ── 质量评分 ──
+    score_cte = max(0, 100 - (cte_avg or 0.5) * 200)
+    score_he = max(0, 100 - (he_avg or 40) * 2.5)
+    score_mpc = max(0, 100 - mpc.get('avg', 66) * 1.5)
+    score_spd = min(100, velocity['guided_avg'] / 0.3 * 100) if velocity['guided_avg'] > 0 else 0
+    total_score = score_cte * 0.4 + score_he * 0.4 + score_mpc * 0.1 + score_spd * 0.1
+    grade = 'A+' if total_score >= 80 else 'A' if total_score >= 70 else 'B' if total_score >= 60 else 'C' if total_score >= 40 else 'D'
+
+    scoring = {
+        'cte': score_cte, 'he': score_he, 'mpc': score_mpc, 'spd': score_spd,
+        'total': total_score, 'grade': grade,
+        'cte_label': '优秀' if (cte_avg or 999) < 0.1 else '良好' if (cte_avg or 999) < 0.3 else '一般' if (cte_avg or 999) < 0.5 else '较差',
+        'he_label': '优秀' if (he_avg or 999) < 5 else '良好' if (he_avg or 999) < 10 else '一般' if (he_avg or 999) < 20 else '较差',
+        'mpc_label': '优秀' if mpc.get('avg', 999) < 15 else '正常' if mpc.get('avg', 999) < 30 else '偏高' if mpc.get('avg', 999) < 50 else '过高',
+    }
+
+    # ── 时间序列 (供图表用，做降采样) ──
+    step = max(1, len(data) // 800)  # 限制 ~800 点，HTML 足够流畅
+    ts_data = {
+        'time': [t[i] for i in range(0, len(data), step)],
+        'pose_x': [data[i]['pose_x'] for i in range(0, len(data), step)],
+        'pose_y': [data[i]['pose_y'] for i in range(0, len(data), step)],
+        'speed': [data[i]['velocity_speed'] for i in range(0, len(data), step)],
+        'cmd_vx': [data[i].get('cmd_vx', 0) for i in range(0, len(data), step)],
+        'heading_error': [data[i].get('heading_error_deg', 0) for i in range(0, len(data), step)],
+        'cte': [data[i].get('cross_track_error', 0) for i in range(0, len(data), step)],
+        'distance': [],
+        'flight_mode': [data[i].get('flight_mode', '') for i in range(0, len(data), step)],
+    }
+    # distance
+    if distances and len(distances) == len(data):
+        ts_data['distance'] = [distances[i] for i in range(0, len(data), step)]
+    elif distances:
+        ts_data['distance'] = [data[i].get('distance_to_goal', 0) for i in range(0, len(data), step)]
+
+    if 'mpc_solve_time_ms' in data[0]:
+        ts_data['mpc_time'] = [data[i].get('mpc_solve_time_ms', 0) for i in range(0, len(data), step)]
+    if 'cmd_omega' in data[0]:
+        ts_data['cmd_omega'] = [data[i].get('cmd_omega', 0) for i in range(0, len(data), step)]
+    if 'omega_actual' in data[0]:
+        ts_data['omega_actual'] = [data[i].get('omega_actual', 0) for i in range(0, len(data), step)]
+    if 'current_tau_omega' in data[0]:
+        ts_data['tau'] = [data[i].get('current_tau_omega', 0) for i in range(0, len(data), step)]
+    if 'ampc_tau_estimated' in data[0]:
+        ts_data['tau_estimated'] = [data[i].get('ampc_tau_estimated', 0) for i in range(0, len(data), step)]
+        ts_data['tau_confidence'] = [data[i].get('ampc_tau_confidence', 0) for i in range(0, len(data), step)]
+    if 'wifi_rssi_dbm' in data[0]:
+        ts_data['wifi_rssi'] = [data[i].get('wifi_rssi_dbm', -100) for i in range(0, len(data), step)]
+    if 'orca_active' in data[0]:
+        ts_data['orca_active'] = [data[i].get('orca_active', 0) for i in range(0, len(data), step)]
+        ts_data['orca_closest'] = [data[i].get('orca_closest_distance', -1) for i in range(0, len(data), step)]
+
+    return {
+        'info': info, 'sampling': sampling, 'velocity': velocity,
+        'targets': targets, 'goal_seq': goal_seq,
+        'distance': {'min': min_dist, 'end': distances[-1] if distances else None, 'reach_t': reach_t},
+        'cte': {'avg': cte_avg, 'max': cte_max, 'rms': cte_rms},
+        'heading_error': {'avg': he_avg, 'max': he_max},
+        'mpc': mpc, 'omega': omega, 'osc_freq': osc_freq,
+        'ampc': ampc, 'orca': orca, 'wifi': wifi,
+        'per_goal': per_goal, 'scoring': scoring,
+        'ts': ts_data,
+    }
+
+
+# ─── HTML 模板 ─────────────────────────────────────────────────
+
+def _safe_json(obj):
+    """安全 JSON 序列化，处理 None / NaN / Inf"""
+    def default(o):
+        if o is None:
+            return None
+        if isinstance(o, float):
+            if math.isnan(o) or math.isinf(o):
+                return None
+        raise TypeError(f"Object of type {type(o)} is not JSON serializable")
+    return json.dumps(obj, default=default, ensure_ascii=False)
+
+
+def _fmt(val, fmt_spec='.2f', suffix='', na='N/A'):
+    if val is None:
+        return na
+    try:
+        return f"{val:{fmt_spec}}{suffix}"
+    except (ValueError, TypeError):
+        return str(val)
+
+
+def generate_html_report(report_data: dict, output_path: Path, csv_name: str = ''):
+    """生成单文件交互式 HTML 报告"""
+    d = report_data
+    info = d['info']
+    sc = d['scoring']
+    ts = d['ts']
+
+    # 评分颜色
+    grade_color = {
+        'A+': '#00E676', 'A': '#69F0AE', 'B': '#FFD740',
+        'C': '#FF9100', 'D': '#FF5252'
+    }.get(sc['grade'], '#90A4AE')
+
+    # 构建指标卡片 HTML
+    def metric_card(icon, label, value, sub='', color='#64FFDA'):
+        return f'''
+        <div class="metric-card">
+          <div class="metric-icon" style="color:{color}">{icon}</div>
+          <div class="metric-value">{value}</div>
+          <div class="metric-label">{label}</div>
+          {f'<div class="metric-sub">{sub}</div>' if sub else ''}
+        </div>'''
+
+    overview_cards = ''.join([
+        metric_card('⏱', '任务时长', f"{info['duration_s']:.1f}s",
+                    f"{info['duration_s']/60:.1f} min", '#64FFDA'),
+        metric_card('📊', '数据点数', f"{info['record_count']}",
+                    f"~{d['sampling'].get('hz',0):.0f} Hz", '#82B1FF'),
+        metric_card('🎯', '航点数', f"{len(d['targets'])}",
+                    f"序列: {' → '.join(str(g) for g in d['goal_seq'][:6])}", '#FFAB40'),
+        metric_card('🚀', 'GUIDED占比', f"{info['guided_pct']:.0f}%",
+                    f"导航 {info['guided_count']} / 等待 {info['hold_count']}", '#B388FF'),
+    ])
+
+    perf_cards = ''.join([
+        metric_card('📐', '横向偏差CTE', _fmt(d['cte']['avg'], '.3f', 'm'),
+                    f"RMS={_fmt(d['cte']['rms'], '.3f', 'm')} | {sc['cte_label']}",
+                    '#4FC3F7' if sc['cte'] >= 60 else '#FF8A65'),
+        metric_card('🧭', '航向误差', _fmt(d['heading_error']['avg'], '.1f', '°'),
+                    f"Max={_fmt(d['heading_error']['max'], '.1f', '°')} | {sc['he_label']}",
+                    '#4FC3F7' if sc['he'] >= 60 else '#FF8A65'),
+        metric_card('⚡', 'MPC求解', _fmt(d['mpc'].get('avg'), '.1f', 'ms'),
+                    f"P95={_fmt(d['mpc'].get('p95'), '.1f', 'ms')} | {sc['mpc_label']}",
+                    '#4FC3F7' if sc['mpc'] >= 60 else '#FF8A65'),
+        metric_card('🏎', 'GUIDED均速', _fmt(d['velocity']['guided_avg'], '.3f', ' m/s'),
+                    f"最大 {_fmt(d['velocity']['guided_max'], '.3f', ' m/s')}",
+                    '#69F0AE'),
+    ])
+
+    # WiFi / ORCA 卡片
+    extra_cards = ''
+    if d['wifi']:
+        w = d['wifi']
+        wcolor = '#69F0AE' if w['avg'] >= -50 else '#FFD740' if w['avg'] >= -60 else '#FF9100' if w['avg'] >= -70 else '#FF5252'
+        extra_cards += metric_card('📶', 'WiFi信号', f"{w['avg']:.0f} dBm",
+                                   f"{w['grade']} | 波动±{w['std']:.1f}dBm", wcolor)
+    if d['orca'] and d['orca'].get('active_count', 0) > 0:
+        o = d['orca']
+        extra_cards += metric_card('🛡', 'ORCA避障', f"{o['active_pct']:.0f}%",
+                                   f"最近 {_fmt(o.get('min_dist'), '.2f', 'm')} | 硬刹 {o.get('hard_brake_count', 0)}次",
+                                   '#FF8A65' if (o.get('min_dist') or 99) < 1 else '#FFD740')
+    if d['ampc']:
+        a = d['ampc']
+        extra_cards += metric_card('🧠', 'AMPC辨识',
+                                   f"τ={_fmt(a.get('tau_final'), '.3f', 's')}",
+                                   f"置信 {_fmt(a.get('confidence_final'), '.2f')} | {'已收敛' if a.get('converge_time') is not None else '未收敛'}",
+                                   '#69F0AE' if a.get('converge_time') is not None else '#FF8A65')
+
+    # 振荡
+    if d['osc_freq'] > 0.01:
+        extra_cards += metric_card('〰', '振荡频率', f"{d['osc_freq']:.2f} Hz",
+                                   f"{'⚠ 可能S形' if d['osc_freq'] > 0.3 else '正常范围'}",
+                                   '#FF8A65' if d['osc_freq'] > 0.3 else '#69F0AE')
+
+    # 每航点表
+    goal_rows = ''
+    for pg in d['per_goal']:
+        arrived = '✅' if pg.get('min_dist') is not None and pg['min_dist'] <= 1.5 else '❌'
+        goal_rows += f'''
+        <tr>
+          <td>G{pg['id']}</td><td>{pg['duration']:.1f}s</td>
+          <td>{arrived} {_fmt(pg.get('min_dist'), '.2f', 'm')}</td>
+          <td>{_fmt(pg.get('avg_cte'), '.3f', 'm')}</td>
+          <td>{_fmt(pg.get('avg_he'), '.1f', '°')}</td>
+          <td>{_fmt(pg.get('avg_speed'), '.3f', ' m/s')}</td>
+          <td>{pg['guided_pct']:.0f}%</td>
+          <td>{_fmt(pg.get('wifi_avg'), '.0f', ' dBm')}</td>
+        </tr>'''
+
+    # JSON 时间序列数据，嵌入到 HTML
+    ts_json = _safe_json(ts)
+    targets_json = _safe_json(d['targets'])
+
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    html = f'''<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>USV 导航分析报告 - {info['usv_id']}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+/* ─── 基础 & 深色主题 ─── */
+:root {{
+  --bg: #0a0e17; --bg2: #111827; --bg-card: rgba(17,24,39,0.75);
+  --accent: #64FFDA; --accent2: #82B1FF; --text: #e0e0e0; --text2: #9e9e9e;
+  --border: rgba(100,255,218,0.15); --glow: rgba(100,255,218,0.25);
+}}
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{
+  font-family: 'Inter','Segoe UI','PingFang SC','Microsoft YaHei',system-ui,sans-serif;
+  background: var(--bg); color: var(--text); line-height:1.6;
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(100,255,218,0.04) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 20%, rgba(130,177,255,0.04) 0%, transparent 50%);
+}}
+.container {{ max-width:1280px; margin:0 auto; padding:20px; }}
+
+/* ─── 顶部 Banner ─── */
+.banner {{
+  text-align:center; padding:48px 20px 32px;
+  background: linear-gradient(135deg, rgba(100,255,218,0.08) 0%, rgba(130,177,255,0.08) 100%);
+  border-bottom: 1px solid var(--border); position:relative; overflow:hidden;
+}}
+.banner::before {{
+  content:''; position:absolute; top:-50%; left:-50%; width:200%; height:200%;
+  background: conic-gradient(from 0deg, transparent, rgba(100,255,218,0.03), transparent 30%);
+  animation: bannerRotate 20s linear infinite;
+}}
+@keyframes bannerRotate {{ to {{ transform: rotate(360deg); }} }}
+.banner h1 {{ font-size:2rem; font-weight:700; color:var(--accent); position:relative; }}
+.banner .subtitle {{ color:var(--text2); font-size:0.9rem; margin-top:8px; position:relative; }}
+
+/* ─── 评分徽章 ─── */
+.grade-badge {{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:80px; height:80px; border-radius:50%; font-size:2rem; font-weight:800;
+  border: 3px solid {grade_color}; color: {grade_color};
+  box-shadow: 0 0 30px {grade_color}44; margin:16px auto 8px;
+  animation: pulseBadge 2s ease-in-out infinite; position:relative;
+}}
+@keyframes pulseBadge {{
+  0%,100% {{ box-shadow: 0 0 20px {grade_color}33; }}
+  50% {{ box-shadow: 0 0 40px {grade_color}66; }}
+}}
+.grade-score {{ font-size:1.1rem; color:{grade_color}; font-weight:600; position:relative; }}
+
+/* ─── 章节 ─── */
+.section {{
+  margin: 32px 0; opacity:0; transform: translateY(30px);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}}
+.section.visible {{ opacity:1; transform: translateY(0); }}
+.section-title {{
+  font-size:1.3rem; font-weight:700; color:var(--accent);
+  padding-bottom:10px; margin-bottom:20px;
+  border-bottom: 2px solid var(--border);
+  display:flex; align-items:center; gap:10px;
+}}
+.section-title .num {{
+  display:inline-flex; align-items:center; justify-content:center;
+  width:28px; height:28px; border-radius:50%; background:var(--accent);
+  color:var(--bg); font-size:0.85rem; font-weight:700;
+}}
+
+/* ─── 指标卡片 ─── */
+.metrics {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:16px; }}
+.metric-card {{
+  background: var(--bg-card); backdrop-filter: blur(12px);
+  border: 1px solid var(--border); border-radius:12px;
+  padding:20px; text-align:center;
+  transition: transform 0.25s, box-shadow 0.25s;
+}}
+.metric-card:hover {{
+  transform: translateY(-4px); box-shadow: 0 8px 32px rgba(100,255,218,0.12);
+}}
+.metric-icon {{ font-size:1.5rem; margin-bottom:6px; }}
+.metric-value {{ font-size:1.5rem; font-weight:700; color:#fff; }}
+.metric-label {{ font-size:0.8rem; color:var(--text2); margin-top:4px; }}
+.metric-sub {{ font-size:0.72rem; color:var(--text2); margin-top:4px; opacity:0.7; }}
+
+/* ─── 图表容器 ─── */
+.chart-box {{
+  background: var(--bg-card); backdrop-filter: blur(12px);
+  border: 1px solid var(--border); border-radius:12px;
+  padding:16px; margin-bottom:20px;
+}}
+.chart-box .chart-guide {{
+  font-size:0.78rem; color:var(--text2); margin-top:10px;
+  padding:10px 14px; background:rgba(100,255,218,0.06);
+  border-radius:8px; border-left:3px solid var(--accent);
+}}
+
+/* ─── 航点表 ─── */
+.goal-table {{ width:100%; border-collapse:collapse; font-size:0.85rem; }}
+.goal-table th {{
+  background:rgba(100,255,218,0.1); color:var(--accent);
+  padding:10px 8px; text-align:center; border-bottom:2px solid var(--border);
+}}
+.goal-table td {{
+  padding:8px; text-align:center; border-bottom:1px solid rgba(255,255,255,0.05);
+}}
+.goal-table tr:hover td {{ background:rgba(100,255,218,0.05); }}
+
+/* ─── 阅读指南面板 ─── */
+.reading-guide {{
+  background: rgba(255,253,231,0.06); border:1px solid rgba(255,215,64,0.2);
+  border-radius:10px; padding:16px 20px; margin:20px 0; font-size:0.82rem;
+  color:var(--text2); line-height:1.8;
+}}
+.reading-guide strong {{ color:#FFD740; }}
+
+/* ─── 页脚 ─── */
+.footer {{
+  text-align:center; padding:30px; color:var(--text2); font-size:0.75rem;
+  border-top:1px solid var(--border); margin-top:40px;
+}}
+
+/* ─── 动画 ─── */
+@keyframes fadeInUp {{
+  from {{ opacity:0; transform:translateY(20px); }}
+  to {{ opacity:1; transform:translateY(0); }}
+}}
+.animate-in {{ animation: fadeInUp 0.5s ease forwards; }}
+
+/* plotly图表深色 */
+.js-plotly-plot .plotly .modebar {{ top:4px !important; }}
+</style>
+</head>
+<body>
+
+<!-- ═══ Banner ═══ -->
+<div class="banner">
+  <h1>🚢 USV 导航分析报告</h1>
+  <div class="subtitle">{info['usv_id']} | {info['version']} | {csv_name} | {now}</div>
+  <div class="grade-badge">{sc['grade']}</div>
+  <div class="grade-score">{sc['total']:.0f} / 100</div>
+</div>
+
+<div class="container">
+
+<!-- ═══ 1. 任务总览 ═══ -->
+<div class="section" id="s1">
+  <div class="section-title"><span class="num">1</span> 任务总览</div>
+  <div class="metrics">{overview_cards}</div>
+</div>
+
+<!-- ═══ 2. 性能指标 ═══ -->
+<div class="section" id="s2">
+  <div class="section-title"><span class="num">2</span> 核心性能</div>
+  <div class="metrics">{perf_cards}</div>
+  <div class="reading-guide">
+    <strong>如何判读：</strong>CTE(横向偏差)越小越好，&lt;0.1m优秀，&lt;0.3m良好；
+    航向误差&lt;5°优秀，&lt;10°良好；MPC求解&lt;15ms优秀，&gt;50ms需警惕。
+    综合评分按 CTE×40% + 航向×40% + MPC×10% + 速度×10% 加权计算。
+  </div>
+</div>
+
+<!-- ═══ 3. 轨迹图 ═══ -->
+<div class="section" id="s3">
+  <div class="section-title"><span class="num">3</span> 航行轨迹</div>
+  <div class="chart-box">
+    <div id="chart-traj" style="height:500px;"></div>
+    <div class="chart-guide">
+      📍 蓝色轨迹=GUIDED自动导航 | 灰色=HOLD悬停等待 | 绿●=起点 | 红■=终点 | 橙★=目标航点<br>
+      可用鼠标滚轮缩放，拖拽平移，悬停查看坐标。轨迹越平滑、越贴近航点连线说明控制越精准。
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 4. 速度 & 距离 ═══ -->
+<div class="section" id="s4">
+  <div class="section-title"><span class="num">4</span> 速度与到达</div>
+  <div class="chart-box">
+    <div id="chart-velocity" style="height:400px;"></div>
+    <div class="chart-guide">
+      🔵 蓝=实际速度 | 🔴 红虚线=指令速度 | 两者重合度体现速度执行精度<br>
+      淡红背景区域=HOLD悬停阶段(无速度指令)
+    </div>
+  </div>
+  <div class="chart-box">
+    <div id="chart-distance" style="height:300px;"></div>
+    <div class="chart-guide">
+      🟣 紫=到目标距离 | 红虚线=到达阈值(1.5m) | 曲线降至阈值以下=成功到达航点
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 5. 误差分析 ═══ -->
+<div class="section" id="s5">
+  <div class="section-title"><span class="num">5</span> 误差分析</div>
+  <div class="chart-box">
+    <div id="chart-errors" style="height:450px;"></div>
+    <div class="chart-guide">
+      📐 上图: 航向误差(°)，越接近0°航向越准 |
+      下图: 横向偏差CTE(m)，越接近0轨迹越精准，填充面积越小越好
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 6. 控制指令 ═══ -->
+<div class="section" id="s6">
+  <div class="section-title"><span class="num">6</span> 控制指令</div>
+  <div class="chart-box">
+    <div id="chart-control" style="height:400px;"></div>
+    <div class="chart-guide">
+      🎮 角速度: 红=指令ω_cmd, 蓝=实际ω_actual | 跟踪越紧密转弯控制越好 |
+      正值=左转, 负值=右转
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 7. 高级分析 (MPC/Tau/AMPC) ═══ -->
+<div class="section" id="s7">
+  <div class="section-title"><span class="num">7</span> 高级分析</div>
+  <div class="chart-box">
+    <div id="chart-mpc" style="height:300px;"></div>
+    <div class="chart-guide">
+      ⚡ MPC求解时间(ms) | 红虚线=50ms警戒线 | 超过50ms说明计算负荷过高需优化
+    </div>
+  </div>
+  <div class="chart-box" id="chart-tau-box" style="display:none;">
+    <div id="chart-tau" style="height:350px;"></div>
+    <div class="chart-guide">
+      🔧 蓝=当前τ_omega(转弯时间常数) | 红虚=AMPC估计τ | 绿=置信度(0~1) |
+      τ越小转弯越灵敏，AMPC在线自动调节
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 8. 扩展指标 ═══ -->
+<div class="section" id="s8">
+  <div class="section-title"><span class="num">8</span> 扩展指标</div>
+  <div class="metrics">{extra_cards}</div>
+  <div class="chart-box" id="chart-wifi-box" style="display:none;">
+    <div id="chart-wifi" style="height:300px;"></div>
+    <div class="chart-guide">
+      📶 WiFi RSSI 信号强度 | ≥-50dBm优秀(绿) | -60~-50良好 | -70~-60一般 | &lt;-70较弱(红)
+    </div>
+  </div>
+  <div class="chart-box" id="chart-orca-box" style="display:none;">
+    <div id="chart-orca" style="height:300px;"></div>
+    <div class="chart-guide">
+      🛡 ORCA避障: 蓝=最近邻居距离 | 红背景=ORCA激活中 | 橙虚线=影响距离(4m) | &lt;1m危险
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 9. 每航点统计 ═══ -->
+<div class="section" id="s9">
+  <div class="section-title"><span class="num">9</span> 每航点统计</div>
+  <div class="chart-box" style="overflow-x:auto;">
+    <table class="goal-table">
+      <thead><tr>
+        <th>航点</th><th>时长</th><th>最近距离</th>
+        <th>均CTE</th><th>均航向误差</th><th>均速</th><th>GUIDED%</th><th>WiFi</th>
+      </tr></thead>
+      <tbody>{goal_rows}</tbody>
+    </table>
+  </div>
+  <div class="chart-box">
+    <div id="chart-goals" style="height:350px;"></div>
+  </div>
+</div>
+
+</div><!-- /container -->
+
+<div class="footer">
+  USV Navigation Log Analysis Report | Generated by analyze_nav_log.py | {now}
+</div>
+
+<!-- ═══ 数据 & 图表渲染 ═══ -->
+<script>
+const TS = {ts_json};
+const TARGETS = {targets_json};
+
+const darkLayout = {{
+  paper_bgcolor: 'rgba(0,0,0,0)',
+  plot_bgcolor: 'rgba(17,24,39,0.5)',
+  font: {{ color: '#e0e0e0', family: 'Inter,system-ui,sans-serif' }},
+  margin: {{ t:40, r:30, b:40, l:55 }},
+  xaxis: {{ gridcolor:'rgba(255,255,255,0.06)', zerolinecolor:'rgba(255,255,255,0.1)' }},
+  yaxis: {{ gridcolor:'rgba(255,255,255,0.06)', zerolinecolor:'rgba(255,255,255,0.1)' }},
+  legend: {{ bgcolor:'rgba(0,0,0,0.3)', font:{{ size:11 }} }},
+}};
+const cfg = {{ responsive:true, displayModeBar:true,
+  modeBarButtonsToRemove:['select2d','lasso2d','autoScale2d'],
+  displaylogo:false }};
+
+// ── 1. 轨迹图 ──
+(function() {{
+  let guided_x=[], guided_y=[], hold_x=[], hold_y=[];
+  for(let i=0; i<TS.pose_x.length; i++) {{
+    if(TS.flight_mode[i]==='GUIDED') {{ guided_x.push(TS.pose_x[i]); guided_y.push(TS.pose_y[i]); }}
+    else {{ hold_x.push(TS.pose_x[i]); hold_y.push(TS.pose_y[i]); }}
+  }}
+  let traces = [
+    {{ x:guided_x, y:guided_y, mode:'lines', name:'GUIDED',
+      line:{{color:'#42A5F5',width:2}}, hovertemplate:'X:%{{x:.2f}} Y:%{{y:.2f}}' }},
+    {{ x:hold_x, y:hold_y, mode:'markers', name:'HOLD',
+      marker:{{color:'#9E9E9E',size:3,opacity:0.4}} }},
+    {{ x:[TS.pose_x[0]], y:[TS.pose_y[0]], mode:'markers', name:'Start',
+      marker:{{color:'#4CAF50',size:14,symbol:'circle',line:{{width:2,color:'#fff'}}}} }},
+    {{ x:[TS.pose_x[TS.pose_x.length-1]], y:[TS.pose_y[TS.pose_y.length-1]],
+      mode:'markers', name:'End',
+      marker:{{color:'#F44336',size:14,symbol:'square',line:{{width:2,color:'#fff'}}}} }},
+  ];
+  if(TARGETS.length)
+    traces.push({{ x:TARGETS.map(t=>t.x), y:TARGETS.map(t=>t.y),
+      mode:'markers+text', name:'Goals',
+      marker:{{color:'#FFA726',size:16,symbol:'star', line:{{width:1,color:'#E65100'}}}},
+      text:TARGETS.map(t=>'G'+t.id), textposition:'top center',
+      textfont:{{color:'#FFA726',size:11}} }});
+  Plotly.newPlot('chart-traj', traces, {{
+    ...darkLayout, title:'航行轨迹',
+    xaxis:{{...darkLayout.xaxis, title:'X (m)', scaleanchor:'y'}},
+    yaxis:{{...darkLayout.yaxis, title:'Y (m)'}},
+  }}, cfg);
+}})();
+
+// ── 2. 速度 ──
+(function() {{
+  let traces = [ {{ x:TS.time, y:TS.speed, name:'实际速度', line:{{color:'#42A5F5',width:1.5}} }} ];
+  if(TS.cmd_vx)
+    traces.push({{ x:TS.time, y:TS.cmd_vx, name:'指令速度', line:{{color:'#EF5350',width:1,dash:'dash'}} }});
+  // HOLD 背景 shapes
+  let shapes = [];
+  let inHold = false, hStart = 0;
+  for(let i=0;i<TS.flight_mode.length;i++) {{
+    if(TS.flight_mode[i]==='HOLD' && !inHold) {{ inHold=true; hStart=TS.time[i]; }}
+    else if(TS.flight_mode[i]!=='HOLD' && inHold) {{
+      inHold=false;
+      shapes.push({{ type:'rect',xref:'x',yref:'paper',x0:hStart,x1:TS.time[i],y0:0,y1:1,
+        fillcolor:'rgba(244,67,54,0.08)',line:{{width:0}} }});
+    }}
+  }}
+  Plotly.newPlot('chart-velocity', traces, {{
+    ...darkLayout, title:'速度跟踪', shapes,
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+    yaxis:{{...darkLayout.yaxis,title:'Speed (m/s)'}},
+  }}, cfg);
+}})();
+
+// ── 3. 距离 ──
+if(TS.distance && TS.distance.length) {{
+  Plotly.newPlot('chart-distance',
+    [{{ x:TS.time, y:TS.distance, name:'到目标距离',
+      line:{{color:'#AB47BC',width:1.5}}, fill:'tozeroy',
+      fillcolor:'rgba(171,71,188,0.1)' }}],
+    {{ ...darkLayout, title:'到目标距离',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+      yaxis:{{...darkLayout.yaxis,title:'Distance (m)'}},
+      shapes:[{{ type:'line',x0:TS.time[0],x1:TS.time[TS.time.length-1],
+        y0:1.5,y1:1.5, line:{{color:'#EF5350',width:1.5,dash:'dash'}} }}],
+    }}, cfg);
+}}
+
+// ── 4. 误差 ──
+(function() {{
+  let traces = [
+    {{ x:TS.time, y:TS.heading_error, name:'航向误差(°)', yaxis:'y',
+      line:{{color:'#42A5F5',width:1.2}} }},
+    {{ x:TS.time, y:TS.cte, name:'横向偏差CTE(m)', yaxis:'y2',
+      line:{{color:'#66BB6A',width:1.2}}, fill:'tozeroy',
+      fillcolor:'rgba(102,187,106,0.1)' }},
+  ];
+  Plotly.newPlot('chart-errors', traces, {{
+    ...darkLayout, title:'误差分析',
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+    yaxis:{{...darkLayout.yaxis, title:'航向误差 (°)', domain:[0.55,1]}},
+    yaxis2:{{...darkLayout.yaxis, title:'CTE (m)', domain:[0,0.42],
+      gridcolor:'rgba(255,255,255,0.06)', zerolinecolor:'rgba(255,255,255,0.1)'}},
+  }}, cfg);
+}})();
+
+// ── 5. 控制指令 ──
+(function() {{
+  let traces = [];
+  if(TS.cmd_omega) traces.push(
+    {{ x:TS.time, y:TS.cmd_omega, name:'ω_cmd', line:{{color:'#EF5350',width:1}} }});
+  if(TS.omega_actual) traces.push(
+    {{ x:TS.time, y:TS.omega_actual, name:'ω_actual', line:{{color:'#42A5F5',width:1.5}} }});
+  if(traces.length)
+    Plotly.newPlot('chart-control', traces, {{
+      ...darkLayout, title:'角速度跟踪',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+      yaxis:{{...darkLayout.yaxis,title:'ω (rad/s)'}},
+      shapes:[{{ type:'line',x0:TS.time[0],x1:TS.time[TS.time.length-1],
+        y0:0,y1:0, line:{{color:'rgba(255,255,255,0.2)',width:0.5}} }}],
+    }}, cfg);
+}})();
+
+// ── 6. MPC 求解时间 ──
+if(TS.mpc_time) {{
+  Plotly.newPlot('chart-mpc',
+    [{{ x:TS.time, y:TS.mpc_time, name:'求解时间',
+      line:{{color:'#42A5F5',width:1.2}}, fill:'tozeroy',
+      fillcolor:'rgba(66,165,245,0.1)' }}],
+    {{ ...darkLayout, title:'MPC 求解时间',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+      yaxis:{{...darkLayout.yaxis,title:'Time (ms)'}},
+      shapes:[{{ type:'line',x0:TS.time[0],x1:TS.time[TS.time.length-1],
+        y0:50,y1:50, line:{{color:'#EF5350',width:1.5,dash:'dash'}} }}],
+    }}, cfg);
+}}
+
+// ── 7. Tau + AMPC ──
+if(TS.tau) {{
+  document.getElementById('chart-tau-box').style.display='block';
+  let traces = [
+    {{ x:TS.time, y:TS.tau, name:'τ_omega (active)', line:{{color:'#42A5F5',width:2}} }}
+  ];
+  if(TS.tau_estimated) {{
+    traces.push({{ x:TS.time, y:TS.tau_estimated, name:'τ_estimated (RLS)',
+      line:{{color:'#EF5350',width:1,dash:'dash'}} }});
+    traces.push({{ x:TS.time, y:TS.tau_confidence, name:'confidence',
+      yaxis:'y2', line:{{color:'#69F0AE',width:1}}, opacity:0.6 }});
+  }}
+  Plotly.newPlot('chart-tau', traces, {{
+    ...darkLayout, title:'Tau 自适应 / AMPC 在线辨识',
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+    yaxis:{{...darkLayout.yaxis,title:'τ (s)'}},
+    yaxis2:{{ overlaying:'y',side:'right',title:'Confidence',range:[0,1.1],
+      gridcolor:'rgba(255,255,255,0.03)',titlefont:{{color:'#69F0AE'}},tickfont:{{color:'#69F0AE'}} }},
+  }}, cfg);
+}}
+
+// ── 8. WiFi ──
+if(TS.wifi_rssi) {{
+  document.getElementById('chart-wifi-box').style.display='block';
+  Plotly.newPlot('chart-wifi',
+    [{{ x:TS.time, y:TS.wifi_rssi, name:'WiFi RSSI',
+      line:{{color:'#42A5F5',width:1.2}} }}],
+    {{ ...darkLayout, title:'WiFi 信号强度',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+      yaxis:{{...darkLayout.yaxis,title:'RSSI (dBm)'}},
+      shapes:[
+        {{type:'line',x0:TS.time[0],x1:TS.time[TS.time.length-1],y0:-50,y1:-50,
+          line:{{color:'#4CAF50',width:0.8,dash:'dot'}}}},
+        {{type:'line',x0:TS.time[0],x1:TS.time[TS.time.length-1],y0:-70,y1:-70,
+          line:{{color:'#FF9800',width:0.8,dash:'dot'}}}},
+      ],
+    }}, cfg);
+}}
+
+// ── 9. ORCA ──
+if(TS.orca_active && TS.orca_closest) {{
+  let hasData = TS.orca_active.some(v=>v===1);
+  if(hasData) {{
+    document.getElementById('chart-orca-box').style.display='block';
+    let shapes=[];
+    let inOrca=false, oStart=0;
+    for(let i=0;i<TS.orca_active.length;i++) {{
+      if(TS.orca_active[i]===1 && !inOrca) {{ inOrca=true; oStart=TS.time[i]; }}
+      else if(TS.orca_active[i]!==1 && inOrca) {{
+        inOrca=false;
+        shapes.push({{type:'rect',xref:'x',yref:'paper',x0:oStart,x1:TS.time[i],y0:0,y1:1,
+          fillcolor:'rgba(244,67,54,0.1)',line:{{width:0}}}});
+      }}
+    }}
+    let dist_valid = TS.orca_closest.map(v=>v>0?v:null);
+    Plotly.newPlot('chart-orca',
+      [{{ x:TS.time, y:dist_valid, name:'最近邻居距离', connectgaps:false,
+        line:{{color:'#42A5F5',width:1.5}} }}],
+      {{ ...darkLayout, title:'ORCA 避障分析', shapes,
+        xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+        yaxis:{{...darkLayout.yaxis,title:'Distance (m)'}},
+      }}, cfg);
+  }}
+}}
+
+// ── 10. 每航点柱状图 ──
+(function() {{
+  const pgData = {_safe_json(d['per_goal'])};
+  if(pgData.length < 2) return;
+  let labels = pgData.map(g=>'G'+g.id);
+  let traces = [
+    {{ x:labels, y:pgData.map(g=>g.avg_cte), name:'均CTE(m)', type:'bar',
+      marker:{{color:'#7E57C2'}} }},
+    {{ x:labels, y:pgData.map(g=>g.avg_he), name:'均航向误差(°)', type:'bar',
+      marker:{{color:'#42A5F5'}}, yaxis:'y2' }},
+  ];
+  Plotly.newPlot('chart-goals', traces, {{
+    ...darkLayout, title:'每航点性能对比', barmode:'group',
+    xaxis:{{...darkLayout.xaxis,title:'Goal'}},
+    yaxis:{{...darkLayout.yaxis,title:'CTE (m)'}},
+    yaxis2:{{ overlaying:'y',side:'right',title:'航向误差 (°)',
+      gridcolor:'rgba(255,255,255,0.03)' }},
+  }}, cfg);
+}})();
+
+// ── 滚动动画 ──
+const observer = new IntersectionObserver((entries) => {{
+  entries.forEach(e => {{
+    if(e.isIntersecting) {{ e.target.classList.add('visible'); }}
+  }});
+}}, {{ threshold:0.1 }});
+document.querySelectorAll('.section').forEach(s => observer.observe(s));
+
+// 初始立即显示前两个
+setTimeout(()=>{{ document.querySelectorAll('#s1,#s2').forEach(s=>s.classList.add('visible')); }}, 100);
+</script>
+</body>
+</html>'''
+
+    html_path = output_path / 'report.html'
+    html_path.write_text(html, encoding='utf-8')
+    return html_path
