@@ -59,7 +59,7 @@ class GroundStationNode(Node):
     NAMESPACE_UPDATE_PERIOD = 2.0 # 命名空间更新周期(秒)，从 5.0 减少到 2.0，加快离线检测
     CLUSTER_TARGET_PUBLISH_PERIOD =0.5 # 集群目标发布周期(秒)，增加周期减少CPU占用
     MIN_ACK_RATE_FOR_PROCEED = 0.8  # 最小确认率阈值，超过此值可进入下一步
-    PREARM_WARNING_EXPIRY = 15.0  # PreArm 报警保留时长（秒）
+    PREARM_WARNING_EXPIRY = 5.0  # PreArm 报警保留时长（秒），从 15s 缩短到 5s 加快 Ready 响应
     
     def __init__(self, signal, append_info=None, append_warning=None):
         """
@@ -230,6 +230,9 @@ class GroundStationNode(Node):
         self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器，定期检查USV之间的传染逻辑
         # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI（类似 QGC 的灵敏响应）
         self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz，优化性能
+        # 定期主动请求飞控 PreArm 检查，加快 Ready 状态响应
+        self._prearm_check_timer = self.create_timer(3.0, self._request_prearm_checks)  # 每 3 秒请求一次
+        self._cmd_long_clients = {}  # 缓存 CommandLong 服务客户端
         
         # 使用静态配置初始化USV订阅和发布者（Domain隔离架构）
         self.initialize_usv_from_config()
@@ -1908,6 +1911,12 @@ class GroundStationNode(Node):
                 f"health=0x{curr_health:08X}"
             )
             self._last_sensor_health_log[usv_id] = curr_health
+            # 传感器健康状态变化时，立即重新计算并推送 Ready 状态，不等待下次定时器
+            self.augment_state_payload(usv_id)
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception:
+                pass
 
     def push_state_updates(self):
         """
@@ -1939,6 +1948,50 @@ class GroundStationNode(Node):
         except Exception as exc:
             # 使用 debug 级别避免刷屏，因为这是高频调用
             pass  # 静默失败，避免日志刷屏
+
+    def _request_prearm_checks(self):
+        """
+        定期向所有在线 USV 发送 MAV_CMD_RUN_PREARM_CHECKS (401) 命令，
+        让飞控主动报告 PreArm 状态，避免被动等待 STATUSTEXT。
+        """
+        if not self.usv_states:
+            return
+        try:
+            from mavros_msgs.srv import CommandLong
+        except ImportError:
+            return
+
+        for usv_id in list(self.usv_states.keys()):
+            state = self.usv_states.get(usv_id) or {}
+            # 只对在线、未解锁的 USV 请求 PreArm 检查
+            if not state.get('connected', False):
+                continue
+            if state.get('armed', False):
+                continue
+
+            service_name = f'/{usv_id}/cmd/command'
+            try:
+                client = self._cmd_long_clients.get(service_name)
+                if client is None or not client.service_is_ready():
+                    client = self.create_client(CommandLong, service_name)
+                    self._cmd_long_clients[service_name] = client
+                if not client.service_is_ready():
+                    continue
+
+                request = CommandLong.Request()
+                request.broadcast = False
+                request.command = 401  # MAV_CMD_RUN_PREARM_CHECKS
+                request.confirmation = 0
+                request.param1 = 0.0
+                request.param2 = 0.0
+                request.param3 = 0.0
+                request.param4 = 0.0
+                request.param5 = 0.0
+                request.param6 = 0.0
+                request.param7 = 0.0
+                client.call_async(request)  # 异步发送，不阻塞
+            except Exception:
+                pass
 
     def _maybe_force_guided_during_nav(self, usv_id: str, state: dict, now_sec: float) -> None:
         """导航执行中若意外变为HOLD，则限频补发GUIDED。
@@ -2308,9 +2361,9 @@ class GroundStationNode(Node):
             if now_sec - sensor_cache.get('timestamp', 0) < 0.5:  # 500ms 内有更新
                 return True
         
-        # 默认每 2 秒强制更新一次
+        # 默认每 1 秒强制更新一次（从 2s 缩短，加快 Ready 响应）
         last_update = getattr(self, '_last_augment_time', {}).get(usv_id, 0)
-        if now_sec - last_update > 2.0:
+        if now_sec - last_update > 1.0:
             if not hasattr(self, '_last_augment_time'):
                 self._last_augment_time = {}
             self._last_augment_time[usv_id] = now_sec
