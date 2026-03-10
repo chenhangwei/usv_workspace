@@ -728,6 +728,7 @@ class VelocityControllerNode(Node):
         self._orca_stall_timeout: float = 60.0              # ORCA停滞超时 (秒)
         self._orca_stall_progress_threshold: float = 1.0    # 有效进展阈值 (米)
         self._orca_stall_start_pose: tuple = None            # 停滞开始时的位置 (x, y)
+        self._orca_stall_primary_neighbor_id: str = ''      # 停滞窗口内持续主导的邻船
         self._orca_stall_displacement_threshold: float = 0.6 # 位移阈值: 超过此值视为仍在移动 (米)
         self._orca_escape_count: int = 0                    # 连续脱困次数 (用于升级策略)
         self._orca_escape_max_count: int = 5                # 最大连续脱困次数
@@ -1537,6 +1538,7 @@ class VelocityControllerNode(Node):
                 self.get_logger().info(f'✓ 收到新目标 [ID={goal_id}], 已取消ORCA脱困')
             self._orca_stall_start_time = 0.0
             self._orca_stall_best_dist = float('inf')
+            self._orca_stall_primary_neighbor_id = ''
             self._orca_escape_count = 0
             
             # 新任务开始时，如果当前不是 GUIDED 模式，自动切换
@@ -2279,6 +2281,7 @@ class VelocityControllerNode(Node):
                 # ORCA退出时重置停滞检测和脱困计数
                 self._orca_stall_start_time = 0.0
                 self._orca_stall_best_dist = float('inf')
+                self._orca_stall_primary_neighbor_id = ''
                 self._orca_escape_count = 0
                 return cmd
             # 最小保持期内或仍有邻船在扩展范围 → 保持 ORCA 激活
@@ -2360,6 +2363,7 @@ class VelocityControllerNode(Node):
                     self._orca_encounter_locked_side = 0
                     self._orca_encounter_lock_time = 0.0
                     self._orca_encounter_lock_distance = 0.0
+                    locked_is_crossing = False
 
                 # 锁定逻辑: 首次检测到 crossing 类型时锁定
                 if self._orca_encounter_locked_type == 'none' and is_crossing_type:
@@ -2372,15 +2376,25 @@ class VelocityControllerNode(Node):
                         f'd={closest_distance:.2f}m bearing={rel_bearing_deg:.1f}°'
                     )
 
-                # 应用锁定: 如果当前判定是 crossing 类型, 但锁定了另一种 crossing, 使用锁定值
-                if locked_is_crossing and is_crossing_type:
-                    if encounter_type_raw != self._orca_encounter_locked_type:
+                # 应用锁定:
+                # 1) crossing 内部翻转时保持首次判定
+                # 2) 双船互让降速后即使瞬时判成 stationary/other，也保留原 crossing 语义
+                if locked_is_crossing:
+                    if is_crossing_type:
+                        if encounter_type_raw != self._orca_encounter_locked_type:
+                            self.get_logger().debug(
+                                f'🔒 P6 锁定覆盖: {encounter_type_raw}→{self._orca_encounter_locked_type} '
+                                f'(bearing翻转, 距离={closest_distance:.2f}m)'
+                            )
+                        encounter_type_raw = self._orca_encounter_locked_type
+                        encounter_side = self._orca_encounter_locked_side
+                    elif encounter_type_raw in ('stationary', 'other') and closest_distance <= max(guidance_distance, 2.0 * min_sep):
                         self.get_logger().debug(
-                            f'🔒 P6 锁定覆盖: {encounter_type_raw}→{self._orca_encounter_locked_type} '
-                            f'(bearing翻转, 距离={closest_distance:.2f}m)'
+                            f'🔒 P6 低速保持 crossing: {encounter_type_raw}→{self._orca_encounter_locked_type} '
+                            f'(d={closest_distance:.2f}m, neighbor={closest_neighbor_id})'
                         )
-                    encounter_type_raw = self._orca_encounter_locked_type
-                    encounter_side = self._orca_encounter_locked_side
+                        encounter_type_raw = self._orca_encounter_locked_type
+                        encounter_side = self._orca_encounter_locked_side
 
             encounter_type = self._smooth_encounter_type(encounter_type_raw, now_sec)
             # P1: COLREGS 强化 — 对遇时加强右转偏置
@@ -3138,16 +3152,19 @@ class VelocityControllerNode(Node):
             self._orca_stall_start_time = 0.0
             self._orca_stall_best_dist = float('inf')
             self._orca_stall_start_pose = None
+            self._orca_stall_primary_neighbor_id = ''
             return False
 
         dist_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
         current_time = time.time()
+        current_primary_neighbor = self._orca_debug_primary_neighbor_id if isinstance(self._orca_debug_primary_neighbor_id, str) else ''
 
         if self._orca_stall_start_time == 0.0:
             # 首次检测，初始化
             self._orca_stall_start_time = current_time
             self._orca_stall_best_dist = dist_to_goal
             self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+            self._orca_stall_primary_neighbor_id = current_primary_neighbor
             return False
 
         # 有实质进展(距离减少超过阈值)，重置计时器
@@ -3155,17 +3172,37 @@ class VelocityControllerNode(Node):
             self._orca_stall_best_dist = dist_to_goal
             self._orca_stall_start_time = current_time
             self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+            self._orca_stall_primary_neighbor_id = current_primary_neighbor
             return False
 
+        current_wp = self.tracker.get_current_waypoint()
+        is_final_goal = bool(current_wp is not None and current_wp.is_final)
+        close_block_neighbor = (
+            isinstance(self._orca_debug_closest_distance, (int, float))
+            and 0.0 < self._orca_debug_closest_distance <= 1.5 * max(0.1, self._apf_orca_min_separation)
+        )
+        persistent_blocker = bool(
+            current_primary_neighbor
+            and self._orca_stall_primary_neighbor_id
+            and current_primary_neighbor == self._orca_stall_primary_neighbor_id
+        )
+        blocking_encounter = self._orca_debug_encounter_type in ('stationary', 'other')
+        effective_timeout = self._orca_stall_timeout
+        if is_final_goal and close_block_neighbor and persistent_blocker and blocking_encounter:
+            effective_timeout = min(effective_timeout, 30.0)
+
         stall_duration = current_time - self._orca_stall_start_time
-        if stall_duration >= self._orca_stall_timeout:
+        if stall_duration >= effective_timeout:
             # 额外检查: 位移是否足够小（真正停滞 vs 缓慢前进）
             if self._orca_stall_start_pose is not None:
                 sx, sy = self._orca_stall_start_pose
                 displacement = math.hypot(
                     self.current_pose.x - sx, self.current_pose.y - sy
                 )
-                if displacement > self._orca_stall_displacement_threshold:
+                final_goal_blocked = (
+                    is_final_goal and close_block_neighbor and persistent_blocker and blocking_encounter
+                )
+                if displacement > self._orca_stall_displacement_threshold and not final_goal_blocked:
                     # USV 仍在移动（位移较大），只是进展缓慢，不触发脱困
                     self.get_logger().info(
                         f'⏳ ORCA停滞检测: {stall_duration:.0f}s无目标进展, '
@@ -3175,7 +3212,14 @@ class VelocityControllerNode(Node):
                     # 重置计时器起点，继续监控
                     self._orca_stall_start_time = current_time
                     self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+                    self._orca_stall_primary_neighbor_id = current_primary_neighbor
                     return False
+                if displacement > self._orca_stall_displacement_threshold and final_goal_blocked:
+                    self.get_logger().warn(
+                        f'🆘 ORCA末段阻塞检测: {stall_duration:.0f}s 无法靠近最终目标, '
+                        f'主导邻船={current_primary_neighbor}, d_goal={dist_to_goal:.2f}m, '
+                        f'd_neighbor={self._orca_debug_closest_distance:.2f}m, 位移={displacement:.2f}m, 强制脱困'
+                    )
 
             self._trigger_orca_escape(stall_duration, dist_to_goal)
             return True
@@ -3209,6 +3253,7 @@ class VelocityControllerNode(Node):
         self._orca_stall_start_time = 0.0
         self._orca_stall_best_dist = float('inf')
         self._orca_stall_start_pose = None
+        self._orca_stall_primary_neighbor_id = ''
 
         # 释放 ORCA 状态，防止脱困期间 ORCA 残留影响
         self._orca_committed_side = 0
