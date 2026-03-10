@@ -54,6 +54,8 @@ from gs_gui.nav_settings_dialog import NavSettingsDialog
 from gs_gui.velocity_settings_dialog import VelocitySettingsDialog
 # 使用性能优化版本的集群启动器（异步检测 + 并行 ping）
 from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
+from gs_gui.mission_queue_manager import MissionQueueManager
+from gs_gui.mission_queue_widget import MissionQueueWidget
 
 
 class MainWindow(QMainWindow):
@@ -177,6 +179,21 @@ class MainWindow(QMainWindow):
             self
         )
         
+        # 初始化多任务队列管理器
+        self.mission_queue_manager = MissionQueueManager(
+            self.ros_signal,
+            self.task_manager,
+            self.ui_utils.append_info,
+            self.ui_utils.append_warning
+        )
+        # 设置任务切换时的预览路径更新回调
+        self.mission_queue_manager.set_preview_callback(self.update_plot_preview)
+
+        # 初始化多任务队列 GUI 并添加到侧边栏选项卡
+        self.mission_queue_widget = MissionQueueWidget(self.mission_queue_manager)
+        self.mission_queue_widget.task_selected.connect(self.update_plot_preview)
+        self.right_tab_widget.addTab(self.mission_queue_widget, "📋 任务队列")
+
         # 初始化电子围栏管理器
         self.geofence_manager = GeofenceManager(
             self.ros_signal,
@@ -203,19 +220,8 @@ class MainWindow(QMainWindow):
         self.cluster_status_label.setAlignment(Qt.AlignCenter)
         self.cluster_status_label.setMinimumHeight(30)
         
-        # 初始样式
-        default_style = """
-            QLabel {
-                background-color: #2D2D2D;
-                color: #888888;
-                border: 1px solid #444444;
-                border-radius: 4px;
-                padding: 4px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-        """
-        self.cluster_status_label.setStyleSheet(default_style)
+        # 初始样式（根据主题）
+        self._update_cluster_status_style(self.style_manager.current_theme)
         
         # 将标签插入到verticalLayout_5的最上方 (集群控制区域)
         # verticalLayout_5 是右侧面板中"集群控制"GroupBox的布局
@@ -231,18 +237,7 @@ class MainWindow(QMainWindow):
         from PyQt5.QtWidgets import QCheckBox
         self.geofence_checkbox = QCheckBox("🛡️ 启用电子围栏保护")
         self.geofence_checkbox.setToolTip("开启后，若USV超出设定矩形范围将自动锁定(HOLD)")
-        self.geofence_checkbox.setStyleSheet("""
-            QCheckBox {
-                color: #CCCCCC;
-                spacing: 5px;
-                margin-top: 5px;
-                margin-bottom: 5px;
-            }
-            QCheckBox::indicator {
-                width: 18px;
-                height: 18px;
-            }
-        """)
+        self._update_geofence_checkbox_style(self.style_manager.current_theme)
         
         # 插入到集群控制区域 (在状态标签下面)
         self.ui.verticalLayout_5.insertWidget(1, self.geofence_checkbox)
@@ -571,6 +566,10 @@ class MainWindow(QMainWindow):
         self.action_about.triggered.connect(self.show_about_dialog)
         help_menu.addAction(self.action_about)
 
+    def _is_dark_theme(self):
+        """判断当前是否为深色主题"""
+        return self.style_manager.current_theme != 'light'
+
     def switch_theme(self, theme_name):
         """切换应用主题"""
         if self.style_manager.load_theme(theme_name):
@@ -590,8 +589,39 @@ class MainWindow(QMainWindow):
                     self._usv_fleet_launcher.set_theme(theme_name)
                 except Exception:
                     pass
-                
-            pass
+
+            # 5. 更新侧边栏选项卡样式
+            self._update_side_tab_style(theme_name)
+
+            # 6. 更新集群状态标签样式
+            self._update_cluster_status_style(theme_name)
+
+            # 7. 更新电子围栏复选框样式
+            self._update_geofence_checkbox_style(theme_name)
+
+            # 8. 更新任务队列组件样式
+            if hasattr(self, 'mission_queue_widget'):
+                try:
+                    self.mission_queue_widget.set_theme(theme_name)
+                except Exception:
+                    pass
+
+            # 9. 刷新导航反馈表格中的前景色
+            self._refresh_nav_feedback_colors()
+
+            # 10. 更新 USV 信息面板样式
+            if hasattr(self, 'usv_info_panel'):
+                try:
+                    self.usv_info_panel.set_theme(theme_name)
+                except Exception:
+                    pass
+
+            # 11. 更新 USV 导航面板样式
+            if hasattr(self, 'usv_navigation_panel'):
+                try:
+                    self.usv_navigation_panel.set_theme(theme_name)
+                except Exception:
+                    pass
         else:
             QMessageBox.warning(self, "主题切换失败", f"无法加载主题: {theme_name}")
             # 回滚Checkbox状态
@@ -760,6 +790,152 @@ class MainWindow(QMainWindow):
         self.mission_dashboard.setStyleSheet(dashboard_style)
         self.nav_feedback_table.setStyleSheet(table_style)
 
+    def _update_side_tab_style(self, theme_name):
+        """更新侧边栏选项卡样式"""
+        if not hasattr(self, 'right_tab_widget'):
+            return
+        is_dark = (theme_name == 'modern_dark')
+        if is_dark:
+            self.right_tab_widget.setStyleSheet("""
+                QTabWidget::pane {
+                    border: 1px solid #444;
+                    background: #1e1e1e;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #2d2d2d;
+                    color: #aaa;
+                    padding: 8px 20px;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                    margin-right: 2px;
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 11pt;
+                }
+                QTabBar::tab:selected {
+                    background: #1e1e1e;
+                    color: #00f2ff;
+                    border-bottom: 2px solid #00f2ff;
+                }
+                QTabBar::tab:hover {
+                    background: #3d3d3d;
+                    color: #fff;
+                }
+            """)
+        else:
+            self.right_tab_widget.setStyleSheet("""
+                QTabWidget::pane {
+                    border: 1px solid #d0d0d0;
+                    background: #ffffff;
+                    top: -1px;
+                }
+                QTabBar::tab {
+                    background: #f0f0f0;
+                    color: #666666;
+                    padding: 8px 20px;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                    margin-right: 2px;
+                    font-family: "Segoe UI", sans-serif;
+                    font-size: 11pt;
+                    border: 1px solid #e0e0e0;
+                    border-bottom: none;
+                }
+                QTabBar::tab:selected {
+                    background: #ffffff;
+                    color: #0078d7;
+                    border-bottom: 2px solid #0078d7;
+                }
+                QTabBar::tab:hover {
+                    background: #e6e6e6;
+                    color: #333333;
+                }
+            """)
+
+    def _update_cluster_status_style(self, theme_name):
+        """更新集群状态标签默认样式"""
+        if not hasattr(self, 'cluster_status_label'):
+            return
+        is_dark = (theme_name == 'modern_dark')
+        if is_dark:
+            self.cluster_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: #2D2D2D;
+                    color: #888888;
+                    border: 1px solid #444444;
+                    border-radius: 4px;
+                    padding: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                }
+            """)
+        else:
+            self.cluster_status_label.setStyleSheet("""
+                QLabel {
+                    background-color: #f0f0f0;
+                    color: #666666;
+                    border: 1px solid #d0d0d0;
+                    border-radius: 4px;
+                    padding: 4px;
+                    font-weight: bold;
+                    font-size: 13px;
+                }
+            """)
+
+    def _update_geofence_checkbox_style(self, theme_name):
+        """更新电子围栏复选框样式"""
+        if not hasattr(self, 'geofence_checkbox'):
+            return
+        is_dark = (theme_name == 'modern_dark')
+        if is_dark:
+            self.geofence_checkbox.setStyleSheet("""
+                QCheckBox {
+                    color: #CCCCCC;
+                    spacing: 5px;
+                    margin-top: 5px;
+                    margin-bottom: 5px;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                }
+            """)
+        else:
+            self.geofence_checkbox.setStyleSheet("""
+                QCheckBox {
+                    color: #333333;
+                    spacing: 5px;
+                    margin-top: 5px;
+                    margin-bottom: 5px;
+                }
+                QCheckBox::indicator {
+                    width: 18px;
+                    height: 18px;
+                }
+            """)
+
+    def _get_theme_fg_color(self, color_type='text'):
+        """获取当前主题的前景色"""
+        is_dark = self._is_dark_theme()
+        if color_type == 'cyan':
+            return "#00f2ff" if is_dark else "#0078d7"
+        elif color_type == 'gray':
+            return "#9e9e9e" if is_dark else "#888888"
+        return "#e0e0e0" if is_dark else "#333333"
+
+    def _refresh_nav_feedback_colors(self):
+        """刷新导航反馈表格中已有行的前景色"""
+        if not hasattr(self, 'nav_feedback_table'):
+            return
+        table = self.nav_feedback_table
+        for row in range(table.rowCount()):
+            id_item = table.item(row, 1)
+            if id_item:
+                id_item.setForeground(QColor(self._get_theme_fg_color('cyan')))
+            eta_item = table.item(row, 5)
+            if eta_item:
+                eta_item.setForeground(QColor(self._get_theme_fg_color('cyan')))
+
     def show_license_dialog(self):
         """显示许可证对话框"""
         license_text = """
@@ -899,33 +1075,8 @@ limitations under the License.
         # 我们调整拉伸因子，因为现在只有两部分：List(0) 和 Tabs(1-added)
         main_splitter.addWidget(self.right_tab_widget)
         
-        # 5. 设置科幻风格 QSS
-        self.right_tab_widget.setStyleSheet("""
-            QTabWidget::pane {
-                border: 1px solid #444;
-                background: #1e1e1e;
-                top: -1px; 
-            }
-            QTabBar::tab {
-                background: #2d2d2d;
-                color: #aaa;
-                padding: 8px 20px;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-                margin-right: 2px;
-                font-family: "Segoe UI", sans-serif;
-                font-size: 11pt;
-            }
-            QTabBar::tab:selected {
-                background: #1e1e1e;
-                color: #00f2ff;
-                border-bottom: 2px solid #00f2ff;
-            }
-            QTabBar::tab:hover {
-                background: #3d3d3d;
-                color: #fff;
-            }
-        """)
+        # 5. 设置选项卡样式（根据主题）
+        self._update_side_tab_style(self.style_manager.current_theme)
 
     def _init_feedback_tab(self):
         """初始化反馈选项卡内容"""
@@ -1029,7 +1180,8 @@ limitations under the License.
         self.mission_state_label.setText(state_text)
         
         if state == 'running':
-             self.mission_state_label.setStyleSheet("QLabel#dbState { color: #00f2ff; }") # 简单处理，可加定时器闪烁
+             _cyan = '#00f2ff' if self._is_dark_theme() else '#0078d7'
+             self.mission_state_label.setStyleSheet(f"QLabel#dbState {{ color: {_cyan}; }}")
         elif state == 'completed':
              self.mission_state_label.setStyleSheet("QLabel#dbState { color: #4caf50; }")
         elif state == 'failed':
@@ -1224,11 +1376,18 @@ limitations under the License.
     # ============== 集群任务控制 ==============
     def toggle_cluster_task(self):
         """切换集群任务运行状态"""
+        # 如果多任务队列正在运行，阻止单任务操作以避免冲突
+        if hasattr(self, 'mission_queue_manager') and self.mission_queue_manager.is_running:
+            self.ui_utils.append_warning("多任务队列正在运行，请先停止队列再操作单任务")
+            return
         button_text = self.task_manager.toggle_task(self.list_manager.usv_departed_list)
         self.ui.send_cluster_point_pushButton.setText(button_text)
     
     def stop_cluster_task(self):
         """停止集群任务并刷新按钮文本"""
+        # 如果多任务队列正在运行，同时停止队列
+        if hasattr(self, 'mission_queue_manager') and self.mission_queue_manager.is_running:
+            self.mission_queue_manager.stop_queue()
         self.task_manager.stop_task()
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
 
@@ -1362,8 +1521,29 @@ limitations under the License.
 
     def _handle_cluster_progress_update(self, progress_info):
         """处理集群任务进度更新并同步按钮文本"""
-        self.task_manager.update_progress(progress_info)
-        self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        # 当多任务队列正在运行时，由 MissionQueueManager 直接管理 task_manager 状态
+        # 跳过 update_progress 避免过时的 'completed' 信号覆盖新启动任务的状态
+        if hasattr(self, 'mission_queue_manager') and self.mission_queue_manager.is_running:
+            # 仍然更新集群状态标签（不更新按钮文本和task_manager状态）
+            state = progress_info.get('state', 'unknown')
+            current_step = progress_info.get('current_step', 0)
+            total_steps = progress_info.get('total_steps', 0)
+            acked_usvs = progress_info.get('acked_usvs', 0)
+            total_usvs = progress_info.get('total_usvs', 0)
+            state_label_map = {
+                'running': '运行中',
+                'paused': '已暂停',
+                'completed': '已完成',
+                'idle': '空闲',
+            }
+            state_label_cn = state_label_map.get(state, state)
+            if state == 'running':
+                label_text = f"🚀 {state_label_cn}: 第 {current_step} / {total_steps} 步 | {acked_usvs}/{total_usvs} 艘"
+                style_css = self.task_manager.STATUS_STYLES.get('running')
+                self.task_manager._update_status(label_text, style_css)
+        else:
+            self.task_manager.update_progress(progress_info)
+            self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
         
         # 更新科幻仪表盘
         if hasattr(self, 'mission_dashboard'):
@@ -1625,7 +1805,7 @@ limitations under the License.
             # 1. ID
             id_item = QTableWidgetItem(usv_id)
             id_item.setTextAlignment(Qt.AlignCenter)
-            id_item.setForeground(QColor("#00f2ff"))
+            id_item.setForeground(QColor(self._get_theme_fg_color('cyan')))
             self.nav_feedback_table.setItem(row, 1, id_item)
         
         row = self._nav_feedback_row_map[usv_id]
@@ -1642,7 +1822,7 @@ limitations under the License.
             status_item.setForeground(QColor("#f44336")) # 红色
         else:
             status_item.setText("●")
-            status_item.setForeground(QColor("#00f2ff")) # 青色
+            status_item.setForeground(QColor(self._get_theme_fg_color('cyan'))) # 青色
             
         # 2. 目标ID (TARGET)
         # 优先显示 Step 数值（S-xx），如果是单点导航则显示 Goal ID (T-xx)
@@ -1666,20 +1846,36 @@ limitations under the License.
             bar = QProgressBar()
             bar.setRange(0, 100)
             bar.setTextVisible(True)
-            bar.setStyleSheet("""
-                QProgressBar {
-                    border: 1px solid #333;
-                    border-radius: 2px;
-                    background-color: #0a0a0a;
-                    text-align: center;
-                    color: #ffffff;
-                    font-size: 8pt;
-                    height: 16px;
-                }
-                QProgressBar::chunk {
-                    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
-                }
-            """)
+            if self._is_dark_theme():
+                bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 1px solid #333;
+                        border-radius: 2px;
+                        background-color: #0a0a0a;
+                        text-align: center;
+                        color: #ffffff;
+                        font-size: 8pt;
+                        height: 16px;
+                    }
+                    QProgressBar::chunk {
+                        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #004e92, stop:1 #00f2ff);
+                    }
+                """)
+            else:
+                bar.setStyleSheet("""
+                    QProgressBar {
+                        border: 1px solid #cccccc;
+                        border-radius: 2px;
+                        background-color: #f0f0f0;
+                        text-align: center;
+                        color: #333333;
+                        font-size: 8pt;
+                        height: 16px;
+                    }
+                    QProgressBar::chunk {
+                        background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #4da6ff, stop:1 #0078d7);
+                    }
+                """)
             self.nav_feedback_table.setCellWidget(row, 3, bar)
         
         bar.setValue(progress_val)
@@ -1720,7 +1916,7 @@ limitations under the License.
         eta_item = QTableWidgetItem(eta_str)
         eta_item.setTextAlignment(Qt.AlignCenter)
         if 0 < eta < 10:
-            eta_item.setForeground(QColor("#00f2ff"))
+            eta_item.setForeground(QColor(self._get_theme_fg_color('cyan')))
         self.nav_feedback_table.setItem(row, 5, eta_item)
 
         # 6-7. 避让特征（最近邻距离 + 风险等级）

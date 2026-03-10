@@ -68,6 +68,9 @@ class ClusterController:
         self._state = ClusterTaskState.IDLE
         self._cluster_start_time = None
 
+        # 外部任务完成回调（多任务队列管理器使用）
+        self._on_task_completed_callback = None
+
     def _now(self) -> float:
         """返回当前 ROS 时钟的秒值。"""
         return self.node.get_clock().now().nanoseconds / 1e9
@@ -522,7 +525,8 @@ class ClusterController:
                     step=state.step,
                     nav_mode=nav_mode,
                     sync_timeout=sync_timeout,
-                    arrival_quality_threshold=arrival_quality
+                    arrival_quality_threshold=arrival_quality,
+                    task_name=target_data.get('task_name', '')
                 )
                 
                 # ========== 航点预发送 (Lookahead) ==========
@@ -609,7 +613,8 @@ class ClusterController:
                 nav_mode=nav_mode,
                 sync_timeout=sync_timeout,
                 arrival_quality_threshold=arrival_quality,
-                is_lookahead=True  # 预发送标记，不更新目标缓存
+                is_lookahead=True,  # 预发送标记，不更新目标缓存
+                task_name=target_data.get('task_name', '')
             )
             
             # 记录已预发送
@@ -881,6 +886,12 @@ class ClusterController:
             self._reset_cluster_task(ClusterTaskState.COMPLETED, "全部步骤完成", cancel_active=False)
             # 记录日志信息
             self.node.get_logger().info("全部步骤完成")
+            # 通知外部任务完成回调（多任务队列管理器使用）
+            if self._on_task_completed_callback:
+                try:
+                    self._on_task_completed_callback()
+                except Exception as e:
+                    self.node.get_logger().warn(f"任务完成回调执行失败: {e}")
             # ✅ 修复：任务完成后立即返回，不再执行后续逻辑
             return
         

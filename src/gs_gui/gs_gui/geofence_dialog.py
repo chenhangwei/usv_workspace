@@ -12,6 +12,7 @@
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                              QDoubleSpinBox, QCheckBox, QPushButton, QGroupBox)
 from PyQt5.QtCore import Qt
+from gs_gui.style_manager import is_dark_theme
 
 class GeofenceDialog(QDialog):
     def __init__(self, parent=None, current_bounds=None, current_enabled=False):
@@ -28,7 +29,8 @@ class GeofenceDialog(QDialog):
         # 说明
         info_label = QLabel("设置矩形电子围栏。\n当USV超出此范围时，将自动切换到HOLD模式。")
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #AAAAAA; margin-bottom: 10px;")
+        _info_color = '#AAAAAA' if is_dark_theme() else '#666666'
+        info_label.setStyleSheet(f"color: {_info_color}; margin-bottom: 10px;")
         layout.addWidget(info_label)
 
         # 启用开关
@@ -84,7 +86,8 @@ class GeofenceDialog(QDialog):
         btn_layout = QHBoxLayout()
         self.ok_btn = QPushButton("确定")
         self.ok_btn.clicked.connect(self.accept)
-        self.ok_btn.setStyleSheet("background-color: #2D5887; color: white; padding: 6px;")
+        _btn_bg = '#2D5887' if is_dark_theme() else '#0078d7'
+        self.ok_btn.setStyleSheet(f"background-color: {_btn_bg}; color: white; padding: 6px;")
         self.cancel_btn = QPushButton("取消")
         self.cancel_btn.clicked.connect(self.reject)
         

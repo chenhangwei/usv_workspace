@@ -32,7 +32,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
 from std_msgs.msg import Bool
-from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug, UsvStatus
+from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug, UsvStatus, FleetNeighborPoses
 
 import math
 import csv
@@ -100,7 +100,9 @@ class LogCollectorNode(Node):
         self._mpc_params_received = False  # 标记是否已收到参数
         
         # v6 新增: USV ID 和速度自适应 tau_omega 参数
-        self._usv_id = ''
+        # 从 ROS namespace 获取 USV ID 作为初始值（确保日志创建时已有 ID）
+        ns = self.get_namespace()
+        self._usv_id = ns.strip('/') if ns and ns != '/' else ''
         self._adaptive_tau_enabled = False
         self._tau_omega_low_speed = 0.0
         self._tau_omega_high_speed = 0.0
@@ -129,7 +131,7 @@ class LogCollectorNode(Node):
         self._wifi_link_quality = 0
         self._wifi_interface = ''
         
-        # v14 新增: ORCA/APF 避障状态
+        # v14/v17 新增: ORCA/APF 避障与脱困状态
         self._orca_active = False
         self._orca_closest_distance = -1.0
         self._orca_encounter_type = 'none'
@@ -144,6 +146,11 @@ class LogCollectorNode(Node):
         self._orca_rel_speed = -1.0
         self._orca_tcpa = -1.0
         self._orca_dcpa = -1.0
+        self._orca_primary_neighbor_id = ''
+        self._orca_escape_active = False
+        self._orca_escape_phase = 0
+        self._orca_escape_direction = 0
+        self._orca_escape_count = 0
         
         # 飞控状态 (用于记录模式切换)
         self._flight_mode = ''
@@ -153,6 +160,11 @@ class LogCollectorNode(Node):
         
         # v15 新增: 导航事件记录 (到达/通过/偏离等)
         self._nav_event = ''  # 当前帧的导航事件，写入CSV后清空
+        
+        # v16 新增: 邻居USV位置数据 (来自 FleetNeighborPoses)
+        # 存储格式: {usv_id: (x, y, yaw, vx, vy)} 按usv_id排序写入固定5个slot
+        self._neighbor_data = {}  # type: dict[str, tuple]
+        self._max_neighbor_slots = 5
         
         # ==================== 任务状态 ====================
         self._is_navigating = False       # 是否正在导航
@@ -220,6 +232,11 @@ class LogCollectorNode(Node):
         self.create_subscription(
             Bool, 'stop_navigation',
             self._stop_navigation_callback, qos_reliable)
+        
+        # v16 新增: 邻居USV位置订阅 (来自GS的 apf_neighbor_relay_node)
+        self.create_subscription(
+            FleetNeighborPoses, 'apf/neighbors',
+            self._fleet_neighbors_callback, qos_reliable)
             
         # ==================== 定时器 ====================
         self.create_timer(0.1, self._log_data)
@@ -238,14 +255,17 @@ class LogCollectorNode(Node):
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
-        # 构建文件名：nav_log_{时间}_{任务名或ID}.csv
+        # USV ID 前缀（区分不同船的日志文件）
+        usv_prefix = f'{self._usv_id}_' if self._usv_id else ''
+        
+        # 构建文件名：nav_log_{usv_id}_{时间}_{任务名或ID}.csv
         if task_name:
             # 清理文件名中的非法字符
             safe_name = "".join(c for c in task_name if c.isalnum() or c in (' ', '_', '-')).strip()
             safe_name = safe_name.replace(' ', '_')
-            filename = f'nav_log_{timestamp}_{safe_name}.csv'
+            filename = f'nav_log_{usv_prefix}{timestamp}_{safe_name}.csv'
         else:
-            filename = f'nav_log_{timestamp}_goal_{goal_id}.csv'
+            filename = f'nav_log_{usv_prefix}{timestamp}_goal_{goal_id}.csv'
             
         self._current_log_path = self._log_dir / filename
         
@@ -255,8 +275,10 @@ class LogCollectorNode(Node):
             
             # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
             # 始终写入最小头部 (版本号和 USV ID)，即使 MPC 参数尚未到达
-            self._csv_file.write(f'# MPC Parameters Configuration (v14)\n')
+            self._csv_file.write(f'# MPC Parameters Configuration (v17)\n')
             self._csv_file.write(f'# USV ID: {self._usv_id}\n')
+            if task_name:
+                self._csv_file.write(f'# Task Name: {task_name}\n')
             if self._mpc_params_received:
                 self._csv_file.write(f'# Q_pos (position weight): {self._mpc_param_q_pos:.2f}\n')
                 self._csv_file.write(f'# Q_theta (heading weight): {self._mpc_param_q_theta:.2f}\n')
@@ -305,10 +327,18 @@ class LogCollectorNode(Node):
                 'orca_hard_brake', 'apf_neighbor_count',
                 'orca_rel_bearing_deg', 'orca_rel_course_deg', 'orca_rel_speed',
                 'orca_tcpa', 'orca_dcpa',
+                'orca_primary_neighbor_id', 'orca_escape_active', 'orca_escape_phase',
+                'orca_escape_direction', 'orca_escape_count',
                 # WiFi 信号字段
                 'wifi_rssi_dbm', 'wifi_link_quality',
                 # v15 新增: 导航事件字段
-                'nav_event'
+                'nav_event',
+                # v16 新增: 邻居USV位置字段 (最多5个邻居)
+                'neighbor_1_id', 'neighbor_1_x', 'neighbor_1_y', 'neighbor_1_yaw', 'neighbor_1_vx', 'neighbor_1_vy',
+                'neighbor_2_id', 'neighbor_2_x', 'neighbor_2_y', 'neighbor_2_yaw', 'neighbor_2_vx', 'neighbor_2_vy',
+                'neighbor_3_id', 'neighbor_3_x', 'neighbor_3_y', 'neighbor_3_yaw', 'neighbor_3_vx', 'neighbor_3_vy',
+                'neighbor_4_id', 'neighbor_4_x', 'neighbor_4_y', 'neighbor_4_yaw', 'neighbor_4_vx', 'neighbor_4_vy',
+                'neighbor_5_id', 'neighbor_5_x', 'neighbor_5_y', 'neighbor_5_yaw', 'neighbor_5_vx', 'neighbor_5_vy',
             ])
             
             # 清空模式切换事件列表
@@ -340,8 +370,9 @@ class LogCollectorNode(Node):
                 
                 # 日志统计
                 mode_changes = len(self._mode_change_events)
+                saved_name = self._current_log_path.name if self._current_log_path is not None else 'unknown'
                 self.get_logger().info(
-                    f'📁 日志已保存: {self._current_log_path.name} '
+                    f'📁 日志已保存: {saved_name} '
                     f'({self._record_count} 条, {mode_changes} 次模式切换)')
             except Exception as e:
                 self.get_logger().error(f'关闭日志文件失败: {e}')
@@ -494,6 +525,11 @@ class LogCollectorNode(Node):
         self._orca_rel_speed = getattr(msg, 'orca_rel_speed', -1.0)
         self._orca_tcpa = getattr(msg, 'orca_tcpa', -1.0)
         self._orca_dcpa = getattr(msg, 'orca_dcpa', -1.0)
+        self._orca_primary_neighbor_id = getattr(msg, 'orca_primary_neighbor_id', '')
+        self._orca_escape_active = getattr(msg, 'orca_escape_active', False)
+        self._orca_escape_phase = getattr(msg, 'orca_escape_phase', 0)
+        self._orca_escape_direction = getattr(msg, 'orca_escape_direction', 0)
+        self._orca_escape_count = getattr(msg, 'orca_escape_count', 0)
         
         self._mpc_params_received = True
 
@@ -550,6 +586,18 @@ class LogCollectorNode(Node):
                 f'⏹️ 任务停止 (手动终止), 停止记录, '
                 f'本次记录 {self._record_count} 条, {self._goal_count} 个目标')
             self._close_current_log()
+
+    def _fleet_neighbors_callback(self, msg: FleetNeighborPoses):
+        """邻居USV位置回调 (来自GS apf_neighbor_relay_node)
+        
+        记录所有邻居USV的位置、航向和速度，用于事后分析和回放。
+        即使邻居USV已完成任务并停止，只要GS还在广播其位置就持续记录。
+        """
+        self._neighbor_data = {}
+        for nb in msg.neighbors:
+            self._neighbor_data[nb.usv_id] = (
+                nb.x, nb.y, nb.yaw, nb.vx, nb.vy
+            )
 
     def _result_callback(self, msg: NavigationResult):
         """导航结果回调
@@ -638,7 +686,7 @@ class LogCollectorNode(Node):
         while yaw_diff < -math.pi:
             yaw_diff += 2 * math.pi
         
-        self._csv_writer.writerow([
+        row_data = [
             f'{timestamp:.3f}',
             f'{self._pose_x:.4f}',
             f'{self._pose_y:.4f}',
@@ -696,12 +744,33 @@ class LogCollectorNode(Node):
             f'{self._orca_rel_speed:.3f}',
             f'{self._orca_tcpa:.3f}',
             f'{self._orca_dcpa:.3f}',
+            f'{self._orca_primary_neighbor_id}',
+            f'{1 if self._orca_escape_active else 0}',
+            f'{self._orca_escape_phase}',
+            f'{self._orca_escape_direction}',
+            f'{self._orca_escape_count}',
             # WiFi 信号字段
             f'{self._wifi_rssi_dbm}',
             f'{self._wifi_link_quality}',
             # v15 新增: 导航事件
-            f'{self._nav_event}'
-        ])
+            f'{self._nav_event}',
+        ]
+        
+        # v16 新增: 邻居USV位置数据 (按usv_id排序写入固定5个slot)
+        sorted_neighbors = sorted(self._neighbor_data.items(), key=lambda x: x[0])
+        for i in range(self._max_neighbor_slots):
+            if i < len(sorted_neighbors):
+                nid, (nx, ny, nyaw, nvx, nvy) = sorted_neighbors[i]
+                row_data.extend([
+                    f'{nid}',
+                    f'{nx:.4f}', f'{ny:.4f}',
+                    f'{math.degrees(nyaw):.2f}',
+                    f'{nvx:.4f}', f'{nvy:.4f}',
+                ])
+            else:
+                row_data.extend(['', '0', '0', '0', '0', '0'])
+        
+        self._csv_writer.writerow(row_data)
         self._record_count += 1
         # 事件只写一次，写入后立即清空
         self._nav_event = ''

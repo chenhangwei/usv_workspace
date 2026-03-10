@@ -10,6 +10,7 @@
 # Updated: 2026-02-03 - v5 添加一阶惯性模型相关字段
 # Updated: 2026-02-09 - v8 添加 AMPC 在线辨识相关字段
 # Updated: 2026-02-27 - v14 添加 ORCA/APF 避障状态字段
+# Updated: 2026-03-10 - v17 添加 ORCA 脱困与主导邻船字段
 # =============================================================================
 # MPC 控制器调试信息
 
@@ -81,3 +82,8 @@ float32 orca_rel_course_deg         # 相对航向差(相对航向-本船航向,
 float32 orca_rel_speed              # 相对速度模值 (m/s)
 float32 orca_tcpa                   # 时间最近点 (s), 无效时为 -1
 float32 orca_dcpa                   # 最近点距离 (m), 无效时为 -1
+string orca_primary_neighbor_id     # 当前主导避让/最近邻船 ID
+bool orca_escape_active             # ORCA 脱困是否激活
+int8 orca_escape_phase              # ORCA 脱困阶段: 0=无,1=后退转向,2=削弱绕行
+int8 orca_escape_direction          # ORCA 脱困方向: +1=左, -1=右, 0=无
+int32 orca_escape_count             # 当前任务内累计脱困次数

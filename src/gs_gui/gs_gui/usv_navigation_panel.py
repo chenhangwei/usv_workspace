@@ -20,6 +20,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QColor
 import math
 from .compass_widget import CompassWidget
+from gs_gui.style_manager import is_dark_theme
 
 # 兼容性定义
 try:
@@ -105,6 +106,91 @@ class UsvNavigationPanel(QWidget):
             padding: 0 3px;
         }
     """
+
+    def _get_groupbox_style(self, border_color="#e67e22"):
+        """根据主题返回 QGroupBox 样式"""
+        dark = is_dark_theme()
+        title_color = "#e0e0e0" if dark else "#333333"
+        return f"""
+            QGroupBox {{
+                font-weight: bold;
+                font-size: 16px;
+                border: 1.5px solid {border_color};
+                border-radius: 5px;
+                margin-top: 6px;
+                padding-top: 6px;
+                color: {title_color};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }}
+        """
+
+    def _get_scrollbar_stylesheet(self):
+        """根据主题返回滚动条样式"""
+        dark = is_dark_theme()
+        if dark:
+            bg = "#2c3e50"
+            handle = "#e67e22"
+            handle_hover = "#f39c12"
+        else:
+            bg = "#e8e8e8"
+            handle = "#b0b0b0"
+            handle_hover = "#909090"
+        return f"""
+            QScrollArea {{
+                border: none;
+                background-color: transparent;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: {bg};
+                width: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle};
+                min-height: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: {bg};
+                height: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {handle};
+                min-width: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
+            }}
+        """
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -120,20 +206,46 @@ class UsvNavigationPanel(QWidget):
         
         # 设置主布局（包含滚动区域）
         self._setup_ui()
+
+    def set_theme(self, theme_name):
+        """切换主题时刷新面板内硬编码的样式"""
+        if hasattr(self, '_scroll_area'):
+            self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
+        group_colors = {
+            'velocity_group': '#e67e22',
+            'heading_group': '#3498db',
+            'mission_group': '#27ae60',
+            'feedback_group': '#9b59b6',
+        }
+        for attr, color in group_colors.items():
+            w = getattr(self, attr, None)
+            if w:
+                w.setStyleSheet(self._get_groupbox_style(color))
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        val_color = "#e0e0e0" if dark else "#34495e"
+        for label in getattr(self, '_key_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {key_color}; font-weight: bold; font-size: 16px; min-width: 70px; }}")
+        for label in getattr(self, '_value_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {val_color}; font-size: 16px; font-weight: 600; }}")
     
     def _setup_ui(self):
         """设置UI布局（带滚动条）"""
+        # 用于 set_theme() 批量刷新
+        self._key_labels = []
+        self._value_labels = []
+
         # 主容器布局（外层）
         main_container_layout = QVBoxLayout(self)
         main_container_layout.setContentsMargins(0, 0, 0, 0)
         main_container_layout.setSpacing(0)
         
         # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)  # 自动调整内容大小
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)  # 无边框
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         
         # 创建滚动内容容器
         scroll_content = QWidget()
@@ -145,89 +257,37 @@ class UsvNavigationPanel(QWidget):
         content_layout.setSpacing(10)
         
         # ==================== 速度信息组 ====================
-        velocity_group = self._create_velocity_info_group()
-        content_layout.addWidget(velocity_group)
+        self.velocity_group = self._create_velocity_info_group()
+        content_layout.addWidget(self.velocity_group)
         
         # ==================== 航向信息组 ====================
-        heading_group = self._create_heading_info_group()
-        content_layout.addWidget(heading_group)
+        self.heading_group = self._create_heading_info_group()
+        content_layout.addWidget(self.heading_group)
         
         # ==================== 任务信息组 ====================
-        mission_group = self._create_mission_info_group()
-        content_layout.addWidget(mission_group)
+        self.mission_group = self._create_mission_info_group()
+        content_layout.addWidget(self.mission_group)
         
         # ==================== 导航反馈组 ====================
-        feedback_group = self._create_navigation_feedback_group()
-        content_layout.addWidget(feedback_group)
+        self.feedback_group = self._create_navigation_feedback_group()
+        content_layout.addWidget(self.feedback_group)
         
         # 添加弹性空间（自动填充剩余空间）
         content_layout.addStretch()
         
         # 将内容容器设置到滚动区域
-        scroll_area.setWidget(scroll_content)
+        self._scroll_area.setWidget(scroll_content)
         
         # 将滚动区域添加到主布局
-        main_container_layout.addWidget(scroll_area)
+        main_container_layout.addWidget(self._scroll_area)
         
-        # 设置滚动条样式
-        scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #2c3e50;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: #e67e22;
-                min-height: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #f39c12;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-            }
-            
-            QScrollBar:horizontal {
-                border: none;
-                background: #2c3e50;
-                height: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #e67e22;
-                min-width: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #f39c12;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                border: none;
-                background: none;
-                width: 0px;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: none;
-            }
-        """)
+        # 设置滚动条样式（主题感知）
+        self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
     
     def _create_velocity_info_group(self):
         """创建速度信息组"""
         group = QGroupBox("🚤 速度信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE)
+        group.setStyleSheet(self._get_groupbox_style("#e67e22"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -258,7 +318,7 @@ class UsvNavigationPanel(QWidget):
     def _create_heading_info_group(self):
         """创建航向信息组（带罗盘显示）"""
         group = QGroupBox("🧭 航向信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#3498db"))
+        group.setStyleSheet(self._get_groupbox_style("#3498db"))
         
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
@@ -298,7 +358,7 @@ class UsvNavigationPanel(QWidget):
     def _create_mission_info_group(self):
         """创建任务信息组"""
         group = QGroupBox("📋 任务信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#27ae60"))
+        group.setStyleSheet(self._get_groupbox_style("#27ae60"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -340,7 +400,7 @@ class UsvNavigationPanel(QWidget):
     def _create_navigation_feedback_group(self):
         """创建导航反馈组"""
         group = QGroupBox("📡 导航反馈")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#9b59b6"))
+        group.setStyleSheet(self._get_groupbox_style("#9b59b6"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -382,14 +442,17 @@ class UsvNavigationPanel(QWidget):
         else:
             alignment = AlignRight | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        label.setStyleSheet(f"""
+            QLabel {{
+                color: {key_color};
                 font-weight: bold;
                 font-size: 16px;
                 min-width: 70px;
-            }
+            }}
         """)
+        self._key_labels.append(label)
         return label
     
     def _create_value_label(self, text):
@@ -400,13 +463,16 @@ class UsvNavigationPanel(QWidget):
         else:
             alignment = AlignLeft | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("""
-            QLabel {
-                color: #34495e;
+        dark = is_dark_theme()
+        val_color = "#e0e0e0" if dark else "#34495e"
+        label.setStyleSheet(f"""
+            QLabel {{
+                color: {val_color};
                 font-size: 16px;
                 font-weight: 600;
-            }
+            }}
         """)
+        self._value_labels.append(label)
         return label
     
     def update_navigation_state(self, state, feedback=None, nav_status=None):

@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt
 import glob
 import serial.tools.list_ports
+from gs_gui.style_manager import is_dark_theme
 
 
 class ParamConnectionDialog(QDialog):
@@ -106,7 +107,8 @@ class ParamConnectionDialog(QDialog):
             "• 系统 ID 通常为 1（与飞控 SYSID_THISMAV 一致）"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #555; font-size: 14pt;")
+        _info_color = '#555' if is_dark_theme() else '#888'
+        info_label.setStyleSheet(f"color: {_info_color}; font-size: 14pt;")
         layout.addWidget(info_label)
         
         # ==================== 按钮 ====================

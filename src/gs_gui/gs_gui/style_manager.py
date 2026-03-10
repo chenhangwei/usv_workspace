@@ -13,8 +13,16 @@
 样式管理器 - 支持多种主题快速切换
 提供现代化UI主题，增强视觉体验
 """
-from PyQt5.QtWidgets import QWidget
+from PyQt5.QtWidgets import QWidget, QApplication
 import os
+
+
+def is_dark_theme() -> bool:
+    """全局辅助：判断当前主题是否为深色"""
+    app = QApplication.instance()
+    if app:
+        return app.property('current_theme') != 'light'
+    return True
 
 
 class StyleManager:
@@ -87,6 +95,7 @@ class StyleManager:
         if qss_file is None:
             self.widget.setStyleSheet("")
             self.current_theme = theme_name
+            QApplication.instance().setProperty('current_theme', theme_name)
             print(f"✓ 已切换到主题: {theme_name} (无样式表)")
             return True
         
@@ -99,6 +108,7 @@ class StyleManager:
                     stylesheet = f.read()
                     self.widget.setStyleSheet(stylesheet)
                     self.current_theme = theme_name
+                    QApplication.instance().setProperty('current_theme', theme_name)
                     print(f"✓ 已加载主题: {theme_name} ({qss_path})")
                     return True
             else:

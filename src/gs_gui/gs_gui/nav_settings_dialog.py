@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QFormLayout, QFrame
 )
 from PyQt5.QtCore import Qt
+from gs_gui.style_manager import is_dark_theme
 
 
 class NavSettingsDialog(QDialog):
@@ -65,7 +66,8 @@ class NavSettingsDialog(QDialog):
             "• 平滑导航: 中间航点提前切换，避免减速停止"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #AAAAAA; margin-bottom: 10px; font-size: 12px;")
+        _info_color = '#AAAAAA' if is_dark_theme() else '#666666'
+        info_label.setStyleSheet(f"color: {_info_color}; margin-bottom: 10px; font-size: 12px;")
         layout.addWidget(info_label)
         
         # ==================== 平滑导航开关 ====================
@@ -122,9 +124,14 @@ class NavSettingsDialog(QDialog):
         
         # ==================== 提示信息 ====================
         tip_frame = QFrame()
-        tip_frame.setStyleSheet(
-            "QFrame { background-color: #2D3A4D; border-radius: 5px; padding: 10px; }"
-        )
+        if is_dark_theme():
+            tip_frame.setStyleSheet(
+                "QFrame { background-color: #2D3A4D; border-radius: 5px; padding: 10px; }"
+            )
+        else:
+            tip_frame.setStyleSheet(
+                "QFrame { background-color: #e6f7ff; border-radius: 5px; padding: 10px; }"
+            )
         tip_layout = QVBoxLayout(tip_frame)
         
         tip_label = QLabel(
@@ -134,7 +141,8 @@ class NavSettingsDialog(QDialog):
             "• 对于需要精确定位的航点，可临时关闭平滑导航"
         )
         tip_label.setWordWrap(True)
-        tip_label.setStyleSheet("color: #88CCFF; font-size: 11px;")
+        _tip_color = '#88CCFF' if is_dark_theme() else '#0078d7'
+        tip_label.setStyleSheet(f"color: {_tip_color}; font-size: 11px;")
         tip_layout.addWidget(tip_label)
         
         layout.addWidget(tip_frame)
@@ -154,9 +162,14 @@ class NavSettingsDialog(QDialog):
         
         self.ok_btn = QPushButton("应用")
         self.ok_btn.clicked.connect(self.accept)
-        self.ok_btn.setStyleSheet(
-            "background-color: #2D5887; color: white; padding: 6px 16px; font-weight: bold;"
-        )
+        if is_dark_theme():
+            self.ok_btn.setStyleSheet(
+                "background-color: #2D5887; color: white; padding: 6px 16px; font-weight: bold;"
+            )
+        else:
+            self.ok_btn.setStyleSheet(
+                "background-color: #0078d7; color: white; padding: 6px 16px; font-weight: bold;"
+            )
         
         btn_layout.addWidget(self.reset_btn)
         btn_layout.addStretch()

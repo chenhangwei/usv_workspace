@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                               QListWidget, QListWidgetItem, QAbstractItemView)
 from PyQt5.QtCore import Qt, QTimer, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
+from gs_gui.style_manager import is_dark_theme
 
 # 兼容性定义
 try:
@@ -64,6 +65,91 @@ class UsvInfoPanel(QWidget):
             padding: 0 3px;
         }
     """
+
+    def _get_groupbox_style(self, border_color="#3498db"):
+        """根据主题返回 QGroupBox 样式"""
+        dark = is_dark_theme()
+        title_color = "#e0e0e0" if dark else "#333333"
+        return f"""
+            QGroupBox {{
+                font-weight: bold;
+                font-size: 16px;
+                border: 1.5px solid {border_color};
+                border-radius: 5px;
+                margin-top: 6px;
+                padding-top: 6px;
+                color: {title_color};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }}
+        """
+
+    def _get_scrollbar_stylesheet(self):
+        """根据主题返回滚动条样式"""
+        dark = is_dark_theme()
+        if dark:
+            bg = "#2c3e50"
+            handle = "#3498db"
+            handle_hover = "#5dade2"
+        else:
+            bg = "#e8e8e8"
+            handle = "#b0b0b0"
+            handle_hover = "#909090"
+        return f"""
+            QScrollArea {{
+                border: none;
+                background-color: transparent;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: {bg};
+                width: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle};
+                min-height: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: {bg};
+                height: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {handle};
+                min-width: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
+            }}
+        """
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,20 +169,68 @@ class UsvInfoPanel(QWidget):
         self._update_timer.start(1000)  # 每秒更新一次
         # 在线时长追踪（秒）
         self._online_start_ts = None
+
+    def set_theme(self, theme_name):
+        """切换主题时刷新面板内硬编码的样式"""
+        # 刷新滚动条
+        if hasattr(self, '_scroll_area'):
+            self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
+        # 刷新 GroupBox 边框颜色
+        group_colors = {
+            'basic_group': '#3498db',
+            'position_group': '#27ae60',
+            'battery_group': '#f39c12',
+            'gps_group': '#9b59b6',
+            'readiness_group': '#16a085',
+            'messages_group': '#34495e',
+        }
+        for attr, color in group_colors.items():
+            w = getattr(self, attr, None)
+            if w:
+                w.setStyleSheet(self._get_groupbox_style(color))
+        # 刷新键/值标签颜色
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        val_color = "#e0e0e0" if dark else "#34495e"
+        id_fg = "#e0e0e0" if dark else "#2c3e50"
+        id_bg = "#3a3a3a" if dark else "#ecf0f1"
+        section_color = "#e0e0e0" if dark else "#2c3e50"
+        summary_color = "#aaaaaa" if dark else "#7f8c8d"
+        list_bg = "#2b2b2b" if dark else "#ffffff"
+        list_border = "#444444" if dark else "#ecf0f1"
+
+        for label in getattr(self, '_key_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {key_color}; font-weight: bold; font-size: 16px; min-width: 40px; }}")
+        for label in getattr(self, '_value_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {val_color}; font-size: 16px; font-weight: 600; }}")
+        if hasattr(self, 'id_label'):
+            self.id_label.setStyleSheet(f"QLabel {{ color: {id_fg}; font-weight: bold; font-size: 16px; background-color: {id_bg}; padding: 5px; border-radius: 3px; }}")
+        for label in getattr(self, '_section_labels', []):
+            label.setStyleSheet(f"color: {section_color}; font-size: 16px; font-weight: bold; margin-top: 4px;")
+        if hasattr(self, 'ready_summary_label'):
+            self.ready_summary_label.setStyleSheet(f"color: {summary_color}; font-size: 16px;")
+        for lw in getattr(self, '_list_widgets', []):
+            lw.setStyleSheet(f"QListWidget {{ background-color: {list_bg}; border: 1px solid {list_border}; border-radius: 6px; }} QListWidget::item {{ padding: 6px 8px; }}")
     
     def _setup_ui(self):
         """设置UI布局（带滚动条）"""
+        # 用于 set_theme() 批量刷新的标签列表
+        self._key_labels = []
+        self._value_labels = []
+        self._section_labels = []
+        self._list_widgets = []
+
         # 主容器布局（外层）
         main_container_layout = QVBoxLayout(self)
         main_container_layout.setContentsMargins(0, 0, 0, 0)
         main_container_layout.setSpacing(0)
         
         # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)  # 自动调整内容大小
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)  # 无边框
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)  # 自动调整内容大小
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)  # 无边框
         
         # 创建滚动内容容器
         scroll_content = QWidget()
@@ -108,113 +242,64 @@ class UsvInfoPanel(QWidget):
         content_layout.setSpacing(10)
         
         # ==================== 基本信息组 ====================
-        basic_group = self._create_basic_info_group()
-        content_layout.addWidget(basic_group)
+        self.basic_group = self._create_basic_info_group()
+        content_layout.addWidget(self.basic_group)
 
         # ==================== 位置信息组 ====================
-        position_group = self._create_position_info_group()
-        content_layout.addWidget(position_group)
+        self.position_group = self._create_position_info_group()
+        content_layout.addWidget(self.position_group)
         
         # ==================== 电池信息组 ====================
-        battery_group = self._create_battery_info_group()
-        content_layout.addWidget(battery_group)
+        self.battery_group = self._create_battery_info_group()
+        content_layout.addWidget(self.battery_group)
         
         # ==================== GPS 信息组 ====================
-        gps_group = self._create_gps_info_group()
-        content_layout.addWidget(gps_group)
+        self.gps_group = self._create_gps_info_group()
+        content_layout.addWidget(self.gps_group)
         
         # ==================== Ready 状态组 ====================
-        readiness_group = self._create_readiness_group()
-        content_layout.addWidget(readiness_group)
+        self.readiness_group = self._create_readiness_group()
+        content_layout.addWidget(self.readiness_group)
 
         # ==================== 飞控消息组 ====================
-        messages_group = self._create_vehicle_message_group()
-        content_layout.addWidget(messages_group)
+        self.messages_group = self._create_vehicle_message_group()
+        content_layout.addWidget(self.messages_group)
         
         # 添加弹性空间（自动填充剩余空间）
         content_layout.addStretch()
         
         # 将内容容器设置到滚动区域
-        scroll_area.setWidget(scroll_content)
+        self._scroll_area.setWidget(scroll_content)
         
         # 将滚动区域添加到主布局
-        main_container_layout.addWidget(scroll_area)
+        main_container_layout.addWidget(self._scroll_area)
         
-        # 设置滚动条样式
-        scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #2c3e50;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: #3498db;
-                min-height: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #5dade2;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-            }
-            
-            QScrollBar:horizontal {
-                border: none;
-                background: #2c3e50;
-                height: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #3498db;
-                min-width: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #5dade2;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                border: none;
-                background: none;
-                width: 0px;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: none;
-            }
-        """)
+        # 设置滚动条样式（主题感知）
+        self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
     
     def _create_basic_info_group(self):
         """创建基本信息组"""
         group = QGroupBox("📝 基本信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE)
+        group.setStyleSheet(self._get_groupbox_style("#3498db"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
         layout.setContentsMargins(10, 12, 10, 10)
         
         # USV ID
+        dark = is_dark_theme()
+        id_fg = "#e0e0e0" if dark else "#2c3e50"
+        id_bg = "#3a3a3a" if dark else "#ecf0f1"
         self.id_label = self._create_value_label("--", large=True)
-        self.id_label.setStyleSheet("""
-            QLabel {
-                color: #2c3e50;
+        self.id_label.setStyleSheet(f"""
+            QLabel {{
+                color: {id_fg};
                 font-weight: bold;
                 font-size: 16px;
-                background-color: #ecf0f1;
+                background-color: {id_bg};
                 padding: 5px;
                 border-radius: 3px;
-            }
+            }}
         """)
         layout.addWidget(QLabel("📋 USV ID:"), 0, 0)
         layout.addWidget(self.id_label, 0, 1)
@@ -262,7 +347,7 @@ class UsvInfoPanel(QWidget):
     def _create_readiness_group(self):
         """创建 Ready 状态展示组"""
         group = QGroupBox("🎯 Ready 检查")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#16a085"))
+        group.setStyleSheet(self._get_groupbox_style("#16a085"))
 
         layout = QVBoxLayout()
         layout.setSpacing(6)
@@ -286,7 +371,8 @@ class UsvInfoPanel(QWidget):
         except AttributeError:
             alignment = AlignLeft | AlignVCenter
         self.ready_summary_label.setAlignment(alignment)  # type: ignore[arg-type]
-        self.ready_summary_label.setStyleSheet("color: #7f8c8d; font-size: 16px;")
+        summary_color = "#aaaaaa" if is_dark_theme() else "#7f8c8d"
+        self.ready_summary_label.setStyleSheet(f"color: {summary_color}; font-size: 16px;")
         layout.addWidget(self.ready_summary_label)
 
         # 传感器状态列表
@@ -311,7 +397,7 @@ class UsvInfoPanel(QWidget):
     def _create_position_info_group(self):
         """创建位置信息组"""
         group = QGroupBox("📋 位置信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#27ae60"))
+        group.setStyleSheet(self._get_groupbox_style("#27ae60"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -348,7 +434,7 @@ class UsvInfoPanel(QWidget):
     def _create_battery_info_group(self):
         """创建电池信息组"""
         group = QGroupBox("📋 电池信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#f39c12"))
+        group.setStyleSheet(self._get_groupbox_style("#f39c12"))
         
         layout = QVBoxLayout()
         layout.setSpacing(5)
@@ -410,7 +496,7 @@ class UsvInfoPanel(QWidget):
     def _create_gps_info_group(self):
         """创建GPS信息组"""
         group = QGroupBox("📋 GPS 信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#9b59b6"))
+        group.setStyleSheet(self._get_groupbox_style("#9b59b6"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -434,7 +520,7 @@ class UsvInfoPanel(QWidget):
     def _create_vehicle_message_group(self):
         """创建飞控消息展示组"""
         group = QGroupBox("📋 飞控消息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#3498db", "#34495e"))
+        group.setStyleSheet(self._get_groupbox_style("#34495e"))
 
         layout = QVBoxLayout()
         layout.setSpacing(6)
@@ -457,14 +543,17 @@ class UsvInfoPanel(QWidget):
         else:
             alignment = AlignRight | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        label.setStyleSheet(f"""
+            QLabel {{
+                color: {key_color};
                 font-weight: bold;
                 font-size: 16px;
                 min-width: 40px;
-            }
+            }}
         """)
+        self._key_labels.append(label)
         return label
     
     def _create_value_label(self, text, large=False):
@@ -475,22 +564,26 @@ class UsvInfoPanel(QWidget):
         else:
             alignment = AlignLeft | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
+        dark = is_dark_theme()
+        val_color = "#e0e0e0" if dark else "#34495e"
         if large:
-            label.setStyleSheet("""
-                QLabel {
-                    color: #2c3e50;
+            large_color = "#e0e0e0" if dark else "#2c3e50"
+            label.setStyleSheet(f"""
+                QLabel {{
+                    color: {large_color};
                     font-size: 16px;
                     font-weight: bold;
-                }
+                }}
             """)
         else:
-            label.setStyleSheet("""
-                QLabel {
-                    color: #34495e;
+            label.setStyleSheet(f"""
+                QLabel {{
+                    color: {val_color};
                     font-size: 16px;
                     font-weight: 600;
-                }
+                }}
             """)
+        self._value_labels.append(label)
         return label
 
     def _create_section_label(self, text):
@@ -501,7 +594,10 @@ class UsvInfoPanel(QWidget):
         except AttributeError:
             alignment = AlignLeft | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("color: #2c3e50; font-size: 16px; font-weight: bold; margin-top: 4px;")
+        dark = is_dark_theme()
+        section_color = "#e0e0e0" if dark else "#2c3e50"
+        label.setStyleSheet(f"color: {section_color}; font-size: 16px; font-weight: bold; margin-top: 4px;")
+        self._section_labels.append(label)
         return label
 
     def _configure_list_widget(self, widget):
@@ -521,16 +617,20 @@ class UsvInfoPanel(QWidget):
             widget.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         widget.setAlternatingRowColors(False)
         widget.setWordWrap(True)
-        widget.setStyleSheet("""
-            QListWidget {
-                background-color: #ffffff;
-                border: 1px solid #ecf0f1;
+        dark = is_dark_theme()
+        list_bg = "#2b2b2b" if dark else "#ffffff"
+        list_border = "#444444" if dark else "#ecf0f1"
+        widget.setStyleSheet(f"""
+            QListWidget {{
+                background-color: {list_bg};
+                border: 1px solid {list_border};
                 border-radius: 6px;
-            }
-            QListWidget::item {
+            }}
+            QListWidget::item {{
                 padding: 6px 8px;
-            }
+            }}
         """)
+        self._list_widgets.append(widget)
 
     def _set_list_placeholder(self, widget, text):
         """在列表内显示占位提示"""
@@ -983,12 +1083,13 @@ class UsvInfoPanel(QWidget):
                 }}
             """)
         except (ValueError, TypeError):
-            self.satellite_label.setStyleSheet("""
-                QLabel {
-                    color: #34495e;
+            val_color = "#e0e0e0" if is_dark_theme() else "#34495e"
+            self.satellite_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {val_color};
                     font-size: 16px;
                     font-weight: 600;
-                }
+                }}
             """)
 
     def _level_to_palette(self, level):

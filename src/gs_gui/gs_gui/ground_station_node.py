@@ -966,7 +966,7 @@ class GroundStationNode(Node):
     def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0, 
                                  maneuver_type=0, maneuver_param=0.0, step=None,
                                  nav_mode=0, sync_timeout=10.0, arrival_quality_threshold=0.8,
-                                 is_lookahead=False):
+                                 is_lookahead=False, task_name=''):
         """
         通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
         
@@ -1061,6 +1061,7 @@ class GroundStationNode(Node):
         
         goal_msg.timeout = timeout
         goal_msg.timestamp = self.get_clock().now().to_msg()
+        goal_msg.task_name = task_name or ''
         
         # 发布目标
         pub = self.usv_manager.navigation_goal_pubs[usv_id]

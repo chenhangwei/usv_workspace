@@ -86,6 +86,10 @@ class ROSSignal(QObject):
     formation_type_change = pyqtSignal(int)         # 编队队形切换，参数：FormationType 整数值
     formation_spacing_change = pyqtSignal(float, float)  # 编队间距变更，参数：(along, cross)
 
+    # ==================== 多任务队列信号 ====================
+    mission_queue_updated = pyqtSignal(list)        # 任务队列内容变更，参数：任务信息字典列表
+    mission_queue_progress = pyqtSignal(dict)       # 任务队列整体进度，参数：进度信息字典
+
 
 
 

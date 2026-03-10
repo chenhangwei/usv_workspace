@@ -902,8 +902,10 @@ class UsvStatusNode(Node):
                     return val
             except Exception:
                 continue
-        # 如果所有路径均失败，记录并返回0.0
-        self.get_logger().warn('无法读取系统温度，返回0.0')
+        # 如果所有路径均失败，仅首次警告，避免刷屏
+        if not getattr(self, '_temp_warn_logged', False):
+            self._temp_warn_logged = True
+            self.get_logger().warn('无法读取系统温度，返回0.0')
         return 0.0
 
     def destroy_node(self):

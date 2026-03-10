@@ -28,6 +28,34 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     if not data:
         return {}
 
+    def _valid_primary_neighbor(value: Any) -> str | None:
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value != '0':
+                return value
+            return None
+        if isinstance(value, (int, float)) and value != 0:
+            return str(int(value)) if float(value).is_integer() else str(value)
+        return None
+
+    def _count_active_episodes(field: str) -> tuple[int, float]:
+        total_duration = 0.0
+        episode_count = 0
+        index = 0
+        while index < len(data):
+            if data[index].get(field) == 1:
+                episode_start = data[index]['timestamp']
+                end_index = index
+                while end_index < len(data) and data[end_index].get(field) == 1:
+                    end_index += 1
+                episode_end = data[end_index - 1]['timestamp']
+                total_duration += max(0.0, episode_end - episode_start)
+                episode_count += 1
+                index = end_index
+            else:
+                index += 1
+        return episode_count, total_duration
+
     t0 = data[0]['timestamp']
     duration = data[-1]['timestamp'] - t0
     t = [d['timestamp'] - t0 for d in data]
@@ -70,10 +98,11 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     for d in data:
         gid = d.get('goal_id')
         if isinstance(gid, (int, float)) and gid > 0:
-            key = (round(d.get('target_x', 0), 2), round(d.get('target_y', 0), 2), int(gid))
+            tidx = d.get('_task_idx', 0)
+            key = (round(d.get('target_x', 0), 2), round(d.get('target_y', 0), 2), int(gid), tidx)
             if key not in seen:
                 seen.add(key)
-                targets.append({'x': key[0], 'y': key[1], 'id': key[2]})
+                targets.append({'x': key[0], 'y': key[1], 'id': key[2], 'task_idx': tidx})
     goal_seq = []
     prev_g = None
     for d in data:
@@ -169,9 +198,53 @@ def extract_report_data(data: list, header_info: dict) -> dict:
             encounters = {}
             for d in active_samples:
                 et = d.get('orca_encounter_type', 'none')
-                if isinstance(et, str) and et not in ('none', 'other'):
+                if isinstance(et, str) and et != 'none':
                     encounters[et] = encounters.get(et, 0) + 1
             orca['encounters'] = encounters
+
+            primary_counts = {}
+            for d in active_samples:
+                primary_id = _valid_primary_neighbor(d.get('orca_primary_neighbor_id'))
+                if primary_id is not None:
+                    primary_counts[primary_id] = primary_counts.get(primary_id, 0) + 1
+            if primary_counts:
+                top_primary_neighbor = max(primary_counts.items(), key=lambda item: item[1])
+                orca['primary_neighbors'] = primary_counts
+                orca['top_primary_neighbor'] = top_primary_neighbor[0]
+                orca['top_primary_neighbor_pct'] = top_primary_neighbor[1] / active_cnt * 100
+
+        if 'orca_escape_active' in data[0]:
+            escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
+            escape_sample_count = len(escape_samples)
+            orca['escape_sample_count'] = escape_sample_count
+            orca['escape_active_pct'] = escape_sample_count / len(data) * 100 if data else 0
+            if escape_sample_count > 0:
+                escape_episode_count, escape_total_duration = _count_active_episodes('orca_escape_active')
+                phase_counts = {}
+                direction_counts = {}
+                for d in escape_samples:
+                    phase = d.get('orca_escape_phase', 0)
+                    if isinstance(phase, (int, float)):
+                        phase_num = int(phase)
+                        if phase_num > 0:
+                            phase_label = 'phase1_reverse_turn' if phase_num == 1 else 'phase2_weakened_orca' if phase_num == 2 else f'phase{phase_num}'
+                            phase_counts[phase_label] = phase_counts.get(phase_label, 0) + 1
+                    direction = d.get('orca_escape_direction', 0)
+                    if isinstance(direction, (int, float)):
+                        direction_num = int(direction)
+                        if direction_num != 0:
+                            direction_label = 'left' if direction_num > 0 else 'right'
+                            direction_counts[direction_label] = direction_counts.get(direction_label, 0) + 1
+
+                orca['escape_episode_count'] = escape_episode_count
+                orca['escape_total_duration'] = escape_total_duration
+                orca['escape_phases'] = phase_counts
+                orca['escape_directions'] = direction_counts
+                orca['max_escape_count'] = max(
+                    int(d.get('orca_escape_count', 0))
+                    for d in data
+                    if isinstance(d.get('orca_escape_count'), (int, float))
+                )
 
     wifi = {}
     if 'wifi_rssi_dbm' in data[0]:
@@ -186,14 +259,16 @@ def extract_report_data(data: list, header_info: dict) -> dict:
             }
 
     per_goal = []
-    goals_map = {}
+    goals_map = {}  # key: (task_idx, goal_id)
     for d in data:
         gid = d.get('goal_id')
         if isinstance(gid, (int, float)):
             gid = int(gid)
-            if gid not in goals_map:
-                goals_map[gid] = []
-            goals_map[gid].append(d)
+            tidx = d.get('_task_idx', 0)
+            gkey = (tidx, gid)
+            if gkey not in goals_map:
+                goals_map[gkey] = []
+            goals_map[gkey].append(d)
     sorted_gids = sorted(goals_map.keys())
 
     # === 构建全局到达事件映射 ===
@@ -201,7 +276,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     # 事件记录在下一个 goal 的第一行数据中，按 goal_id 分组会归属到错误的 goal。
     # 因此先遍历所有数据，提取事件并按其引用的 goal_id 建立映射。
     import re as _re
-    _arrival_event_map = {}  # {referenced_goal_id: event_string}
+    _arrival_event_map = {}  # {(task_idx, referenced_goal_id): event_string}
     for d in data:
         evt = d.get('nav_event', '')
         if not evt:
@@ -210,10 +285,12 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         m = _re.match(r'"?(passed|arrived):(\d+):', evt_s)
         if m:
             ref_gid = int(m.group(2))
-            _arrival_event_map[ref_gid] = evt_s
+            tidx = d.get('_task_idx', 0)
+            _arrival_event_map[(tidx, ref_gid)] = evt_s
 
-    for gi, gid in enumerate(sorted_gids):
-        gdata = goals_map[gid]
+    for gi, gkey in enumerate(sorted_gids):
+        tidx_g, gid = gkey
+        gdata = goals_map[gkey]
         dur = gdata[-1]['timestamp'] - gdata[0]['timestamp']
         gg = [d for d in gdata if d.get('flight_mode') == 'GUIDED']
         dists_g = [d.get('distance_to_goal', 999) for d in gdata if isinstance(d.get('distance_to_goal'), (int, float))]
@@ -224,7 +301,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
 
         # === 到达判断 (数据驱动) ===
         # 使用全局事件映射: 按事件中引用的 goal_id 匹配，而非按 goal 分组内的行
-        own_event = _arrival_event_map.get(gid, '')
+        own_event = _arrival_event_map.get((tidx_g, gid), '')
         has_arrived_event = 'arrived:' in own_event
         has_passed_event = 'passed:' in own_event
 
@@ -263,7 +340,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
                     arrival_status = 'not_reached'
 
         pg = {
-            'id': gid, 'duration': dur,
+            'id': gid, 'task_idx': tidx_g, 'duration': dur,
             'min_dist': min_d,
             'arrival': arrival_status,
             'avg_cte': sum(ctes_g)/len(ctes_g) if ctes_g else None,
@@ -306,6 +383,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'flight_mode': [data[i].get('flight_mode', '') for i in range(0, len(data), step)],
         'yaw_deg': [data[i].get('pose_yaw_deg', 0) for i in range(0, len(data), step)],
         'goal_id': [data[i].get('goal_id', 0) for i in range(0, len(data), step)],
+        'task_idx': [data[i].get('_task_idx', 0) for i in range(0, len(data), step)],
     }
     if distances and len(distances) == len(data):
         ts_data['distance'] = [distances[i] for i in range(0, len(data), step)]
@@ -330,6 +408,45 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         ts_data['orca_linear_corr'] = [data[i].get('orca_linear_correction', 0) for i in range(0, len(data), step)]
         ts_data['orca_angular_corr'] = [data[i].get('orca_angular_correction', 0) for i in range(0, len(data), step)]
         ts_data['orca_hard_brake'] = [data[i].get('orca_hard_brake', 0) for i in range(0, len(data), step)]
+    if 'orca_primary_neighbor_id' in data[0]:
+      ts_data['orca_primary_neighbor'] = [
+        _valid_primary_neighbor(data[i].get('orca_primary_neighbor_id')) or ''
+        for i in range(0, len(data), step)
+      ]
+    if 'orca_escape_active' in data[0]:
+      ts_data['orca_escape_active'] = [data[i].get('orca_escape_active', 0) for i in range(0, len(data), step)]
+      ts_data['orca_escape_phase'] = [
+        int(data[i].get('orca_escape_phase', 0)) if data[i].get('orca_escape_active', 0) == 1 else 0
+        for i in range(0, len(data), step)
+      ]
+      ts_data['orca_escape_direction'] = [
+        int(data[i].get('orca_escape_direction', 0)) if data[i].get('orca_escape_active', 0) == 1 else 0
+        for i in range(0, len(data), step)
+      ]
+      ts_data['orca_escape_count'] = [data[i].get('orca_escape_count', 0) for i in range(0, len(data), step)]
+
+    # v16: 提取邻居USV位置时间序列 (用于回放中显示其他USV的实时位置)
+    if 'neighbor_1_id' in data[0]:
+        neighbor_ts = {}  # {neighbor_usv_id: {time: [], x: [], y: [], yaw: []}}
+        for i in range(0, len(data), step):
+            d = data[i]
+            ti = t[i]
+            for slot in range(1, 6):
+                nid = d.get(f'neighbor_{slot}_id')
+                if not nid or (isinstance(nid, str) and not nid.strip()):
+                    continue
+                if isinstance(nid, (int, float)) and nid == 0:
+                    continue
+                nid_str = str(nid) if not isinstance(nid, str) else nid
+                if nid_str not in neighbor_ts:
+                    neighbor_ts[nid_str] = {'time': [], 'x': [], 'y': [], 'yaw': []}
+                nb = neighbor_ts[nid_str]
+                nb['time'].append(ti)
+                nb['x'].append(d.get(f'neighbor_{slot}_x', 0))
+                nb['y'].append(d.get(f'neighbor_{slot}_y', 0))
+                nb['yaw'].append(d.get(f'neighbor_{slot}_yaw', 0))
+        if neighbor_ts:
+            ts_data['neighbors'] = neighbor_ts
 
     return {
         'info': info, 'sampling': sampling, 'velocity': velocity,
@@ -410,6 +527,9 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
             'mpc_avg': round(rd['mpc'].get('avg', 0), 1) if rd['mpc'] else None,
             'orca_active_pct': round(rd['orca'].get('active_pct', 0), 1) if rd['orca'] else 0,
             'orca_hard_brakes': rd['orca'].get('hard_brake_count', 0) if rd['orca'] else 0,
+            'orca_primary': rd['orca'].get('top_primary_neighbor', '') if rd['orca'] else '',
+            'escape_count': rd['orca'].get('escape_episode_count', 0) if rd['orca'] else 0,
+            'escape_duration': round(rd['orca'].get('escape_total_duration', 0), 1) if rd['orca'] else 0,
             'wifi_avg': round(rd['wifi'].get('avg', -100), 1) if rd['wifi'] else None,
             'wifi_grade': rd['wifi'].get('grade', '') if rd['wifi'] else '',
         })
@@ -559,6 +679,19 @@ body {{
   padding:7px 10px; background:rgba(100,255,218,0.06);
   border-radius:8px; border-left:3px solid var(--accent);
 }}
+.orca-summary-grid {{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+  gap:14px; margin-bottom:14px;
+}}
+.orca-summary-card {{ margin-bottom:0; }}
+.orca-summary-card h4 {{
+  display:flex; align-items:center; gap:8px; margin-bottom:10px;
+  font-size:0.95rem; color:var(--text);
+}}
+.orca-summary-card .orca-line {{
+  font-size:0.76rem; color:var(--text2); margin-top:6px; line-height:1.65;
+}}
+.orca-summary-card .orca-line strong {{ color:var(--accent); font-weight:700; }}
 .replay-container {{
   position:relative; border-radius:12px; overflow:hidden;
   background:var(--bg-card); border:1px solid var(--border);
@@ -822,16 +955,21 @@ body {{
   <div class="chart-box" id="chart-orca-corr-box" style="display:none;">
     <div id="chart-orca-corrections" style="height:280px;"></div>
   </div>
+  <div class="chart-box" id="chart-orca-escape-box" style="display:none;">
+    <div id="chart-orca-escape" style="height:280px;"></div>
+  </div>
   <div class="reading-guide">
     <strong>🛡️ ORCA 避障分析阅读指南：</strong>ORCA (Optimal Reciprocal Collision Avoidance) 是USV的分布式避碰算法。<br>
     <strong>图表1：避障激活</strong> — 显示ORCA是否检测到邻近USV并激活避碰(1=激活, 0=未激活)。激活率高表示编队密集。<br>
     <strong>图表2：最近邻距离</strong> — 与最近邻USV的实时距离，红虚线=1.0m安全阈值。低于此线需关注。<br>
     <strong>图表3：速度修正量</strong> — ORCA对原始控制指令的修正量(线速度+角速度)，修正越大说明碰撞风险越高。<br>
+    <strong>图表4：脱困阶段</strong> — v17 新增。0=未脱困，1=后退转向，2=削弱绕行；如果持续停在高位，说明控制器正在主动解除锁死。<br>
     <strong>关键指标：</strong><br>
     • <strong>激活率</strong>：0%=全程无碰撞风险，高占比=密集编队或频繁交叉<br>
     • <strong>硬刹车</strong>：紧急制动次数，≥3次建议检查路径规划是否合理<br>
-    • <strong>遇发类型</strong>：head_on=迎面, crossing_give_way=交叉让行, overtaking=追越, stationary=静止船舶<br>
-    <strong>分析思路：</strong>检查避障是否影响航行效率(CTE因避障偏离)，硬刹车是否导致航点超时。
+    • <strong>主导邻船</strong>：避障激活时最常压制当前艇的邻船，可快速定位互锁对象<br>
+    • <strong>遭遇类型</strong>：head_on=迎面, crossing_give_way/crossing_stand_on=交叉会遇, being_overtaken/overtaking=追越, stationary=近距伴随/静态压制<br>
+    <strong>分析思路：</strong>先看主导邻船是否高度集中，再结合脱困统计判断是正常避障、长时间互抑，还是已经进入脱困恢复流程。
   </div>
 </div>
 
@@ -972,7 +1110,64 @@ function toggleAllUSV() {{
 function refreshAll() {{
   buildSummaryCards(); buildCompareTable(); drawTrajectory(); drawVelocity();
   drawCTE(); drawHE(); drawDistance(); drawControl(); drawMPC(); drawTau(); drawWifi();
-  drawOrca(); buildPerGoal(); updateReplayInfo();
+  buildOrcaSummary(); drawOrca(); buildPerGoal(); updateReplayInfo();
+}}
+
+function formatOrcaCounter(counter,total,limit) {{
+  if(!counter) return '—';
+  const entries=Object.entries(counter).sort((a,b)=>b[1]-a[1]);
+  if(!entries.length) return '—';
+  return entries.slice(0,limit||3).map(([key,val])=>{{
+    const pct=total&&total>0 ? ` (${{(val/total*100).toFixed(1)}}%)` : '';
+    return `${{key}}: ${{val}}${{pct}}`;
+  }}).join(' | ');
+}}
+
+function buildOrcaSummary() {{
+  const el=document.getElementById('orca-summary-area');
+  if(!el) return;
+  const active=getActive();
+  if(!active.length) {{ el.innerHTML=''; return; }}
+  const cards=[];
+  active.forEach(u=>{{
+    const sum=ALL_SUM[u.idx];
+    const orca=sum&&sum.orca;
+    if(!orca || (!orca.active_count && !orca.escape_sample_count && !orca.top_primary_neighbor)) return;
+    const activeText=orca.active_count
+      ? `${{orca.active_count}} 次 / ${{(orca.active_pct||0).toFixed(1)}}%`
+      : '未触发';
+    const distText=orca.min_dist!==null && orca.min_dist!==undefined
+      ? `${{orca.min_dist.toFixed(2)}}m / 均值 ${{(orca.avg_dist||0).toFixed(2)}}m`
+      : '—';
+    const primaryText=orca.top_primary_neighbor
+      ? `${{orca.top_primary_neighbor}} (${{(orca.top_primary_neighbor_pct||0).toFixed(1)}}%)`
+      : '—';
+    const primaryTopText=formatOrcaCounter(orca.primary_neighbors, orca.active_count, 3);
+    const encounterText=formatOrcaCounter(orca.encounters, orca.active_count, 4);
+    const escapeText=orca.escape_episode_count
+      ? `${{orca.escape_episode_count}} 次 / ${{(orca.escape_total_duration||0).toFixed(1)}}s`
+      : '未触发';
+    const phaseText=formatOrcaCounter(orca.escape_phases, orca.escape_sample_count, 3);
+    const dirText=formatOrcaCounter(orca.escape_directions, orca.escape_sample_count, 2);
+    cards.push(`
+      <div class="chart-box orca-summary-card">
+        <h4><span style="color:${{u.color}};font-weight:700">●</span> ${{u.id}}</h4>
+        <div class="orca-line"><strong>激活:</strong> ${{activeText}}</div>
+        <div class="orca-line"><strong>最近邻距离:</strong> ${{distText}}</div>
+        <div class="orca-line"><strong>硬刹车:</strong> ${{orca.hard_brake_count||0}} 次</div>
+        <div class="orca-line"><strong>主导邻船:</strong> ${{primaryText}}</div>
+        <div class="orca-line"><strong>邻船分布:</strong> ${{primaryTopText}}</div>
+        <div class="orca-line"><strong>遭遇类型:</strong> ${{encounterText}}</div>
+        <div class="orca-line"><strong>脱困:</strong> ${{escapeText}}${{orca.max_escape_count?` | max_count=${{orca.max_escape_count}}`:''}}</div>
+        <div class="orca-line"><strong>脱困阶段:</strong> ${{phaseText}}</div>
+        <div class="orca-line"><strong>脱困方向:</strong> ${{dirText}}</div>
+      </div>`);
+  }});
+  if(!cards.length) {{
+    el.innerHTML='<div class="reading-guide">当前所选 USV 没有可用的 ORCA v14/v17 数据。</div>';
+    return;
+  }}
+  el.innerHTML=`<div class="orca-summary-grid">${{cards.join('')}}</div>`;
 }}
 
 // ═══ 对比表 ═══
@@ -1038,6 +1233,18 @@ function drawTrajectory() {{
       marker:{{color:u.color,size:13,symbol:'star',line:{{width:1,color:'#fff'}}}},
       text:tg.map(t=>u.id+' G'+t.id),textposition:'top center',
       textfont:{{color:u.color,size:8}},showlegend:false}});
+    // v16: 邻居轨迹 (虚线叠加)
+    if(ts.neighbors) {{
+      Object.keys(ts.neighbors).forEach(nid=>{{
+        const nb=ts.neighbors[nid];
+        if(!nb||nb.x.length<5) return;
+        // 检查此邻居是否已经作为独立USV被绘制 (避免重复)
+        const alreadyActive=getActive().some(a=>a.id===nid);
+        if(alreadyActive) return;
+        traces.push({{x:nb.x,y:nb.y,mode:'lines',name:nid+' (neighbor)',
+          line:{{color:u.color,width:1,dash:'dot'}},opacity:0.4,showlegend:true}});
+      }});
+    }}
   }});
   Plotly.react('chart-traj',traces.length?traces:emptyTrace(),{{
     ...darkLayout,title:'航行轨迹对比',
@@ -1209,6 +1416,8 @@ function buildSummaryCards() {{
       ins.push('ORCA触发'+sum.orca.active_count+'次('+sum.orca.active_pct.toFixed(1)+'%)');
       if(sum.orca.hard_brake_count>0) ins.push('⚠️硬刹车'+sum.orca.hard_brake_count+'次');
       if(sum.orca.min_dist!==null&&sum.orca.min_dist<0.5) ins.push('❌最近距离仅'+sum.orca.min_dist.toFixed(2)+'m');
+      if(sum.orca.top_primary_neighbor) ins.push('主导邻船'+sum.orca.top_primary_neighbor);
+      if(sum.orca.escape_episode_count>0) ins.push('🆘脱困'+sum.orca.escape_episode_count+'次/'+sum.orca.escape_total_duration.toFixed(1)+'s');
     }}
     if(sum.wifi&&sum.wifi.avg) ins.push('WiFi '+sum.wifi.grade+'('+sum.wifi.avg.toFixed(0)+'dBm)');
     if(sum.velocity) ins.push('均速'+sum.velocity.guided_avg.toFixed(3)+'m/s');
@@ -1237,12 +1446,15 @@ function drawDistance() {{
 
 function drawOrca() {{
   const active=getActive();
-  const hasOrca=active.some(u=>ALL_TS[u.idx]&&ALL_TS[u.idx].orca_active);
+  const hasOrca=active.some(u=>ALL_TS[u.idx]&&Array.isArray(ALL_TS[u.idx].orca_active));
+  const hasEscape=active.some(u=>ALL_TS[u.idx]&&Array.isArray(ALL_TS[u.idx].orca_escape_active));
   ['chart-orca-box','chart-orca-dist-box','chart-orca-corr-box'].forEach(id=>{{
     const el=document.getElementById(id); if(el) el.style.display=hasOrca?'block':'none';
   }});
-  if(!hasOrca) return;
-  const t1=[],t2=[],t3=[];
+  const escapeBox=document.getElementById('chart-orca-escape-box');
+  if(escapeBox) escapeBox.style.display=hasEscape?'block':'none';
+  if(!hasOrca && !hasEscape) return;
+  const t1=[],t2=[],t3=[],t4=[];
   active.forEach(u=>{{
     const ts=ALL_TS[u.idx]; if(!ts||!ts.orca_active) return;
     t1.push({{x:ts.time,y:ts.orca_active,name:u.id+' 激活',line:{{color:u.color,width:1.5}},fill:'tozeroy',fillcolor:u.color+'20'}});
@@ -1252,20 +1464,33 @@ function drawOrca() {{
       t3.push({{x:ts.time,y:ts.orca_linear_corr,name:u.id+' Δv',line:{{color:u.color,width:1}}}});
       if(ts.orca_angular_corr) t3.push({{x:ts.time,y:ts.orca_angular_corr,name:u.id+' Δω',line:{{color:u.color,width:1,dash:'dash'}},showlegend:false}});
     }}
+    if(Array.isArray(ts.orca_escape_active)) {{
+      const phase=(ts.orca_escape_phase||[]).map((value,index)=>ts.orca_escape_active[index]===1?value:0);
+      t4.push({{x:ts.time,y:phase,name:u.id+' 脱困阶段',line:{{color:u.color,width:1.8,shape:'hv'}}}});
+    }}
   }});
-  Plotly.react('chart-orca-activation',t1.length?t1:emptyTrace(),{{
-    ...darkLayout,title:'ORCA 避障激活',
-    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Active',range:[-0.1,1.3]}},
-  }},cfg);
-  Plotly.react('chart-orca-dist',t2.length?t2:emptyTrace(),{{
-    ...darkLayout,title:'最近邻USV距离',
-    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Distance (m)'}},
-    shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:1.0,y1:1.0,line:{{color:'#EF5350',width:1.5,dash:'dash'}}}}],
-  }},cfg);
-  Plotly.react('chart-orca-corrections',t3.length?t3:emptyTrace(),{{
-    ...darkLayout,title:'ORCA 速度修正量',
-    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Correction'}},
-  }},cfg);
+  if(hasOrca) {{
+    Plotly.react('chart-orca-activation',t1.length?t1:emptyTrace(),{{
+      ...darkLayout,title:'ORCA 避障激活',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Active',range:[-0.1,1.3]}},
+    }},cfg);
+    Plotly.react('chart-orca-dist',t2.length?t2:emptyTrace(),{{
+      ...darkLayout,title:'最近邻USV距离',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Distance (m)'}},
+      shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:1.0,y1:1.0,line:{{color:'#EF5350',width:1.5,dash:'dash'}}}}],
+    }},cfg);
+    Plotly.react('chart-orca-corrections',t3.length?t3:emptyTrace(),{{
+      ...darkLayout,title:'ORCA 速度修正量',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Correction'}},
+    }},cfg);
+  }}
+  if(hasEscape) {{
+    Plotly.react('chart-orca-escape',t4.length?t4:emptyTrace(),{{
+      ...darkLayout,title:'ORCA 脱困阶段 (v17)',
+      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+      yaxis:{{...darkLayout.yaxis,title:'Escape Phase',tickmode:'array',tickvals:[0,1,2],ticktext:['Off','P1','P2'],range:[-0.2,2.3]}},
+    }},cfg);
+  }}
 }}
 
 // ═══ 路径重放引擎 ═══
@@ -1317,9 +1542,9 @@ function getReplayData() {{
     if(!ts||!ts.time||ts.time.length<2) return;
     if(!ts._smoothPath) ts._smoothPath=buildSmoothPath(ts);
     const pg=ALL_PG[u.idx]||[];
-    // 构建每个goal的到达状态映射 (数据驱动)
+    // 构建每个goal的到达状态映射 (按 task_idx + goal_id 区分多任务)
     const arrivalMap={{}};
-    pg.forEach(g=>{{ arrivalMap[g.id]=g.arrival||'unknown'; }});
+    pg.forEach(g=>{{ arrivalMap[(g.task_idx||0)+'_'+g.id]=g.arrival||'unknown'; }});
     data.push({{usv:u,ts:ts,targets:ALL_TGTS[u.idx]||[],sp:ts._smoothPath,arrivalMap:arrivalMap}});
   }});
   return data;
@@ -1367,6 +1592,27 @@ function sampleSmoothPos(sp,t) {{
   return {{x:cx,y:cy,yaw:yaw}};
 }}
 
+// 从邻居观测数据中采样给定时间t的位置 (线性插值)
+function sampleNeighborPos(nb,t) {{
+  if(!nb||!nb.time||nb.time.length<1) return null;
+  if(t<=nb.time[0]) return {{x:nb.x[0],y:nb.y[0],yaw:nb.yaw[0]*Math.PI/180}};
+  if(t>=nb.time[nb.time.length-1]) {{
+    const li=nb.time.length-1;
+    return {{x:nb.x[li],y:nb.y[li],yaw:nb.yaw[li]*Math.PI/180}};
+  }}
+  let lo=0,hi=nb.time.length-1;
+  while(lo<hi-1){{ const m=(lo+hi)>>1; if(nb.time[m]<=t)lo=m; else hi=m; }}
+  const dt=nb.time[lo+1]-nb.time[lo];
+  if(dt<1e-6) return {{x:nb.x[lo],y:nb.y[lo],yaw:nb.yaw[lo]*Math.PI/180}};
+  const f=(t-nb.time[lo])/dt;
+  const x=nb.x[lo]+(nb.x[lo+1]-nb.x[lo])*f;
+  const y=nb.y[lo]+(nb.y[lo+1]-nb.y[lo])*f;
+  let y0=nb.yaw[lo],y1=nb.yaw[lo+1],dy=y1-y0;
+  if(dy>180)dy-=360; if(dy<-180)dy+=360;
+  const yaw=(y0+dy*f)*Math.PI/180;
+  return {{x:x,y:y,yaw:yaw}};
+}}
+
 function updateReplayInfo() {{
   const el=document.getElementById('replay-info');
   el.innerHTML=getActive().map(u=>
@@ -1399,7 +1645,7 @@ function replayToggle() {{
   }}
 }}
 
-function replayRestart() {{ initAudio(); sfxClick(); replayState.currentTime=0; replayState.goalReachedFlags={{}}; replayState.goalReachedTime={{}}; replayState._prevGoals={{}}; renderReplayFrame(); updateTimeDisplay(); }}
+function replayRestart() {{ initAudio(); sfxClick(); replayState.currentTime=0; replayState.goalReachedFlags={{}}; replayState.goalReachedTime={{}}; replayState._prevGoals={{}}; replayState._taskFade={{}}; replayState._globalFadeTime=null; replayState._vp=null; renderReplayFrame(); updateTimeDisplay(); }}
 function replayFaster() {{ initAudio(); sfxSpeed(); replayState.speed=Math.min(16,replayState.speed*2); document.getElementById('speed-display').textContent=replayState.speed+'x'; }}
 function replaySlower() {{ initAudio(); sfxSpeed(); replayState.speed=Math.max(0.25,replayState.speed/2); document.getElementById('speed-display').textContent=replayState.speed+'x'; }}
 function toggleGoalLabels() {{ replayState.showGoalLabels=!replayState.showGoalLabels; const btn=document.getElementById('btn-goal-labels'); btn.style.background=replayState.showGoalLabels?'rgba(100,255,218,0.15)':'rgba(255,255,255,0.08)'; btn.style.color=replayState.showGoalLabels?'#64ffda':'#9e9e9e'; renderReplayFrame(); }}
@@ -1408,7 +1654,30 @@ function replaySeek(evt) {{
   const bar=document.getElementById('replay-progress');
   const rect=bar.getBoundingClientRect();
   replayState.currentTime=Math.max(0,Math.min(1,(evt.clientX-rect.left)/rect.width))*replayState.maxTime;
-  replayState.goalReachedFlags={{}}; replayState.goalReachedTime={{}}; replayState._prevGoals={{}}; renderReplayFrame(); updateTimeDisplay();
+  replayState.goalReachedFlags={{}}; replayState.goalReachedTime={{}}; replayState._prevGoals={{}}; replayState._vp=null;
+  // seek后重建任务切换状态
+  replayState._taskFade={{}}; replayState._globalFadeTime=null;
+  const seekT=replayState.currentTime;
+  getReplayData().forEach(d=>{{
+    const ts=d.ts;
+    if(!ts.task_idx) return;
+    // 找到当前时间对应的任务
+    let sIdx=0;
+    for(let i=0;i<ts.time.length;i++) {{ if(ts.time[i]<=seekT) sIdx=i; else break; }}
+    const curTask=ts.task_idx[sIdx];
+    // 检查是否存在更早的任务 (即已经发生过切换)
+    const firstTask=ts.task_idx[0];
+    if(curTask!==firstTask) {{
+      // 找到切换时刻
+      let switchTime=seekT;
+      for(let i=1;i<ts.time.length;i++) {{ if(ts.task_idx[i]!==firstTask) {{ switchTime=ts.time[i]; break; }} }}
+      const tfKey='u'+d.usv.idx;
+      replayState._taskFade[tfKey]={{task:curTask,prevTask:firstTask,fadeStart:switchTime}};
+      if(replayState._globalFadeTime===null) replayState._globalFadeTime=switchTime;
+      else replayState._globalFadeTime=Math.min(replayState._globalFadeTime,switchTime);
+    }}
+  }});
+  renderReplayFrame(); updateTimeDisplay();
 }}
 
 function replayLoop(now) {{
@@ -1450,18 +1719,93 @@ function renderReplayFrame() {{
     ctx.textAlign='center'; ctx.fillText('请选择USV加入重放',w/2,h/2); return;
   }}
 
+  const t=replayState.currentTime;
+
+  // 初始化任务切换渐隐追踪
+  if(!replayState._taskFade) replayState._taskFade={{}};
+
+  // 第一遍: 更新所有USV的任务状态,检测切换
+  data.forEach(d=>{{
+    const ts=d.ts;
+    let dIdx=0;
+    for(let i=0;i<ts.time.length;i++) {{ if(ts.time[i]<=t) dIdx=i; else break; }}
+    const dTaskIdx=ts.task_idx?ts.task_idx[dIdx]:0;
+    const tfKey='u'+d.usv.idx;
+    if(!(tfKey in replayState._taskFade)) replayState._taskFade[tfKey]={{task:dTaskIdx}};
+    const tf=replayState._taskFade[tfKey];
+    if(tf.task!==dTaskIdx) {{
+      tf.prevTask=tf.task; tf.fadeStart=t; tf.task=dTaskIdx;
+      // 记录全局切换时间 (持久化,不会被清除)
+      if(replayState._globalFadeTime===null||replayState._globalFadeTime===undefined) replayState._globalFadeTime=t;
+    }}
+  }});
+  const globalFadeTime=replayState._globalFadeTime;
+  const fadeDur=3.0;
+
+  // 第二遍: 计算视口范围
   let minX=Infinity,maxX=-Infinity,minY=Infinity,maxY=-Infinity;
   data.forEach(d=>{{
-    d.ts.pose_x.forEach(v=>{{ if(v<minX)minX=v; if(v>maxX)maxX=v; }});
-    d.ts.pose_y.forEach(v=>{{ if(v<minY)minY=v; if(v>maxY)maxY=v; }});
-    d.targets.forEach(t=>{{ if(t.x<minX)minX=t.x; if(t.x>maxX)maxX=t.x; if(t.y<minY)minY=t.y; if(t.y>maxY)maxY=t.y; }});
+    const ts=d.ts;
+    let dIdx=0;
+    for(let i=0;i<ts.time.length;i++) {{ if(ts.time[i]<=t) dIdx=i; else break; }}
+    const dTaskIdx=ts.task_idx?ts.task_idx[dIdx]:0;
+    const tfKey='u'+d.usv.idx;
+    const tf=replayState._taskFade[tfKey];
+    const hasOwnFade=(tf.prevTask!==undefined);
+    const ownFading=(hasOwnFade&&tf.fadeStart!==undefined&&t-tf.fadeStart<fadeDur);
+    // 单任务USV: 全局渐隐已完成则不纳入视口
+    if(!hasOwnFade&&globalFadeTime!==null&&globalFadeTime!==undefined&&t-globalFadeTime>=fadeDur) return;
+    // 只将当前任务(及渐隐中的旧任务)的轨迹点纳入视口范围
+    for(let i=0;i<ts.pose_x.length;i++) {{
+      const ti=ts.task_idx?ts.task_idx[i]:0;
+      if(ti===dTaskIdx||(ownFading&&ti===tf.prevTask)) {{
+        const vx=ts.pose_x[i],vy=ts.pose_y[i];
+        if(vx<minX)minX=vx; if(vx>maxX)maxX=vx;
+        if(vy<minY)minY=vy; if(vy>maxY)maxY=vy;
+      }}
+    }}
+    // 只将当前任务(及渐隐中的旧任务)的目标点纳入视口范围
+    d.targets.forEach(tg=>{{
+      const ti=tg.task_idx||0;
+      if(ti===dTaskIdx||(ownFading&&ti===tf.prevTask)) {{
+        if(tg.x<minX)minX=tg.x; if(tg.x>maxX)maxX=tg.x;
+        if(tg.y<minY)minY=tg.y; if(tg.y>maxY)maxY=tg.y;
+      }}
+    }});
+  }});
+  // v16: 将邻居观测位置纳入视口 (已结束USV可能漂移到新位置)
+  data.forEach(dSelf=>{{
+    const selfEndTime=dSelf.ts.time[dSelf.ts.time.length-1];
+    if(t<=selfEndTime) return;
+    const selfId=dSelf.usv.id;
+    data.forEach(dOther=>{{
+      if(dOther.usv.idx===dSelf.usv.idx) return;
+      const nbs=dOther.ts.neighbors;
+      if(!nbs||!nbs[selfId]) return;
+      const pos=sampleNeighborPos(nbs[selfId],t);
+      if(pos) {{
+        if(pos.x<minX)minX=pos.x; if(pos.x>maxX)maxX=pos.x;
+        if(pos.y<minY)minY=pos.y; if(pos.y>maxY)maxY=pos.y;
+      }}
+    }});
   }});
 
-  const rx=(maxX-minX)||1, ry=(maxY-minY)||1, pad=0.15;
+  let rx=(maxX-minX)||1, ry=(maxY-minY)||1;
+  const pad=0.15;
   minX-=rx*pad; maxX+=rx*pad; minY-=ry*pad; maxY+=ry*pad;
-  const scX=(w-40)/(maxX-minX), scY=(h-40)/(maxY-minY);
+  // 视口平滑插值 — 避免任务切换时画面跳变
+  if(replayState._vp) {{
+    const k=0.08;
+    minX=replayState._vp.minX+(minX-replayState._vp.minX)*k;
+    maxX=replayState._vp.maxX+(maxX-replayState._vp.maxX)*k;
+    minY=replayState._vp.minY+(minY-replayState._vp.minY)*k;
+    maxY=replayState._vp.maxY+(maxY-replayState._vp.maxY)*k;
+  }}
+  replayState._vp={{minX,maxX,minY,maxY}};
+  rx=(maxX-minX)||1; ry=(maxY-minY)||1;
+  const scX=(w-40)/rx, scY=(h-40)/ry;
   const sc=Math.min(scX,scY);
-  const offX=(w-(maxX-minX)*sc)/2, offY=(h-(maxY-minY)*sc)/2;
+  const offX=(w-rx*sc)/2, offY=(h-ry*sc)/2;
   function toC(px,py) {{ return [offX+(px-minX)*sc, h-offY-(py-minY)*sc]; }}
 
   // 网格
@@ -1492,8 +1836,6 @@ function renderReplayFrame() {{
   ctx.save(); ctx.translate(14,h/2); ctx.rotate(-Math.PI/2);
   ctx.fillText('Y (m)',0,0); ctx.restore();
 
-  const t=replayState.currentTime;
-
   data.forEach(d=>{{
     const ts=d.ts, color=d.usv.color, uK=d.usv.idx, sp=d.sp;
     let idx=0;
@@ -1503,56 +1845,145 @@ function renderReplayFrame() {{
     const pos=sampleSmoothPos(sp,t)||{{x:ts.pose_x[idx],y:ts.pose_y[idx],yaw:(ts.yaw_deg[idx]||0)*Math.PI/180}};
     const cx=pos.x, cy=pos.y, yaw=pos.yaw;
 
-    // 已走轨迹 — 使用平滑路径点
-    ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=2; ctx.globalAlpha=0.6;
+    // 当前任务索引 (多任务合并时区分不同任务的目标和轨迹)
+    const curTaskIdx=ts.task_idx?ts.task_idx[idx]:0;
+    const curGoalId=ts.goal_id?ts.goal_id[idx]:0;
+
+    // 计算渐隐/淡入系数
+    const tfKey='u'+uK;
+    const tf=replayState._taskFade[tfKey];
+    const hasOwnTransition=(tf&&tf.prevTask!==undefined);
+    let baseA=1.0;
+    if(!hasOwnTransition&&globalFadeTime!==null&&globalFadeTime!==undefined) {{
+      const gfe=t-globalFadeTime;
+      baseA=gfe>=fadeDur?0:1.0-gfe/fadeDur;
+    }}
+    // 多任务USV新任务内容淡入
+    let fadeInA=1.0;
+    if(hasOwnTransition&&tf.fadeStart!==undefined) {{
+      const fia=t-tf.fadeStart;
+      fadeInA=Math.min(1.0,fia/fadeDur);
+    }}
+
+    // === 渐隐上一个任务的轨迹和目标点 (多任务USV) ===
+    if(hasOwnTransition&&tf.fadeStart!==undefined) {{
+      const fadeElapsed=t-tf.fadeStart;
+      if(fadeElapsed<fadeDur) {{
+        const fadeAlpha=1.0-fadeElapsed/fadeDur;
+        const oldTask=tf.prevTask;
+        // 计算旧任务的轨迹边界
+        let oStart=0,oEnd=ts.time.length-1;
+        if(ts.task_idx) {{
+          for(let i=0;i<ts.time.length;i++) {{ if(ts.task_idx[i]===oldTask) {{ oStart=i; break; }} }}
+          for(let i=ts.time.length-1;i>=0;i--) {{ if(ts.task_idx[i]===oldTask) {{ oEnd=i; break; }} }}
+        }}
+        const oST=ts.time[oStart],oET=ts.time[oEnd];
+        let spOS=0,spOE=sp.t.length-1;
+        for(let i=0;i<sp.t.length;i++) {{ if(sp.t[i]>=oST) {{ spOS=i; break; }} }}
+        for(let i=sp.t.length-1;i>=0;i--) {{ if(sp.t[i]<=oET) {{ spOE=i; break; }} }}
+        // 渐隐旧轨迹
+        ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=2; ctx.globalAlpha=0.6*fadeAlpha;
+        for(let i=spOS;i<=spOE;i++) {{
+          const[px,py]=toC(sp.x[i],sp.y[i]);
+          if(i===spOS)ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        }}
+        ctx.stroke(); ctx.globalAlpha=1.0;
+        // 渐隐旧目标点
+        const oldTargets=d.targets.filter(tgt=>(tgt.task_idx||0)===oldTask);
+        oldTargets.forEach(tgt=>{{
+          const[tx,ty]=toC(tgt.x,tgt.y);
+          ctx.globalAlpha=fadeAlpha;
+          drawStar(ctx,tx,ty,8,color);
+        }});
+        ctx.globalAlpha=1.0;
+        // 渐隐旧起点
+        const[osx,osy]=toC(ts.pose_x[oStart],ts.pose_y[oStart]);
+        ctx.globalAlpha=fadeAlpha;
+        ctx.beginPath(); ctx.arc(osx,osy,5,0,Math.PI*2);
+        ctx.fillStyle='#4CAF50'; ctx.fill();
+        ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+        ctx.globalAlpha=1.0;
+      }}
+    }}
+
+    // 当前任务段起始索引 — 从任务切换点开始
+    let taskStartIdx=0;
+    if(ts.task_idx) {{
+      taskStartIdx=idx;
+      while(taskStartIdx>0 && ts.task_idx[taskStartIdx-1]===curTaskIdx) taskStartIdx--;
+    }}
+    // 当前任务段结束索引 — 到任务切换点结束
+    let taskEndIdx=ts.time.length-1;
+    if(ts.task_idx) {{
+      taskEndIdx=idx;
+      while(taskEndIdx<ts.time.length-1 && ts.task_idx[taskEndIdx+1]===curTaskIdx) taskEndIdx++;
+    }}
+    const taskStartTime=ts.time[taskStartIdx];
+    const taskEndTime=ts.time[taskEndIdx];
+    let spTaskStart=0;
+    for(let i=0;i<sp.t.length;i++) {{ if(sp.t[i]>=taskStartTime) {{ spTaskStart=i; break; }} }}
+    let spTaskEnd=sp.t.length-1;
+    for(let i=sp.t.length-1;i>=0;i--) {{ if(sp.t[i]<=taskEndTime) {{ spTaskEnd=i; break; }} }}
+
+    // 已走轨迹 — 只显示当前任务段 (baseA=单任务渐隐, fadeInA=新任务淡入)
+    const curA=baseA*fadeInA;
+    ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=2; ctx.globalAlpha=0.6*curA;
     let spIdx=0;
     for(let i=0;i<sp.t.length;i++) {{ if(sp.t[i]<=t) spIdx=i; else break; }}
-    for(let i=0;i<=spIdx;i++) {{
+    for(let i=spTaskStart;i<=spIdx;i++) {{
       const[px,py]=toC(sp.x[i],sp.y[i]);
-      if(i===0)ctx.moveTo(px,py); else ctx.lineTo(px,py);
+      if(i===spTaskStart)ctx.moveTo(px,py); else ctx.lineTo(px,py);
     }}
     const[interpX,interpY]=toC(cx,cy);
     ctx.lineTo(interpX,interpY);
     ctx.stroke(); ctx.globalAlpha=1.0;
 
-    // 未来轨迹
-    if(spIdx<sp.t.length-1) {{
-      ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=1; ctx.globalAlpha=0.15;
+    // 未来轨迹 — 只显示到当前任务结束
+    if(spIdx<spTaskEnd) {{
+      ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=1; ctx.globalAlpha=0.15*curA;
       ctx.setLineDash([4,4]);
       ctx.moveTo(interpX,interpY);
-      for(let i=spIdx+1;i<sp.t.length;i++) {{
+      for(let i=spIdx+1;i<=spTaskEnd;i++) {{
         const[px,py]=toC(sp.x[i],sp.y[i]);ctx.lineTo(px,py);
       }}
       ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1.0;
     }}
 
-    // 目标航点（数据驱动到达判定 + 动画）
-    const curGoalId=ts.goal_id?ts.goal_id[idx]:0;
-    d.targets.forEach(tgt=>{{
+    // 目标航点 — 只显示当前任务的目标点
+    const taskTargets=d.targets.filter(tgt=>(tgt.task_idx||0)===curTaskIdx);
+    taskTargets.forEach(tgt=>{{
       const[tx,ty]=toC(tgt.x,tgt.y);
-      const gfk=uK+'_'+tgt.id;
+      const gfk=uK+'_'+curTaskIdx+'_'+tgt.id;
       const reached=!!replayState.goalReachedFlags[gfk];
       const reachedAt=replayState.goalReachedTime[gfk]||0;
       const highlightAge=t-reachedAt;
-      // 到达方式来自日志数据: arrived(绿)=确认到达, passed(绿)=已通过, diverged(黄)=偏离到达, 其他(红)
-      const arrStatus=d.arrivalMap[tgt.id]||'unknown';
+      const arrStatus=d.arrivalMap[curTaskIdx+'_'+tgt.id]||'unknown';
       const arrColor=(arrStatus==='arrived'||arrStatus==='passed')?'#4CAF50':arrStatus==='diverged'?'#FFB300':'#F44336';
       if(reached) {{
-        drawStar(ctx,tx,ty,10,arrColor);
+        // 到达动画 (2秒扩散环), 动画结束后保持已完成样式
         if(highlightAge<2.0) {{
           const progress=highlightAge/2.0;
+          const fadeAlpha=(1.0-progress*0.5)*curA;
+          ctx.globalAlpha=fadeAlpha;
+          drawStar(ctx,tx,ty,10,arrColor);
           const ringR=10+progress*18;
           ctx.beginPath(); ctx.arc(tx,ty,ringR,0,Math.PI*2);
           ctx.strokeStyle=arrColor; ctx.lineWidth=2.5;
-          ctx.globalAlpha=0.8*(1-progress);
+          ctx.globalAlpha=0.6*fadeAlpha;
           ctx.stroke(); ctx.globalAlpha=1.0;
+        }} else {{
+          // 动画结束: 以半透明已完成样式保留
+          ctx.globalAlpha=0.5*curA;
+          drawStar(ctx,tx,ty,7,arrColor);
+          ctx.globalAlpha=1.0;
         }}
         ctx.fillStyle=arrColor;
       }} else {{
+        ctx.globalAlpha=curA;
         drawStar(ctx,tx,ty,8,color);
+        ctx.globalAlpha=1.0;
         ctx.fillStyle=color;
       }}
-      // 目标点标签 (横排显示，可切换显隐)
       if(replayState.showGoalLabels) {{
         ctx.font='9px Inter,system-ui,sans-serif';
         ctx.textAlign='center';
@@ -1560,29 +1991,30 @@ function renderReplayFrame() {{
       }}
     }});
 
-    // USV到下一个目标的连接虚线（GS风格）
+    // USV到下一个目标的连接虚线
     if(curGoalId>0) {{
-      const nextTgt=d.targets.find(g=>g.id===curGoalId);
+      const nextTgt=taskTargets.find(g=>g.id===curGoalId);
       if(nextTgt) {{
         const[tx,ty]=toC(nextTgt.x,nextTgt.y);
         ctx.beginPath(); ctx.moveTo(interpX,interpY); ctx.lineTo(tx,ty);
-        ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.globalAlpha=0.5;
+        ctx.strokeStyle=color; ctx.lineWidth=1.5; ctx.globalAlpha=0.5*curA;
         ctx.setLineDash([6,4]); ctx.stroke();
         ctx.setLineDash([]); ctx.globalAlpha=1.0;
-        // 目标点小圆圈强调
         ctx.beginPath(); ctx.arc(tx,ty,12,0,Math.PI*2);
-        ctx.strokeStyle=color; ctx.lineWidth=1; ctx.globalAlpha=0.35;
+        ctx.strokeStyle=color; ctx.lineWidth=1; ctx.globalAlpha=0.35*curA;
         ctx.stroke(); ctx.globalAlpha=1.0;
       }}
     }}
 
-    // 起点
-    const[sx,sy]=toC(ts.pose_x[0],ts.pose_y[0]);
+    // 当前任务段起点
+    ctx.globalAlpha=curA;
+    const[sx,sy]=toC(ts.pose_x[taskStartIdx],ts.pose_y[taskStartIdx]);
     ctx.beginPath(); ctx.arc(sx,sy,5,0,Math.PI*2);
     ctx.fillStyle='#4CAF50'; ctx.fill();
     ctx.strokeStyle='#fff'; ctx.lineWidth=1.5; ctx.stroke();
+    ctx.globalAlpha=1.0;
 
-    // 船（使用平滑路径插值的 cx,cy,yaw）
+    // 船 (始终显示,不随任务切换隐藏)
     const[canX,canY]=toC(cx,cy);
     drawBoat(ctx,canX,canY,yaw,color,BOAT_SCALE);
 
@@ -1590,39 +2022,36 @@ function renderReplayFrame() {{
     ctx.fillStyle=color; ctx.font='bold 11px Inter,system-ui,sans-serif';
     ctx.textAlign='center'; ctx.fillText(d.usv.id,canX,canY-BOAT_SCALE-4);
 
-    // 到达检测: 数据驱动 — 基于日志分析的 arrivalMap 判定到达状态
-    // 到达时机: goal_id切换 = 前一目标已处理完毕 (触发高亮动画+音效)
+    // 到达检测 (使用 taskIdx_goalId 复合键)
     if(ts.goal_id) {{
       const cg=ts.goal_id[idx];
-      if(!(uK in replayState._prevGoals)) replayState._prevGoals[uK]=cg;
-      if(cg!==replayState._prevGoals[uK]) {{
-        const prevId=replayState._prevGoals[uK];
-        const prevFk=uK+'_'+prevId;
-        const arrStatus=d.arrivalMap[prevId]||'unknown';
-        // 只有 arrived/passed/diverged 才触发标记 (not_reached 不标记)
+      const cti=ts.task_idx?ts.task_idx[idx]:0;
+      const prevKey=uK+'_prev';
+      if(!(prevKey in replayState._prevGoals)) replayState._prevGoals[prevKey]={{g:cg,t:cti}};
+      const prev=replayState._prevGoals[prevKey];
+      if(cg!==prev.g||cti!==prev.t) {{
+        const prevFk=uK+'_'+prev.t+'_'+prev.g;
+        const arrStatus=d.arrivalMap[prev.t+'_'+prev.g]||'unknown';
         if(!replayState.goalReachedFlags[prevFk] && arrStatus!=='not_reached' && arrStatus!=='unknown') {{
           replayState.goalReachedFlags[prevFk]=true;
           replayState.goalReachedTime[prevFk]=t;
-          // arrived/passed 播放到达音效, diverged 播放偏离到达音效
           if(arrStatus==='arrived'||arrStatus==='passed') sfxGoalReached();
           else if(arrStatus==='diverged') sfxGoalDiverged();
         }}
-        replayState._prevGoals[uK]=cg;
+        replayState._prevGoals[prevKey]={{g:cg,t:cti}};
       }}
-      // 方法2: 当前goal如果 arrivalMap 标记为 arrived 且 distance<=1.5m 也实时触发
       if(cg>0&&ts.distance&&ts.distance[idx]<=1.5) {{
-        const fk=uK+'_'+cg;
-        const arrStatus=d.arrivalMap[cg]||'unknown';
+        const fk=uK+'_'+cti+'_'+cg;
+        const arrStatus=d.arrivalMap[cti+'_'+cg]||'unknown';
         if(!replayState.goalReachedFlags[fk] && (arrStatus==='arrived'||arrStatus==='passed')) {{
           replayState.goalReachedFlags[fk]=true;
           replayState.goalReachedTime[fk]=t;
           sfxGoalReached();
         }}
       }}
-      // 方法3: 最后一个goal，数据结束时标记
       if(idx>=ts.time.length-2&&cg>0) {{
-        const fk=uK+'_'+cg;
-        const arrStatus=d.arrivalMap[cg]||'unknown';
+        const fk=uK+'_'+cti+'_'+cg;
+        const arrStatus=d.arrivalMap[cti+'_'+cg]||'unknown';
         if(!replayState.goalReachedFlags[fk] && arrStatus!=='not_reached') {{
           replayState.goalReachedFlags[fk]=true;
           replayState.goalReachedTime[fk]=t;
@@ -1630,6 +2059,33 @@ function renderReplayFrame() {{
           else if(arrStatus==='diverged') sfxGoalDiverged();
         }}
       }}
+    }}
+  }});
+
+  // v16: 已结束的USV通过邻居观测数据继续显示位置
+  // 当一个USV自身数据结束后，从其他仍在记录的USV的邻居数据中获取其位置
+  data.forEach(dSelf=>{{
+    const ts=dSelf.ts;
+    const selfEndTime=ts.time[ts.time.length-1];
+    if(t<=selfEndTime) return; // 自身数据未结束，已在上面绘制
+    const selfId=dSelf.usv.id;
+    // 在所有其他USV的邻居数据中查找此USV
+    let bestPos=null;
+    data.forEach(dOther=>{{
+      if(dOther.usv.idx===dSelf.usv.idx) return;
+      const nbs=dOther.ts.neighbors;
+      if(!nbs||!nbs[selfId]) return;
+      const pos=sampleNeighborPos(nbs[selfId],t);
+      if(pos) bestPos=pos;
+    }});
+    if(bestPos) {{
+      const[canX,canY]=toC(bestPos.x,bestPos.y);
+      ctx.globalAlpha=0.55;
+      drawBoat(ctx,canX,canY,bestPos.yaw,dSelf.usv.color,BOAT_SCALE);
+      ctx.globalAlpha=0.55;
+      ctx.fillStyle=dSelf.usv.color; ctx.font='bold 11px Inter,system-ui,sans-serif';
+      ctx.textAlign='center'; ctx.fillText(dSelf.usv.id+'(idle)',canX,canY-BOAT_SCALE-4);
+      ctx.globalAlpha=1.0;
     }}
   }});
 

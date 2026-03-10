@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QMessageBox
 )
 from PyQt5.QtCore import Qt
+from gs_gui.style_manager import is_dark_theme
 
 
 class SetHomeDialog(QDialog):
@@ -62,7 +63,10 @@ class SetHomeDialog(QDialog):
             "与 EKF Origin 不同，Home Position 可以在任务执行中动态修改。"
         )
         info_label.setWordWrap(True)
-        info_label.setStyleSheet("color: #888; font-size: 11px; padding: 10px; background-color: #2a2a2a; border-radius: 5px;")
+        if is_dark_theme():
+            info_label.setStyleSheet("color: #888; font-size: 11px; padding: 10px; background-color: #2a2a2a; border-radius: 5px;")
+        else:
+            info_label.setStyleSheet("color: #666; font-size: 11px; padding: 10px; background-color: #f0f0f0; border-radius: 5px;")
         layout.addWidget(info_label)
         
         # USV 选择
@@ -159,7 +163,8 @@ class SetHomeDialog(QDialog):
         button_layout.addStretch()
         
         self.btn_ok = QPushButton("确定")
-        self.btn_ok.setStyleSheet("background-color: #4a90e2; color: white; font-weight: bold; padding: 8px 20px;")
+        _btn_bg = '#4a90e2' if is_dark_theme() else '#0078d7'
+        self.btn_ok.setStyleSheet(f"background-color: {_btn_bg}; color: white; font-weight: bold; padding: 8px 20px;")
         self.btn_ok.clicked.connect(self.accept)
         button_layout.addWidget(self.btn_ok)
         

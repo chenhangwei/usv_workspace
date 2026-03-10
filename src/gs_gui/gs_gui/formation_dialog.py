@@ -31,6 +31,7 @@ from PyQt5.QtCore import Qt, QSize, pyqtSignal
 from PyQt5.QtGui import QPainter, QColor, QFont, QPen, QBrush
 
 from .formation_controller import FormationType, FormationController
+from .style_manager import is_dark_theme
 
 
 class FormationPreviewWidget(QWidget):
@@ -73,11 +74,14 @@ class FormationPreviewWidget(QWidget):
         h = self.height()
 
         # 背景
-        painter.fillRect(0, 0, w, h, QColor(30, 30, 35))
+        if is_dark_theme():
+            painter.fillRect(0, 0, w, h, QColor(30, 30, 35))
+        else:
+            painter.fillRect(0, 0, w, h, QColor(245, 245, 250))
 
         if not self._positions:
             # 无数据提示
-            painter.setPen(QColor(100, 100, 100))
+            painter.setPen(QColor(100, 100, 100) if is_dark_theme() else QColor(150, 150, 150))
             painter.setFont(QFont("Arial", 12))
             painter.drawText(self.rect(), Qt.AlignCenter, "请先配置编队")
             return
@@ -95,7 +99,8 @@ class FormationPreviewWidget(QWidget):
         scale = min(w, h) / (2 * max_range + 1) * 0.4
 
         # 绘制网格
-        painter.setPen(QPen(QColor(50, 50, 55), 1, Qt.DotLine))
+        _grid_color = QColor(50, 50, 55) if is_dark_theme() else QColor(210, 210, 220)
+        painter.setPen(QPen(_grid_color, 1, Qt.DotLine))
         for i in range(-10, 11):
             grid_x = cx + i * scale
             grid_y = cy - i * scale
@@ -105,19 +110,21 @@ class FormationPreviewWidget(QWidget):
                 painter.drawLine(0, int(grid_y), w, int(grid_y))
 
         # 绘制坐标轴
-        painter.setPen(QPen(QColor(80, 80, 90), 1))
+        _axis_color = QColor(80, 80, 90) if is_dark_theme() else QColor(160, 160, 180)
+        painter.setPen(QPen(_axis_color, 1))
         painter.drawLine(int(cx), 0, int(cx), h)
         painter.drawLine(0, int(cy), w, int(cy))
 
         # 航向指示箭头 (向上)
-        painter.setPen(QPen(QColor(100, 100, 120), 1))
+        _arrow_color = QColor(100, 100, 120) if is_dark_theme() else QColor(140, 140, 160)
+        painter.setPen(QPen(_arrow_color, 1))
         painter.drawLine(int(cx), int(cy), int(cx), max(0, int(cy - 40)))
         painter.drawLine(int(cx), max(0, int(cy - 40)), int(cx - 5), max(0, int(cy - 33)))
         painter.drawLine(int(cx), max(0, int(cy - 40)), int(cx + 5), max(0, int(cy - 33)))
         
         # 标注方向
         painter.setFont(QFont("Arial", 8))
-        painter.setPen(QColor(100, 100, 120))
+        painter.setPen(_arrow_color)
         painter.drawText(int(cx + 5), max(10, int(cy - 42)), "航向")
 
         # 绘制USV
@@ -141,13 +148,15 @@ class FormationPreviewWidget(QWidget):
 
             # 标签
             label = self._labels[idx] if idx < len(self._labels) else f"F{idx}"
-            painter.setPen(QColor(230, 230, 230))
+            _label_color = QColor(230, 230, 230) if is_dark_theme() else QColor(40, 40, 40)
+            painter.setPen(_label_color)
             painter.setFont(QFont("Arial", 9, QFont.Bold))
             painter.drawText(int(sx - 15), int(sy + radius + 15), label)
 
         # 连线 (领队到每个跟随者)
         if len(self._positions) > 1:
-            painter.setPen(QPen(QColor(80, 80, 100, 100), 1, Qt.DashLine))
+            _line_color = QColor(80, 80, 100, 100) if is_dark_theme() else QColor(140, 140, 170, 120)
+            painter.setPen(QPen(_line_color, 1, Qt.DashLine))
             lx = cx + self._positions[0][0] * scale
             ly = cy - self._positions[0][1] * scale
             for px, py in self._positions[1:]:
@@ -157,7 +166,8 @@ class FormationPreviewWidget(QWidget):
 
         # 编队名称
         if self._formation_name:
-            painter.setPen(QColor(180, 180, 200))
+            _name_color = QColor(180, 180, 200) if is_dark_theme() else QColor(60, 60, 80)
+            painter.setPen(_name_color)
             painter.setFont(QFont("Arial", 11, QFont.Bold))
             painter.drawText(10, 22, f"队形: {self._formation_name}")
 
@@ -250,7 +260,8 @@ class FormationDialog(QDialog):
 
         # --- 编队说明 ---
         info_label = QLabel("💡 领队导航由集群任务控制，编队跟随者将自动排除在集群任务之外")
-        info_label.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        _info_color = '#AAAAAA' if is_dark_theme() else '#666666'
+        info_label.setStyleSheet(f"color: {_info_color}; font-size: 11px;")
         info_label.setWordWrap(True)
         config_layout.addWidget(info_label)
 
@@ -369,7 +380,8 @@ class FormationDialog(QDialog):
 
         self.preview_info_label = QLabel("选择跟随者后更新预览")
         self.preview_info_label.setAlignment(Qt.AlignCenter)
-        self.preview_info_label.setStyleSheet("color: #AAAAAA; font-size: 11px;")
+        _info_color2 = '#AAAAAA' if is_dark_theme() else '#666666'
+        self.preview_info_label.setStyleSheet(f"color: {_info_color2}; font-size: 11px;")
         preview_layout.addWidget(self.preview_info_label)
 
         main_layout.addWidget(preview_group, 1)

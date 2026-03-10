@@ -225,6 +225,10 @@ class VelocityControllerNode(Node):
         self.declare_parameter('apf_orca_coupling_speed_cut', 0.12)
         self.declare_parameter('apf_orca_coupling_turn_boost', 0.10)
         self.declare_parameter('apf_orca_coupling_lane_push', 0.10)
+        self.declare_parameter('apf_orca_coupling_stationary_distance', 1.6)
+        self.declare_parameter('apf_orca_coupling_stationary_speed_max', 0.30)
+        self.declare_parameter('apf_orca_coupling_hard_brake_scale', 0.60)
+        self.declare_parameter('apf_orca_coupling_speed_floor', 0.12)
         self.declare_parameter('apf_orca_predictive_early_enabled', True)
         self.declare_parameter('apf_orca_predictive_tcpa_threshold', 12.0)
         self.declare_parameter('apf_orca_predictive_cpa_threshold', 2.0)
@@ -366,6 +370,18 @@ class VelocityControllerNode(Node):
         self._apf_orca_coupling_speed_cut = float(self.get_parameter('apf_orca_coupling_speed_cut').value or 0.12)
         self._apf_orca_coupling_turn_boost = float(self.get_parameter('apf_orca_coupling_turn_boost').value or 0.10)
         self._apf_orca_coupling_lane_push = float(self.get_parameter('apf_orca_coupling_lane_push').value or 0.10)
+        self._apf_orca_coupling_stationary_distance = float(
+            self.get_parameter('apf_orca_coupling_stationary_distance').value or 1.6
+        )
+        self._apf_orca_coupling_stationary_speed_max = float(
+            self.get_parameter('apf_orca_coupling_stationary_speed_max').value or 0.30
+        )
+        self._apf_orca_coupling_hard_brake_scale = float(
+            self.get_parameter('apf_orca_coupling_hard_brake_scale').value or 0.60
+        )
+        self._apf_orca_coupling_speed_floor = float(
+            self.get_parameter('apf_orca_coupling_speed_floor').value or 0.12
+        )
         self._apf_orca_predictive_early_enabled = bool(self.get_parameter('apf_orca_predictive_early_enabled').value)
         self._apf_orca_predictive_tcpa_threshold = float(
             self.get_parameter('apf_orca_predictive_tcpa_threshold').value or 12.0
@@ -568,6 +584,14 @@ class VelocityControllerNode(Node):
         self._avoidance_active = False           # 避障模式是否激活
         self._avoidance_position: Optional[Pose2D] = None  # 避障目标位置
         
+        # ==================== 避障停滞检测与后退状态 ====================
+        self._avoidance_best_dist: float = float('inf')  # 避障期间最优（最小）目标距离
+        self._avoidance_no_progress_start: float = 0.0   # 开始无进展的时间戳
+        self._avoidance_stall_timeout: float = 60.0      # 无进展超时 (秒)
+        self._retreat_active: bool = False                # 是否正在执行后退动作
+        self._retreat_start_time: float = 0.0             # 后退开始时间
+        self._retreat_duration: float = 10.0              # 后退持续时间 (秒)
+        
         # ==================== 旋转机动状态 ====================
         self._rotation_active = False            # 是否正在执行旋转
         self._rotation_target_yaw = 0.0          # 目标旋转总角度 (rad)
@@ -676,6 +700,11 @@ class VelocityControllerNode(Node):
         self._orca_debug_rel_speed: float = -1.0
         self._orca_debug_tcpa: float = -1.0
         self._orca_debug_dcpa: float = -1.0
+        self._orca_debug_primary_neighbor_id: str = ''
+        self._orca_debug_escape_active: bool = False
+        self._orca_debug_escape_phase: int = 0
+        self._orca_debug_escape_direction: int = 0
+        self._orca_debug_escape_count: int = 0
         self._orca_encounter_type_smoothed: str = 'none'
         self._orca_encounter_candidate: Optional[str] = None
         self._orca_encounter_candidate_since: float = 0.0
@@ -684,6 +713,25 @@ class VelocityControllerNode(Node):
         self._orca_encounter_locked_side: int = 0          # 锁定的避让方向
         self._orca_encounter_lock_time: float = 0.0        # 锁定开始时间
         self._orca_encounter_lock_distance: float = 0.0    # 锁定时的初始距离
+
+        # ==================== ORCA 脱困机制 ====================
+        # 检测 ORCA 导致的长时间导航停滞（如两船近距振荡死锁），
+        # 通过后退+转向脱离死锁区域，再以削弱 ORCA 的方式绕行通过。
+        self._orca_escape_active: bool = False              # 脱困模式是否激活
+        self._orca_escape_start_time: float = 0.0           # 脱困开始时间
+        self._orca_escape_phase: int = 0                    # 脱困阶段: 1=后退转向, 2=削弱绕行
+        self._orca_escape_direction: int = -1               # 脱困转向方向: 1=左转, -1=右转
+        self._orca_escape_phase1_duration: float = 8.0      # 阶段1持续时间 (秒)
+        self._orca_escape_phase2_duration: float = 15.0     # 阶段2持续时间 (秒)
+        self._orca_stall_start_time: float = 0.0            # ORCA停滞检测开始时间
+        self._orca_stall_best_dist: float = float('inf')    # ORCA期间到目标最优距离
+        self._orca_stall_timeout: float = 60.0              # ORCA停滞超时 (秒)
+        self._orca_stall_progress_threshold: float = 1.0    # 有效进展阈值 (米)
+        self._orca_stall_start_pose: tuple = None            # 停滞开始时的位置 (x, y)
+        self._orca_stall_displacement_threshold: float = 0.6 # 位移阈值: 超过此值视为仍在移动 (米)
+        self._orca_escape_count: int = 0                    # 连续脱困次数 (用于升级策略)
+        self._orca_escape_max_count: int = 5                # 最大连续脱困次数
+
         self._apf_neighbor_subs = []
         self._apf_fleet_sub = None
         self._recovery_enabled: bool = True  # 启用自动恢复
@@ -1481,6 +1529,15 @@ class VelocityControllerNode(Node):
                     f'📥 收到新任务 [ID={goal_id}]，清除手动暂停状态'
                 )
             self._manual_hold_requested = False
+
+            # 新目标到达，重置 ORCA 脱困状态
+            if self._orca_escape_active:
+                self._orca_escape_active = False
+                self._orca_escape_phase = 0
+                self.get_logger().info(f'✓ 收到新目标 [ID={goal_id}], 已取消ORCA脱困')
+            self._orca_stall_start_time = 0.0
+            self._orca_stall_best_dist = float('inf')
+            self._orca_escape_count = 0
             
             # 新任务开始时，如果当前不是 GUIDED 模式，自动切换
             # 解决 USV 处于 MANUAL/HOLD 模式时收到任务立即被取消的问题
@@ -1546,6 +1603,16 @@ class VelocityControllerNode(Node):
         if old_state != msg.data:
             mode = "避障模式" if msg.data else "常规导航"
             self.get_logger().info(f'⚠️ 切换到: {mode}')
+            
+            if msg.data:
+                # 进入避障模式，初始化停滞检测
+                self._avoidance_best_dist = float('inf')
+                self._avoidance_no_progress_start = 0.0
+            else:
+                # 退出避障模式，重置停滞检测和后退状态
+                self._avoidance_best_dist = float('inf')
+                self._avoidance_no_progress_start = 0.0
+                self._retreat_active = False
 
     
     def _cruise_speed_callback(self, msg: Float32):
@@ -2113,9 +2180,10 @@ class VelocityControllerNode(Node):
         closest_ry = 0.0
         closest_neighbor_vx = 0.0
         closest_neighbor_vy = 0.0
+        closest_neighbor_id = ''
 
         # 第 1 遍: 找到最近邻船距离 (用于距离自适应 horizon)
-        for _, (neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec) in self._apf_neighbor_states.items():
+        for neighbor_id, (neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec) in self._apf_neighbor_states.items():
             if now_sec - stamp_sec > self._apf_neighbor_timeout:
                 continue
             rx = self.current_pose.x - neighbor_x
@@ -2132,6 +2200,7 @@ class VelocityControllerNode(Node):
                 closest_ry = ry
                 closest_neighbor_vx = neighbor_vx
                 closest_neighbor_vy = neighbor_vy
+                closest_neighbor_id = str(neighbor_id)
 
         # 距离自适应时间地平线: 距离越近 → horizon 越短 → VO 修正越强
         # horizon_eff = clamp(distance * 1.0, 0.3, horizon_base)
@@ -2207,6 +2276,10 @@ class VelocityControllerNode(Node):
                 self._orca_encounter_locked_side = 0
                 self._orca_encounter_lock_time = 0.0
                 self._orca_encounter_lock_distance = 0.0
+                # ORCA退出时重置停滞检测和脱困计数
+                self._orca_stall_start_time = 0.0
+                self._orca_stall_best_dist = float('inf')
+                self._orca_escape_count = 0
                 return cmd
             # 最小保持期内或仍有邻船在扩展范围 → 保持 ORCA 激活
             if not has_risk_neighbor:
@@ -2417,7 +2490,9 @@ class VelocityControllerNode(Node):
         rel_body_y = -sin_yaw * closest_rx + cos_yaw * closest_ry
         closest_neighbor_speed = math.hypot(closest_neighbor_vx, closest_neighbor_vy)
         own_pref_speed = math.hypot(v_pref_x, v_pref_y)
+        own_actual_speed = max(0.0, self._current_speed)
         rel_speed = math.hypot(v_pref_x - closest_neighbor_vx, v_pref_y - closest_neighbor_vy)
+        stationary_coupling_context = False
 
         # 伴行耦合保护：长时间近距并行/推行时，强制解耦（减速+横向分离）
         if self._apf_orca_coupling_guard_enabled:
@@ -2427,6 +2502,8 @@ class VelocityControllerNode(Node):
             rel_speed_max = max(0.01, self._apf_orca_coupling_rel_speed_max)
             speed_min = max(0.0, self._apf_orca_coupling_speed_min)
             hold_time = max(0.2, self._apf_orca_coupling_hold_time)
+            stationary_distance = max(coupling_distance, self._apf_orca_coupling_stationary_distance)
+            stationary_speed_max = max(rel_speed_max, self._apf_orca_coupling_stationary_speed_max)
 
             coupling_candidate = (
                 closest_distance <= coupling_distance
@@ -2435,11 +2512,21 @@ class VelocityControllerNode(Node):
                 and closest_neighbor_speed >= speed_min
                 and rel_speed <= rel_speed_max
             )
+            stationary_coupling_context = (
+                is_stationary_encounter
+                and closest_distance <= stationary_distance
+                and own_pref_speed >= 0.08
+                and own_actual_speed <= stationary_speed_max
+                and 0.01 <= closest_neighbor_speed <= stationary_speed_max
+                and rel_speed <= stationary_speed_max
+            )
+            coupling_candidate = coupling_candidate or stationary_coupling_context
+            candidate_hold_time = min(hold_time, 1.5) if stationary_coupling_context else hold_time
 
             if coupling_candidate:
                 if self._orca_coupling_enter_time <= 0.0:
                     self._orca_coupling_enter_time = now_sec
-                elif (now_sec - self._orca_coupling_enter_time) >= hold_time:
+                elif (now_sec - self._orca_coupling_enter_time) >= candidate_hold_time:
                     self._orca_coupling_active = True
             elif closest_distance >= release_distance:
                 self._orca_coupling_enter_time = 0.0
@@ -2457,6 +2544,9 @@ class VelocityControllerNode(Node):
                 proximity = max(0.0, min(1.0, (release_distance - closest_distance) / max(0.05, release_distance)))
                 turn_boost = max(0.0, self._apf_orca_coupling_turn_boost)
                 lane_push = max(0.0, self._apf_orca_coupling_lane_push)
+                if stationary_coupling_context:
+                    turn_boost += 0.05
+                    lane_push += 0.04
                 angular_correction += decouple_side * (turn_boost + lane_push * (0.4 + 0.6 * proximity))
 
                 speed_cut = max(0.0, self._apf_orca_coupling_speed_cut)
@@ -2676,6 +2766,12 @@ class VelocityControllerNode(Node):
             min(self._apf_max_angular_correction, angular_correction)
         )
 
+        # ORCA脱困 Phase2: 按比例削弱修正量，允许 MPC 驱动绕行
+        escape_scale = self._get_orca_escape_suppression_scale()
+        if escape_scale < 1.0:
+            linear_correction *= escape_scale
+            angular_correction *= escape_scale
+
         # 到点阶段削弱避让修正，保持终点可达
         nav_speed_abs = abs(cmd.linear_x)
         if self._apf_goal_slow_speed_threshold > 1e-6:
@@ -2715,17 +2811,29 @@ class VelocityControllerNode(Node):
         # 紧急减速 (硬上限): d < 1.0*min_sep 时激活，真正碰撞风险
         # v16: 1.2→1.0*min_sep, 回退v15扩展(HB从1118→2381翻倍但安全距离未改善)
         # Rule 17(b): 极近距时所有船都必须硬刹，不论 stand_on
+        coupling_hard_brake_relaxed = self._orca_coupling_active and stationary_coupling_context
         hard_brake_dist = max(0.3, 1.0 * min_sep)  # v16: 1.5m (回退到v14水平)
         hard_brake_release = max(0.5, 1.5 * min_sep)  # v16: 2.25m
+        if coupling_hard_brake_relaxed:
+            hard_brake_scale = max(0.3, min(1.0, self._apf_orca_coupling_hard_brake_scale))
+            hard_brake_dist = max(0.3, hard_brake_dist * hard_brake_scale)
+            hard_brake_release = max(hard_brake_dist + 0.2, hard_brake_release * max(hard_brake_scale, 0.7))
         if closest_distance < hard_brake_dist:
             self._orca_hard_brake_active = True
         elif closest_distance > hard_brake_release:
             self._orca_hard_brake_active = False
         # 硬刹不豁免 stand_on (d<1.0m 是真正碰撞风险)
+        # 脱困 Phase2 期间提高硬刹最低速度，保证绕行动力
         if self._orca_hard_brake_active and cmd.linear_x > 0.0:
             # d=1.0m→keep=1.0, d=0.5m→keep=0.25, d=0.3m→keep=0.09
             hard_speed_keep = max(0.03, (closest_distance / hard_brake_dist) ** 2.0)
             hard_max_speed = max(0.02, cmd.linear_x * hard_speed_keep)  # v16: 0.05→0.02m/s, 允许近乎完全停止减少漂移
+            if coupling_hard_brake_relaxed:
+                hard_max_speed = max(hard_max_speed, self._apf_orca_coupling_speed_floor)
+            # 脱困 Phase2: 提高最低速度下限，确保有足够动力绕行
+            if escape_scale < 1.0:
+                escape_min_speed = self.tracker.cruise_speed * 0.3
+                hard_max_speed = max(hard_max_speed, escape_min_speed)
             if corrected.linear_x > hard_max_speed:
                 corrected = VelocityCommand(
                     linear_x=hard_max_speed,
@@ -2745,6 +2853,11 @@ class VelocityControllerNode(Node):
         self._orca_debug_rel_speed = rel_speed
         self._orca_debug_tcpa = rel_tcpa
         self._orca_debug_dcpa = rel_dcpa
+        self._orca_debug_primary_neighbor_id = closest_neighbor_id if closest_distance < float('inf') else ''
+        self._orca_debug_escape_active = self._orca_escape_active
+        self._orca_debug_escape_phase = int(self._orca_escape_phase)
+        self._orca_debug_escape_direction = int(self._orca_escape_direction if self._orca_escape_active else 0)
+        self._orca_debug_escape_count = int(self._orca_escape_count)
         # 统计有效邻居数
         valid_count = 0
         for _, (_, _, _, _, stamp_sec) in self._apf_neighbor_states.items():
@@ -2832,6 +2945,16 @@ class VelocityControllerNode(Node):
         if self.current_pose is None:
             return
         
+        # ==================== 优先级 0: 后退动作 ====================
+        if self._retreat_active:
+            self._handle_retreat_control()
+            return
+        
+        # ==================== 优先级 0.5: ORCA 脱困 ====================
+        if self._orca_escape_active:
+            self._handle_orca_escape()
+            return
+        
         # ==================== 优先级 1: 避障模式 ====================
         if self._avoidance_active and self._avoidance_position is not None:
             self._handle_avoidance_control()
@@ -2862,6 +2985,10 @@ class VelocityControllerNode(Node):
         cmd = self._apply_apf_to_command(cmd)
         self._last_velocity_cmd = cmd
         
+        # ORCA 停滞检测: 若长时间无进展则触发脱困
+        if self._check_orca_stall():
+            return  # 脱困已触发，跳过本次指令发布
+        
         # 发布速度指令
         self._publish_velocity_command(cmd)
         
@@ -2884,19 +3011,40 @@ class VelocityControllerNode(Node):
         """
         处理避障控制
         
-        使用简单的方向追踪算法追踪避障目标点
+        使用简单的方向追踪算法追踪避障目标点。
+        同时监测是否长时间未靠近导航目标点，若停滞超过 60s 则触发后退动作。
         """
         if self._avoidance_position is None or self.current_pose is None:
             return
         
-        # 创建临时航点追踪避障目标
-        avoidance_waypoint = Waypoint(
-            x=self._avoidance_position.x,
-            y=self._avoidance_position.y,
-            speed=self.tracker.cruise_speed,
-            goal_id=0,
-            is_final=True
-        )
+        # 计算到导航目标点的距离（用于停滞检测）
+        dist_to_nav_goal = self.tracker.get_distance_to_goal(self.current_pose)
+        current_time = time.time()
+        
+        # 停滞检测：检查是否在靠近导航目标点
+        if dist_to_nav_goal < self._avoidance_best_dist - 0.5:
+            # 有进展（距离显著减少），重置计时器
+            self._avoidance_best_dist = dist_to_nav_goal
+            self._avoidance_no_progress_start = current_time
+        elif self._avoidance_no_progress_start == 0.0:
+            # 首次进入避障，初始化计时器
+            self._avoidance_best_dist = dist_to_nav_goal
+            self._avoidance_no_progress_start = current_time
+        else:
+            # 检查是否超时
+            no_progress_duration = current_time - self._avoidance_no_progress_start
+            if no_progress_duration >= self._avoidance_stall_timeout:
+                self.get_logger().warn(
+                    f'⚠️ 避障停滞检测: {no_progress_duration:.0f}s 未靠近目标点 '
+                    f'(最优距离={self._avoidance_best_dist:.2f}m, '
+                    f'当前距离={dist_to_nav_goal:.2f}m), 触发后退动作'
+                )
+                self._retreat_active = True
+                self._retreat_start_time = current_time
+                # 重置停滞检测状态，后退结束后重新计时
+                self._avoidance_best_dist = float('inf')
+                self._avoidance_no_progress_start = 0.0
+                return
         
         # 计算到避障点的距离
         dist = math.hypot(
@@ -2934,10 +3082,293 @@ class VelocityControllerNode(Node):
         # 定期日志
         self._log_counter += 1
         if self._log_counter % 40 == 0:
+            no_progress_time = current_time - self._avoidance_no_progress_start if self._avoidance_no_progress_start > 0 else 0.0
             self.get_logger().info(
-                f'⚠️ 避障中: vx={linear_x:.2f} m/s, ω={angular_z:.2f} rad/s, 距离={dist:.2f}m'
+                f'⚠️ 避障中: vx={linear_x:.2f} m/s, ω={angular_z:.2f} rad/s, '
+                f'避障距离={dist:.2f}m, 目标距离={dist_to_nav_goal:.2f}m, '
+                f'无进展={no_progress_time:.0f}s/{self._avoidance_stall_timeout:.0f}s'
             )
     
+    def _handle_retreat_control(self):
+        """
+        处理后退控制
+        
+        避障停滞时执行后退动作，持续 _retreat_duration 秒后自动恢复导航。
+        """
+        current_time = time.time()
+        elapsed = current_time - self._retreat_start_time
+        
+        if elapsed >= self._retreat_duration:
+            # 后退结束，恢复导航
+            self._retreat_active = False
+            self.get_logger().info(
+                f'✅ 后退动作完成 ({self._retreat_duration:.0f}s)，恢复导航'
+            )
+            return
+        
+        # 后退: 发送负的线速度，不旋转
+        retreat_speed = -self.tracker.cruise_speed * 0.5  # 后退速度为巡航速度的50%
+        cmd = VelocityCommand(linear_x=retreat_speed, linear_y=0.0, angular_z=0.0)
+        self._last_velocity_cmd = cmd
+        self._publish_velocity_command(cmd)
+        
+        # 定期日志
+        self._log_counter += 1
+        if self._log_counter % 40 == 0:
+            remaining = self._retreat_duration - elapsed
+            self.get_logger().info(
+                f'⏪ 后退中: vx={retreat_speed:.2f} m/s, 剩余={remaining:.1f}s'
+            )
+    
+    # ==================== ORCA 脱困方法 ====================
+
+    def _check_orca_stall(self) -> bool:
+        """
+        检测 ORCA 导致的长时间导航停滞。
+
+        在正常导航路径中调用，检查 ORCA 激活期间到目标距离是否有实质进展。
+        若超过 _orca_stall_timeout 秒无进展（距离未减少超过阈值），
+        且位移低于阈值（排除缓慢前进的情况），则触发脱困。
+
+        Returns:
+            True 表示已触发脱困，调用方应跳过本次导航指令发布。
+        """
+        if not self._orca_active or self.current_pose is None:
+            # ORCA 未激活，重置停滞检测
+            self._orca_stall_start_time = 0.0
+            self._orca_stall_best_dist = float('inf')
+            self._orca_stall_start_pose = None
+            return False
+
+        dist_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
+        current_time = time.time()
+
+        if self._orca_stall_start_time == 0.0:
+            # 首次检测，初始化
+            self._orca_stall_start_time = current_time
+            self._orca_stall_best_dist = dist_to_goal
+            self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+            return False
+
+        # 有实质进展(距离减少超过阈值)，重置计时器
+        if dist_to_goal < self._orca_stall_best_dist - self._orca_stall_progress_threshold:
+            self._orca_stall_best_dist = dist_to_goal
+            self._orca_stall_start_time = current_time
+            self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+            return False
+
+        stall_duration = current_time - self._orca_stall_start_time
+        if stall_duration >= self._orca_stall_timeout:
+            # 额外检查: 位移是否足够小（真正停滞 vs 缓慢前进）
+            if self._orca_stall_start_pose is not None:
+                sx, sy = self._orca_stall_start_pose
+                displacement = math.hypot(
+                    self.current_pose.x - sx, self.current_pose.y - sy
+                )
+                if displacement > self._orca_stall_displacement_threshold:
+                    # USV 仍在移动（位移较大），只是进展缓慢，不触发脱困
+                    self.get_logger().info(
+                        f'⏳ ORCA停滞检测: {stall_duration:.0f}s无目标进展, '
+                        f'但位移={displacement:.2f}m > {self._orca_stall_displacement_threshold}m, '
+                        f'判定为缓慢前进, 继续监控'
+                    )
+                    # 重置计时器起点，继续监控
+                    self._orca_stall_start_time = current_time
+                    self._orca_stall_start_pose = (self.current_pose.x, self.current_pose.y)
+                    return False
+
+            self._trigger_orca_escape(stall_duration, dist_to_goal)
+            return True
+
+        return False
+
+    def _trigger_orca_escape(self, stall_duration: float, dist_to_goal: float):
+        """
+        触发 ORCA 脱困机制。
+
+        根据最近邻船位置计算脱困方向，激活脱困状态机。
+        连续脱困次数越多，脱困动作越激进（更长的后退时间、更强的 ORCA 抑制）。
+        """
+        self._orca_escape_count += 1
+        current_time = time.time()
+
+        # 计算脱困方向: 远离最近邻船
+        escape_dir = self._compute_orca_escape_direction()
+
+        # 渐进升级: 每次脱困增加 Phase1 时长
+        base_phase1 = 8.0
+        escalation = min(self._orca_escape_count - 1, 4) * 2.0  # 每次+2s, 最多+8s
+        self._orca_escape_phase1_duration = base_phase1 + escalation
+
+        self._orca_escape_active = True
+        self._orca_escape_start_time = current_time
+        self._orca_escape_phase = 1
+        self._orca_escape_direction = escape_dir
+
+        # 重置停滞检测（脱困结束后重新开始计时）
+        self._orca_stall_start_time = 0.0
+        self._orca_stall_best_dist = float('inf')
+        self._orca_stall_start_pose = None
+
+        # 释放 ORCA 状态，防止脱困期间 ORCA 残留影响
+        self._orca_committed_side = 0
+        self._orca_close_enter_time = 0.0
+        self._orca_hard_brake_active = False
+        self._orca_soft_brake_active = False
+
+        self.get_logger().warn(
+            f'🆘 ORCA脱困触发 (第{self._orca_escape_count}次): '
+            f'停滞{stall_duration:.0f}s, 目标距离={dist_to_goal:.1f}m, '
+            f'方向={"左" if escape_dir > 0 else "右"}, '
+            f'Phase1={self._orca_escape_phase1_duration:.0f}s'
+        )
+
+    def _compute_orca_escape_direction(self) -> int:
+        """
+        计算脱困转向方向: 选择远离最近邻船的方向。
+
+        通过邻船在船体坐标系中的横向位置判断:
+        - 邻船在左侧 → 右转 (-1)
+        - 邻船在右侧 → 左转 (+1)
+        - 无邻船信息 → 默认右转 (COLREGS 惯例)
+
+        Returns:
+            +1 表示左转, -1 表示右转。
+        """
+        if self.current_pose is None:
+            return -1  # 默认右转 (COLREGS)
+
+        now_sec = time.time()
+        closest_dist = float('inf')
+        closest_rel_body_y = 0.0
+
+        yaw = self.current_pose.yaw
+        cos_yaw = math.cos(yaw)
+        sin_yaw = math.sin(yaw)
+
+        for _, (nx, ny, _, _, stamp_sec) in self._apf_neighbor_states.items():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+            dx = nx - self.current_pose.x
+            dy = ny - self.current_pose.y
+            dist = math.hypot(dx, dy)
+            if dist < closest_dist:
+                closest_dist = dist
+                # 邻船在船体坐标系中的 y 分量 (左正右负)
+                closest_rel_body_y = -sin_yaw * dx + cos_yaw * dy
+
+        if closest_dist == float('inf'):
+            return -1  # 无邻船信息，默认右转
+
+        # 向邻船反方向转向
+        if closest_rel_body_y > 0.1:
+            return -1  # 邻船在左边，向右转
+        elif closest_rel_body_y < -0.1:
+            return 1   # 邻船在右边，向左转
+        else:
+            return -1  # 邻船正前方，默认右转 (COLREGS)
+
+    def _handle_orca_escape(self):
+        """
+        执行 ORCA 脱困动作。
+
+        两阶段策略:
+        - Phase 1 (后退+转向): 以后退速度 + 强转向远离邻船，增大分离距离。
+          ORCA 完全抑制，避免 hard_brake 阻止后退。
+        - Phase 2 (削弱绕行): 恢复正常导航，但 ORCA 修正量按比例削弱，
+          允许 MPC 驱动 USV 实际绕过障碍区域而非被 ORCA 困住。
+        """
+        if self.current_pose is None:
+            return
+
+        current_time = time.time()
+        elapsed = current_time - self._orca_escape_start_time
+
+        if self._orca_escape_phase == 1:
+            # Phase 1: 后退 + 强转向
+            if elapsed >= self._orca_escape_phase1_duration:
+                # Phase 1 结束，进入 Phase 2
+                self._orca_escape_phase = 2
+                self._orca_escape_start_time = current_time
+                self._orca_smooth_initialized = False  # 重置 ORCA 平滑器
+                self.get_logger().info(
+                    f'🔄 ORCA脱困Phase1完成 ({self._orca_escape_phase1_duration:.0f}s), '
+                    f'进入Phase2削弱绕行 ({self._orca_escape_phase2_duration:.0f}s)'
+                )
+                return
+
+            # 后退速度 + 强转向（远离邻船方向）
+            retreat_speed = -self.tracker.cruise_speed * 0.6
+            turn_rate = self._orca_escape_direction * 0.5  # 0.5 rad/s
+            cmd = VelocityCommand(
+                linear_x=retreat_speed,
+                linear_y=0.0,
+                angular_z=turn_rate,
+            )
+            self._last_velocity_cmd = cmd
+            self._publish_velocity_command(cmd)
+
+            # 定期日志
+            self._log_counter += 1
+            if self._log_counter % 40 == 0:
+                remaining = self._orca_escape_phase1_duration - elapsed
+                self.get_logger().info(
+                    f'🆘 ORCA脱困Phase1: 后退+转向, '
+                    f'vx={retreat_speed:.2f}, ω={turn_rate:.2f}, '
+                    f'剩余={remaining:.1f}s'
+                )
+
+        elif self._orca_escape_phase == 2:
+            # Phase 2: 正常导航 + ORCA 削弱
+            if elapsed >= self._orca_escape_phase2_duration:
+                # Phase 2 结束，脱困完成
+                self._orca_escape_active = False
+                self._orca_escape_phase = 0
+                self._orca_smooth_initialized = False
+                self.get_logger().info(
+                    f'✅ ORCA脱困完成 (第{self._orca_escape_count}次), 恢复正常导航'
+                )
+                return
+
+            # 正常计算导航指令，ORCA 修正在 _apply_orca_to_command 中会自动削弱
+            cmd = self.tracker.compute_velocity(self.current_pose)
+            cmd = self._apply_apf_to_command(cmd)
+            self._last_velocity_cmd = cmd
+            self._publish_velocity_command(cmd)
+
+            # 定期日志
+            self._log_counter += 1
+            if self._log_counter % 40 == 0:
+                remaining = self._orca_escape_phase2_duration - elapsed
+                dist = self.tracker.get_distance_to_goal(self.current_pose)
+                self.get_logger().info(
+                    f'🆘 ORCA脱困Phase2: 削弱绕行, '
+                    f'vx={cmd.linear_x:.2f}, ω={cmd.angular_z:.2f}, '
+                    f'目标距离={dist:.1f}m, 剩余={remaining:.1f}s'
+                )
+
+        else:
+            # 异常状态，清除脱困标记
+            self._orca_escape_active = False
+            self._orca_escape_phase = 0
+
+    def _get_orca_escape_suppression_scale(self) -> float:
+        """
+        获取 ORCA 脱困 Phase 2 期间的修正抑制系数。
+
+        Returns:
+            0.0~1.0 之间的缩放系数。
+            1.0 = 正常修正, 0.0 = 完全抑制。
+            不在脱困 Phase 2 期间返回 1.0。
+        """
+        if not self._orca_escape_active or self._orca_escape_phase != 2:
+            return 1.0
+        # 渐进升级: 连续脱困次数越多, ORCA 抑制越强
+        # 第1次: 0.35, 第2次: 0.25, 第3次: 0.15, 第4次+: 0.10
+        base_scale = 0.35
+        reduction = min(self._orca_escape_count - 1, 3) * 0.08
+        return max(0.10, base_scale - reduction)
+
     def _handle_rotation_control(self):
         """
         处理旋转机动控制
@@ -3282,6 +3713,11 @@ class VelocityControllerNode(Node):
             debug_msg.orca_rel_speed = float(self._orca_debug_rel_speed)
             debug_msg.orca_tcpa = float(self._orca_debug_tcpa)
             debug_msg.orca_dcpa = float(self._orca_debug_dcpa)
+            debug_msg.orca_primary_neighbor_id = self._orca_debug_primary_neighbor_id
+            debug_msg.orca_escape_active = bool(self._orca_escape_active)
+            debug_msg.orca_escape_phase = int(self._orca_escape_phase)
+            debug_msg.orca_escape_direction = int(self._orca_escape_direction if self._orca_escape_active else 0)
+            debug_msg.orca_escape_count = int(self._orca_escape_count)
 
             self.debug_pub.publish(debug_msg)
         except Exception as e:

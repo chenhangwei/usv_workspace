@@ -43,6 +43,7 @@ import csv
 import math
 import io
 import contextlib
+from collections import Counter
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Optional
@@ -114,6 +115,7 @@ def load_csv(filepath: str) -> tuple:
     header_info = {
         'usv_id': 'unknown',
         'version': 'v5',  # 默认 v5
+        'task_name': '',
         'params': {}
     }
     
@@ -140,6 +142,8 @@ def load_csv(filepath: str) -> tuple:
             # 解析特定字段
             if 'usv_id' in key or key == 'usv_id':
                 header_info['usv_id'] = value
+            if 'task_name' in key or key == 'task_name':
+                header_info['task_name'] = value
             # 通用版本检测: 从 (vXX) 格式中提取版本号
             import re as _re
             version_match = _re.search(r'\(v(\d+)\)', line)
@@ -178,6 +182,9 @@ def load_csv(filepath: str) -> tuple:
 
         reader = csv.DictReader(f)
         for row in reader:
+            # 跳过损坏行：多余字段（csv行合并/串扰）
+            if None in row:
+                continue
             # 兼容：文件尾可能有 '# ...' 统计行，或不完整行
             ts = row.get('timestamp')
             ts_num = _to_number(ts)
@@ -186,7 +193,15 @@ def load_csv(filepath: str) -> tuple:
 
             parsed = {}
             for key, value in row.items():
-                parsed[key] = _to_number(value)
+                v = _to_number(value)
+                parsed[key] = v if v is not None else 0.0
+
+            # 跳过关键字段非数值的损坏行
+            if not all(isinstance(parsed.get(k), (int, float))
+                       for k in ('pose_x', 'pose_y', 'velocity_speed')
+                       if k in parsed):
+                continue
+
             data.append(parsed)
     
     # 检测 v6/v8/v14 特有字段
@@ -197,6 +212,10 @@ def load_csv(filepath: str) -> tuple:
         header_info['version'] = 'v8'
     if data and ('orca_active' in data[0] or 'wifi_rssi_dbm' in data[0]):
         header_info['version'] = 'v14'
+    if data and 'neighbor_1_id' in data[0]:
+        header_info['version'] = 'v16'
+    if data and ('orca_primary_neighbor_id' in data[0] or 'orca_escape_active' in data[0]):
+        header_info['version'] = 'v17'
 
     # 从文件路径提取 USV ID (如 .../usv_02/xxx.csv)
     if header_info['usv_id'] == 'unknown':
@@ -225,7 +244,9 @@ def analyze_statistics(data: list, header_info: dict = None):
     if header_info:
         usv_id = header_info.get('usv_id', 'unknown')
         version = header_info.get('version', 'v5')
-        print(f"\n🚢 USV: {usv_id}  (日志版本: {version})")
+        t_name = header_info.get('task_name', '')
+        task_info = f"  任务: {t_name}" if t_name else ""
+        print(f"\n🚢 USV: {usv_id}  (日志版本: {version}){task_info}")
         
         # 显示 v6 自适应参数
         params = header_info.get('params', {})
@@ -254,9 +275,10 @@ def analyze_statistics(data: list, header_info: dict = None):
         print(f"   最大 dt: {dt_max:.3f}s")
     
     # 速度统计
-    speeds = [d['velocity_speed'] for d in data]
-    avg_speed = sum(speeds) / len(speeds)
-    max_speed = max(speeds)
+    speeds = [d['velocity_speed'] for d in data
+             if isinstance(d.get('velocity_speed'), (int, float))]
+    avg_speed = sum(speeds) / len(speeds) if speeds else 0.0
+    max_speed = max(speeds) if speeds else 0.0
     print(f"\n🚀 速度统计:")
     print(f"   平均速度: {avg_speed:.3f} m/s")
     print(f"   最大速度: {max_speed:.3f} m/s")
@@ -265,12 +287,14 @@ def analyze_statistics(data: list, header_info: dict = None):
     guided_data = [d for d in data if d.get('flight_mode') == 'GUIDED']
     hold_data = [d for d in data if d.get('flight_mode') == 'HOLD']
     if guided_data:
-        guided_speeds = [d['velocity_speed'] for d in guided_data]
+        guided_speeds = [d['velocity_speed'] for d in guided_data
+                         if isinstance(d.get('velocity_speed'), (int, float))]
         guided_pct = len(guided_data) / len(data) * 100
         hold_pct = len(hold_data) / len(data) * 100
         print(f"\n🎯 GUIDED模式统计 ({len(guided_data)} 点, {guided_pct:.1f}%):")
-        print(f"   平均速度: {sum(guided_speeds)/len(guided_speeds):.3f} m/s")
-        print(f"   最大速度: {max(guided_speeds):.3f} m/s")
+        if guided_speeds:
+            print(f"   平均速度: {sum(guided_speeds)/len(guided_speeds):.3f} m/s")
+            print(f"   最大速度: {max(guided_speeds):.3f} m/s")
         if 'cmd_vx' in guided_data[0]:
             cmd_vxs = [d['cmd_vx'] for d in guided_data if isinstance(d.get('cmd_vx'), (int, float))]
             if cmd_vxs:
@@ -278,7 +302,9 @@ def analyze_statistics(data: list, header_info: dict = None):
         print(f"   HOLD停留: {len(hold_data)} 点 ({hold_pct:.1f}%)")
     
     # 航向差异统计
-    yaw_diffs = [abs(d['yaw_diff_deg']) for d in data if d['velocity_speed'] > 0.1]
+    yaw_diffs = [abs(d['yaw_diff_deg']) for d in data
+                 if isinstance(d.get('velocity_speed'), (int, float)) and d['velocity_speed'] > 0.1
+                 and isinstance(d.get('yaw_diff_deg'), (int, float))]
     if yaw_diffs:
         avg_diff = sum(yaw_diffs) / len(yaw_diffs)
         max_diff = max(yaw_diffs)
@@ -329,26 +355,40 @@ def analyze_statistics(data: list, header_info: dict = None):
             print(f"   RMS: {rms:.3f} m")
             print(f"   最大: {max(ctes):.3f} m")
 
-    # 航向误差统计
+    # 航向误差统计 (区分直线段与转弯段)
+    # 与控制器动态路径阈值一致: |heading_error| < 45° 为直线跟踪段
+    TURNING_THRESHOLD_DEG = 45.0
     if 'heading_error_deg' in data[0]:
-        hes = [abs(d['heading_error_deg']) for d in data if isinstance(d.get('heading_error_deg'), (int, float))]
-        if hes:
-            print(f"\n🧭 航向误差 |heading_error_deg|:")
-            print(f"   平均: {sum(hes)/len(hes):.1f}°")
-            print(f"   最大: {max(hes):.1f}°")
+        hes_all = [abs(d['heading_error_deg']) for d in data if isinstance(d.get('heading_error_deg'), (int, float))]
+        hes_straight = [h for h in hes_all if h < TURNING_THRESHOLD_DEG]
+        hes_turning = [h for h in hes_all if h >= TURNING_THRESHOLD_DEG]
+        if hes_all:
+            print(f"\n🧭 航向误差 |heading_error_deg| (直线/转弯阈值={TURNING_THRESHOLD_DEG:.0f}°):")
+            if hes_straight:
+                print(f"   直线段: 平均={sum(hes_straight)/len(hes_straight):.1f}°, 最大={max(hes_straight):.1f}°, 占比={len(hes_straight)/len(hes_all)*100:.0f}%")
+            else:
+                print(f"   直线段: 无数据")
+            if hes_turning:
+                print(f"   转弯段: 平均={sum(hes_turning)/len(hes_turning):.1f}°, 最大={max(hes_turning):.1f}° (仅供参考)")
+            print(f"   全  程: 平均={sum(hes_all)/len(hes_all):.1f}°, 最大={max(hes_all):.1f}°")
     
     # 角速度统计
-    omegas = [abs(d['cmd_omega']) for d in data]
-    avg_omega = sum(omegas) / len(omegas)
-    max_omega = max(omegas)
-    print(f"\n🔄 角速度指令:")
-    print(f"   平均: {avg_omega:.3f} rad/s ({math.degrees(avg_omega):.1f}°/s)")
-    print(f"   最大: {max_omega:.3f} rad/s ({math.degrees(max_omega):.1f}°/s)")
+    omegas = [abs(d['cmd_omega']) for d in data
+              if isinstance(d.get('cmd_omega'), (int, float))]
+    if omegas:
+        avg_omega = sum(omegas) / len(omegas)
+        max_omega = max(omegas)
+        print(f"\n🔄 角速度指令:")
+        print(f"   平均: {avg_omega:.3f} rad/s ({math.degrees(avg_omega):.1f}°/s)")
+        print(f"   最大: {max_omega:.3f} rad/s ({math.degrees(max_omega):.1f}°/s)")
 
     # MPC 统计
     if 'mpc_solve_time_ms' in data[0]:
         print("\n🤖 MPC 性能分析")
-        solve_times = [d.get('mpc_solve_time_ms', 0) for d in data]
+        solve_times = [d['mpc_solve_time_ms'] for d in data
+                       if isinstance(d.get('mpc_solve_time_ms'), (int, float))]
+        if not solve_times:
+            solve_times = [0]
         avg_time = sum(solve_times) / len(solve_times)
         max_time = max(solve_times)
         st_sorted = sorted(solve_times)
@@ -515,7 +555,9 @@ def _print_wifi_stats(data: list):
     
     # 链路质量
     wifi_quality = [d.get('wifi_link_quality', 0) for d in data
-                    if isinstance(d.get('wifi_link_quality'), (int, float)) and d.get('wifi_rssi_dbm', -100) > -100]
+                    if isinstance(d.get('wifi_link_quality'), (int, float))
+                    and isinstance(d.get('wifi_rssi_dbm'), (int, float))
+                    and d.get('wifi_rssi_dbm', -100) > -100]
     avg_quality = sum(wifi_quality) / len(wifi_quality) if wifi_quality else 0
     
     print(f"\n{'='*60}")
@@ -589,7 +631,7 @@ def _print_per_goal_stats(data: list):
     print("📋 每航点详细统计")
     print("=" * 60)
     header = (f"   {'GoalID':>6} {'时长(s)':>8} {'最近距(m)':>9} {'均CTE(m)':>9} "
-              f"{'均航向误差°':>10} {'均速(m/s)':>9} {'模式':>8}")
+              f"{'航向误差°(直)':>10} {'均速(m/s)':>9} {'模式':>8}")
     if has_wifi:
         header += f" {'信号(dBm)':>10}"
     print(header)
@@ -612,7 +654,8 @@ def _print_per_goal_stats(data: list):
         
         hes = [abs(d.get('heading_error_deg', 0)) for d in g_guided
                if isinstance(d.get('heading_error_deg'), (int, float))]
-        avg_he = sum(hes) / len(hes) if hes else float('nan')
+        hes_straight = [h for h in hes if h < 45.0]
+        avg_he = sum(hes_straight) / len(hes_straight) if hes_straight else (sum(hes) / len(hes) if hes else float('nan'))
         
         spds = [d.get('velocity_speed', 0) for d in g_guided
                 if isinstance(d.get('velocity_speed'), (int, float))]
@@ -654,11 +697,14 @@ def _print_quality_score(data: list):
     cte_rms = math.sqrt(sum(x*x for x in ctes) / len(ctes)) if ctes else 999
     cte_grade = "优秀" if avg_cte < 0.1 else "良好" if avg_cte < 0.3 else "一般" if avg_cte < 0.5 else "较差"
     
-    # 航向误差评分
-    hes = [abs(d.get('heading_error_deg', 0)) for d in guided_data
-           if isinstance(d.get('heading_error_deg'), (int, float))]
+    # 航向误差评分 (仅直线段, 与控制器 45° 动态路径阈值一致)
+    TURNING_THRESHOLD_DEG = 45.0
+    hes_all = [abs(d.get('heading_error_deg', 0)) for d in guided_data
+               if isinstance(d.get('heading_error_deg'), (int, float))]
+    hes = [h for h in hes_all if h < TURNING_THRESHOLD_DEG]  # 只用直线段评分
     avg_he = sum(hes) / len(hes) if hes else 999
     he_grade = "优秀" if avg_he < 5 else "良好" if avg_he < 10 else "一般" if avg_he < 20 else "较差"
+    straight_pct = len(hes) / len(hes_all) * 100 if hes_all else 0
     
     # MPC 性能评分
     solve_times = [d.get('mpc_solve_time_ms', 0) for d in data
@@ -672,13 +718,13 @@ def _print_quality_score(data: list):
     avg_speed = sum(guided_speeds) / len(guided_speeds) if guided_speeds else 0
     
     print(f"   横向跟踪 (CTE):   均值={avg_cte:.4f}m  最大={max_cte:.4f}m  RMSE={cte_rms:.4f}m → 【{cte_grade}】")
-    print(f"   航向误差:          均值={avg_he:.1f}°  → 【{he_grade}】")
+    print(f"   航向误差(直线段):  均值={avg_he:.1f}° (直线占比{straight_pct:.0f}%) → 【{he_grade}】")
     print(f"   MPC求解时间:       均值={avg_mpc:.1f}ms → 【{mpc_grade}】")
     print(f"   GUIDED平均速度:    {avg_speed:.3f} m/s")
     
     # 综合评分 (CTE 权重 40%, 航向 30%, MPC 20%, 速度 10%)
     score_cte = max(0, 100 - avg_cte * 200)       # 0.5m → 0分
-    score_he = max(0, 100 - avg_he * 2.5)          # 40° → 0分
+    score_he = max(0, 100 - avg_he * 2.5)          # 40° → 0分 (仅直线段)
     score_mpc = max(0, 100 - avg_mpc * 1.5)        # 66ms → 0分
     score_spd = min(100, avg_speed / 0.3 * 100)    # 0.3m/s → 100分
     total = score_cte * 0.4 + score_he * 0.4 + score_mpc * 0.1 + score_spd * 0.1
@@ -691,6 +737,31 @@ def _print_orca_stats(data: list):
     """打印 ORCA/APF 避障统计 (v14+)"""
     if 'orca_active' not in data[0]:
         return
+
+    def _valid_primary_neighbor(value: Any) -> Optional[str]:
+        if isinstance(value, str):
+            value = value.strip()
+            if value and value != '0':
+                return value
+        return None
+
+    def _count_active_episodes(field: str) -> tuple[int, float]:
+        total_duration = 0.0
+        episode_count = 0
+        i = 0
+        while i < len(data):
+            if data[i].get(field) == 1:
+                episode_start = data[i]['timestamp']
+                j = i
+                while j < len(data) and data[j].get(field) == 1:
+                    j += 1
+                episode_end = data[j - 1]['timestamp']
+                total_duration += (episode_end - episode_start)
+                episode_count += 1
+                i = j
+            else:
+                i += 1
+        return episode_count, total_duration
 
     orca_active_samples = [d for d in data if d.get('orca_active') == 1]
     total = len(data)
@@ -715,21 +786,7 @@ def _print_orca_stats(data: list):
         print(f"   最近邻居距离: 最小={min(distances):.2f}m, 平均={sum(distances)/len(distances):.2f}m")
 
     # 计算 ORCA 持续时间段
-    duration_total = 0.0
-    episode_count = 0
-    i = 0
-    while i < len(data):
-        if data[i].get('orca_active') == 1:
-            episode_start = data[i]['timestamp']
-            j = i
-            while j < len(data) and data[j].get('orca_active') == 1:
-                j += 1
-            episode_end = data[j - 1]['timestamp']
-            duration_total += (episode_end - episode_start)
-            episode_count += 1
-            i = j
-        else:
-            i += 1
+    episode_count, duration_total = _count_active_episodes('orca_active')
     if episode_count > 0:
         total_time = data[-1]['timestamp'] - data[0]['timestamp']
         print(f"   激活段数: {episode_count} 段, 总时长={duration_total:.1f}s ({duration_total/total_time*100:.1f}%)")
@@ -739,12 +796,23 @@ def _print_orca_stats(data: list):
     encounters = {}
     for d in orca_active_samples:
         etype = d.get('orca_encounter_type', 'none')
-        if isinstance(etype, str) and etype != 'none' and etype != 'other':
+        if isinstance(etype, str) and etype != 'none':
             encounters[etype] = encounters.get(etype, 0) + 1
     if encounters:
         print(f"\n   遭遇类型 (COLREGS):")
         for etype, count in sorted(encounters.items(), key=lambda x: -x[1]):
             print(f"   - {etype}: {count} ({count/active_count*100:.1f}%)")
+
+    primary_counts = Counter()
+    for d in orca_active_samples:
+        primary_id = _valid_primary_neighbor(d.get('orca_primary_neighbor_id'))
+        if primary_id is not None:
+            primary_counts[primary_id] += 1
+    if primary_counts:
+        top_neighbor, top_count = primary_counts.most_common(1)[0]
+        print(f"\n   主导邻船: {top_neighbor} ({top_count}/{active_count}, {top_count/active_count*100:.1f}%)")
+        for neighbor_id, count in primary_counts.most_common(3):
+            print(f"   - {neighbor_id}: {count} ({count/active_count*100:.1f}%)")
 
     # 选边统计
     sides = [d.get('orca_commit_side', 0) for d in orca_active_samples
@@ -770,6 +838,36 @@ def _print_orca_stats(data: list):
     hard_brakes = [d for d in data if d.get('orca_hard_brake') == 1]
     if hard_brakes:
         print(f"\n   ⚠️ 硬刹车触发: {len(hard_brakes)} 次 ({len(hard_brakes)/total*100:.1f}%)")
+
+    if 'orca_escape_active' in data[0]:
+        escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
+        escape_count = len(escape_samples)
+        if escape_count > 0:
+            escape_episodes, escape_duration = _count_active_episodes('orca_escape_active')
+            phase_counter = Counter(
+                int(d.get('orca_escape_phase', 0))
+                for d in escape_samples
+                if isinstance(d.get('orca_escape_phase'), (int, float)) and int(d.get('orca_escape_phase', 0)) > 0
+            )
+            direction_counter = Counter(
+                int(d.get('orca_escape_direction', 0))
+                for d in escape_samples
+                if isinstance(d.get('orca_escape_direction'), (int, float)) and int(d.get('orca_escape_direction', 0)) != 0
+            )
+            max_escape_count = max(
+                int(d.get('orca_escape_count', 0))
+                for d in data
+                if isinstance(d.get('orca_escape_count'), (int, float))
+            )
+            print(f"\n   🆘 脱困统计: {escape_episodes} 次, 总时长={escape_duration:.1f}s ({escape_count/total*100:.1f}%)")
+            if phase_counter:
+                phase_text = ', '.join(f'Phase{phase}:{count}' for phase, count in sorted(phase_counter.items()))
+                print(f"   - 阶段分布: {phase_text}")
+            if direction_counter:
+                left_count = direction_counter.get(1, 0)
+                right_count = direction_counter.get(-1, 0)
+                print(f"   - 方向分布: 左={left_count}, 右={right_count}")
+            print(f"   - 累计脱困计数峰值: {max_escape_count}")
 
     # 邻居数统计
     neighbor_counts = [d.get('apf_neighbor_count', 0) for d in orca_active_samples
@@ -809,7 +907,10 @@ def _print_nav_mode_stats(data: list):
         # 找同步模式的航点段，估算等待时间（HOLD期间的时长）
         sync_goals = {}
         for d in data:
-            if int(d.get('nav_mode', 0)) == 1 and isinstance(d.get('goal_id'), (int, float)):
+            nm = d.get('nav_mode', 0)
+            if not isinstance(nm, (int, float)):
+                continue
+            if int(nm) == 1 and isinstance(d.get('goal_id'), (int, float)):
                 gid = int(d['goal_id'])
                 if gid not in sync_goals:
                     sync_goals[gid] = []
@@ -856,10 +957,16 @@ def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
         return
     
     usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    primary_counts = Counter(
+        d.get('orca_primary_neighbor_id', '').strip()
+        for d in data
+        if d.get('orca_active') == 1 and isinstance(d.get('orca_primary_neighbor_id'), str) and d.get('orca_primary_neighbor_id', '').strip()
+    )
+    top_neighbor = primary_counts.most_common(1)[0][0] if primary_counts else 'N/A'
     t = [d['timestamp'] - data[0]['timestamp'] for d in data]
     
-    fig, axes = plt.subplots(5, 1, figsize=(14, 16), sharex=True)
-    fig.suptitle(f'ORCA/APF Avoidance Analysis - {usv_id}', fontsize=14, fontweight='bold')
+    fig, axes = plt.subplots(6, 1, figsize=(14, 18), sharex=True)
+    fig.suptitle(f'ORCA/APF Avoidance Analysis - {usv_id} (主导邻船: {top_neighbor})', fontsize=14, fontweight='bold')
     
     # 1. 最近邻居距离 + ORCA 激活状态背景
     ax = axes[0]
@@ -891,10 +998,24 @@ def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
     
     # 2. 遭遇类型 (分类散点)
     ax = axes[1]
-    encounter_map = {'head_on': 3, 'crossing': 2, 'overtaking': 1, 'other': 0.5, 'none': 0}
-    encounter_colors = {'head_on': 'red', 'crossing': 'orange', 'overtaking': 'blue', 'other': 'gray', 'none': 'lightgray'}
+    encounter_order = [
+        'none', 'other', 'stationary', 'crossing_give_way',
+        'crossing_stand_on', 'head_on', 'overtaking', 'being_overtaken'
+    ]
+    encounter_map = {etype: idx for idx, etype in enumerate(encounter_order)}
+    encounter_colors = {
+        'none': 'lightgray',
+        'other': 'gray',
+        'stationary': 'purple',
+        'crossing_give_way': 'orange',
+        'crossing_stand_on': 'gold',
+        'head_on': 'red',
+        'overtaking': 'blue',
+        'being_overtaken': 'green',
+    }
     
-    for etype, yval in encounter_map.items():
+    for etype in encounter_order:
+        yval = encounter_map[etype]
         indices = [idx for idx, d in enumerate(data) if d.get('orca_encounter_type') == etype and d.get('orca_active') == 1]
         if indices:
             ax.scatter([t[i] for i in indices], [yval] * len(indices),
@@ -902,7 +1023,7 @@ def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
     
     ax.set_ylabel('Encounter Type')
     ax.set_yticks(list(encounter_map.values()))
-    ax.set_yticklabels(list(encounter_map.keys()), fontsize=8)
+    ax.set_yticklabels(encounter_order, fontsize=8)
     ax.set_title('COLREGS Encounter Classification')
     ax.legend(loc='upper right', fontsize=7)
     ax.grid(True, alpha=0.3, axis='x')
@@ -950,19 +1071,103 @@ def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
     ax.axhline(y=0, color='k', linewidth=0.5)
     ax.fill_between(t, ang_corr, alpha=0.2, color='blue')
     ax.set_ylabel('Angular Corr (rad/s)')
-    ax.set_xlabel('Time (s)')
     ax.set_title('Heading Correction')
     ax.legend(loc='upper right', fontsize=7)
+    ax.grid(True, alpha=0.3)
+
+    # 6. 脱困阶段 (v17+)
+    ax = axes[5]
+    if 'orca_escape_active' in data[0]:
+        escape_phase = [int(d.get('orca_escape_phase', 0)) if d.get('orca_escape_active') == 1 else 0 for d in data]
+        escape_active = [d.get('orca_escape_active', 0) for d in data]
+        if any(escape_active):
+            ax.step(t, escape_phase, where='post', color='darkred', linewidth=1.2, label='Escape Phase')
+            phase1_t = [t[i] for i in range(len(data)) if escape_phase[i] == 1]
+            phase2_t = [t[i] for i in range(len(data)) if escape_phase[i] == 2]
+            if phase1_t:
+                ax.scatter(phase1_t, [1] * len(phase1_t), c='red', s=5, alpha=0.5, label='Phase1')
+            if phase2_t:
+                ax.scatter(phase2_t, [2] * len(phase2_t), c='orange', s=5, alpha=0.5, label='Phase2')
+            ax.legend(loc='upper right', fontsize=7)
+        else:
+            ax.text(0.5, 0.5, 'No escape triggered', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
+    else:
+        ax.text(0.5, 0.5, 'Escape fields unavailable', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
+    ax.set_ylabel('Escape')
+    ax.set_yticks([0, 1, 2])
+    ax.set_yticklabels(['Off', 'P1', 'P2'])
+    ax.set_xlabel('Time (s)')
+    ax.set_title('ORCA Escape State (v17+)')
     ax.grid(True, alpha=0.3)
     
     _add_reading_guide(fig,
         '【阅读指南】第1行: 蓝=最近邻居距离，红色背景=ORCA避障激活中; 距离>4m安全，<1m危险。\n'
-        '第2行: 遇见类型分类—head_on(红)=对向、crossing(橙)=交叉、overtaking(蓝)=超越。\n'
-        '第3行: 选边+1=左避，-1=右避，X=紧急制动。 第4行: 红填充=线速度修正(负值=减速)。 第5行: 蓝填充=角速度修正(避让转向)。',
+        '第2行: 遇见类型分类，stationary=近距伴随/静态障碍，crossing_give_way 与 crossing_stand_on 区分让路关系。\n'
+        '第3行: 选边+1=左避，-1=右避，X=紧急制动。 第4行: 红填充=线速度修正(负值=减速)。 第5行: 蓝填充=角速度修正。 第6行: 脱困阶段 Off/P1/P2。',
         bottom=0.06)
     plt.savefig(output_path / 'orca_analysis.png', dpi=150)
     plt.close()
     print(f"   📈 ORCA 避障分析图: {output_path / 'orca_analysis.png'}")
+
+
+def plot_neighbor_distances(data: list, output_path: Path, header_info: dict = None):
+    """绘制邻居USV距离变化图 — 展示本USV与各邻居的距离随时间变化"""
+    if not HAS_MATPLOTLIB:
+        return
+    
+    if 'neighbor_1_id' not in data[0]:
+        return
+    
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    
+    # 收集每个邻居的距离时间序列
+    neighbor_distances = {}  # {usv_id: [(t, dist), ...]}
+    t0 = data[0]['timestamp']
+    
+    for d in data:
+        t = d['timestamp'] - t0
+        px, py = d['pose_x'], d['pose_y']
+        for slot in range(1, 6):
+            nid = d.get(f'neighbor_{slot}_id')
+            if not nid or (isinstance(nid, str) and not nid.strip()):
+                continue
+            if isinstance(nid, (int, float)) and nid == 0:
+                continue
+            nx = d.get(f'neighbor_{slot}_x', 0)
+            ny = d.get(f'neighbor_{slot}_y', 0)
+            if isinstance(nx, (int, float)) and isinstance(ny, (int, float)):
+                dist = math.sqrt((px - nx) ** 2 + (py - ny) ** 2)
+                neighbor_distances.setdefault(nid, []).append((t, dist))
+    
+    if not neighbor_distances:
+        return
+    
+    colors = ['#E91E63', '#9C27B0', '#00BCD4', '#FF9800', '#4CAF50']
+    
+    fig, ax = plt.subplots(figsize=(14, 5))
+    
+    for idx, (nid, pts) in enumerate(sorted(neighbor_distances.items())):
+        ts = [p[0] for p in pts]
+        ds = [p[1] for p in pts]
+        ax.plot(ts, ds, color=colors[idx % len(colors)], linewidth=1.0,
+                alpha=0.8, label=f'{nid}')
+    
+    # 安全距离线
+    ax.axhline(y=3.0, color='red', linestyle=':', alpha=0.5, label='安全距离 3m')
+    
+    ax.set_xlabel('时间 (s)')
+    ax.set_ylabel('距离 (m)')
+    ax.set_title(f'邻居USV距离变化 - {usv_id}')
+    ax.legend(loc='upper right', fontsize=9)
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(bottom=0)
+    
+    _add_reading_guide(fig,
+        '【阅读指南】各彩色曲线表示本USV与不同邻居USV的距离随时间变化。\n'
+        '红色虚线=3m安全距离。曲线持续低于安全线表示存在碰撞风险。', bottom=0.08)
+    plt.savefig(output_path / 'neighbor_distances.png', dpi=150)
+    plt.close()
+    print(f"   📈 邻居距离分析图: {output_path / 'neighbor_distances.png'}")
 
 
 def plot_wifi_signal(data: list, output_path: Path, header_info: dict = None):
@@ -1116,8 +1321,11 @@ def plot_errors(data: list, output_path: Path):
     t = [d['timestamp'] - data[0]['timestamp'] for d in data]
 
     ax = axes[0]
-    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
-        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y']) for d in data]
+    _num_keys = ('pose_x', 'pose_y', 'target_x', 'target_y')
+    if all(k in data[0] for k in _num_keys):
+        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y'])
+                if all(isinstance(d.get(k), (int, float)) for k in _num_keys)
+                else 0.0 for d in data]
     else:
         dist = [d.get('distance_to_goal', 0) for d in data]
     ax.plot(t, dist, 'purple', label='Distance to Goal')
@@ -1130,10 +1338,25 @@ def plot_errors(data: list, output_path: Path):
 
     ax = axes[1]
     he = [d.get('heading_error_deg', 0) for d in data]
-    ax.plot(t, he, 'b-', label='Heading Error (deg)')
+    ax.plot(t, he, 'b-', label='Heading Error (deg)', alpha=0.9)
+    # 标注转弯段区域 (|heading_error| >= 45°)
+    TURNING_THRESHOLD_DEG = 45.0
+    i = 0
+    labeled_turning = False
+    while i < len(he):
+        if abs(he[i]) >= TURNING_THRESHOLD_DEG:
+            j = i
+            while j < len(he) and abs(he[j]) >= TURNING_THRESHOLD_DEG:
+                j += 1
+            lbl = 'Turning (≥45°)' if not labeled_turning else ''
+            ax.axvspan(t[i], t[min(j-1, len(t)-1)], alpha=0.15, color='red', label=lbl)
+            labeled_turning = True
+            i = j
+        else:
+            i += 1
     ax.axhline(y=0, color='k', linewidth=0.5)
     ax.set_ylabel('deg')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', fontsize=7)
     ax.grid(True, alpha=0.3)
 
     ax = axes[2]
@@ -1147,7 +1370,7 @@ def plot_errors(data: list, output_path: Path):
 
     _add_reading_guide(fig,
         '【阅读指南】上图: 紫线=到目标距离，降至红虚线(1.5m)以下表示到达航点。\n'
-        '中图: 蓝线=航向误差(度)，接近0°表示航向对准，长期偏大说明转弯困难。\n'
+        '中图: 蓝线=航向误差(度)，红色背景=转弯段(≥45°, 仅供参考)，白色区域=直线跟踪段。\n'
         '下图: 绿线=横向偏差 CTE(m)，接近0表示紧贴航线，偏大说明路径跟踪精度不足。')
     plt.savefig(output_path / 'errors.png', dpi=150)
     plt.close()
@@ -1159,8 +1382,9 @@ def find_yaw_offset(data: list) -> float:
     # 只取速度足够大的数据点
     valid_diffs = []
     for d in data:
-        if d['velocity_speed'] > 0.15:
-            valid_diffs.append(d['yaw_diff_deg'])
+        if isinstance(d.get('velocity_speed'), (int, float)) and d['velocity_speed'] > 0.15:
+            if isinstance(d.get('yaw_diff_deg'), (int, float)):
+                valid_diffs.append(d['yaw_diff_deg'])
     
     if not valid_diffs:
         return 0.0
@@ -1246,6 +1470,7 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
             plot_v6_adaptive_tau(data, output_path, header_info)
             plot_v8_ampc(data, output_path, header_info)
             plot_orca_analysis(data, output_path, header_info)
+            plot_neighbor_distances(data, output_path, header_info)
             plot_wifi_signal(data, output_path, header_info)
             plot_dashboard(data, output_path, header_info)
             plot_per_goal_stats(data, output_path, header_info)
@@ -1277,6 +1502,10 @@ def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
     fig, ax = plt.subplots(figsize=(10, 10))
     
     usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    task_name = header_info.get('task_name', '') if header_info else ''
+    title_suffix = f' - {usv_id}'
+    if task_name:
+        title_suffix += f' [{task_name}]'
     
     x_all = [d['pose_x'] for d in data]
     y_all = [d['pose_y'] for d in data]
@@ -1305,7 +1534,8 @@ def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
     arrow_step = max(1, len(data) // 20)
     for idx in range(0, len(data) - 1, arrow_step):
         d = data[idx]
-        if d.get('flight_mode') != 'GUIDED' or d.get('velocity_speed', 0) < 0.05:
+        spd = d.get('velocity_speed', 0)
+        if d.get('flight_mode') != 'GUIDED' or not isinstance(spd, (int, float)) or spd < 0.05:
             continue
         yaw_rad = math.radians(d.get('pose_yaw_deg', 0))
         dx = math.cos(yaw_rad) * 0.3
@@ -1335,17 +1565,63 @@ def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
         Line2D([0], [0], marker='s', color='w', markerfacecolor='red', markersize=10, label='End'),
         Line2D([0], [0], marker='*', color='w', markerfacecolor='orange', markersize=12, label='Goal'),
     ]
+    # v16: 绘制邻居USV轨迹 (虚线，不同颜色)
+    neighbor_colors = ['#E91E63', '#9C27B0', '#00BCD4', '#FF9800', '#4CAF50']
+    neighbor_ids_plotted = set()
+    for slot in range(1, 6):
+        id_key = f'neighbor_{slot}_id'
+        x_key = f'neighbor_{slot}_x'
+        y_key = f'neighbor_{slot}_y'
+        if id_key not in data[0] or x_key not in data[0]:
+            continue
+        # 按邻居ID分组绘制
+        segments = {}  # {usv_id: [(x, y), ...]}
+        for d in data:
+            nid = d.get(id_key)
+            if isinstance(nid, str) and nid.startswith('usv_'):
+                pass
+            elif isinstance(nid, (int, float)) and nid == 0:
+                continue
+            else:
+                if not nid or (isinstance(nid, str) and not nid.strip()):
+                    continue
+            nx = d.get(x_key, 0)
+            ny = d.get(y_key, 0)
+            if isinstance(nx, (int, float)) and isinstance(ny, (int, float)):
+                if abs(nx) > 0.01 or abs(ny) > 0.01:
+                    segments.setdefault(nid, []).append((nx, ny))
+        for nid, pts in segments.items():
+            if nid in neighbor_ids_plotted or len(pts) < 5:
+                continue
+            neighbor_ids_plotted.add(nid)
+            color_idx = len(neighbor_ids_plotted) - 1
+            color = neighbor_colors[color_idx % len(neighbor_colors)]
+            nx_list = [p[0] for p in pts]
+            ny_list = [p[1] for p in pts]
+            ax.plot(nx_list, ny_list, color=color, linewidth=1.0, alpha=0.5,
+                    linestyle='--', label=f'{nid}')
+
+    # 更新图例以包含邻居
+    if neighbor_ids_plotted:
+        for nid in sorted(neighbor_ids_plotted):
+            color_idx = sorted(neighbor_ids_plotted).index(nid)
+            color = neighbor_colors[color_idx % len(neighbor_colors)]
+            legend_elements.append(
+                Line2D([0], [0], color=color, lw=1.0, linestyle='--',
+                       alpha=0.5, label=f'{nid}'))
+    
     ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
     
     ax.set_xlabel('X (m)')
     ax.set_ylabel('Y (m)')
-    ax.set_title(f'USV Navigation Trajectory - {usv_id}')
+    ax.set_title(f'USV Navigation Trajectory{title_suffix}')
     ax.grid(True, alpha=0.3)
     ax.set_aspect('equal')
     
     _add_reading_guide(fig,
         '【阅读指南】蓝色线=自动导航(GUIDED)轨迹，灰色线=悬停等待(HOLD)阶段；\n'
         '绿●=起点，红■=终点，橙★=目标航点(G1,G2...)，蓝色箭头=USV航向方向。\n'
+        '虚线=其他USV轨迹（邻居），颜色区分不同USV。\n'
         '理想状态：轨迹平滑且紧贴各目标点连线，弯道处无大幅振荡。', bottom=0.08)
     plt.savefig(output_path / 'trajectory.png', dpi=150)
     plt.close()
@@ -1374,7 +1650,7 @@ def plot_velocity(data: list, output_path: Path, header_info: dict = None):
     # 1. 速度: 实际 vs 指令
     ax = axes[0]
     _shade_modes(ax)
-    speed = [d['velocity_speed'] for d in data]
+    speed = [d['velocity_speed'] if isinstance(d.get('velocity_speed'), (int, float)) else 0.0 for d in data]
     ax.plot(t, speed, 'b-', label='Actual Speed', linewidth=1.2)
     if 'cmd_vx' in data[0]:
         cmd_vx = [d.get('cmd_vx', 0) for d in data]
@@ -1398,10 +1674,13 @@ def plot_velocity(data: list, output_path: Path, header_info: dict = None):
     # 3. 距离目标
     ax = axes[2]
     _shade_modes(ax)
-    if all(k in data[0] for k in ('pose_x', 'pose_y', 'target_x', 'target_y')):
-        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y']) for d in data]
+    _num_keys2 = ('pose_x', 'pose_y', 'target_x', 'target_y')
+    if all(k in data[0] for k in _num_keys2):
+        dist = [math.hypot(d['target_x'] - d['pose_x'], d['target_y'] - d['pose_y'])
+                if all(isinstance(d.get(k), (int, float)) for k in _num_keys2)
+                else 0.0 for d in data]
     else:
-        dist = [d.get('distance_to_goal', 0) for d in data]
+        dist = [d.get('distance_to_goal', 0) if isinstance(d.get('distance_to_goal'), (int, float)) else 0.0 for d in data]
     ax.plot(t, dist, 'purple', label='Distance to Goal')
     ax.axhline(y=1.5, color='r', linestyle='--', label='Arrival Threshold (1.5m)')
     ax.set_ylabel('Distance (m)')
@@ -1437,8 +1716,8 @@ def plot_heading_comparison(data: list, output_path: Path):
     
     # Heading difference
     ax = axes[1]
-    yaw_diff = [d['yaw_diff_deg'] for d in data]
-    speed = [d['velocity_speed'] for d in data]
+    yaw_diff = [d['yaw_diff_deg'] if isinstance(d.get('yaw_diff_deg'), (int, float)) else 0.0 for d in data]
+    speed = [d['velocity_speed'] if isinstance(d.get('velocity_speed'), (int, float)) else 0.0 for d in data]
     
     # Color by speed
     colors = ['blue' if s > 0.1 else 'gray' for s in speed]
@@ -1539,7 +1818,7 @@ def plot_mpc_debug(data: list, output_path: Path):
     
     # 2. 代价函数 (自动对数缩放)
     ax = axes[1]
-    costs = [d.get('mpc_cost', 0) for d in data]
+    costs = [d.get('mpc_cost', 0) if isinstance(d.get('mpc_cost'), (int, float)) else 0 for d in data]
     ax.plot(t, costs, 'g-', label='Optimization Cost')
     ax.set_ylabel('Cost')
     # 如果代价范围跨越2个数量级以上，使用对数缩放
@@ -1839,8 +2118,24 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     if 'heading_error_deg' in data[0]:
         he = [d.get('heading_error_deg', 0) for d in data]
         ax.plot(t, he, 'b-', linewidth=0.8)
+        # 标注转弯段
+        idx = 0
+        labeled = False
+        while idx < len(he):
+            if abs(he[idx]) >= 45.0:
+                j = idx
+                while j < len(he) and abs(he[j]) >= 45.0:
+                    j += 1
+                lbl = '≥45°' if not labeled else ''
+                ax.axvspan(t[idx], t[min(j-1, len(t)-1)], alpha=0.15, color='red', label=lbl)
+                labeled = True
+                idx = j
+            else:
+                idx += 1
         ax.axhline(y=0, color='k', linewidth=0.5)
-    ax.set_title('Heading Error', fontsize=10)
+        if labeled:
+            ax.legend(fontsize=6)
+    ax.set_title('Heading Error (red=turning)', fontsize=10)
     ax.set_ylabel('deg')
     ax.grid(True, alpha=0.3)
     
@@ -1887,11 +2182,12 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     # 计算统计数据
     g_speeds = [d['velocity_speed'] for d in guided] if guided else [0]
     g_ctes = [abs(d.get('cross_track_error', 0)) for d in guided] if guided else [0]
-    g_hes = [abs(d.get('heading_error_deg', 0)) for d in guided] if guided else [0]
+    g_hes_all = [abs(d.get('heading_error_deg', 0)) for d in guided] if guided else [0]
+    g_hes = [h for h in g_hes_all if h < 45.0] if guided else [0]  # 仅直线段
     g_mpc = [d.get('mpc_solve_time_ms', 0) for d in data if isinstance(d.get('mpc_solve_time_ms'), (int,float))]
     
     avg_cte = sum(g_ctes) / len(g_ctes)
-    avg_he = sum(g_hes) / len(g_hes)
+    avg_he = sum(g_hes) / len(g_hes) if g_hes else sum(g_hes_all) / len(g_hes_all)
     avg_spd = sum(g_speeds) / len(g_speeds)
     avg_mpc = sum(g_mpc) / len(g_mpc) if g_mpc else 0
     
@@ -1914,6 +2210,38 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
 
     orca_line = f"ORCA:      {orca_pct:.0f}% (min {orca_min_dist:.2f}m)" if orca_active_count > 0 else "ORCA:      off"
 
+    escape_line = "Escape:    N/A"
+    if 'orca_escape_active' in data[0]:
+        escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
+        if escape_samples:
+            escape_duration = 0.0
+            escape_episodes = 0
+            i = 0
+            while i < len(data):
+                if data[i].get('orca_escape_active') == 1:
+                    start_ts = data[i]['timestamp']
+                    j = i
+                    while j < len(data) and data[j].get('orca_escape_active') == 1:
+                        j += 1
+                    escape_duration += data[j - 1]['timestamp'] - start_ts
+                    escape_episodes += 1
+                    i = j
+                else:
+                    i += 1
+            escape_line = f"Escape:    {escape_episodes}x ({escape_duration:.0f}s)"
+        else:
+            escape_line = "Escape:    off"
+
+    primary_counts = Counter(
+        d.get('orca_primary_neighbor_id', '').strip()
+        for d in data
+        if d.get('orca_active') == 1 and isinstance(d.get('orca_primary_neighbor_id'), str) and d.get('orca_primary_neighbor_id', '').strip()
+    )
+    primary_line = "Primary:   N/A"
+    if primary_counts and orca_active_count > 0:
+        neighbor_id, count = primary_counts.most_common(1)[0]
+        primary_line = f"Primary:   {neighbor_id} ({count/orca_active_count*100:.0f}%)"
+
     # WiFi 信号摘要
     wifi_line = "WiFi:      N/A"
     if 'wifi_rssi_dbm' in data[0]:
@@ -1934,9 +2262,11 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"\n━━━ GUIDED Stats ━━━\n"
         f"Avg Speed: {avg_spd:.3f} m/s\n"
         f"Avg CTE:   {avg_cte:.4f} m\n"
-        f"Avg HdgErr:{avg_he:.1f}°\n"
+        f"HdgErr(st):{avg_he:.1f}°\n"
         f"MPC Time:  {avg_mpc:.1f} ms\n"
         f"{orca_line}\n"
+        f"{escape_line}\n"
+        f"{primary_line}\n"
         f"{wifi_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
@@ -1997,7 +2327,9 @@ def plot_per_goal_stats(data: list, output_path: Path, header_info: dict = None)
         avg_ctes.append(sum(ctes)/len(ctes) if ctes else 0)
         
         hes = [abs(d.get('heading_error_deg', 0)) for d in g_guided if isinstance(d.get('heading_error_deg'), (int, float))]
-        avg_hes.append(sum(hes)/len(hes) if hes else 0)
+        # 仅统计直线段航向误差 (|heading_error| < 45°)
+        hes_straight = [h for h in hes if h < 45.0]
+        avg_hes.append(sum(hes_straight)/len(hes_straight) if hes_straight else (sum(hes)/len(hes) if hes else 0))
         
         spds = [d.get('velocity_speed', 0) for d in g_guided if isinstance(d.get('velocity_speed'), (int, float))]
         avg_speeds.append(sum(spds)/len(spds) if spds else 0)
@@ -2028,7 +2360,7 @@ def plot_per_goal_stats(data: list, output_path: Path, header_info: dict = None)
     bars = ax.bar(x, avg_hes, color='#42A5F5', alpha=0.8)
     ax.axhline(y=10, color='orange', linestyle='--', linewidth=1, label='Good threshold')
     ax.set_ylabel('Avg |Heading Error| (°)')
-    ax.set_title('Heading Error')
+    ax.set_title('Heading Error (straight segments)')
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=45, fontsize=8)
     ax.legend(fontsize=7)
@@ -2098,6 +2430,135 @@ def plot_per_goal_stats(data: list, output_path: Path, header_info: dict = None)
     print(f"   📈 每航点统计: {output_path / 'per_goal_stats.png'}")
 
 
+def _quick_scan_usv_id(log_file: Path) -> str:
+    """快速扫描 CSV 文件头，提取 USV ID（不加载全部数据）"""
+    usv_id = 'unknown'
+    try:
+        with open(log_file, 'r', errors='replace') as f:
+            for _ in range(30):  # 只读前 30 行
+                line = f.readline()
+                if not line:
+                    break
+                low = line.lower().lstrip()
+                if low.startswith('#') and 'usv' in low and 'id' in low:
+                    _, _, val = line.partition(':')
+                    val = val.strip()
+                    if val:
+                        usv_id = val
+                        break
+    except Exception:
+        pass
+    # 如果头部没找到，尝试从路径提取
+    if usv_id == 'unknown':
+        import re as _re
+        m = _re.search(r'(usv_\d+)', str(log_file))
+        if m:
+            usv_id = m.group(1)
+    return usv_id
+
+
+def analyze_merged_logs(log_files: list, batch_mode: bool = True):
+    """
+    合并同一 USV 的多个日志文件并统一分析。
+
+    将多个 CSV 的数据按时间戳排序拼接，生成一份合并的分析报告和图表。
+    """
+    if not log_files:
+        return False, None
+
+    # 加载并合并所有数据，标记每条记录所属的任务索引
+    all_data = []
+    all_headers = []
+    task_names = []
+    for task_idx, lf in enumerate(log_files):
+        data, header_info = load_csv(str(lf))
+        if data:
+            for d in data:
+                d['_task_idx'] = task_idx
+            all_data.extend(data)
+            all_headers.append(header_info)
+            t_name = header_info.get('task_name', '')
+            if t_name and t_name not in task_names:
+                task_names.append(t_name)
+
+    if len(all_data) < 10:
+        print("⚠️  合并后数据量太少，无法分析")
+        return False, None
+
+    # 按时间戳排序（多文件时间可能交替）
+    all_data.sort(key=lambda d: d['timestamp'])
+
+    # 构建合并后的 header_info（取第一个文件的基本信息）
+    merged_header = dict(all_headers[0])
+    if task_names:
+        merged_header['task_name'] = ' → '.join(task_names)
+
+    usv_id = merged_header.get('usv_id', 'unknown')
+
+    # 输出目录：使用 USV ID + 首尾文件名组合
+    first_stem = log_files[0].stem
+    parent_dir = log_files[0].parent
+    output_name = f"{first_stem}_merged_{len(log_files)}tasks"
+    output_path = parent_dir / output_name
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    print(f"\n🔗 合并 {usv_id} 的 {len(log_files)} 个任务日志 ({len(all_data)} 条记录)")
+    for lf in log_files:
+        print(f"   📄 {lf.name}")
+
+    report_path = output_path / 'analysis_report.txt'
+    report_buffer = io.StringIO()
+    report_buffer.write("USV nav log analysis report (MERGED)\n")
+    report_buffer.write(f"USV: {usv_id}\n")
+    report_buffer.write(f"Merged files: {len(log_files)}\n")
+    for lf in log_files:
+        report_buffer.write(f"  - {lf}\n")
+    report_buffer.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    report_buffer.write(f"Output dir: {output_path}\n")
+    report_buffer.write(f"Total records: {len(all_data)}\n\n")
+
+    with contextlib.redirect_stdout(TeeStdout(sys.stdout, report_buffer)):
+        analyze_statistics(all_data, merged_header)
+        find_yaw_offset(all_data)
+
+        if HAS_MATPLOTLIB:
+            print("\n📊 生成图表...")
+            plot_trajectory(all_data, output_path, merged_header)
+            plot_velocity(all_data, output_path, merged_header)
+            plot_heading_comparison(all_data, output_path)
+            plot_control_commands(all_data, output_path, merged_header)
+            plot_mpc_debug(all_data, output_path)
+            plot_errors(all_data, output_path)
+            plot_v6_adaptive_tau(all_data, output_path, merged_header)
+            plot_v8_ampc(all_data, output_path, merged_header)
+            plot_orca_analysis(all_data, output_path, merged_header)
+            plot_neighbor_distances(all_data, output_path, merged_header)
+            plot_wifi_signal(all_data, output_path, merged_header)
+            plot_dashboard(all_data, output_path, merged_header)
+            plot_per_goal_stats(all_data, output_path, merged_header)
+            print(f"\n✅ 图表已保存到: {output_path}")
+
+    report_path.write_text(report_buffer.getvalue(), encoding='utf-8')
+    print(f"   📝 说明文件: {report_path}")
+
+    # 提取 HTML 报告数据
+    report_data = None
+    if HAS_HTML_REPORT:
+        try:
+            report_data = extract_report_data(all_data, merged_header)
+            report_data['csv_name'] = f"{usv_id} ({len(log_files)} tasks)"
+            if not batch_mode:
+                html_path = generate_html_report(report_data, output_path,
+                                                  csv_name=report_data['csv_name'])
+                print(f"   🌐 HTML报告: {html_path}")
+                print(f"   💡 浏览器打开: file://{html_path.resolve()}")
+        except Exception as e:
+            print(f"   ⚠️  HTML报告数据提取失败: {e}")
+            report_data = None
+
+    return True, report_data
+
+
 def main():
     # 确定日志路径 — 支持多个参数
     log_files = []
@@ -2131,16 +2592,38 @@ def main():
         print("❌ 未找到任何可用日志文件")
         sys.exit(1)
 
-    batch_mode = len(log_files) > 1
+    # === 按 USV ID 分组，同一 USV 的多个任务日志合并分析 ===
+    from collections import OrderedDict
+    usv_groups = OrderedDict()
+    for lf in log_files:
+        uid = _quick_scan_usv_id(lf)
+        usv_groups.setdefault(uid, []).append(lf)
+
+    # 统计合并信息
+    merged_count = sum(1 for files in usv_groups.values() if len(files) > 1)
+    if merged_count > 0:
+        print(f"\n🔗 检测到 {merged_count} 个 USV 有多任务日志，将合并分析:")
+        for uid, files in usv_groups.items():
+            if len(files) > 1:
+                print(f"   {uid}: {len(files)} 个文件")
+
+    total_analyses = len(usv_groups)
+    batch_mode = total_analyses > 1
     all_report_data = []
 
-    for idx, log_file in enumerate(log_files, start=1):
+    for idx, (uid, group_files) in enumerate(usv_groups.items(), start=1):
         if batch_mode:
             print("\n" + "="*60)
-            print(f"[{idx}/{len(log_files)}] {log_file}")
+            print(f"[{idx}/{total_analyses}] USV: {uid} ({len(group_files)} 个文件)")
             print("="*60)
-        result = analyze_log_file(log_file, batch_mode=batch_mode)
-        # result 可能是 (bool, data) 或旧版的 bool
+
+        if len(group_files) == 1:
+            # 单文件：沿用原有逻辑
+            result = analyze_log_file(group_files[0], batch_mode=batch_mode)
+        else:
+            # 多文件：合并后统一分析
+            result = analyze_merged_logs(group_files, batch_mode=batch_mode)
+
         if isinstance(result, tuple):
             success, report_data = result
         else:
@@ -2148,14 +2631,13 @@ def main():
         if report_data:
             all_report_data.append(report_data)
 
-    # 多文件模式: 生成合并 HTML 报告
+    # 多USV模式: 生成合并 HTML 报告
     if batch_mode and HAS_HTML_REPORT and len(all_report_data) >= 1:
         try:
-            # 输出到第一个文件的上级目录
             multi_output = log_files[0].parent.parent if log_files[0].parent.name.startswith('nav_log_') else log_files[0].parent
             multi_output = multi_output / 'multi_report'
             multi_output.mkdir(parents=True, exist_ok=True)
-            title = f'USV 多航次分析报告 ({len(all_report_data)} 条记录)'
+            title = f'USV 多航次分析报告 ({len(all_report_data)} 艘 USV)'
             html_path = generate_multi_html_report(all_report_data, multi_output, title=title)
             print(f"\n🌐 多USV合并HTML报告: {html_path}")
             print(f"💡 浏览器打开: file://{html_path.resolve()}")
@@ -2164,7 +2646,7 @@ def main():
             import traceback; traceback.print_exc()
 
     print("\n" + "="*60)
-    print(f"分析完成! ({len(all_report_data)}/{len(log_files)} 文件成功)")
+    print(f"分析完成! ({len(all_report_data)}/{total_analyses} 个USV分析成功)")
     print("="*60)
 
 

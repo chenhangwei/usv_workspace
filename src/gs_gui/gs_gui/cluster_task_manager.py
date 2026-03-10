@@ -63,6 +63,156 @@ class ClusterTaskManager:
         if self.update_status_callback:
             self.update_status_callback(text, style)
 
+    def _parse_xml_content(self, xml_file: str) -> list:
+        """
+        纯 XML 解析逻辑，返回解析后的位置列表。
+
+        Args:
+            xml_file: XML 文件路径
+
+        Returns:
+            list: USV 目标点字典列表，按 (step, usv_id) 排序
+        
+        Raises:
+            ET.ParseError, FileNotFoundError, ValueError 等异常
+        """
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+
+        steps = root.findall("step")
+        if not steps:
+            return []
+
+        combined_list = []
+        NAV_MODE_MAP = {
+            'async': 0, '0': 0,
+            'sync': 1, '1': 1,
+            'rotate': 2, '2': 2,
+            'terminal': 3, '3': 3
+        }
+
+        for idx, step in enumerate(steps, start=1):
+            raw_step_number = step.get("number")
+            try:
+                step_number = int(raw_step_number) if raw_step_number is not None else idx
+            except ValueError:
+                step_number = idx
+
+            nav_mode_attr = step.get("nav_mode", "async").lower()
+            step_nav_mode = NAV_MODE_MAP.get(nav_mode_attr, 0)
+
+            explicit_sync = step.get("sync")
+            if explicit_sync is not None:
+                sync_val = (explicit_sync.lower() == "true")
+            else:
+                sync_val = (step_nav_mode != 0)
+
+            step_sync_timeout = float(step.get("sync_timeout", "10.0"))
+            step_arrival_quality = float(step.get("arrival_quality", "0.8"))
+
+            usvs_elem = step.find("usvs")
+            if usvs_elem is None:
+                continue
+
+            for usv in usvs_elem.findall("usv"):
+                usv_id_elem = usv.find("usv_id")
+                pos_x_elem = usv.find("position/x")
+                pos_y_elem = usv.find("position/y")
+                pos_z_elem = usv.find("position/z")
+
+                yaw_val = 0.0
+                use_yaw_val = False
+                maneuver_type = 0
+                maneuver_param = 0.0
+
+                maneuver_node = usv.find("maneuver")
+                if maneuver_node is not None:
+                    m_type = maneuver_node.get("type", "").lower()
+                    if m_type in ["rotate", "spin"]:
+                        maneuver_type = 1
+                        use_yaw_val = True
+                        circles_attr = maneuver_node.get("circles")
+                        direction_attr = maneuver_node.get("direction", "clockwise")
+                        if circles_attr:
+                            try:
+                                maneuver_param = float(circles_attr)
+                                if direction_attr.lower() in ["ccw", "counter_clockwise", "anticlockwise", "left"]:
+                                    maneuver_param = -abs(maneuver_param)
+                                else:
+                                    maneuver_param = abs(maneuver_param)
+                            except ValueError:
+                                pass
+
+                yaw_node = usv.find("yaw")
+                if yaw_node is not None and maneuver_type == 0:
+                    use_attr = yaw_node.get("use")
+                    mode_attr = yaw_node.get("mode")
+                    if (use_attr and use_attr.lower() == "true") or (mode_attr and mode_attr.lower() == "fixed"):
+                        use_yaw_val = True
+                    elif mode_attr and mode_attr.lower() == "auto":
+                        use_yaw_val = False
+                    val_child = yaw_node.find("value")
+                    if val_child is not None and val_child.text:
+                        try:
+                            yaw_val = float(val_child.text)
+                        except ValueError:
+                            pass
+                    elif yaw_node.text and yaw_node.text.strip():
+                        try:
+                            yaw_val = float(yaw_node.text)
+                        except ValueError:
+                            pass
+
+                velocity_elem = usv.find("velocity/value")
+                led_val = usv.get("led", "")
+
+                effective_nav_mode = step_nav_mode
+                if maneuver_type == 1:
+                    effective_nav_mode = 2
+
+                usv_data = {
+                    "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
+                    "position": {
+                        "x": float(pos_x_elem.text) if pos_x_elem is not None and pos_x_elem.text is not None else 0.0,
+                        "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
+                        "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
+                    },
+                    "yaw": yaw_val,
+                    "use_yaw": use_yaw_val,
+                    "maneuver_type": maneuver_type,
+                    "maneuver_param": maneuver_param,
+                    "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
+                    "step": step_number,
+                    "sync": sync_val,
+                    "nav_mode": effective_nav_mode,
+                    "sync_timeout": step_sync_timeout,
+                    "arrival_quality_threshold": step_arrival_quality,
+                    "led": led_val
+                }
+                combined_list.append(usv_data)
+
+        if combined_list:
+            combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
+
+        return combined_list
+
+    def parse_file(self, xml_file: str) -> list:
+        """
+        解析 XML 任务文件并返回位置列表（不触发 GUI 弹窗和状态更新）。
+        供 MissionQueueManager 等外部调用使用。
+
+        Args:
+            xml_file: XML 文件路径
+
+        Returns:
+            list: 解析后的目标点列表，失败返回空列表
+        """
+        try:
+            return self._parse_xml_content(xml_file)
+        except Exception as e:
+            self.append_warning(f"解析文件失败: {e}")
+            return []
+
     def read_data_from_file(self):
         """从XML文件中读取集群任务数据"""
         # 打开文件对话框，选择XML文件

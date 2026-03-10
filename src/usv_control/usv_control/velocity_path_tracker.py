@@ -615,6 +615,26 @@ class VelocityPathTracker:
             #   150° → 0.26 × speed (紧弧)
             #   180° → 0.15 × speed (极慢弧, 接近最小速度)
             v_cmd = max(v_cmd, adaptive_speed)
+
+            # 大角度对准保护:
+            # MPC 在 120°~180° 附近偶尔会因为角度分支/代价对称性给出错误方向
+            # 或几乎为零的角速度，导致 USV 长时间不朝目标点转向。
+            # 这里在仅限大角度阶段引入一个与 heading_error 同号的最小转向下限，
+            # 保证船首优先朝向目标方向收敛。
+            align_w_cmd = 1.8 * heading_error
+            align_w_cmd = max(-self.max_angular_velocity, min(self.max_angular_velocity, align_w_cmd))
+
+            min_turn_floor = max(0.18, 0.45 * self.max_angular_velocity)
+            if abs(heading_error) > math.radians(120.0):
+                min_turn_floor = max(min_turn_floor, 0.28)
+            min_turn_floor = min(self.max_angular_velocity, min_turn_floor)
+
+            commanded_floor = min(abs(align_w_cmd), min_turn_floor)
+            wrong_turn_direction = (w_cmd * heading_error) < 0.0
+            insufficient_turn = abs(w_cmd) < commanded_floor
+
+            if wrong_turn_direction or insufficient_turn:
+                w_cmd = math.copysign(max(abs(w_cmd), commanded_floor), heading_error)
         
         # 同步更新角速度滤波 (用于曲率减速计算)
         self._last_angular_velocity = (
