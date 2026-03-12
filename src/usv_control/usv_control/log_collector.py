@@ -236,7 +236,7 @@ class LogCollectorNode(Node):
         # v16 新增: 邻居USV位置订阅 (来自GS的 apf_neighbor_relay_node)
         self.create_subscription(
             FleetNeighborPoses, 'apf/neighbors',
-            self._fleet_neighbors_callback, qos_reliable)
+            self._fleet_neighbors_callback, qos_best_effort)
             
         # ==================== 定时器 ====================
         self.create_timer(0.1, self._log_data)

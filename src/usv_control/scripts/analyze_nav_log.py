@@ -679,6 +679,204 @@ def _print_per_goal_stats(data: list):
         print(line)
 
 
+def _valid_primary_neighbor_id(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        value = value.strip()
+        if value and value != '0':
+            return value
+    return None
+
+
+def _count_binary_episodes(data: list, field: str) -> tuple[int, float, float]:
+    total_duration = 0.0
+    episode_count = 0
+    longest_duration = 0.0
+    i = 0
+    while i < len(data):
+        if data[i].get(field) == 1:
+            start_ts = data[i]['timestamp']
+            j = i
+            while j < len(data) and data[j].get(field) == 1:
+                j += 1
+            end_ts = data[j - 1]['timestamp']
+            duration = max(0.0, end_ts - start_ts)
+            total_duration += duration
+            longest_duration = max(longest_duration, duration)
+            episode_count += 1
+            i = j
+        else:
+            i += 1
+    return episode_count, total_duration, longest_duration
+
+
+def _count_nonzero_switches(values: list[float]) -> int:
+    filtered = [int(v) for v in values if isinstance(v, (int, float)) and int(v) != 0]
+    return sum(1 for i in range(1, len(filtered)) if filtered[i] != filtered[i - 1])
+
+
+def _count_significant_sign_flips(values: list[float], min_abs: float = 0.05) -> int:
+    return sum(
+        1
+        for i in range(1, len(values))
+        if values[i - 1] * values[i] < 0.0 and abs(values[i - 1]) > min_abs and abs(values[i]) > min_abs
+    )
+
+
+def _compute_orca_quality_metrics(data: list) -> dict[str, Any]:
+    if not data or 'orca_active' not in data[0]:
+        return {'available': False}
+
+    total = len(data)
+    total_time = max(1e-6, data[-1]['timestamp'] - data[0]['timestamp'])
+    duration_min = total_time / 60.0
+    active_samples = [d for d in data if d.get('orca_active') == 1]
+    active_count = len(active_samples)
+    active_pct = active_count / total * 100.0 if total else 0.0
+
+    start_distances: list[float] = []
+    prev_active = 0
+    for sample in data:
+        current_active = 1 if sample.get('orca_active') == 1 else 0
+        distance = sample.get('orca_closest_distance')
+        if current_active == 1 and prev_active == 0 and isinstance(distance, (int, float)) and distance > 0.0:
+            start_distances.append(float(distance))
+        prev_active = current_active
+
+    start_distances_sorted = sorted(start_distances)
+    min_start_distance = start_distances_sorted[0] if start_distances_sorted else None
+    median_start_distance = None
+    if start_distances_sorted:
+        mid = len(start_distances_sorted) // 2
+        if len(start_distances_sorted) % 2 == 1:
+            median_start_distance = start_distances_sorted[mid]
+        else:
+            median_start_distance = (start_distances_sorted[mid - 1] + start_distances_sorted[mid]) / 2.0
+    late_start_count = sum(1 for d in start_distances if d < 3.0)
+
+    valid_distances = [
+        float(d.get('orca_closest_distance'))
+        for d in active_samples
+        if isinstance(d.get('orca_closest_distance'), (int, float)) and d.get('orca_closest_distance') > 0.0
+    ]
+    min_distance = min(valid_distances) if valid_distances else None
+    avg_distance = sum(valid_distances) / len(valid_distances) if valid_distances else None
+
+    hard_brakes = [d for d in data if d.get('orca_hard_brake') == 1]
+    hard_brake_count = len(hard_brakes)
+    hard_brake_pct = hard_brake_count / total * 100.0 if total else 0.0
+
+    escape_episodes = 0
+    escape_duration = 0.0
+    if 'orca_escape_active' in data[0]:
+        escape_episodes, escape_duration, _ = _count_binary_episodes(data, 'orca_escape_active')
+    escape_pct = escape_duration / total_time * 100.0 if total_time > 0.0 else 0.0
+
+    omega_values = [d.get('cmd_omega') for d in data if isinstance(d.get('cmd_omega'), (int, float))]
+    omega_flips = _count_significant_sign_flips(omega_values)
+    abrupt_omega_jumps = sum(1 for i in range(1, len(omega_values)) if abs(omega_values[i] - omega_values[i - 1]) > 0.20)
+    omega_flip_rate = omega_flips / duration_min if duration_min > 0.0 else 0.0
+    abrupt_jump_rate = abrupt_omega_jumps / duration_min if duration_min > 0.0 else 0.0
+
+    commit_changes = _count_nonzero_switches([d.get('orca_commit_side', 0) for d in data])
+
+    orca_speeds = [d.get('velocity_speed') for d in active_samples if isinstance(d.get('velocity_speed'), (int, float))]
+    avg_orca_speed = sum(orca_speeds) / len(orca_speeds) if orca_speeds else None
+    low_speed_threshold = 0.15
+    low_speed_count = sum(1 for speed in orca_speeds if speed < low_speed_threshold)
+    low_speed_pct = low_speed_count / len(orca_speeds) * 100.0 if orca_speeds else 0.0
+
+    orca_episodes, orca_duration, longest_orca_episode = _count_binary_episodes(data, 'orca_active')
+
+    if min_start_distance is None:
+        early_grade = 'N/A'
+    elif min_start_distance >= 4.0 and late_start_count == 0:
+        early_grade = '较早'
+    elif min_start_distance >= 3.0:
+        early_grade = '一般'
+    else:
+        early_grade = '偏晚'
+
+    if (
+        hard_brake_pct <= 0.3
+        and abrupt_jump_rate <= 0.5
+        and omega_flip_rate <= 0.8
+        and low_speed_pct <= 8.0
+        and escape_episodes == 0
+    ):
+        smooth_grade = '丝滑'
+    elif (
+        hard_brake_pct <= 1.0
+        and abrupt_jump_rate <= 1.2
+        and omega_flip_rate <= 1.5
+        and low_speed_pct <= 15.0
+        and escape_episodes <= 1
+    ):
+        smooth_grade = '一般'
+    else:
+        smooth_grade = '生硬'
+
+    if (
+        longest_orca_episode >= 120.0
+        or (active_pct >= 80.0 and escape_episodes >= 2)
+        or (hard_brake_pct >= 3.0 and escape_episodes >= 1)
+        or commit_changes >= 6
+    ):
+        coupling_grade = '高'
+    elif longest_orca_episode >= 45.0 or active_pct >= 60.0 or escape_episodes >= 1 or commit_changes >= 3:
+        coupling_grade = '中'
+    else:
+        coupling_grade = '低'
+
+    elegance_score = 100.0
+    elegance_score -= min(40.0, hard_brake_pct * 6.0)
+    elegance_score -= min(18.0, abrupt_jump_rate * 6.0)
+    elegance_score -= min(14.0, omega_flip_rate * 5.0)
+    elegance_score -= min(18.0, low_speed_pct * 0.6)
+    elegance_score -= min(10.0, commit_changes * 1.5)
+    if coupling_grade == '高':
+        elegance_score -= 12.0
+    elif coupling_grade == '中':
+        elegance_score -= 6.0
+    elegance_score = max(0.0, min(100.0, elegance_score))
+    elegance_grade = '优雅' if elegance_score >= 80 else '可接受' if elegance_score >= 60 else '欠佳' if elegance_score >= 40 else '差'
+
+    return {
+        'available': True,
+        'orca_pct': active_pct,
+        'episode_count': orca_episodes,
+        'episode_duration_s': orca_duration,
+        'longest_episode_s': longest_orca_episode,
+        'min_start_distance_m': min_start_distance,
+        'median_start_distance_m': median_start_distance,
+        'late_start_count': late_start_count,
+        'min_distance_m': min_distance,
+        'avg_distance_m': avg_distance,
+        'hard_brake_count': hard_brake_count,
+        'hard_brake_pct': hard_brake_pct,
+        'escape_episodes': escape_episodes,
+        'escape_duration_s': escape_duration,
+        'escape_pct': escape_pct,
+        'commit_changes': commit_changes,
+        'omega_flips': omega_flips,
+        'omega_flip_rate_per_min': omega_flip_rate,
+        'abrupt_omega_jumps': abrupt_omega_jumps,
+        'abrupt_jump_rate_per_min': abrupt_jump_rate,
+        'avg_orca_speed_mps': avg_orca_speed,
+        'low_speed_pct': low_speed_pct,
+        'early_grade': early_grade,
+        'smooth_grade': smooth_grade,
+        'coupling_grade': coupling_grade,
+        'elegance_score': elegance_score,
+        'elegance_grade': elegance_grade,
+        'early_but_ineffective': bool(
+            min_start_distance is not None
+            and min_start_distance >= 4.0
+            and min_distance is not None
+            and min_distance < 0.8
+        ),
+    }
+
+
 def _print_quality_score(data: list):
     """打印质量评分总结"""
     guided_data = [d for d in data if d.get('flight_mode') == 'GUIDED']
@@ -738,34 +936,10 @@ def _print_orca_stats(data: list):
     if 'orca_active' not in data[0]:
         return
 
-    def _valid_primary_neighbor(value: Any) -> Optional[str]:
-        if isinstance(value, str):
-            value = value.strip()
-            if value and value != '0':
-                return value
-        return None
-
-    def _count_active_episodes(field: str) -> tuple[int, float]:
-        total_duration = 0.0
-        episode_count = 0
-        i = 0
-        while i < len(data):
-            if data[i].get(field) == 1:
-                episode_start = data[i]['timestamp']
-                j = i
-                while j < len(data) and data[j].get(field) == 1:
-                    j += 1
-                episode_end = data[j - 1]['timestamp']
-                total_duration += (episode_end - episode_start)
-                episode_count += 1
-                i = j
-            else:
-                i += 1
-        return episode_count, total_duration
-
     orca_active_samples = [d for d in data if d.get('orca_active') == 1]
     total = len(data)
     active_count = len(orca_active_samples)
+    quality = _compute_orca_quality_metrics(data)
 
     if active_count == 0:
         print(f"\n{'='*60}")
@@ -786,7 +960,7 @@ def _print_orca_stats(data: list):
         print(f"   最近邻居距离: 最小={min(distances):.2f}m, 平均={sum(distances)/len(distances):.2f}m")
 
     # 计算 ORCA 持续时间段
-    episode_count, duration_total = _count_active_episodes('orca_active')
+    episode_count, duration_total, _ = _count_binary_episodes(data, 'orca_active')
     if episode_count > 0:
         total_time = data[-1]['timestamp'] - data[0]['timestamp']
         print(f"   激活段数: {episode_count} 段, 总时长={duration_total:.1f}s ({duration_total/total_time*100:.1f}%)")
@@ -805,7 +979,7 @@ def _print_orca_stats(data: list):
 
     primary_counts = Counter()
     for d in orca_active_samples:
-        primary_id = _valid_primary_neighbor(d.get('orca_primary_neighbor_id'))
+        primary_id = _valid_primary_neighbor_id(d.get('orca_primary_neighbor_id'))
         if primary_id is not None:
             primary_counts[primary_id] += 1
     if primary_counts:
@@ -843,7 +1017,7 @@ def _print_orca_stats(data: list):
         escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
         escape_count = len(escape_samples)
         if escape_count > 0:
-            escape_episodes, escape_duration = _count_active_episodes('orca_escape_active')
+            escape_episodes, escape_duration, _ = _count_binary_episodes(data, 'orca_escape_active')
             phase_counter = Counter(
                 int(d.get('orca_escape_phase', 0))
                 for d in escape_samples
@@ -875,6 +1049,28 @@ def _print_orca_stats(data: list):
     if neighbor_counts:
         max_neighbors = max(neighbor_counts)
         print(f"   最大同时邻居数: {max_neighbors}")
+
+    if quality.get('available'):
+        print(f"\n   🎯 避让质量判定:")
+        print(
+            f"   - 提前性: {quality['early_grade']} "
+            f"(最早启动={quality['min_start_distance_m']:.2f}m, 中位启动={quality['median_start_distance_m']:.2f}m, <3m 启动={quality['late_start_count']}次)"
+            if quality['min_start_distance_m'] is not None and quality['median_start_distance_m'] is not None
+            else f"   - 提前性: {quality['early_grade']}"
+        )
+        print(
+            f"   - 丝滑性: {quality['smooth_grade']} "
+            f"(硬刹车={quality['hard_brake_pct']:.1f}%, ω反转={quality['omega_flips']}次/{quality['omega_flip_rate_per_min']:.2f}次/分, "
+            f"ω突变={quality['abrupt_omega_jumps']}次/{quality['abrupt_jump_rate_per_min']:.2f}次/分, ORCA低速占比={quality['low_speed_pct']:.1f}%)"
+        )
+        avg_orca_speed_text = f", ORCA均速={quality['avg_orca_speed_mps']:.3f}m/s" if quality['avg_orca_speed_mps'] is not None else ""
+        print(
+            f"   - 钳制风险: {quality['coupling_grade']} "
+            f"(最长连续接管={quality['longest_episode_s']:.1f}s, 脱困={quality['escape_episodes']}次/{quality['escape_duration_s']:.1f}s, 选边切换={quality['commit_changes']}次{avg_orca_speed_text})"
+        )
+        print(f"   - 优雅度: {quality['elegance_score']:.0f}/100 → 【{quality['elegance_grade']}】")
+        if quality['early_but_ineffective']:
+            print("   - 诊断: 虽然启动较早，但最近距离仍塌陷，说明存在长时耦合或修正不够顺滑")
 
 
 def _print_nav_mode_stats(data: list):
@@ -2198,6 +2394,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     s_spd = min(100, avg_spd / 0.3 * 100)
     total = s_cte * 0.4 + s_he * 0.4 + s_mpc * 0.1 + s_spd * 0.1
     grade = "A+" if total >= 80 else "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 40 else "D"
+    orca_quality = _compute_orca_quality_metrics(data)
     
     # ORCA 统计
     orca_active_count = sum(1 for d in data if d.get('orca_active') == 1)
@@ -2242,6 +2439,20 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         neighbor_id, count = primary_counts.most_common(1)[0]
         primary_line = f"Primary:   {neighbor_id} ({count/orca_active_count*100:.0f}%)"
 
+    avoid_line = "Avoid:     N/A"
+    lock_line = "LockRisk:  N/A"
+    elegant_line = "Elegant:   N/A"
+    if orca_quality.get('available'):
+        avoid_line = (
+            f"Avoid:     提前={orca_quality['early_grade']} 丝滑={orca_quality['smooth_grade']}"
+        )
+        lock_line = (
+            f"LockRisk:  {orca_quality['coupling_grade']} ({orca_quality['longest_episode_s']:.0f}s/{orca_quality['escape_episodes']}x)"
+        )
+        elegant_line = (
+            f"Elegant:   {orca_quality['elegance_score']:.0f}/100 [{orca_quality['elegance_grade']}]"
+        )
+
     # WiFi 信号摘要
     wifi_line = "WiFi:      N/A"
     if 'wifi_rssi_dbm' in data[0]:
@@ -2267,12 +2478,15 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"{orca_line}\n"
         f"{escape_line}\n"
         f"{primary_line}\n"
+        f"{avoid_line}\n"
+        f"{lock_line}\n"
+        f"{elegant_line}\n"
         f"{wifi_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
     )
     ax.text(0.1, 0.95, stats_text, transform=ax.transAxes, fontsize=10,
-            verticalalignment='top', fontfamily='monospace',
+            verticalalignment='top',
             bbox=dict(boxstyle='round', facecolor='lightyellow', alpha=0.8))
     
     fig.text(

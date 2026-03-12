@@ -131,15 +131,15 @@
     apf_orca_overlap_turn_scale: 0.85       # 防陷入时转向缩放（0~1）
     # ---- 伴行耦合保护 ----
     apf_orca_coupling_guard_enabled: true   # 长时间近距同向伴行时触发解耦
-    apf_orca_coupling_distance: 1.2         # 伴行耦合判定距离阈值（米）
-    apf_orca_coupling_release_distance: 1.6 # 解耦释放距离阈值（米，带迟滞）
-    apf_orca_coupling_lateral_threshold: 0.45  # 伴行耦合横向重合阈值（米）
-    apf_orca_coupling_rel_speed_max: 0.12   # 相对速度小于该值才认为"伴行锁定"（m/s）
-    apf_orca_coupling_hold_time: 8.0        # 满足伴行条件持续该时长后触发解耦（秒）
+    apf_orca_coupling_distance: 1.4         # 伴行耦合判定距离阈值（米）
+    apf_orca_coupling_release_distance: 2.0 # 解耦释放距离阈值（米，带迟滞）
+    apf_orca_coupling_lateral_threshold: 0.60  # 伴行耦合横向重合阈值（米）
+    apf_orca_coupling_rel_speed_max: 0.18   # 相对速度小于该值才认为"伴行锁定"（m/s）
+    apf_orca_coupling_hold_time: 4.5        # 满足伴行条件持续该时长后触发解耦（秒）
     apf_orca_coupling_speed_min: 0.20       # 双船速度都高于该值才判定"推着走"（m/s）
-    apf_orca_coupling_speed_cut: 0.12       # 解耦时附加减速量（m/s）
-    apf_orca_coupling_turn_boost: 0.10      # 解耦时附加转向增量（rad/s）
-    apf_orca_coupling_lane_push: 0.10       # 解耦时横向分离推力（rad/s）
+    apf_orca_coupling_speed_cut: 0.08       # 解耦时附加减速量（m/s）
+    apf_orca_coupling_turn_boost: 0.18      # 解耦时附加转向增量（rad/s）
+    apf_orca_coupling_lane_push: 0.14       # 解耦时横向分离推力（rad/s）
     # ---- CPA / TCPA 预测风险加权 ----
     apf_orca_cpa_enabled: true              # 启用 CPA/TCPA 预测风险加权
     apf_orca_cpa_distance_threshold: 1.2    # CPA 风险阈值（米）
@@ -150,7 +150,16 @@
     apf_orca_predictive_cpa_threshold: 3.0  # 预测 CPA 阈值（米）↑：更早识别潜在碰撞
     apf_orca_predictive_max_distance: 6.0   # 提前介入的最远距离（米）
     apf_orca_predictive_angular_max: 0.16   # 提前转向最大增量（rad/s）↑：增强预转向可见性
-    apf_orca_predictive_speed_cut_max: 0.10 # 提前减速最大增量（m/s）↑：为分离腾时间
+    apf_orca_swarm_companion_entry_distance: 2.8  # 集群伴行在该距离外不进入重 ORCA 接管
+    apf_orca_swarm_companion_heading_deg: 25.0    # 判定同航向/同走廊的航向容差（度）
+    apf_orca_swarm_companion_lateral_threshold: 1.2  # 并行伴行横向阈值（米）
+    apf_orca_swarm_follow_lateral_threshold: 0.7   # 跟驰同车道横向阈值（米）
+    apf_orca_swarm_follow_distance: 3.0            # 跟驰前向距离阈值（米）
+    apf_orca_swarm_rel_speed_max: 0.22             # 伴行/跟驰最大相对速度（m/s）
+    apf_orca_swarm_merge_heading_deg: 35.0         # 路径交汇判定最小航向差（度）
+    apf_orca_swarm_merge_tcpa_threshold: 8.0       # 路径交汇判定 TCPA 阈值（秒）
+    apf_orca_swarm_merge_dcpa_threshold: 1.6       # 路径交汇判定 DCPA 阈值（米）
+    apf_orca_predictive_speed_cut_max: 0.04 # 提前减速最大增量（m/s）↓：更偏向提前转向而非过早掉速
     apf_orca_side_effectiveness_enabled: true     # 启用选边有效性判据与自动换边重试
     apf_orca_side_effectiveness_window: 2.0       # 有效性评估窗口（秒）↓：更快判定是否换边
     apf_orca_side_effectiveness_min_sep_gain: 0.25  # 窗口内最小分离距离增益阈值（米）
@@ -160,7 +169,14 @@
     apf_orca_side_switch_turn_boost: 0.12         # 触发换边当拍附加转向增量（rad/s）
     # ---- 紧急增益 ----
     apf_orca_urgency_scale_max: 2.0         # 高风险时角速度放大上限
-    apf_orca_linear_slowdown_max: 0.12      # 高风险时线速度附加减速上限（m/s）
+    apf_orca_linear_slowdown_max: 0.08      # 高风险时线速度附加减速上限（m/s）
+    apf_orca_close_closing_turn_boost: 0.18 # 近距快速逼近时额外转向增量（rad/s）
+    apf_orca_close_closing_speed_cut: 0.08  # 近距快速逼近时附加减速量（m/s）
+    apf_orca_persistent_close_timeout: 18.0 # 长时间近距但未分离的提前脱困触发时长（秒）
+    apf_orca_escape_enabled: false          # 默认关闭 ORCA 脱困，避免集群中被脱困机制放大振荡
+    apf_orca_turning_hard_brake_relax_enabled: true  # 已建立稳定转向时放宽硬刹车触发
+    apf_orca_turning_hard_brake_scale: 0.82 # 转向有效时硬刹车距离缩放
+    apf_orca_turning_hard_brake_min_speed: 0.08  # 转向有效时硬刹车最低保速（m/s）
     # ---- 转向预算保护 ----
     apf_orca_turn_budget_enabled: true      # 基础转向接近饱和时抑制同向避让增量
     apf_orca_turn_budget_ratio: 0.85        # 判定"接近饱和"的基础角速度比例
