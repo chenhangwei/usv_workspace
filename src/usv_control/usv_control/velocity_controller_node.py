@@ -59,6 +59,7 @@ from common_interfaces.msg import (
 import math
 import time
 import threading
+import numpy as np
 from typing import Any, Dict, Optional, Tuple
 from enum import Enum, auto
 
@@ -93,8 +94,12 @@ class VelocityControllerNode(Node):
     直接发送给飞控，避免飞控的位置模式减速逻辑。
     """
     
-    def __init__(self):
-        super().__init__('velocity_controller_node')
+    def __init__(self, *, namespace=None, parameter_overrides=None):
+        super().__init__(
+            'velocity_controller_node',
+            namespace=namespace,
+            parameter_overrides=parameter_overrides,
+        )
         
         # USV ID (从命名空间提取，如 /usv_02 -> usv_02)
         ns = self.get_namespace()
@@ -306,6 +311,16 @@ class VelocityControllerNode(Node):
         self.declare_parameter('apf_health_own_freeze_warn_duration', 0.8)
         self.declare_parameter('apf_health_neighbor_freeze_warn_duration', 0.8)
         self.declare_parameter('apf_health_warn_interval', 2.0)
+        self.declare_parameter('rl_policy_enabled', False)
+        self.declare_parameter('rl_policy_topic', 'rl_policy/cmd_vel')
+        self.declare_parameter('rl_policy_action_timeout', 0.5)
+        self.declare_parameter('rl_policy_use_residual', True)
+        self.declare_parameter('rl_policy_fallback_to_raw', True)
+        self.declare_parameter('rl_policy_allow_reverse', False)
+        self.declare_parameter('rl_policy_linear_accel_limit', 0.45)
+        self.declare_parameter('rl_policy_linear_jerk_limit', 1.20)
+        self.declare_parameter('rl_policy_angular_accel_limit', 0.80)
+        self.declare_parameter('rl_policy_angular_jerk_limit', 2.50)
         
         # ==================== 获取参数 ====================
         self.control_mode = str(self.get_parameter('control_mode').value or 'velocity')
@@ -587,6 +602,29 @@ class VelocityControllerNode(Node):
         self._apf_health_warn_interval = float(
             self.get_parameter('apf_health_warn_interval').value or 2.0
         )
+        self._rl_policy_topic = str(self.get_parameter('rl_policy_topic').value or 'rl_policy/cmd_vel')
+        self._rl_policy_action_timeout = float(
+            self.get_parameter('rl_policy_action_timeout').value or 0.5
+        )
+        self._rl_policy_use_residual = bool(self.get_parameter('rl_policy_use_residual').value)
+        self._rl_policy_fallback_to_raw = bool(
+            self.get_parameter('rl_policy_fallback_to_raw').value
+        )
+        self._rl_policy_allow_reverse = bool(
+            self.get_parameter('rl_policy_allow_reverse').value
+        )
+        self._rl_policy_linear_accel_limit = float(
+            self.get_parameter('rl_policy_linear_accel_limit').value or 0.45
+        )
+        self._rl_policy_linear_jerk_limit = float(
+            self.get_parameter('rl_policy_linear_jerk_limit').value or 1.20
+        )
+        self._rl_policy_angular_accel_limit = float(
+            self.get_parameter('rl_policy_angular_accel_limit').value or 0.80
+        )
+        self._rl_policy_angular_jerk_limit = float(
+            self.get_parameter('rl_policy_angular_jerk_limit').value or 2.50
+        )
         
         # ==================== 初始化路径跟踪器 ====================
         self.get_logger().info(f'🛠️ 正在创建 VelocityPathTracker (MPC)...')
@@ -662,7 +700,16 @@ class VelocityControllerNode(Node):
         self.current_state: Optional[State] = None
         self._current_goal_id: Optional[int] = None
         self._last_velocity_cmd: Optional[VelocityCommand] = None
+        self._last_velocity_cmd_time: float = 0.0
+        self._last_raw_navigation_cmd: Optional[VelocityCommand] = None
         self._control_active = False
+        self._rl_policy_last_action = VelocityCommand.stop()
+        self._rl_policy_last_shaped_action = VelocityCommand.stop()
+        self._rl_policy_last_action_time: float = 0.0
+        self._rl_policy_last_safety_log_time: float = 0.0
+        self._rl_policy_last_shaped_time: float = 0.0
+        self._rl_policy_last_linear_accel: float = 0.0
+        self._rl_policy_last_angular_accel: float = 0.0
         
         # ==================== 避障状态 ====================
         self._avoidance_active = False           # 避障模式是否激活
@@ -747,6 +794,7 @@ class VelocityControllerNode(Node):
         
         self._last_valid_pose: Optional[Pose2D] = None  # 用于跳变检测
         self._pose_jump_threshold: float = 3.0  # 位姿跳变阈值 (m) - 降低以检测小幅漂移
+        self._pose_jump_ignore_until: float = 0.0  # 训练环境 reset 后暂时忽略位姿跳变
 
         # APF 邻船状态缓存: topic/usv_id -> (x, y, vx, vy, timestamp)
         self._apf_neighbor_states: Dict[str, Tuple[float, float, float, float, float]] = {}
@@ -1007,6 +1055,14 @@ class VelocityControllerNode(Node):
                         callback_group=self.callback_group
                     )
                     self._apf_neighbor_subs.append(sub)
+
+        self.rl_policy_sub = self.create_subscription(
+            TwistStamped,
+            self._rl_policy_topic,
+            self._rl_policy_cmd_callback,
+            qos_best_effort,
+            callback_group=self.callback_group
+        )
         
         # ==================== 发布者 ====================
         # 速度指令发布
@@ -1050,10 +1106,16 @@ class VelocityControllerNode(Node):
             'velocity_controller/debug',
             qos_best_effort
         )
+        self.raw_cmd_pub = self.create_publisher(
+            TwistStamped,
+            'velocity_controller/raw_cmd',
+            qos_best_effort
+        )
 
         # ==================== 控制循环 ====================
         control_rate = float(self.get_parameter('control_rate').value or 20.0)
         control_period = 1.0 / control_rate
+        self._control_period = control_period
         self.control_timer = self.create_timer(
             control_period, 
             self._control_loop,
@@ -1185,6 +1247,16 @@ class VelocityControllerNode(Node):
             course=course_yaw,
             speed=current_speed
         )
+
+        if current_time < self._pose_jump_ignore_until:
+            self.current_pose = new_pose
+            self._last_valid_pose = new_pose
+            self._last_pose_time = current_time
+            self._consecutive_timeout_count = 0
+            self._consecutive_jump_count = 0
+            self._last_jump_pose = None
+            self._update_own_freeze_health(new_pose, current_time)
+            return
         
         # 数据有效性检查
         if not new_pose.is_valid():
@@ -1877,6 +1949,154 @@ class VelocityControllerNode(Node):
 
         return own_freeze_duration, neighbor_freeze_count
 
+    def _rl_policy_cmd_callback(self, msg: TwistStamped):
+        """缓存最新的 RL 动作。"""
+        cmd = VelocityCommand(
+            linear_x=float(msg.twist.linear.x),
+            linear_y=float(msg.twist.linear.y),
+            angular_z=float(msg.twist.angular.z),
+        ).sanitize()
+        self._rl_policy_last_action = cmd
+        self._rl_policy_last_action_time = time.time()
+
+    def _publish_raw_navigation_command(self, cmd: VelocityCommand):
+        """发布避碰修正前的导航原始速度指令，供 RL 训练采样。"""
+        safe_cmd = cmd.sanitize()
+        msg = TwistStamped()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = 'base_link'
+        msg.twist.linear.x = safe_cmd.linear_x
+        msg.twist.linear.y = safe_cmd.linear_y
+        msg.twist.angular.z = safe_cmd.angular_z
+        self.raw_cmd_pub.publish(msg)
+        self._last_raw_navigation_cmd = safe_cmd
+
+    @staticmethod
+    def _limit_axis_with_continuous_accel(
+        current_value: float,
+        target_value: float,
+        current_accel: float,
+        dt: float,
+        accel_limit: float,
+        jerk_limit: float,
+    ) -> Tuple[float, float]:
+        if dt <= 1e-6 or accel_limit <= 1e-6:
+            return target_value, 0.0
+
+        desired_accel = (target_value - current_value) / dt
+        bounded_accel = desired_accel
+        if jerk_limit > 1e-6:
+            accel_delta = jerk_limit * dt
+            bounded_accel = np.clip(
+                bounded_accel,
+                current_accel - accel_delta,
+                current_accel + accel_delta,
+            )
+
+        bounded_accel = float(np.clip(bounded_accel, -accel_limit, accel_limit))
+        next_value = current_value + bounded_accel * dt
+
+        if target_value >= current_value:
+            next_value = min(next_value, target_value)
+        else:
+            next_value = max(next_value, target_value)
+
+        next_accel = (next_value - current_value) / dt
+        return float(next_value), float(next_accel)
+
+    def _sync_rl_command_shaper(self, cmd: VelocityCommand, now_sec: float):
+        self._rl_policy_last_shaped_action = cmd.sanitize()
+        self._rl_policy_last_shaped_time = now_sec
+        self._rl_policy_last_linear_accel = 0.0
+        self._rl_policy_last_angular_accel = 0.0
+
+    def _shape_rl_policy_command(self, target_cmd: VelocityCommand, now_sec: float) -> VelocityCommand:
+        target_cmd = target_cmd.sanitize()
+        dt = now_sec - self._rl_policy_last_shaped_time
+        if dt <= 1e-6:
+            dt = max(1e-3, getattr(self, '_control_period', 0.05))
+        else:
+            dt = min(dt, max(0.2, getattr(self, '_control_period', 0.05) * 3.0))
+
+        if (now_sec - self._rl_policy_last_shaped_time) > max(0.3, getattr(self, '_control_period', 0.05) * 4.0):
+            self._rl_policy_last_linear_accel = 0.0
+            self._rl_policy_last_angular_accel = 0.0
+
+        shaped_linear_x, linear_accel = self._limit_axis_with_continuous_accel(
+            current_value=self._rl_policy_last_shaped_action.linear_x,
+            target_value=target_cmd.linear_x,
+            current_accel=self._rl_policy_last_linear_accel,
+            dt=dt,
+            accel_limit=max(1e-3, self._rl_policy_linear_accel_limit),
+            jerk_limit=max(0.0, self._rl_policy_linear_jerk_limit),
+        )
+        shaped_angular_z, angular_accel = self._limit_axis_with_continuous_accel(
+            current_value=self._rl_policy_last_shaped_action.angular_z,
+            target_value=target_cmd.angular_z,
+            current_accel=self._rl_policy_last_angular_accel,
+            dt=dt,
+            accel_limit=max(1e-3, self._rl_policy_angular_accel_limit),
+            jerk_limit=max(0.0, self._rl_policy_angular_jerk_limit),
+        )
+
+        self._rl_policy_last_shaped_time = now_sec
+        self._rl_policy_last_linear_accel = linear_accel
+        self._rl_policy_last_angular_accel = angular_accel
+        result = VelocityCommand(
+            linear_x=shaped_linear_x,
+            linear_y=target_cmd.linear_y,
+            angular_z=shaped_angular_z,
+        ).sanitize()
+        self._rl_policy_last_shaped_action = result
+        return result.sanitize()
+
+    def _apply_rl_policy_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
+        """将最新 RL 动作叠加到导航原始命令。"""
+        now_sec = time.time()
+        if (
+            self._rl_policy_last_action_time <= 0.0
+            or (now_sec - self._rl_policy_last_action_time) > max(0.05, self._rl_policy_action_timeout)
+        ):
+            if self._rl_policy_fallback_to_raw:
+                self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
+                return cmd
+            return VelocityCommand.stop()
+
+        target_action = self._rl_policy_last_action.sanitize()
+        if self._rl_policy_use_residual and (not self._rl_policy_allow_reverse):
+            min_residual_linear = -max(0.0, cmd.linear_x)
+            if target_action.linear_x < min_residual_linear and (now_sec - self._rl_policy_last_safety_log_time) >= 2.0:
+                self.get_logger().warning(
+                    f'RL safety clamp active: reverse linear command {cmd.linear_x + target_action.linear_x:.2f} m/s was blocked; residual was clipped to preserve forward-only COLREGS motion.'
+                )
+                self._rl_policy_last_safety_log_time = now_sec
+            target_action = VelocityCommand(
+                linear_x=max(target_action.linear_x, min_residual_linear),
+                linear_y=target_action.linear_y,
+                angular_z=target_action.angular_z,
+            ).sanitize()
+
+        shaped_action = self._shape_rl_policy_command(target_action, now_sec)
+
+        if self._rl_policy_use_residual:
+            corrected = VelocityCommand(
+                linear_x=cmd.linear_x + shaped_action.linear_x,
+                linear_y=cmd.linear_y + shaped_action.linear_y,
+                angular_z=cmd.angular_z + shaped_action.angular_z,
+            )
+        else:
+            corrected = shaped_action
+
+        safe_corrected = corrected.sanitize()
+        if (not self._rl_policy_allow_reverse) and safe_corrected.linear_x < 0.0:
+            safe_corrected = VelocityCommand(
+                linear_x=0.0,
+                linear_y=safe_corrected.linear_y,
+                angular_z=safe_corrected.angular_z,
+            )
+
+        return safe_corrected.sanitize()
+
     def _apply_apf_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
         """
         将 APF 排斥修正叠加到导航速度指令。
@@ -1885,6 +2105,9 @@ class VelocityControllerNode(Node):
         """
         if (not self._apf_enabled) or (self.current_pose is None):
             return cmd
+
+        if bool(self.get_parameter('rl_policy_enabled').value):
+            return self._apply_rl_policy_to_command(cmd)
 
         if self._apf_orca_enabled:
             return self._apply_orca_to_command(cmd)
@@ -1903,18 +2126,6 @@ class VelocityControllerNode(Node):
 
         corrected_linear_x = cmd.linear_x + linear_correction * relax_scale
         corrected_angular_z = cmd.angular_z + angular_correction * relax_scale
-
-        # 承诺生效期间强约束最终角速度方向，避免被基础导航项抵消
-        if (
-            self._apf_orca_enforce_commit_direction
-            and commit_side != 0
-            and closest_distance <= commit_distance
-        ):
-            enforce_min = max(0.0, self._apf_orca_enforce_min_angular)
-            if corrected_angular_z * commit_side < 0.0:
-                corrected_angular_z = commit_side * max(enforce_min, abs(corrected_angular_z))
-            elif abs(corrected_angular_z) < enforce_min:
-                corrected_angular_z = commit_side * enforce_min
 
         corrected = VelocityCommand(
             linear_x=corrected_linear_x,
@@ -3277,6 +3488,7 @@ class VelocityControllerNode(Node):
         
         # 计算速度指令
         cmd = self.tracker.compute_velocity(self.current_pose)
+        self._publish_raw_navigation_command(cmd)
         cmd = self._apply_apf_to_command(cmd)
         self._last_velocity_cmd = cmd
         
@@ -3296,11 +3508,21 @@ class VelocityControllerNode(Node):
         if self._log_counter % 40 == 0:  # 约 2 秒一次 (20Hz)
             dist = self.tracker.get_distance_to_goal(self.current_pose)
             queue_len = self.tracker.get_queue_length()
-            
-            self.get_logger().info(
-                f'🚀 导航中: vx={cmd.linear_x:.2f} m/s, ω={cmd.angular_z:.2f} rad/s, '
-                f'距离={dist:.2f}m, 队列={queue_len}'
-            )
+
+            if bool(self.get_parameter('rl_policy_enabled').value):
+                raw_cmd = self._last_raw_navigation_cmd or VelocityCommand.stop()
+                residual_cmd = self._rl_policy_last_shaped_action
+                self.get_logger().info(
+                    f'🚀 导航中: raw(vx={raw_cmd.linear_x:.2f}, ω={raw_cmd.angular_z:.2f}) + '
+                    f'rl(Δv={residual_cmd.linear_x:.2f}, Δω={residual_cmd.angular_z:.2f}) -> '
+                    f'final(vx={cmd.linear_x:.2f}, ω={cmd.angular_z:.2f}), '
+                    f'距离={dist:.2f}m, 队列={queue_len}'
+                )
+            else:
+                self.get_logger().info(
+                    f'🚀 导航中: vx={cmd.linear_x:.2f} m/s, ω={cmd.angular_z:.2f} rad/s, '
+                    f'距离={dist:.2f}m, 队列={queue_len}'
+                )
     
     def _handle_avoidance_control(self):
         """
@@ -3370,6 +3592,7 @@ class VelocityControllerNode(Node):
         linear_x = self.tracker.cruise_speed * speed_factor
         
         cmd = VelocityCommand(linear_x=linear_x, linear_y=0.0, angular_z=angular_z)
+        self._publish_raw_navigation_command(cmd)
         cmd = self._apply_apf_to_command(cmd)
         self._last_velocity_cmd = cmd
         self._publish_velocity_command(cmd)
@@ -3988,6 +4211,7 @@ class VelocityControllerNode(Node):
 
             # 正常计算导航指令，ORCA 修正在 _apply_orca_to_command 中会自动削弱
             cmd = self.tracker.compute_velocity(self.current_pose)
+            self._publish_raw_navigation_command(cmd)
             cmd = self._apply_apf_to_command(cmd)
             self._last_velocity_cmd = cmd
             self._publish_velocity_command(cmd)
@@ -4283,6 +4507,7 @@ class VelocityControllerNode(Node):
         
         # 保存最后一次指令用于平滑处理
         self._last_velocity_cmd = cmd
+        self._last_velocity_cmd_time = time.time()
         
         # --- 发布调试信息 ---
         try:
@@ -4731,16 +4956,89 @@ class VelocityControllerNode(Node):
     
     # ==================== 安全关闭 ====================
     
-    def stop_usv(self):
-        """紧急停止 USV"""
-        self.get_logger().warn('发送紧急停止指令')
+    def stop_usv(self, log_warning: bool = True):
+        """停止 USV，默认按紧急停止记录告警。"""
+        if log_warning:
+            self.get_logger().warn('发送紧急停止指令')
         self._publish_velocity_command(VelocityCommand.stop())
         self.tracker.clear_waypoints()
         self._control_active = False
+
+    def prepare_for_shutdown(self):
+        self._soft_decel_active = False
+        self._delayed_stop_pending = False
+        self._delayed_hold_pending = False
+        if self.control_timer is not None:
+            self.control_timer.cancel()
+            self.destroy_timer(self.control_timer)
+            self.control_timer = None
+        if self.status_timer is not None:
+            self.status_timer.cancel()
+            self.destroy_timer(self.status_timer)
+            self.status_timer = None
+        self.stop_usv(log_warning=False)
+
+    def reset_for_training_episode(self):
+        """为训练环境重置控制状态，避免跨 episode 的位姿瞬移触发跳变保护。"""
+        import time
+
+        self.tracker.clear_waypoints()
+        self._publish_velocity_command(VelocityCommand.stop())
+        self._last_velocity_cmd = VelocityCommand.stop()
+
+        self._current_goal_id = None
+        self._control_active = False
+        self._rotation_active = False
+        self._rotation_initialized = False
+        self._rotation_goal_id = None
+
+        self._navigation_state = NavigationState.IDLE
+        self._navigation_active = False
+        self._manual_hold_requested = False
+        self._guided_switch_request_time = 0.0
+
+        self._soft_decel_active = False
+        self._delayed_stop_pending = False
+        self._delayed_hold_pending = False
+
+        self._orca_active = False
+        self._orca_activate_time = 0.0
+        self._orca_committed_side = 0
+        self._orca_commit_neighbor_id = ''
+        self._orca_commit_deadline = 0.0
+        self._orca_close_enter_time = 0.0
+        self._orca_coupling_enter_time = 0.0
+        self._orca_coupling_active = False
+        self._orca_persistent_close_start_time = 0.0
+        self._orca_persistent_close_neighbor_id = ''
+        self._orca_soft_brake_active = False
+        self._orca_hard_brake_active = False
+        self._orca_smooth_vx = 0.0
+        self._orca_smooth_omega = 0.0
+        self._orca_smooth_initialized = False
+
+        self._orca_escape_active = False
+        self._orca_escape_start_time = 0.0
+        self._orca_escape_phase = 0
+        self._orca_escape_direction = -1
+        self._orca_stall_start_time = 0.0
+        self._orca_stall_best_dist = float('inf')
+        self._orca_stall_start_pose = None
+        self._orca_stall_primary_neighbor_id = ''
+        self._orca_escape_count = 0
+
+        self.current_pose = None
+        self._last_valid_pose = None
+        self._pose_jump_ignore_until = time.time() + 1.0
+        self._consecutive_jump_count = 0
+        self._last_jump_pose = None
+        self._health_last_own_pose = None
+        self._health_own_freeze_start = 0.0
+        self._health_neighbor_freeze.clear()
     
     def destroy_node(self):
         """节点销毁时确保停止"""
-        self.stop_usv()
+        self.stop_usv(log_warning=False)
         super().destroy_node()
 
 

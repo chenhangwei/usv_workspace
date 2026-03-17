@@ -1,0 +1,433 @@
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+from .config import RewardConfig
+from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
+from .multi_agent_scenarios import MultiAgentScenarioFactory
+from .policies import load_residual_policy
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Evaluate a residual policy in the multi-USV environment.')
+    parser.add_argument('--policy', choices=['auto', 'mappo', 'bc', 'zero'], default='auto', help='Policy backend.')
+    parser.add_argument('--model', help='Policy model path (.pt for MAPPO, .npz for BC). Not required for zero policy.')
+    parser.add_argument('--episodes', type=int, default=6, help='Evaluation episodes.')
+    parser.add_argument('--steps-per-episode', type=int, default=160, help='Maximum steps per episode.')
+    parser.add_argument('--device', default='cpu', help='Torch device.')
+    parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name. Repeatable.')
+    parser.add_argument('--num-agents', type=int, default=5, help='Controlled agent count for BC/zero evaluation.')
+    parser.add_argument('--action-mode', choices=['auto', 'full', 'angular_only'], default='auto', help='Residual action representation for BC/zero evaluation.')
+    parser.add_argument('--max-neighbors', default='auto', help='Neighbor slots encoded during BC/zero evaluation. Use auto or an integer such as 4.')
+    parser.add_argument('--max-agents', type=int, help='Maximum agents encoded in the global state for BC/zero evaluation.')
+    parser.add_argument('--episode-timeout', type=float, help='Optional override for environment episode timeout.')
+    parser.add_argument('--no-progress-timeout', type=float, help='Optional override for no-progress timeout.')
+    parser.add_argument('--output-json', help='Optional JSON output path.')
+    return parser.parse_args()
+
+
+class ZeroPolicy:
+    def __init__(self, action_dim: int = 2, obs_dim: int | None = None):
+        self.action_dim = int(action_dim)
+        self.obs_dim = obs_dim
+
+    def predict(self, observation: np.ndarray) -> np.ndarray:
+        return np.zeros(self.action_dim, dtype=np.float32)
+
+
+class MappoActorPolicy:
+    def __init__(self, checkpoint: dict, *, device: str = 'cpu'):
+        try:
+            import torch
+            from torch import nn
+        except ImportError as exc:
+            raise RuntimeError('torch is required for MAPPO evaluation.') from exc
+
+        hidden_sizes = tuple(int(value) for value in checkpoint.get('hidden_sizes', [128, 128]))
+        action_dim = int(checkpoint['action_dim'])
+        obs_dim = int(checkpoint['local_observation_size'])
+
+        layers = []
+        current_dim = obs_dim
+        for hidden_size in hidden_sizes:
+            layers.append(nn.Linear(current_dim, hidden_size))
+            layers.append(nn.Tanh())
+            current_dim = hidden_size
+        layers.append(nn.Linear(current_dim, action_dim))
+        actor = nn.Sequential(*layers)
+        actor.load_state_dict(checkpoint['actor_state_dict'])
+        actor.eval()
+
+        self._torch = torch
+        self._device = torch.device(device)
+        self._actor = actor.to(self._device)
+        self.action_dim = action_dim
+        self.obs_dim = obs_dim
+
+    def predict(self, observation: np.ndarray) -> np.ndarray:
+        obs_tensor = self._torch.as_tensor(observation, dtype=self._torch.float32, device=self._device).unsqueeze(0)
+        with self._torch.no_grad():
+            action = self._actor(obs_tensor).cpu().numpy()[0]
+        return np.asarray(action, dtype=np.float32)
+
+
+def _detect_policy_kind(policy_kind: str, model_path: str | None) -> str:
+    if policy_kind != 'auto':
+        return policy_kind
+    if not model_path:
+        return 'zero'
+    suffix = Path(model_path).suffix.lower()
+    if suffix == '.pt':
+        return 'mappo'
+    if suffix == '.npz':
+        return 'bc'
+    raise RuntimeError(f'Unable to infer policy type from model path: {model_path}')
+
+
+def _resolve_action_mode(action_mode: str, policy) -> str:
+    if action_mode != 'auto':
+        return action_mode
+    if getattr(policy, 'action_dim', None) == 1:
+        return 'angular_only'
+    return 'full'
+
+
+def _resolve_max_neighbors(max_neighbors: str | int, policy) -> int:
+    if str(max_neighbors).lower() != 'auto':
+        return max(1, int(max_neighbors))
+    obs_dim = getattr(policy, 'obs_dim', None)
+    if obs_dim is None or int(obs_dim) < 10:
+        return 4
+    inferred = (int(obs_dim) - 10) // 6
+    return max(1, inferred)
+
+
+def _build_agent_namespaces(num_agents: int) -> tuple[str, ...]:
+    return tuple(f'usv_{index + 1:02d}' for index in range(max(2, num_agents)))
+
+
+def _resolve_scenarios(scenarios: tuple[str, ...] | None, agent_count: int) -> tuple[str, ...]:
+    resolved = tuple(scenarios) if scenarios else MultiAgentScenarioFactory.cluster_available()
+    incompatible = [
+        scenario
+        for scenario in resolved
+        if MultiAgentScenarioFactory.required_agent_count(scenario) > agent_count
+    ]
+    if incompatible:
+        joined = ', '.join(incompatible)
+        raise ValueError(f'Scenarios require more agents than configured (agent_count={agent_count}): {joined}')
+    return resolved
+
+
+def _load_mappo_checkpoint(model_path: str, device: str) -> tuple[dict, MappoActorPolicy]:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError('torch is required for MAPPO evaluation.') from exc
+
+    checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    return checkpoint, MappoActorPolicy(checkpoint, device=device)
+
+
+def _load_policy_bundle(
+    policy_kind: str,
+    model_path: str | None,
+    *,
+    device: str,
+    num_agents: int,
+    scenarios: tuple[str, ...] | None,
+    episode_timeout: float | None,
+    no_progress_timeout: float | None,
+    action_mode: str,
+    max_neighbors: str | int,
+    max_agents: int | None,
+) -> tuple[object, dict, tuple[str, ...]]:
+    if policy_kind == 'mappo':
+        if model_path is None:
+            raise RuntimeError('MAPPO evaluation requires --model.')
+        checkpoint, policy = _load_mappo_checkpoint(model_path, device)
+        agent_namespaces = tuple(checkpoint['agent_namespaces'])
+        resolved_scenarios = tuple(scenarios) if scenarios else tuple(checkpoint.get('scenarios', MultiAgentScenarioFactory.available()))
+        resolved_action_mode = str(checkpoint.get('action_mode', 'angular_only' if policy.action_dim == 1 else 'full'))
+        resolved_max_neighbors = int(checkpoint.get('max_neighbors', max(1, int((policy.obs_dim - 10) // 6))))
+        resolved_max_agents = int(checkpoint.get('max_agents', len(agent_namespaces)))
+        env_kwargs = {
+            'agent_namespaces': agent_namespaces,
+            'enable_rl_backend': True,
+            'action_mode': resolved_action_mode,
+            'max_neighbors': resolved_max_neighbors,
+            'max_agents': max(resolved_max_agents, len(agent_namespaces)),
+            'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
+            'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
+            'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
+            'default_scenarios': resolved_scenarios,
+            'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
+            'goal_proximity_reward_weight': float(checkpoint.get('goal_proximity_reward_weight', 0.0)),
+            'goal_proximity_relief_distance': float(checkpoint.get('goal_proximity_relief_distance', 3.0)),
+            'goal_proximity_heading_relief': float(checkpoint.get('goal_proximity_heading_relief', 0.0)),
+            'goal_proximity_smoothness_relief': float(checkpoint.get('goal_proximity_smoothness_relief', 0.0)),
+            'team_reward_weight': float(checkpoint.get('team_reward_weight', 0.30)),
+            'team_progress_weight': float(checkpoint.get('team_progress_weight', 1.20)),
+            'team_goal_proximity_weight': float(checkpoint.get('team_goal_proximity_weight', 0.0)),
+            'team_regression_penalty_weight': float(checkpoint.get('team_regression_penalty_weight', 0.0)),
+            'team_dispersion_penalty_weight': float(checkpoint.get('team_dispersion_penalty_weight', 0.0)),
+            'team_dispersion_margin': float(checkpoint.get('team_dispersion_margin', 0.0)),
+            'coordination_reward_weight': float(checkpoint.get('coordination_reward_weight', 0.20)),
+            'team_completion_bonus': float(checkpoint.get('team_completion_bonus', 18.0)),
+            'deadlock_penalty_weight': float(checkpoint.get('deadlock_penalty_weight', 4.0)),
+        }
+        return policy, env_kwargs, resolved_scenarios
+
+    if policy_kind == 'bc':
+        if model_path is None:
+            raise RuntimeError('BC evaluation requires --model.')
+        policy = load_residual_policy(model_path)
+    elif policy_kind == 'zero':
+        policy = ZeroPolicy(action_dim=1 if action_mode == 'angular_only' else 2)
+    else:
+        raise RuntimeError(f'Unsupported policy type: {policy_kind}')
+
+    resolved_action_mode = _resolve_action_mode(action_mode, policy)
+    resolved_max_neighbors = _resolve_max_neighbors(max_neighbors, policy)
+    required_agents = max((MultiAgentScenarioFactory.required_agent_count(name) for name in (scenarios or MultiAgentScenarioFactory.cluster_available())), default=2)
+    agent_namespaces = _build_agent_namespaces(max(required_agents, num_agents))
+    resolved_scenarios = _resolve_scenarios(scenarios, len(agent_namespaces))
+    env_kwargs = {
+        'agent_namespaces': agent_namespaces,
+        'enable_rl_backend': True,
+        'action_mode': resolved_action_mode,
+        'max_neighbors': resolved_max_neighbors,
+        'max_agents': max(len(agent_namespaces), int(max_agents or len(agent_namespaces))),
+        'episode_timeout': float(episode_timeout) if episode_timeout is not None else 45.0,
+        'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else 10.0,
+        'default_scenarios': resolved_scenarios,
+    }
+    return policy, env_kwargs, resolved_scenarios
+
+
+def _scenario_summary(metrics: list[dict]) -> dict[str, dict]:
+    grouped = {}
+    for item in metrics:
+        grouped.setdefault(item['scenario'], []).append(item)
+
+    result = {}
+    for scenario, items in grouped.items():
+        count = max(1, len(items))
+        result[scenario] = {
+            'episodes': len(items),
+            'collision_rate': sum(item['collision'] for item in items) / count,
+            'success_rate': sum(item['success'] for item in items) / count,
+            'timeout_rate': sum(item['timeout'] for item in items) / count,
+            'mean_pairwise_min_separation': float(np.mean([item['pairwise_min_separation'] for item in items])),
+            'worst_pairwise_min_separation': float(np.min([item['pairwise_min_separation'] for item in items])),
+            'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in items])),
+            'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in items])),
+            'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in items])),
+        }
+    return result
+
+
+def _scenario_initial_team_mean_goal_distance(env: MultiAgentEnv) -> float | None:
+    scenario = getattr(env, '_scenario', None)
+    if scenario is None:
+        return None
+
+    distances = []
+    for agent_id in env.agent_ids:
+        spawn = scenario.agent_spawns.get(agent_id)
+        goal = scenario.agent_goals.get(agent_id)
+        if spawn is None or goal is None:
+            continue
+        distances.append(float(np.hypot(goal.x - spawn.x, goal.y - spawn.y)))
+
+    if not distances:
+        return None
+    return float(np.mean(distances))
+
+
+def _create_env(env_kwargs: dict) -> MultiAgentEnv:
+    return MultiAgentEnv(MultiAgentEnvConfig(**env_kwargs))
+
+
+def evaluate_policy(
+    model_path: str | None,
+    *,
+    policy: str = 'auto',
+    episodes: int = 6,
+    steps_per_episode: int = 160,
+    device: str = 'cpu',
+    scenarios: tuple[str, ...] | None = None,
+    num_agents: int = 5,
+    action_mode: str = 'auto',
+    max_neighbors: str | int = 'auto',
+    max_agents: int | None = None,
+    episode_timeout: float | None = None,
+    no_progress_timeout: float | None = None,
+) -> dict:
+    max_episode_attempts = 3
+    policy_kind = _detect_policy_kind(policy, model_path)
+    policy_impl, env_kwargs, resolved_scenarios = _load_policy_bundle(
+        policy_kind,
+        model_path,
+        device=device,
+        num_agents=num_agents,
+        scenarios=scenarios,
+        episode_timeout=episode_timeout,
+        no_progress_timeout=no_progress_timeout,
+        action_mode=action_mode,
+        max_neighbors=max_neighbors,
+        max_agents=max_agents,
+    )
+
+    env = _create_env(env_kwargs)
+
+    episode_metrics = []
+    try:
+        for episode in range(episodes):
+            scenario_name = resolved_scenarios[episode % len(resolved_scenarios)]
+            last_error = None
+            for attempt in range(max_episode_attempts):
+                try:
+                    observations, info = env.reset(options={'scenario_kind': scenario_name})
+                    last_info = info
+                    initial_team_mean_goal_distance = _scenario_initial_team_mean_goal_distance(env)
+                    if initial_team_mean_goal_distance is None:
+                        initial_team_mean_goal_distance = float(info['global_state'][-3])
+                    exhausted_horizon = True
+                    truncated = False
+                    steps = 0
+
+                    for step in range(steps_per_episode):
+                        action_map = {
+                            agent_id: policy_impl.predict(observations[agent_id])
+                            for agent_id in env.agent_ids
+                        }
+                        observations, _, terminated_dict, truncated_dict, last_info = env.step(action_map)
+                        steps = step + 1
+                        terminated = bool(terminated_dict['__all__'])
+                        truncated = bool(truncated_dict['__all__'])
+                        if terminated or truncated:
+                            exhausted_horizon = False
+                            break
+
+                    pairwise_min = float(last_info['pairwise_min_separation'])
+                    goal_completion_ratio = float(last_info['goal_completion_ratio'])
+                    final_team_mean_goal_distance = float(last_info['team_mean_goal_distance'])
+                    team_goal_distance_delta = initial_team_mean_goal_distance - final_team_mean_goal_distance
+                    team_goal_progress_ratio = 0.0
+                    if initial_team_mean_goal_distance > 1e-6:
+                        team_goal_progress_ratio = team_goal_distance_delta / initial_team_mean_goal_distance
+                    success = goal_completion_ratio >= 0.999
+                    collision = pairwise_min < env.config.collision_distance
+                    timeout = (truncated or exhausted_horizon) and not success and not collision
+                    episode_metrics.append(
+                        {
+                            'episode': episode,
+                            'scenario': scenario_name,
+                            'steps': steps,
+                            'success': success,
+                            'collision': collision,
+                            'timeout': timeout,
+                            'pairwise_min_separation': pairwise_min,
+                            'pairwise_mean_separation': float(last_info['pairwise_mean_separation']),
+                            'goal_completion_ratio': goal_completion_ratio,
+                            'initial_team_mean_goal_distance': initial_team_mean_goal_distance,
+                            'team_mean_goal_distance': final_team_mean_goal_distance,
+                            'team_goal_distance_delta': team_goal_distance_delta,
+                            'team_goal_progress_ratio': team_goal_progress_ratio,
+                        }
+                    )
+                    break
+                except RuntimeError as exc:
+                    last_error = exc
+                    print(
+                        f'Warning: episode {episode} ({scenario_name}) attempt {attempt + 1}/{max_episode_attempts} '
+                        f'failed with {exc}. Recreating environment and retrying.'
+                    )
+                    env.close()
+                    env = _create_env(env_kwargs)
+            else:
+                raise RuntimeError(
+                    f'Failed to evaluate episode {episode} for scenario {scenario_name} '
+                    f'after {max_episode_attempts} attempts.'
+                ) from last_error
+    finally:
+        env.close()
+
+    return {
+        'policy': policy_kind,
+        'model': model_path,
+        'episodes': len(episode_metrics),
+        'agent_namespaces': list(env.agent_ids),
+        'action_mode': env.config.action_mode,
+        'max_neighbors': env.config.max_neighbors,
+        'scenarios': list(resolved_scenarios),
+        'collision_rate': sum(item['collision'] for item in episode_metrics) / max(1, len(episode_metrics)),
+        'success_rate': sum(item['success'] for item in episode_metrics) / max(1, len(episode_metrics)),
+        'timeout_rate': sum(item['timeout'] for item in episode_metrics) / max(1, len(episode_metrics)),
+        'mean_pairwise_min_separation': float(np.mean([item['pairwise_min_separation'] for item in episode_metrics])),
+        'worst_pairwise_min_separation': float(np.min([item['pairwise_min_separation'] for item in episode_metrics])),
+        'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in episode_metrics])),
+        'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in episode_metrics])),
+        'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in episode_metrics])),
+        'scenario_summaries': _scenario_summary(episode_metrics),
+        'episode_metrics': episode_metrics,
+    }
+
+
+def evaluate_checkpoint(
+    model_path: str,
+    *,
+    episodes: int = 6,
+    steps_per_episode: int = 160,
+    device: str = 'cpu',
+    scenarios: tuple[str, ...] | None = None,
+    episode_timeout: float | None = None,
+    no_progress_timeout: float | None = None,
+) -> dict:
+    return evaluate_policy(
+        model_path,
+        policy='mappo',
+        episodes=episodes,
+        steps_per_episode=steps_per_episode,
+        device=device,
+        scenarios=scenarios,
+        episode_timeout=episode_timeout,
+        no_progress_timeout=no_progress_timeout,
+    )
+
+
+def main():
+    args = parse_args()
+    policy_kind = _detect_policy_kind(args.policy, args.model)
+    if policy_kind != 'zero' and not args.model:
+        raise RuntimeError(f'Policy type {policy_kind} requires --model.')
+
+    summary = evaluate_policy(
+        args.model,
+        policy=policy_kind,
+        episodes=args.episodes,
+        steps_per_episode=args.steps_per_episode,
+        device=args.device,
+        scenarios=tuple(args.scenarios) if args.scenarios else None,
+        num_agents=args.num_agents,
+        action_mode=args.action_mode,
+        max_neighbors=args.max_neighbors,
+        max_agents=args.max_agents,
+        episode_timeout=args.episode_timeout,
+        no_progress_timeout=args.no_progress_timeout,
+    )
+
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.output_json:
+        output_path = Path(args.output_json)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
+        print(f'Saved multi-agent evaluation summary to {output_path}')
+
+
+
+if __name__ == '__main__':
+    main()

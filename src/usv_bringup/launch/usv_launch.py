@@ -36,7 +36,7 @@ import subprocess
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, TimerAction
 from launch.event_handlers import OnProcessStart
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, TextSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -142,6 +142,27 @@ def detect_usv_id() -> int:
     return 1
 
 
+def _log_effective_launch_config(context, *args, **kwargs):
+    namespace = LaunchConfiguration('namespace').perform(context)
+    simulation_mode = LaunchConfiguration('simulation_mode').perform(context)
+    gcs_url = LaunchConfiguration('gcs_url').perform(context)
+    target_system_id = LaunchConfiguration('target_system_id').perform(context)
+    configured_system_id = LaunchConfiguration('system_id').perform(context)
+    mavros_system_id = '240' if simulation_mode == 'sitl' else configured_system_id
+
+    print(
+        f'[USV Launch] 生效配置: namespace={namespace}, '
+        f'mavros_system_id={mavros_system_id}, '
+        f'target_system_id={target_system_id}, '
+        f'simulation_mode={simulation_mode}'
+    )
+    if gcs_url:
+        print(f'[USV Launch] 生效 GCS URL: {gcs_url}')
+    else:
+        print('[USV Launch] 生效 GCS URL: <disabled>')
+    return []
+
+
 def generate_launch_description():
     """
     生成USV系统启动描述
@@ -169,10 +190,6 @@ def generate_launch_description():
     # =============================================================================
     usv_id = detect_usv_id()
     cfg = USV_CONFIG[usv_id]
-    print(f'[USV Launch] 当前配置: namespace={cfg["namespace"]}, '
-          f'system_id={cfg["system_id"]}, target_system_id={cfg["target_system_id"]}')
-    print(f'[USV Launch] GCS URL: {cfg["gcs_url"]}')
-
     # =============================================================================
     # 参数声明
     # =============================================================================
@@ -197,6 +214,12 @@ def generate_launch_description():
         'target_system_id',
         default_value=str(cfg['target_system_id']),
         description='MAVROS 目标飞控系统 ID（SITL 模式，需匹配 SYSID_THISMAV）'
+    )
+
+    system_id_arg = DeclareLaunchArgument(
+        'system_id',
+        default_value=str(cfg['system_id']),
+        description='MAVROS 自身系统 ID（硬件模式使用，默认值来自自动检测）'
     )
 
     # SITL 参数文件（用于覆盖 SITL 特有参数）
@@ -288,7 +311,10 @@ def generate_launch_description():
     enable_log_collector = LaunchConfiguration('enable_log_collector')
     simulation_mode = LaunchConfiguration('simulation_mode')
     target_system_id = LaunchConfiguration('target_system_id')
+    system_id = LaunchConfiguration('system_id')
     #lidar_port = LaunchConfiguration('lidar_port')
+
+    effective_config_logger = OpaqueFunction(function=_log_effective_launch_config)
 
     # =============================================================================
     # 通信与状态管理节点
@@ -543,9 +569,9 @@ def generate_launch_description():
                 'gcs_url': gcs_url,
                 
                 # MAVLink 身份配置 (硬件模式)
-                'system_id': cfg['system_id'],           # MAVROS 自身系统 ID (自动检测)
+                'system_id': system_id,                  # MAVROS 自身系统 ID (可覆盖)
                 'component_id': 191,                     # MAVROS 自身组件 ID
-                'target_system_id': cfg['target_system_id'],  # 目标飞控系统 ID (自动检测)
+                'target_system_id': target_system_id,    # 目标飞控系统 ID (可覆盖)
                 'target_component_id': 1,                # 目标飞控组件 ID (固定为1)
                 
                 # ==================== 插件黑名单（加速启动，关键优化！）====================
@@ -867,8 +893,10 @@ def generate_launch_description():
         gcs_url_arg,
         enable_log_collector_arg,
         target_system_id_arg,
+        system_id_arg,
         sitl_param_file_arg,
         #lidar_port_arg,
+        effective_config_logger,
         
         # ============================
         # 硬件模式 (simulation_mode == 'hardware')

@@ -1,15 +1,45 @@
-# Logs
+# Logs and runtime output
 .logs/
+*.log
 
-# Python cache
+# Python cache and tooling
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# ROS 2 / colcon artifacts
+build/
+install/
+log/
+
+# RL training artifacts
+tmp_rl/
+src/tmp_rl/
+**/tmp_rl/
+*.pt
+*.pth
+*.npz
+*.ckpt
+*.onnx
+
+# ROS bag and recorded data
+*.bag
+*.db3
+*.mcap
 
 # Editor/IDE
 .vscode/
 .idea/
-build/
-install/
-log/
-*.pyc
-__pycache__/
+*.swp
+*.swo
+*~

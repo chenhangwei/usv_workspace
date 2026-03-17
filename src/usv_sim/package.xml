@@ -35,6 +35,10 @@
 
   <depend>rclpy</depend>
   <depend>ros2launch</depend>
+  <depend>launch_ros</depend>
+
+  <exec_depend>usv_bringup</exec_depend>
+  <exec_depend>usv_rl</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
