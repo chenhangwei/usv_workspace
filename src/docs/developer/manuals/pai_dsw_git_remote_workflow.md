@@ -6,6 +6,8 @@ This manual describes the recommended way to move the current ROS 2 + RL workspa
 
 Use Git for source code only.
 
+For this repository, GitHub should be the source of truth for code. Migration bundles and `scp` copies are still useful for disaster recovery, but they should not be the primary day-to-day sync mechanism.
+
 Do not commit these categories of files:
 
 - Python virtual environments
@@ -15,6 +17,10 @@ Do not commit these categories of files:
 - ROS bag and recorded runtime data
 
 Store training outputs on mounted cloud storage or a dedicated data directory, not inside the Git history.
+
+Track selected artifact metadata in the repository, not the artifact binaries themselves. The recommended place for this is the tracked model registry file:
+
+- [mappo_model_registry.md](mappo_model_registry.md)
 
 ## Environment Recommendation
 
@@ -362,6 +368,130 @@ Do not commit:
 - raw logs
 - checkpoint directories
 - generated datasets unless they are intentionally versioned data assets
+
+## GitHub-first Loop For This Repository
+
+Use the following loop as the default working model.
+
+1. Make source changes locally and push them to GitHub using a feature branch.
+2. On PAI-DSW, update the same branch with `git fetch` and `git pull --ff-only` or `git switch` to the exact commit you want to train.
+3. Build the workspace on cloud, run training, and write every generated checkpoint, log, and evaluation file to `/mnt/data`.
+4. After a training round, select only the checkpoints worth keeping long term.
+5. Commit lightweight metadata back to GitHub, for example:
+	- reward or curriculum changes
+	- launch or script changes
+	- a curated experiment summary
+	- updates to the tracked model registry
+6. Publish selected model binaries outside Git history, typically as GitHub Release assets or object-storage files.
+
+This keeps Git history small and reviewable while still giving you versioned linkage between source commits and the chosen model outputs.
+
+## Artifact Publication Strategy
+
+For this workspace, use three storage tiers.
+
+### Tier 1: Git Repository
+
+Store only:
+
+- source code
+- configs
+- launch files
+- shell scripts
+- small curated documentation
+- model registry metadata
+
+Do not store raw `.pt` checkpoint trees here.
+
+### Tier 2: Training Output Directory
+
+Store all raw outputs under `/mnt/data`, for example:
+
+- `/mnt/data/checkpoints/usv_rl`
+- `/mnt/data/evals/usv_rl`
+- `/mnt/data/logs/usv_rl`
+
+This tier is for active experimentation and can contain many intermediate checkpoints.
+
+### Tier 3: Published Milestones
+
+Only publish a very small subset of artifacts, for example:
+
+- the current best online candidate checkpoint
+- the final full-run checkpoint as a backup
+- the benchmark JSON needed to compare a candidate against the current baseline
+- a short experiment summary
+
+GitHub Releases are a good default when the number of milestone artifacts stays small. If artifact volume becomes too large, move Tier 3 to OSS or another object store and keep only the URLs and hashes in the repository.
+
+## Release Staging Helper
+
+To avoid manually collecting a checkpoint, summary JSON, and checksums every time, use:
+
+[/scripts/prepare_mappo_release_bundle.sh](scripts/prepare_mappo_release_bundle.sh)
+
+Example:
+
+```bash
+cd /mnt/workspace/usv_workspace
+./scripts/prepare_mappo_release_bundle.sh \
+	/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_checkpoints/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt \
+	--summary-json /mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_checkpoints/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.online.repeat.summary.json \
+	--role primary_candidate
+```
+
+The script creates a small staging directory outside the Git repository, by default under `/mnt/data/releases/usv_rl`, containing:
+
+- the selected checkpoint copy
+- `manifest.json`
+- `RELEASE_NOTES.md`
+- `SHA256SUMS`
+
+That directory is the thing you upload to GitHub Release or object storage. The repository still only tracks metadata and documentation.
+
+## Local CPU Resume Helper
+
+For local machines where the installed PyTorch CUDA wheel does not support the available GPU, use:
+
+[/scripts/resume_mappo_training_cpu_local.sh](scripts/resume_mappo_training_cpu_local.sh)
+
+Example:
+
+```bash
+cd /mnt/workspace/usv_workspace
+./scripts/resume_mappo_training_cpu_local.sh \
+	/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_checkpoints/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt \
+	600000
+```
+
+This wrapper forces:
+
+- `CUDA_VISIBLE_DEVICES=-1`
+- `--device cpu`
+- `--amp off`
+- `--checkpoint-eval-device cpu`
+
+unless you explicitly override those flags yourself.
+
+## What To Commit After A Training Round
+
+After finishing a meaningful round, prefer this minimum Git commit payload:
+
+1. source changes that affected the run
+2. a short markdown summary of the result, if the round changed your recommendation
+3. an update to the model registry showing which checkpoint is now primary, backup, or deprecated
+
+Do not commit the raw checkpoint binary just because the run succeeded.
+
+## Current Recommendation For This Workspace
+
+At the current stage, the recommended split is:
+
+- GitHub: source plus documentation plus the tracked model registry
+- `/mnt/data`: all raw checkpoints and evaluation outputs
+- GitHub Release or object storage: only milestone artifacts tied to registry entries
+
+The current primary candidate and backup artifact should be tracked in the model registry, not committed into the Git tree as `.pt` files.
 
 ## First Cloud Validation Checklist
 

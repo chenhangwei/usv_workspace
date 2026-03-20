@@ -1452,9 +1452,7 @@ class NavigateToPointNode(Node):
         desired_yaw = math.atan2(dy, dx)
         
         # 获取当前航向 (从四元数转换)
-        from tf_transformations import euler_from_quaternion
-        q = current_pose.pose.orientation
-        _, _, current_yaw = euler_from_quaternion([q.x, q.y, q.z, q.w])
+        current_yaw = self._yaw_from_quat(current_pose.pose.orientation)
         
         # 计算误差并归一化到 [-π, π]
         error = desired_yaw - current_yaw

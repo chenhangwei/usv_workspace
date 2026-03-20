@@ -107,7 +107,7 @@ class UsvRlEnv(gym.Env):
 
         return max_risk
 
-    def _compute_head_on_guidance_reward(self, observation: UsvObservation) -> float:
+    def _compute_head_on_guidance_reward(self, observation: UsvObservation, previous_forward_speed: float) -> float:
         scenario_name = getattr(self._scenario, 'name', '') if self._scenario is not None else ''
         if 'head_on' not in scenario_name:
             return 0.0
@@ -152,13 +152,99 @@ class UsvRlEnv(gym.Env):
         desired_starboard_turn = 0.10 + 0.16 * proximity
         actual_starboard_turn = max(0.0, -observation.final_angular_z)
         turn_progress = max(0.0, min(1.0, actual_starboard_turn / desired_starboard_turn))
+        desired_forward_speed = min(
+            max(self.config.reward.desired_conflict_speed, 0.0),
+            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
+        )
+        current_forward_speed = max(0.0, observation.final_linear_x)
+        forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
+        speed_drop = max(0.0, previous_forward_speed - current_forward_speed)
+        speed_drop_ratio = max(0.0, min(1.0, speed_drop / max(desired_forward_speed, 1e-3)))
 
         guidance_reward = (
             self.config.reward.head_on_corridor_reward_weight * proximity * corridor_progress
             - self.config.reward.head_on_centerline_penalty_weight * proximity * centerline_penalty
             + self.config.reward.head_on_turn_reward_weight * proximity * turn_progress
+            + self.config.reward.head_on_forward_reward_weight * proximity * forward_progress
+            - self.config.reward.head_on_speed_drop_penalty_weight * proximity * speed_drop_ratio
         )
         return guidance_reward
+
+    def _compute_crossing_overtaking_guidance_reward(self, observation: UsvObservation) -> float:
+        lookahead_distance = max(
+            self.config.reward.anticipation_distance,
+            self.config.reward.conflict_distance,
+            self.config.collision_distance + 1e-3,
+        )
+        own_speed = max(0.0, float(observation.speed), float(observation.final_linear_x), float(observation.raw_linear_x))
+        actual_starboard_turn = max(0.0, -observation.final_angular_z)
+        actual_port_turn = max(0.0, observation.final_angular_z)
+        current_forward_speed = max(0.0, observation.final_linear_x)
+        desired_forward_speed = min(
+            max(self.config.reward.desired_conflict_speed, 0.0),
+            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
+        )
+        forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
+
+        best_crossing_reward = 0.0
+        best_crossing_forward_reward = 0.0
+        best_overtaking_reward = 0.0
+        best_overtaking_forward_reward = 0.0
+        max_wrong_way_penalty = 0.0
+
+        for neighbor in observation.neighbors:
+            if neighbor.distance <= 1e-3 or neighbor.distance > lookahead_distance:
+                continue
+
+            body_x = float(neighbor.rel_x)
+            body_y = float(neighbor.rel_y)
+            if body_x <= 0.0:
+                continue
+
+            body_vx = float(neighbor.rel_vx)
+            body_vy = float(neighbor.rel_vy)
+            closing_speed = -((body_x * body_vx) + (body_y * body_vy)) / max(neighbor.distance, 1e-3)
+            neighbor_forward_speed = own_speed + body_vx
+            same_lane_ahead = body_x > 0.8 and abs(body_y) < 1.5
+            overtaking_target = (
+                same_lane_ahead
+                and own_speed > 0.18
+                and body_vx < -0.03
+                and neighbor_forward_speed > 0.05
+                and neighbor_forward_speed < own_speed - 0.02
+            )
+            starboard_crossing = body_y < -0.35 and closing_speed > -0.05
+
+            proximity = max(0.0, min(1.0, (lookahead_distance - neighbor.distance) / lookahead_distance))
+            closing_weight = max(0.0, min(1.0, (closing_speed + 0.15) / 0.9))
+            desired_starboard_turn = 0.05 + 0.12 * proximity + 0.05 * closing_weight
+            turn_progress = max(0.0, min(1.0, actual_starboard_turn / max(desired_starboard_turn, 1e-3)))
+            wrong_way_progress = max(0.0, min(1.0, actual_port_turn / max(desired_starboard_turn, 1e-3)))
+
+            if starboard_crossing:
+                best_crossing_reward = max(best_crossing_reward, proximity * turn_progress)
+                best_crossing_forward_reward = max(
+                    best_crossing_forward_reward,
+                    proximity * turn_progress * forward_progress,
+                )
+                max_wrong_way_penalty = max(max_wrong_way_penalty, proximity * wrong_way_progress)
+                continue
+
+            if overtaking_target:
+                best_overtaking_reward = max(best_overtaking_reward, proximity * turn_progress)
+                best_overtaking_forward_reward = max(
+                    best_overtaking_forward_reward,
+                    proximity * turn_progress * forward_progress,
+                )
+                max_wrong_way_penalty = max(max_wrong_way_penalty, proximity * wrong_way_progress)
+
+        return (
+            self.config.reward.crossing_starboard_turn_reward_weight * best_crossing_reward
+            + self.config.reward.crossing_forward_reward_weight * best_crossing_forward_reward
+            + self.config.reward.overtaking_starboard_turn_reward_weight * best_overtaking_reward
+            + self.config.reward.overtaking_forward_reward_weight * best_overtaking_forward_reward
+            - self.config.reward.colregs_port_turn_penalty_weight * max_wrong_way_penalty
+        )
 
     def _policy_action_dim(self) -> int:
         if self.config.action_mode == 'angular_only':
@@ -198,6 +284,8 @@ class UsvRlEnv(gym.Env):
             self._controller = VelocityControllerNode(
                 namespace=f'/{self.config.namespace}',
                 parameter_overrides=[
+                    Parameter('cruise_speed', value=self.config.cruise_speed),
+                    Parameter('max_angular_velocity', value=self.config.max_angular_velocity),
                     Parameter('apf_enabled', value=True),
                     Parameter('apf_orca_enabled', value=False),
                     Parameter('require_guided_mode', value=True),
@@ -306,6 +394,16 @@ class UsvRlEnv(gym.Env):
         progress_delta = self._previous_distance - observation.distance_to_goal
         progress = self.config.reward.progress_weight * progress_delta
 
+        goal_proximity = 0.0
+        relief_distance = max(self.config.goal_tolerance + 1e-3, self.config.goal_proximity_relief_distance)
+        if observation.distance_to_goal < relief_distance:
+            goal_proximity = max(
+                0.0,
+                (relief_distance - observation.distance_to_goal) / max(relief_distance - self.config.goal_tolerance, 1e-3),
+            )
+            goal_proximity = min(goal_proximity, 1.0)
+        progress += self.config.goal_proximity_reward_weight * goal_proximity
+
         min_distance = observation.min_neighbor_distance()
         safety = 0.0
         conflict_risk = self._compute_conflict_risk(observation)
@@ -313,9 +411,10 @@ class UsvRlEnv(gym.Env):
             safety += self.config.reward.collision_penalty
         elif min_distance < self.config.near_miss_distance:
             safety -= self.config.reward.near_miss_weight * (self.config.near_miss_distance - min_distance)
-        safety -= self.config.reward.conflict_risk_weight * conflict_risk
+        conflict_relief_scale = max(0.35, 1.0 - (self.config.goal_proximity_conflict_relief * goal_proximity))
+        safety -= self.config.reward.conflict_risk_weight * conflict_risk * conflict_relief_scale
 
-        conflict_level = min(conflict_risk, 1.0)
+        conflict_level = min(conflict_risk, 1.0) * conflict_relief_scale
         current_forward_speed = max(0.0, observation.final_linear_x)
         desired_conflict_speed = min(
             max(self.config.reward.desired_conflict_speed, 0.0),
@@ -325,11 +424,21 @@ class UsvRlEnv(gym.Env):
         speed_drop = max(0.0, self._previous_forward_speed - current_forward_speed)
         braking = -self.config.reward.conflict_brake_weight * conflict_level * speed_deficit
         braking -= self.config.reward.stop_go_penalty_weight * conflict_level * speed_drop
-        braking += self._compute_head_on_guidance_reward(observation)
+        braking += conflict_relief_scale * (
+            self._compute_head_on_guidance_reward(
+                observation,
+                self._previous_forward_speed,
+            )
+            + self._compute_crossing_overtaking_guidance_reward(observation)
+        )
 
-        heading_scale = max(0.15, 1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)))
+        heading_scale = max(
+            0.15,
+            1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)) - (self.config.goal_proximity_heading_relief * goal_proximity),
+        )
         heading = -(self.config.reward.heading_error_weight * heading_scale) * abs(observation.heading_error)
-        smoothness = -self.config.reward.action_smoothness_weight * float(np.linalg.norm(action - self._previous_action))
+        smoothness_scale = max(0.1, 1.0 - (self.config.goal_proximity_smoothness_relief * goal_proximity))
+        smoothness = -(self.config.reward.action_smoothness_weight * smoothness_scale) * float(np.linalg.norm(action - self._previous_action))
         time_cost = -self.config.reward.time_penalty
 
         terminal = 0.0

@@ -31,6 +31,20 @@ src/tmp_rl/
 *.npz
 *.ckpt
 *.onnx
+*.eval.json
+*.eval.log
+*.online.benchmark.json
+*.online.gate.json
+*.online.validate.log
+*.online.repeat.summary.json
+*.online.repeat.log
+*.online.repeat.skip.json
+*.online_logs/
+*.online_repeats/
+*.tgz
+*.tar.gz
+SHA256SUMS
+.recover_log_summary.txt
 
 # ROS bag and recorded data
 *.bag

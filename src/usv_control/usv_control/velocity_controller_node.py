@@ -148,6 +148,8 @@ class VelocityControllerNode(Node):
         self.declare_parameter('cruise_speed', 0.5)
         self.declare_parameter('max_angular_velocity', 0.5)
         self.declare_parameter('min_speed', 0.05)
+        self.declare_parameter('avoidance_min_forward_speed', 0.10)
+        self.declare_parameter('avoidance_speed_floor_distance', 5.0)
         
         # 到达判断
         self.declare_parameter('goal_tolerance', 0.5)
@@ -601,6 +603,12 @@ class VelocityControllerNode(Node):
         )
         self._apf_health_warn_interval = float(
             self.get_parameter('apf_health_warn_interval').value or 2.0
+        )
+        self._avoidance_min_forward_speed = float(
+            self.get_parameter('avoidance_min_forward_speed').value or 0.10
+        )
+        self._avoidance_speed_floor_distance = float(
+            self.get_parameter('avoidance_speed_floor_distance').value or 5.0
         )
         self._rl_policy_topic = str(self.get_parameter('rl_policy_topic').value or 'rl_policy/cmd_vel')
         self._rl_policy_action_timeout = float(
@@ -2050,6 +2058,121 @@ class VelocityControllerNode(Node):
         self._rl_policy_last_shaped_action = result
         return result.sanitize()
 
+    def _avoidance_speed_floor_active(self) -> bool:
+        if getattr(self, '_retreat_active', False):
+            return False
+        if self._has_avoidance_risk_neighbor():
+            return True
+        if getattr(self, '_avoidance_active', False):
+            return True
+        if getattr(self, '_orca_active', False):
+            return True
+        if getattr(self, '_orca_soft_brake_active', False) or getattr(self, '_orca_hard_brake_active', False):
+            return True
+        encounter_type = str(getattr(self, '_orca_debug_encounter_type', 'none') or 'none')
+        return encounter_type not in ('none', 'other')
+
+    def _has_avoidance_risk_neighbor(self) -> bool:
+        if self.current_pose is None:
+            return False
+        if not self._control_active or self._current_goal_id is None:
+            return False
+        if self._navigation_state != NavigationState.ACTIVE:
+            return False
+        if self.tracker.is_goal_reached():
+            return False
+
+        active_distance = max(0.0, float(self._avoidance_speed_floor_distance))
+        if active_distance <= 1e-3:
+            return False
+
+        now_sec = time.time()
+        yaw = self.current_pose.yaw
+        min_sep = max(0.1, self._apf_orca_min_separation)
+
+        for neighbor_x, neighbor_y, neighbor_vx, neighbor_vy, stamp_sec in self._apf_neighbor_states.values():
+            if now_sec - stamp_sec > self._apf_neighbor_timeout:
+                continue
+
+            distance = math.hypot(self.current_pose.x - neighbor_x, self.current_pose.y - neighbor_y)
+            if distance <= 1e-3 or distance > active_distance:
+                continue
+
+            swarm_context = self._get_orca_swarm_context(
+                neighbor_x=neighbor_x,
+                neighbor_y=neighbor_y,
+                neighbor_vx=neighbor_vx,
+                neighbor_vy=neighbor_vy,
+                neighbor_distance=distance,
+                yaw=yaw,
+                min_sep=min_sep,
+            )
+            if (
+                swarm_context['kind'] in ('companion_parallel', 'follow_in_lane')
+                and not bool(swarm_context.get('imminent'))
+            ):
+                continue
+
+            return True
+
+        return False
+
+    def _enforce_avoidance_min_forward_speed(self, cmd: VelocityCommand) -> VelocityCommand:
+        cmd = cmd.sanitize()
+        min_forward_speed = max(0.0, min(float(self.tracker.cruise_speed), self._avoidance_min_forward_speed))
+        if min_forward_speed <= 1e-6 or cmd.linear_x >= min_forward_speed:
+            return cmd
+
+        floor_active = self._avoidance_speed_floor_active() or self._should_preserve_rl_forward_progress(
+            cmd,
+            min_forward_speed,
+        )
+        if not floor_active:
+            return cmd
+
+        now_sec = time.time()
+        last_log_time = float(getattr(self, '_avoidance_speed_floor_last_log_time', 0.0))
+        if (now_sec - last_log_time) >= 2.0:
+            self.get_logger().info(
+                f'🧭 避让速度下限生效: final(vx) 从 {cmd.linear_x:.2f} m/s 抬升到 {min_forward_speed:.2f} m/s'
+            )
+            self._avoidance_speed_floor_last_log_time = now_sec
+
+        return VelocityCommand(
+            linear_x=min_forward_speed,
+            linear_y=cmd.linear_y,
+            angular_z=cmd.angular_z,
+        ).sanitize()
+
+    def _should_preserve_rl_forward_progress(
+        self,
+        cmd: VelocityCommand,
+        min_forward_speed: float,
+    ) -> bool:
+        if not bool(self.get_parameter('rl_policy_enabled').value):
+            return False
+        if self.current_pose is None:
+            return False
+        if not self._control_active or self._current_goal_id is None:
+            return False
+        if self._navigation_state != NavigationState.ACTIVE:
+            return False
+        if self.tracker.is_goal_reached():
+            return False
+
+        goal_distance = self.tracker.get_distance_to_goal(self.current_pose)
+        near_goal_distance = max(1.5, 3.0 * float(self.tracker.goal_tolerance))
+        if goal_distance <= near_goal_distance:
+            return False
+
+        raw_cmd = (self._last_raw_navigation_cmd or VelocityCommand.stop()).sanitize()
+        residual_cmd = self._rl_policy_last_shaped_action.sanitize()
+        if raw_cmd.linear_x < min_forward_speed:
+            return False
+        if residual_cmd.linear_x >= -1e-3:
+            return False
+        return cmd.linear_x < min_forward_speed
+
     def _apply_rl_policy_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
         """将最新 RL 动作叠加到导航原始命令。"""
         now_sec = time.time()
@@ -2095,7 +2218,16 @@ class VelocityControllerNode(Node):
                 angular_z=safe_corrected.angular_z,
             )
 
-        return safe_corrected.sanitize()
+        max_forward_speed = max(0.0, float(self.tracker.cruise_speed))
+        max_turn_rate = max(1e-3, float(self.tracker.max_angular_velocity))
+        min_forward_speed = -max_forward_speed if self._rl_policy_allow_reverse else 0.0
+        safe_corrected = VelocityCommand(
+            linear_x=float(np.clip(safe_corrected.linear_x, min_forward_speed, max_forward_speed)),
+            linear_y=safe_corrected.linear_y,
+            angular_z=float(np.clip(safe_corrected.angular_z, -max_turn_rate, max_turn_rate)),
+        )
+
+        return self._enforce_avoidance_min_forward_speed(safe_corrected)
 
     def _apply_apf_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
         """
@@ -3413,7 +3545,7 @@ class VelocityControllerNode(Node):
                 linear_y=result.linear_y,
                 angular_z=smoothed_omega,
             )
-        return result.sanitize()
+        return self._enforce_avoidance_min_forward_speed(result)
     
     # ==================== 控制循环 ====================
     
@@ -4480,6 +4612,7 @@ class VelocityControllerNode(Node):
         
         # 限幅保护
         cmd = cmd.sanitize()
+        cmd = self._enforce_avoidance_min_forward_speed(cmd)
         
         # ==================== 构建消息 ====================
         msg = PositionTarget()

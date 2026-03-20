@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .config import RewardConfig
+from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
 from .policies import load_residual_policy
@@ -157,17 +157,24 @@ def _load_policy_bundle(
             'agent_namespaces': agent_namespaces,
             'enable_rl_backend': True,
             'action_mode': resolved_action_mode,
+            'action_bounds': ActionBounds(**checkpoint.get('action_bounds', {'linear_delta': 0.7, 'angular_delta': 0.6})),
             'max_neighbors': resolved_max_neighbors,
             'max_agents': max(resolved_max_agents, len(agent_namespaces)),
+            'cruise_speed': float(checkpoint.get('cruise_speed', 0.5)),
+            'max_angular_velocity': float(checkpoint.get('max_angular_velocity', 0.5)),
             'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
             'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
             'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
+            'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
+            'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
+            'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
             'default_scenarios': resolved_scenarios,
             'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
             'goal_proximity_reward_weight': float(checkpoint.get('goal_proximity_reward_weight', 0.0)),
             'goal_proximity_relief_distance': float(checkpoint.get('goal_proximity_relief_distance', 3.0)),
             'goal_proximity_heading_relief': float(checkpoint.get('goal_proximity_heading_relief', 0.0)),
             'goal_proximity_smoothness_relief': float(checkpoint.get('goal_proximity_smoothness_relief', 0.0)),
+            'goal_proximity_conflict_relief': float(checkpoint.get('goal_proximity_conflict_relief', 0.0)),
             'team_reward_weight': float(checkpoint.get('team_reward_weight', 0.30)),
             'team_progress_weight': float(checkpoint.get('team_progress_weight', 1.20)),
             'team_goal_proximity_weight': float(checkpoint.get('team_goal_proximity_weight', 0.0)),

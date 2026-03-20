@@ -23,6 +23,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            'preflight_check = usv_rl.preflight_check:main',
             'collect_scripted_dataset = usv_rl.collect_scripted_dataset:main',
             'train_behavior_cloning = usv_rl.train_behavior_cloning:main',
             'train_ppo_residual = usv_rl.train_ppo_residual:main',

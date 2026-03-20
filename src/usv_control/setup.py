@@ -34,6 +34,7 @@ setup(
     ],
     install_requires=[
         'setuptools',
+        'casadi',
     ],
     zip_safe=True,
     maintainer='chenhangwei',

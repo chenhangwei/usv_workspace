@@ -18,7 +18,7 @@ def parse_args(argv=None):
     parser.add_argument('--namespace', default='usv_03', help='USV namespace for the recommended launch.')
     parser.add_argument('--timeout-seconds', type=float, default=20.0, help='How long to let the launch run before sending SIGINT.')
     parser.add_argument('--model', default=RECOMMENDED_MODEL_RELATIVE_PATH, help='Recommended model path override.')
-    parser.add_argument('--policy', default='bc', choices=['auto', 'bc', 'ppo', 'zero'], help='Residual policy type for the recommended launch.')
+    parser.add_argument('--policy', default='bc', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], help='Residual policy type for the recommended launch.')
     parser.add_argument('--output-json', help='Optional path to save the smoke summary as JSON.')
     parser.add_argument('--output-log', default=RECOMMENDED_SMOKE_LOG_RELATIVE_PATH, help='Path to save the raw launch output for this smoke run.')
     return parser.parse_args(argv)

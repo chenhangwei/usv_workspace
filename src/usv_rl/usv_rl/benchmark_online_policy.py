@@ -16,8 +16,8 @@ from .scenarios import ScenarioFactory
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Benchmark a residual policy in the online simple validation loop across synthetic encounter scenarios.')
-    parser.add_argument('--model', required=True, help='Residual policy model path (.npz or .zip).')
-    parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'zero'], default='auto', help='Policy backend.')
+    parser.add_argument('--model', required=True, help='Residual policy model path (.npz, .zip, or .pt).')
+    parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Encounter scenario to benchmark. Repeatable.')
     parser.add_argument('--goal-x', type=float, default=8.0, help='Validation goal X in meters.')

@@ -115,6 +115,8 @@ ros2 launch usv_sim usv_sim_launch.py
 - Developer docs index: [docs/developer/README.md](docs/developer/README.md)
 - RL recommended workflow: [docs/developer/manuals/rl_recommended_workflow.md](docs/developer/manuals/rl_recommended_workflow.md)
 - Multi-USV RL retraining plan: [docs/developer/manuals/multi_usv_rl_retraining_plan.md](docs/developer/manuals/multi_usv_rl_retraining_plan.md)
+- PAI-DSW MAPPO runbook: [docs/developer/manuals/pai_dsw_mappo_runbook.md](docs/developer/manuals/pai_dsw_mappo_runbook.md)
+- PAI-DSW environment repair: [docs/developer/manuals/pai_dsw_environment_repair.md](docs/developer/manuals/pai_dsw_environment_repair.md)
   - Current frozen validation sample is the post-fix batch at `./tmp_rl/post_goal_guard_validate_batch_8_final/`: `8/8` full `validate_online_candidate` passes, `head_on=8/8`, `crossing_starboard=8/8`, `overtaking=8/8`, startup retries `0`.
 - Full RL package reference: [usv_rl/README.md](usv_rl/README.md)
 

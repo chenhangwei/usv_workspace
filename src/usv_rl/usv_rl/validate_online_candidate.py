@@ -15,8 +15,8 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description='Run the standard online benchmark for a candidate policy and immediately apply the current replacement gate against the v2 baseline.'
     )
-    parser.add_argument('--model', required=True, help='Candidate residual policy model path (.npz or .zip).')
-    parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'zero'], default='auto', help='Policy backend.')
+    parser.add_argument('--model', required=True, help='Candidate residual policy model path (.npz, .zip, or .pt).')
+    parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
     parser.add_argument('--goal-x', type=float, default=8.0, help='Validation goal X in meters.')
     parser.add_argument('--goal-y', type=float, default=0.0, help='Validation goal Y in meters.')

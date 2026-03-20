@@ -96,12 +96,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rl_policy_kind',
             default_value='bc',
-            description='Residual policy type: auto, bc, ppo, or zero.',
+            description='Residual policy type: auto, bc, ppo, mappo, or zero.',
         ),
         DeclareLaunchArgument(
             'rl_policy_device',
             default_value='cpu',
-            description='Inference device for PPO policies.',
+            description='Inference device for PPO or MAPPO policies.',
         ),
         DeclareLaunchArgument(
             'rl_publish_rate',

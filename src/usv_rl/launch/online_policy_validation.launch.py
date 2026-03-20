@@ -122,9 +122,9 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='usv_03', description='USV namespace for validation.'),
-        DeclareLaunchArgument('model', description='Residual policy model path (.npz or .zip).'),
-        DeclareLaunchArgument('policy', default_value='bc', description='Residual policy backend: auto, bc, ppo, zero.'),
-        DeclareLaunchArgument('device', default_value='cpu', description='Inference device for PPO policies.'),
+        DeclareLaunchArgument('model', description='Residual policy model path (.npz, .zip, or .pt).'),
+        DeclareLaunchArgument('policy', default_value='bc', description='Residual policy backend: auto, bc, ppo, mappo, zero.'),
+        DeclareLaunchArgument('device', default_value='cpu', description='Inference device for PPO or MAPPO policies.'),
         DeclareLaunchArgument('publish_rate', default_value='10.0', description='Residual policy publish rate in Hz.'),
         DeclareLaunchArgument('max_neighbors', default_value='4', description='Max neighbors encoded into the observation.'),
         DeclareLaunchArgument('encounter_enabled', default_value='false', description='Whether to publish synthetic neighbors for an encounter scenario.'),
