@@ -25,17 +25,17 @@ USV 导航日志分析脚本 (v2)
     2. velocity.png         - 速度分析 (实际 vs 指令 + 距离)
     3. heading_comparison.png - 航向对比 (速度航向 vs 磁力计航向)
     4. control_commands.png - 控制指令图 (含 omega 跟踪对比)
+    5. rl_analysis.png      - RL 策略控制分析 (v18+)
     5. errors.png           - 误差图 (距离/航向/CTE)
     6. mpc_debug.png        - MPC 调试 (求解时间/代价/预测航向)
     7. adaptive_tau.png    - 自适应 Tau 分析
     8. ampc_analysis.png    - AMPC 在线辨识分析
     9. dashboard.png        - 综合仪表盘 (一页总览)
     10. per_goal_stats.png  - 每航点统计柱状图
-    11. orca_analysis.png   - ORCA/APF 避障分析 (v14+)
 
 作者: chenhangwei
 日期: 2026-02-10
-Updated: 2026-02-27 - v14 新增 ORCA/APF 避障分析和 nav_mode 分析
+Updated: 2026-02-27 - v14 新增 nav_mode 分析
 """
 
 import sys
@@ -46,7 +46,7 @@ import contextlib
 from collections import Counter
 from pathlib import Path
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Sequence
 
 # HTML 交互式报告生成器
 try:
@@ -103,6 +103,40 @@ if HAS_MATPLOTLIB:
         pass
 
 
+VERSION_SCHEMA_INFO = {
+    'v5': ('legacy_navigation', '基础导航日志'),
+    'v6': ('adaptive_tau_navigation', '导航日志 + Adaptive Tau'),
+    'v8': ('ampc_navigation', '导航日志 + AMPC 在线辨识'),
+    'v14': ('wifi_navigation', '导航日志 + WiFi 状态'),
+    'v16': ('neighbor_context_navigation', '导航日志 + 邻船回放上下文'),
+    'v18': ('rl_navigation_policy', 'RL 导航日志 + pure 控制分解'),
+}
+
+
+def _refresh_version_metadata(header_info: dict):
+    version = header_info.get('version', 'v5')
+    default_schema_name, default_schema_label = VERSION_SCHEMA_INFO.get(
+        version, ('unknown_navigation_schema', '未知导航日志')
+    )
+    if not header_info.get('schema_name'):
+        header_info['schema_name'] = default_schema_name
+    if not header_info.get('schema_label'):
+        header_info['schema_label'] = default_schema_label
+    header_info['version_display'] = f"{version} / {header_info['schema_label']}"
+
+
+def _set_detected_version(header_info: dict, version: str):
+    header_info['version'] = version
+    default_schema_name, default_schema_label = VERSION_SCHEMA_INFO.get(
+        version, ('unknown_navigation_schema', '未知导航日志')
+    )
+    if header_info.get('schema_name') in (None, '', 'unknown_navigation_schema'):
+        header_info['schema_name'] = default_schema_name
+    if header_info.get('schema_label') in (None, '', '未知导航日志'):
+        header_info['schema_label'] = default_schema_label
+    _refresh_version_metadata(header_info)
+
+
 def load_csv(filepath: str) -> tuple:
     """加载 CSV 文件
     
@@ -115,6 +149,11 @@ def load_csv(filepath: str) -> tuple:
     header_info = {
         'usv_id': 'unknown',
         'version': 'v5',  # 默认 v5
+        'schema_name': '',
+        'schema_label': '',
+        'schema_description': '',
+        'schema_features': '',
+        'version_display': 'v5 / 基础导航日志',
         'task_name': '',
         'params': {}
     }
@@ -144,6 +183,14 @@ def load_csv(filepath: str) -> tuple:
                 header_info['usv_id'] = value
             if 'task_name' in key or key == 'task_name':
                 header_info['task_name'] = value
+            if key in ('log_schema', 'schema', 'schema_name', 'log_schema_name'):
+                header_info['schema_name'] = value
+            if key in ('log_schema_label', 'schema_label', 'logging_profile', 'log_profile'):
+                header_info['schema_label'] = value
+            if key in ('log_description', 'schema_description'):
+                header_info['schema_description'] = value
+            if key in ('log_features', 'schema_features'):
+                header_info['schema_features'] = value
             # 通用版本检测: 从 (vXX) 格式中提取版本号
             import re as _re
             version_match = _re.search(r'\(v(\d+)\)', line)
@@ -151,19 +198,20 @@ def load_csv(filepath: str) -> tuple:
                 detected_ver = int(version_match.group(1))
                 current_ver = int(header_info['version'].lstrip('v') or '5')
                 if detected_ver > current_ver:
-                    header_info['version'] = f'v{detected_ver}'
+                    _set_detected_version(header_info, f'v{detected_ver}')
             elif 'v8' in line.lower() or 'ampc' in line.lower():
-                header_info['version'] = 'v8'
+                _set_detected_version(header_info, 'v8')
             elif 'v6' in line.lower() or 'adaptive' in line.lower():
-                header_info['version'] = 'v6'
+                _set_detected_version(header_info, 'v6')
             elif 'v7' in line.lower():
-                header_info['version'] = 'v7'
+                _set_detected_version(header_info, 'v7')
             # 解析数值参数
             if any(k in key for k in ['tau', 'weight', 'threshold', 'q_', 'r_', 'w_max', 'n_steps']):
                 try:
                     header_info['params'][key] = float(value.split()[0])
                 except (ValueError, IndexError):
                     header_info['params'][key] = value
+            _refresh_version_metadata(header_info)
 
     with open(filepath, 'r', errors='replace', newline='') as f:
         # 兼容 v5/v6 日志：文件头可能包含若干以 # 开头的注释/参数行
@@ -207,15 +255,17 @@ def load_csv(filepath: str) -> tuple:
     # 检测 v6/v8/v14 特有字段
     if data and 'current_tau_omega' in data[0]:
         if header_info['version'] == 'v5':
-            header_info['version'] = 'v6'
+            _set_detected_version(header_info, 'v6')
     if data and 'ampc_tau_estimated' in data[0]:
-        header_info['version'] = 'v8'
-    if data and ('orca_active' in data[0] or 'wifi_rssi_dbm' in data[0]):
-        header_info['version'] = 'v14'
+        _set_detected_version(header_info, 'v8')
+    if data and 'wifi_rssi_dbm' in data[0]:
+        _set_detected_version(header_info, 'v14')
     if data and 'neighbor_1_id' in data[0]:
-        header_info['version'] = 'v16'
-    if data and ('orca_primary_neighbor_id' in data[0] or 'orca_escape_active' in data[0]):
-        header_info['version'] = 'v17'
+        _set_detected_version(header_info, 'v16')
+    if data and ('raw_cmd_vx' in data[0] or 'rl_cmd_vx' in data[0]):
+        _set_detected_version(header_info, 'v18')
+
+    _refresh_version_metadata(header_info)
 
     # 从文件路径提取 USV ID (如 .../usv_02/xxx.csv)
     if header_info['usv_id'] == 'unknown':
@@ -234,6 +284,117 @@ def load_csv(filepath: str) -> tuple:
     return data, header_info
 
 
+def _has_rl_logging(data: list) -> bool:
+    return bool(data) and ('raw_cmd_vx' in data[0] or 'rl_cmd_vx' in data[0] or 'rl_delta_vx' in data[0])
+
+
+def _neighbor_slot_count(sample: dict) -> int:
+    count = 0
+    for slot in range(1, 6):
+        value = sample.get(f'neighbor_{slot}_id')
+        if isinstance(value, str) and value.strip():
+            count += 1
+        elif isinstance(value, (int, float)) and value != 0:
+            count += 1
+    return count
+
+
+def _compute_rl_metrics(data: list) -> dict[str, Any]:
+    if not _has_rl_logging(data):
+        return {'available': False}
+
+    raw_vx = [float(d.get('raw_cmd_vx', 0.0)) for d in data if isinstance(d.get('raw_cmd_vx'), (int, float))]
+    raw_omega = [float(d.get('raw_cmd_omega', 0.0)) for d in data if isinstance(d.get('raw_cmd_omega'), (int, float))]
+    rl_vx = [float(d.get('rl_cmd_vx', 0.0)) for d in data if isinstance(d.get('rl_cmd_vx'), (int, float))]
+    rl_omega = [float(d.get('rl_cmd_omega', 0.0)) for d in data if isinstance(d.get('rl_cmd_omega'), (int, float))]
+    delta_vx = [
+        float(d.get('rl_delta_vx', d.get('cmd_vx', 0.0) - d.get('raw_cmd_vx', 0.0)))
+        for d in data
+        if isinstance(d.get('cmd_vx'), (int, float)) and isinstance(d.get('raw_cmd_vx'), (int, float))
+    ]
+    delta_omega = [
+        float(d.get('rl_delta_omega', d.get('cmd_omega', 0.0) - d.get('raw_cmd_omega', 0.0)))
+        for d in data
+        if isinstance(d.get('cmd_omega'), (int, float)) and isinstance(d.get('raw_cmd_omega'), (int, float))
+    ]
+
+    active_mask = []
+    for sample in data:
+        if isinstance(sample.get('rl_cmd_active'), (int, float)):
+            active = int(sample.get('rl_cmd_active', 0)) == 1
+        else:
+            active = (
+                abs(float(sample.get('rl_cmd_vx', 0.0) or 0.0)) > 1e-4
+                or abs(float(sample.get('rl_cmd_omega', 0.0) or 0.0)) > 1e-4
+            )
+        active_mask.append(active)
+
+    active_count = sum(1 for active in active_mask if active)
+    active_indices = [index for index, active in enumerate(active_mask) if active]
+    active_delta_vx = [abs(delta_vx[index]) for index in active_indices if index < len(delta_vx)]
+    active_delta_omega = [abs(delta_omega[index]) for index in active_indices if index < len(delta_omega)]
+    neighbor_counts = [_neighbor_slot_count(sample) for sample in data]
+    active_neighbor_counts = [neighbor_counts[index] for index in active_indices]
+    rl_age = [float(d.get('rl_cmd_age_s')) for d in data if isinstance(d.get('rl_cmd_age_s'), (int, float)) and d.get('rl_cmd_age_s', -1.0) >= 0.0]
+
+    def _mean(values: Sequence[float | int]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    def _sat_ratio(values: list[float]) -> float:
+        if not values:
+            return 0.0
+        vmax = max(abs(value) for value in values)
+        if vmax <= 1e-6:
+            return 0.0
+        hits = sum(1 for value in values if abs(abs(value) - vmax) <= 1e-3)
+        return hits / len(values)
+
+    return {
+        'available': True,
+        'active_count': active_count,
+        'active_pct': active_count / len(data) * 100.0 if data else 0.0,
+        'mean_abs_rl_vx': _mean([abs(value) for value in rl_vx]),
+        'max_abs_rl_vx': max((abs(value) for value in rl_vx), default=0.0),
+        'mean_abs_rl_omega': _mean([abs(value) for value in rl_omega]),
+        'max_abs_rl_omega': max((abs(value) for value in rl_omega), default=0.0),
+        'mean_abs_delta_vx': _mean([abs(value) for value in delta_vx]),
+        'max_abs_delta_vx': max((abs(value) for value in delta_vx), default=0.0),
+        'mean_abs_delta_omega': _mean([abs(value) for value in delta_omega]),
+        'max_abs_delta_omega': max((abs(value) for value in delta_omega), default=0.0),
+        'active_mean_abs_delta_vx': _mean(active_delta_vx),
+        'active_mean_abs_delta_omega': _mean(active_delta_omega),
+        'neighbor_nonzero_pct': sum(1 for count in neighbor_counts if count > 0) / len(neighbor_counts) * 100.0 if neighbor_counts else 0.0,
+        'active_neighbor_mean': _mean(active_neighbor_counts),
+        'rl_age_p95': sorted(rl_age)[int(len(rl_age) * 0.95)] if rl_age else None,
+        'rl_vx_sat_pct': _sat_ratio(rl_vx) * 100.0,
+        'rl_omega_sat_pct': _sat_ratio(rl_omega) * 100.0,
+        'delta_omega_sign_flips': _count_significant_sign_flips(delta_omega),
+        'raw_vx_mean': _mean(raw_vx),
+        'raw_omega_mean': _mean([abs(value) for value in raw_omega]),
+    }
+
+
+def _print_rl_stats(data: list):
+    rl_metrics = _compute_rl_metrics(data)
+    if not rl_metrics.get('available'):
+        return
+
+    print(f"\n{'='*60}")
+    print("🤖 RL 策略控制统计")
+    print("=" * 60)
+    print(f"   RL 活跃样本: {rl_metrics['active_count']}/{len(data)} ({rl_metrics['active_pct']:.1f}%)")
+    print(f"   RL 输出幅值: |Δv|均值 {rl_metrics['mean_abs_rl_vx']:.3f} m/s, 最大 {rl_metrics['max_abs_rl_vx']:.3f} m/s")
+    print(f"                |Δω|均值 {rl_metrics['mean_abs_rl_omega']:.3f} rad/s, 最大 {rl_metrics['max_abs_rl_omega']:.3f} rad/s")
+    print(f"   Final-Raw 差值: |Δv|均值 {rl_metrics['mean_abs_delta_vx']:.3f} m/s, |Δω|均值 {rl_metrics['mean_abs_delta_omega']:.3f} rad/s")
+    print(f"   RL 活跃段差值: |Δv|均值 {rl_metrics['active_mean_abs_delta_vx']:.3f} m/s, |Δω|均值 {rl_metrics['active_mean_abs_delta_omega']:.3f} rad/s")
+    print(f"   RL 触顶比例: Δv {rl_metrics['rl_vx_sat_pct']:.1f}% | Δω {rl_metrics['rl_omega_sat_pct']:.1f}%")
+    print(f"   角速度反转次数: {rl_metrics['delta_omega_sign_flips']} 次")
+    print(f"   邻船槽位非空占比: {rl_metrics['neighbor_nonzero_pct']:.1f}%")
+    print(f"   RL 活跃段平均邻船数: {rl_metrics['active_neighbor_mean']:.2f}")
+    if rl_metrics.get('rl_age_p95') is not None:
+        print(f"   RL 指令年龄 P95: {rl_metrics['rl_age_p95']:.3f}s")
+
+
 def analyze_statistics(data: list, header_info: dict = None):
     """统计分析"""
     print("\n" + "="*60)
@@ -243,10 +404,16 @@ def analyze_statistics(data: list, header_info: dict = None):
     # 显示 USV ID 和版本信息 (v6+)
     if header_info:
         usv_id = header_info.get('usv_id', 'unknown')
-        version = header_info.get('version', 'v5')
+        version = header_info.get('version_display', header_info.get('version', 'v5'))
         t_name = header_info.get('task_name', '')
         task_info = f"  任务: {t_name}" if t_name else ""
         print(f"\n🚢 USV: {usv_id}  (日志版本: {version}){task_info}")
+        if header_info.get('schema_name'):
+            print(f"   schema: {header_info['schema_name']}")
+        if header_info.get('schema_description'):
+            print(f"   说明: {header_info['schema_description']}")
+        if header_info.get('schema_features'):
+            print(f"   字段组: {header_info['schema_features']}")
         
         # 显示 v6 自适应参数
         params = header_info.get('params', {})
@@ -446,6 +613,8 @@ def analyze_statistics(data: list, header_info: dict = None):
             if isinstance(w_max_cfg, (int, float)) and w_max_cfg > 0:
                 true_sat = _sat_ratio(om_cmds, w_max_cfg, tol=0.01)
                 print(f"   → 配置 w_max={w_max_cfg:.2f} 饱和率: {true_sat*100:.1f}%")
+
+    _print_rl_stats(data)
     
     # v8 AMPC 统计
     if 'ampc_tau_estimated' in data[0]:
@@ -516,9 +685,6 @@ def analyze_statistics(data: list, header_info: dict = None):
     
     # 每航点统计
     _print_per_goal_stats(data)
-    
-    # v14 ORCA/APF 避障统计
-    _print_orca_stats(data)
     
     # v14 导航模式统计
     _print_nav_mode_stats(data)
@@ -679,202 +845,12 @@ def _print_per_goal_stats(data: list):
         print(line)
 
 
-def _valid_primary_neighbor_id(value: Any) -> Optional[str]:
-    if isinstance(value, str):
-        value = value.strip()
-        if value and value != '0':
-            return value
-    return None
-
-
-def _count_binary_episodes(data: list, field: str) -> tuple[int, float, float]:
-    total_duration = 0.0
-    episode_count = 0
-    longest_duration = 0.0
-    i = 0
-    while i < len(data):
-        if data[i].get(field) == 1:
-            start_ts = data[i]['timestamp']
-            j = i
-            while j < len(data) and data[j].get(field) == 1:
-                j += 1
-            end_ts = data[j - 1]['timestamp']
-            duration = max(0.0, end_ts - start_ts)
-            total_duration += duration
-            longest_duration = max(longest_duration, duration)
-            episode_count += 1
-            i = j
-        else:
-            i += 1
-    return episode_count, total_duration, longest_duration
-
-
-def _count_nonzero_switches(values: list[float]) -> int:
-    filtered = [int(v) for v in values if isinstance(v, (int, float)) and int(v) != 0]
-    return sum(1 for i in range(1, len(filtered)) if filtered[i] != filtered[i - 1])
-
-
 def _count_significant_sign_flips(values: list[float], min_abs: float = 0.05) -> int:
     return sum(
         1
         for i in range(1, len(values))
         if values[i - 1] * values[i] < 0.0 and abs(values[i - 1]) > min_abs and abs(values[i]) > min_abs
     )
-
-
-def _compute_orca_quality_metrics(data: list) -> dict[str, Any]:
-    if not data or 'orca_active' not in data[0]:
-        return {'available': False}
-
-    total = len(data)
-    total_time = max(1e-6, data[-1]['timestamp'] - data[0]['timestamp'])
-    duration_min = total_time / 60.0
-    active_samples = [d for d in data if d.get('orca_active') == 1]
-    active_count = len(active_samples)
-    active_pct = active_count / total * 100.0 if total else 0.0
-
-    start_distances: list[float] = []
-    prev_active = 0
-    for sample in data:
-        current_active = 1 if sample.get('orca_active') == 1 else 0
-        distance = sample.get('orca_closest_distance')
-        if current_active == 1 and prev_active == 0 and isinstance(distance, (int, float)) and distance > 0.0:
-            start_distances.append(float(distance))
-        prev_active = current_active
-
-    start_distances_sorted = sorted(start_distances)
-    min_start_distance = start_distances_sorted[0] if start_distances_sorted else None
-    median_start_distance = None
-    if start_distances_sorted:
-        mid = len(start_distances_sorted) // 2
-        if len(start_distances_sorted) % 2 == 1:
-            median_start_distance = start_distances_sorted[mid]
-        else:
-            median_start_distance = (start_distances_sorted[mid - 1] + start_distances_sorted[mid]) / 2.0
-    late_start_count = sum(1 for d in start_distances if d < 3.0)
-
-    valid_distances = [
-        float(d.get('orca_closest_distance'))
-        for d in active_samples
-        if isinstance(d.get('orca_closest_distance'), (int, float)) and d.get('orca_closest_distance') > 0.0
-    ]
-    min_distance = min(valid_distances) if valid_distances else None
-    avg_distance = sum(valid_distances) / len(valid_distances) if valid_distances else None
-
-    hard_brakes = [d for d in data if d.get('orca_hard_brake') == 1]
-    hard_brake_count = len(hard_brakes)
-    hard_brake_pct = hard_brake_count / total * 100.0 if total else 0.0
-
-    escape_episodes = 0
-    escape_duration = 0.0
-    if 'orca_escape_active' in data[0]:
-        escape_episodes, escape_duration, _ = _count_binary_episodes(data, 'orca_escape_active')
-    escape_pct = escape_duration / total_time * 100.0 if total_time > 0.0 else 0.0
-
-    omega_values = [d.get('cmd_omega') for d in data if isinstance(d.get('cmd_omega'), (int, float))]
-    omega_flips = _count_significant_sign_flips(omega_values)
-    abrupt_omega_jumps = sum(1 for i in range(1, len(omega_values)) if abs(omega_values[i] - omega_values[i - 1]) > 0.20)
-    omega_flip_rate = omega_flips / duration_min if duration_min > 0.0 else 0.0
-    abrupt_jump_rate = abrupt_omega_jumps / duration_min if duration_min > 0.0 else 0.0
-
-    commit_changes = _count_nonzero_switches([d.get('orca_commit_side', 0) for d in data])
-
-    orca_speeds = [d.get('velocity_speed') for d in active_samples if isinstance(d.get('velocity_speed'), (int, float))]
-    avg_orca_speed = sum(orca_speeds) / len(orca_speeds) if orca_speeds else None
-    low_speed_threshold = 0.15
-    low_speed_count = sum(1 for speed in orca_speeds if speed < low_speed_threshold)
-    low_speed_pct = low_speed_count / len(orca_speeds) * 100.0 if orca_speeds else 0.0
-
-    orca_episodes, orca_duration, longest_orca_episode = _count_binary_episodes(data, 'orca_active')
-
-    if min_start_distance is None:
-        early_grade = 'N/A'
-    elif min_start_distance >= 4.0 and late_start_count == 0:
-        early_grade = '较早'
-    elif min_start_distance >= 3.0:
-        early_grade = '一般'
-    else:
-        early_grade = '偏晚'
-
-    if (
-        hard_brake_pct <= 0.3
-        and abrupt_jump_rate <= 0.5
-        and omega_flip_rate <= 0.8
-        and low_speed_pct <= 8.0
-        and escape_episodes == 0
-    ):
-        smooth_grade = '丝滑'
-    elif (
-        hard_brake_pct <= 1.0
-        and abrupt_jump_rate <= 1.2
-        and omega_flip_rate <= 1.5
-        and low_speed_pct <= 15.0
-        and escape_episodes <= 1
-    ):
-        smooth_grade = '一般'
-    else:
-        smooth_grade = '生硬'
-
-    if (
-        longest_orca_episode >= 120.0
-        or (active_pct >= 80.0 and escape_episodes >= 2)
-        or (hard_brake_pct >= 3.0 and escape_episodes >= 1)
-        or commit_changes >= 6
-    ):
-        coupling_grade = '高'
-    elif longest_orca_episode >= 45.0 or active_pct >= 60.0 or escape_episodes >= 1 or commit_changes >= 3:
-        coupling_grade = '中'
-    else:
-        coupling_grade = '低'
-
-    elegance_score = 100.0
-    elegance_score -= min(40.0, hard_brake_pct * 6.0)
-    elegance_score -= min(18.0, abrupt_jump_rate * 6.0)
-    elegance_score -= min(14.0, omega_flip_rate * 5.0)
-    elegance_score -= min(18.0, low_speed_pct * 0.6)
-    elegance_score -= min(10.0, commit_changes * 1.5)
-    if coupling_grade == '高':
-        elegance_score -= 12.0
-    elif coupling_grade == '中':
-        elegance_score -= 6.0
-    elegance_score = max(0.0, min(100.0, elegance_score))
-    elegance_grade = '优雅' if elegance_score >= 80 else '可接受' if elegance_score >= 60 else '欠佳' if elegance_score >= 40 else '差'
-
-    return {
-        'available': True,
-        'orca_pct': active_pct,
-        'episode_count': orca_episodes,
-        'episode_duration_s': orca_duration,
-        'longest_episode_s': longest_orca_episode,
-        'min_start_distance_m': min_start_distance,
-        'median_start_distance_m': median_start_distance,
-        'late_start_count': late_start_count,
-        'min_distance_m': min_distance,
-        'avg_distance_m': avg_distance,
-        'hard_brake_count': hard_brake_count,
-        'hard_brake_pct': hard_brake_pct,
-        'escape_episodes': escape_episodes,
-        'escape_duration_s': escape_duration,
-        'escape_pct': escape_pct,
-        'commit_changes': commit_changes,
-        'omega_flips': omega_flips,
-        'omega_flip_rate_per_min': omega_flip_rate,
-        'abrupt_omega_jumps': abrupt_omega_jumps,
-        'abrupt_jump_rate_per_min': abrupt_jump_rate,
-        'avg_orca_speed_mps': avg_orca_speed,
-        'low_speed_pct': low_speed_pct,
-        'early_grade': early_grade,
-        'smooth_grade': smooth_grade,
-        'coupling_grade': coupling_grade,
-        'elegance_score': elegance_score,
-        'elegance_grade': elegance_grade,
-        'early_but_ineffective': bool(
-            min_start_distance is not None
-            and min_start_distance >= 4.0
-            and min_distance is not None
-            and min_distance < 0.8
-        ),
-    }
 
 
 def _print_quality_score(data: list):
@@ -931,148 +907,6 @@ def _print_quality_score(data: list):
     print(f"\n   📊 综合评分: {total:.0f}/100 → 【{total_grade}】")
 
 
-def _print_orca_stats(data: list):
-    """打印 ORCA/APF 避障统计 (v14+)"""
-    if 'orca_active' not in data[0]:
-        return
-
-    orca_active_samples = [d for d in data if d.get('orca_active') == 1]
-    total = len(data)
-    active_count = len(orca_active_samples)
-    quality = _compute_orca_quality_metrics(data)
-
-    if active_count == 0:
-        print(f"\n{'='*60}")
-        print("🛡️ ORCA/APF 避障统计")
-        print("=" * 60)
-        print(f"   ORCA 未触发 (0/{total} = 0%)")
-        return
-
-    print(f"\n{'='*60}")
-    print("🛡️ ORCA/APF 避障统计")
-    print("=" * 60)
-    print(f"\n   ORCA 激活: {active_count}/{total} 次 ({active_count/total*100:.1f}%)")
-
-    # 最近距离统计
-    distances = [d.get('orca_closest_distance', -1) for d in orca_active_samples
-                 if isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
-    if distances:
-        print(f"   最近邻居距离: 最小={min(distances):.2f}m, 平均={sum(distances)/len(distances):.2f}m")
-
-    # 计算 ORCA 持续时间段
-    episode_count, duration_total, _ = _count_binary_episodes(data, 'orca_active')
-    if episode_count > 0:
-        total_time = data[-1]['timestamp'] - data[0]['timestamp']
-        print(f"   激活段数: {episode_count} 段, 总时长={duration_total:.1f}s ({duration_total/total_time*100:.1f}%)")
-        print(f"   平均每段: {duration_total/episode_count:.1f}s")
-
-    # 遭遇类型分布
-    encounters = {}
-    for d in orca_active_samples:
-        etype = d.get('orca_encounter_type', 'none')
-        if isinstance(etype, str) and etype != 'none':
-            encounters[etype] = encounters.get(etype, 0) + 1
-    if encounters:
-        print(f"\n   遭遇类型 (COLREGS):")
-        for etype, count in sorted(encounters.items(), key=lambda x: -x[1]):
-            print(f"   - {etype}: {count} ({count/active_count*100:.1f}%)")
-
-    primary_counts = Counter()
-    for d in orca_active_samples:
-        primary_id = _valid_primary_neighbor_id(d.get('orca_primary_neighbor_id'))
-        if primary_id is not None:
-            primary_counts[primary_id] += 1
-    if primary_counts:
-        top_neighbor, top_count = primary_counts.most_common(1)[0]
-        print(f"\n   主导邻船: {top_neighbor} ({top_count}/{active_count}, {top_count/active_count*100:.1f}%)")
-        for neighbor_id, count in primary_counts.most_common(3):
-            print(f"   - {neighbor_id}: {count} ({count/active_count*100:.1f}%)")
-
-    # 选边统计
-    sides = [d.get('orca_commit_side', 0) for d in orca_active_samples
-             if isinstance(d.get('orca_commit_side'), (int, float)) and d['orca_commit_side'] != 0]
-    if sides:
-        left = sum(1 for s in sides if s > 0)
-        right = sum(1 for s in sides if s < 0)
-        print(f"\n   选边决策: 左转(+1)={left}, 右转(-1)={right}")
-
-    # 修正量统计
-    lin_corrs = [d.get('orca_linear_correction', 0) for d in orca_active_samples
-                 if isinstance(d.get('orca_linear_correction'), (int, float))]
-    ang_corrs = [d.get('orca_angular_correction', 0) for d in orca_active_samples
-                 if isinstance(d.get('orca_angular_correction'), (int, float))]
-    if lin_corrs:
-        print(f"\n   线速度修正: 均值={sum(lin_corrs)/len(lin_corrs):.4f} m/s, "
-              f"最大减速={min(lin_corrs):.4f} m/s")
-    if ang_corrs:
-        print(f"   角速度修正: 均值={sum(ang_corrs)/len(ang_corrs):.4f} rad/s, "
-              f"最大={max(abs(a) for a in ang_corrs):.4f} rad/s")
-
-    # 硬刹车统计
-    hard_brakes = [d for d in data if d.get('orca_hard_brake') == 1]
-    if hard_brakes:
-        print(f"\n   ⚠️ 硬刹车触发: {len(hard_brakes)} 次 ({len(hard_brakes)/total*100:.1f}%)")
-
-    if 'orca_escape_active' in data[0]:
-        escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
-        escape_count = len(escape_samples)
-        if escape_count > 0:
-            escape_episodes, escape_duration, _ = _count_binary_episodes(data, 'orca_escape_active')
-            phase_counter = Counter(
-                int(d.get('orca_escape_phase', 0))
-                for d in escape_samples
-                if isinstance(d.get('orca_escape_phase'), (int, float)) and int(d.get('orca_escape_phase', 0)) > 0
-            )
-            direction_counter = Counter(
-                int(d.get('orca_escape_direction', 0))
-                for d in escape_samples
-                if isinstance(d.get('orca_escape_direction'), (int, float)) and int(d.get('orca_escape_direction', 0)) != 0
-            )
-            max_escape_count = max(
-                int(d.get('orca_escape_count', 0))
-                for d in data
-                if isinstance(d.get('orca_escape_count'), (int, float))
-            )
-            print(f"\n   🆘 脱困统计: {escape_episodes} 次, 总时长={escape_duration:.1f}s ({escape_count/total*100:.1f}%)")
-            if phase_counter:
-                phase_text = ', '.join(f'Phase{phase}:{count}' for phase, count in sorted(phase_counter.items()))
-                print(f"   - 阶段分布: {phase_text}")
-            if direction_counter:
-                left_count = direction_counter.get(1, 0)
-                right_count = direction_counter.get(-1, 0)
-                print(f"   - 方向分布: 左={left_count}, 右={right_count}")
-            print(f"   - 累计脱困计数峰值: {max_escape_count}")
-
-    # 邻居数统计
-    neighbor_counts = [d.get('apf_neighbor_count', 0) for d in orca_active_samples
-                       if isinstance(d.get('apf_neighbor_count'), (int, float))]
-    if neighbor_counts:
-        max_neighbors = max(neighbor_counts)
-        print(f"   最大同时邻居数: {max_neighbors}")
-
-    if quality.get('available'):
-        print(f"\n   🎯 避让质量判定:")
-        print(
-            f"   - 提前性: {quality['early_grade']} "
-            f"(最早启动={quality['min_start_distance_m']:.2f}m, 中位启动={quality['median_start_distance_m']:.2f}m, <3m 启动={quality['late_start_count']}次)"
-            if quality['min_start_distance_m'] is not None and quality['median_start_distance_m'] is not None
-            else f"   - 提前性: {quality['early_grade']}"
-        )
-        print(
-            f"   - 丝滑性: {quality['smooth_grade']} "
-            f"(硬刹车={quality['hard_brake_pct']:.1f}%, ω反转={quality['omega_flips']}次/{quality['omega_flip_rate_per_min']:.2f}次/分, "
-            f"ω突变={quality['abrupt_omega_jumps']}次/{quality['abrupt_jump_rate_per_min']:.2f}次/分, ORCA低速占比={quality['low_speed_pct']:.1f}%)"
-        )
-        avg_orca_speed_text = f", ORCA均速={quality['avg_orca_speed_mps']:.3f}m/s" if quality['avg_orca_speed_mps'] is not None else ""
-        print(
-            f"   - 钳制风险: {quality['coupling_grade']} "
-            f"(最长连续接管={quality['longest_episode_s']:.1f}s, 脱困={quality['escape_episodes']}次/{quality['escape_duration_s']:.1f}s, 选边切换={quality['commit_changes']}次{avg_orca_speed_text})"
-        )
-        print(f"   - 优雅度: {quality['elegance_score']:.0f}/100 → 【{quality['elegance_grade']}】")
-        if quality['early_but_ineffective']:
-            print("   - 诊断: 虽然启动较早，但最近距离仍塌陷，说明存在长时耦合或修正不够顺滑")
-
-
 def _print_nav_mode_stats(data: list):
     """打印导航模式统计 (v14+)"""
     if 'nav_mode' not in data[0]:
@@ -1111,24 +945,18 @@ def _print_nav_mode_stats(data: list):
                 if gid not in sync_goals:
                     sync_goals[gid] = []
                 sync_goals[gid].append(d)
-        
+
         if sync_goals:
             print(f"\n   同步航点详情:")
             for gid in sorted(sync_goals.keys()):
                 gdata = sync_goals[gid]
-                hold_time = sum(1 for d in gdata if d.get('flight_mode') == 'HOLD') * 0.1  # 10Hz采样
+                hold_time = sum(1 for d in gdata if d.get('flight_mode') == 'HOLD') * 0.1
                 total_time = gdata[-1]['timestamp'] - gdata[0]['timestamp'] if len(gdata) > 1 else 0
                 print(f"   - Goal {gid}: 总时长={total_time:.1f}s, HOLD等待={hold_time:.1f}s")
 
 
 def _add_reading_guide(fig, text: str, bottom: float = 0.10):
-    """在图表底部添加阅读指南说明框
-
-    Args:
-        fig: matplotlib figure
-        text: 阅读指南文字（支持换行）
-        bottom: 为指南预留的底部空间比例 (0-1)
-    """
+    """在图表底部添加阅读指南说明框"""
     fig.subplots_adjust(bottom=bottom)
     fig.text(
         0.5, 0.005, text,
@@ -1137,173 +965,6 @@ def _add_reading_guide(fig, text: str, bottom: float = 0.10):
         bbox=dict(boxstyle='round,pad=0.5', facecolor='#FFFDE7',
                   alpha=0.95, edgecolor='#E0E0E0'),
     )
-
-
-def plot_orca_analysis(data: list, output_path: Path, header_info: dict = None):
-    """绘制 ORCA/APF 避障分析图 (v14+)"""
-    if not HAS_MATPLOTLIB:
-        return
-    
-    if 'orca_active' not in data[0]:
-        return
-    
-    # 检查是否有 ORCA 触发
-    any_active = any(d.get('orca_active') == 1 for d in data)
-    if not any_active:
-        return
-    
-    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
-    primary_counts = Counter(
-        d.get('orca_primary_neighbor_id', '').strip()
-        for d in data
-        if d.get('orca_active') == 1 and isinstance(d.get('orca_primary_neighbor_id'), str) and d.get('orca_primary_neighbor_id', '').strip()
-    )
-    top_neighbor = primary_counts.most_common(1)[0][0] if primary_counts else 'N/A'
-    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
-    
-    fig, axes = plt.subplots(6, 1, figsize=(14, 18), sharex=True)
-    fig.suptitle(f'ORCA/APF Avoidance Analysis - {usv_id} (主导邻船: {top_neighbor})', fontsize=14, fontweight='bold')
-    
-    # 1. 最近邻居距离 + ORCA 激活状态背景
-    ax = axes[0]
-    orca_active = [d.get('orca_active', 0) for d in data]
-    closest_dist = [d.get('orca_closest_distance', -1) for d in data]
-    # 将 -1 替换为 NaN 以避免绘制
-    closest_dist_plot = [d if d > 0 else float('nan') for d in closest_dist]
-    
-    # ORCA 激活区域背景着色
-    i = 0
-    while i < len(data):
-        if orca_active[i] == 1:
-            j = i
-            while j < len(data) and orca_active[j] == 1:
-                j += 1
-            ax.axvspan(t[i], t[min(j-1, len(t)-1)], alpha=0.15, color='red', label='ORCA active' if i == 0 or not any(orca_active[k] == 1 for k in range(i)) else '')
-            i = j
-        else:
-            i += 1
-    
-    ax.plot(t, closest_dist_plot, 'b-', linewidth=1.2, label='Closest Distance')
-    if 'apf_orca_min_separation' in str(header_info):
-        ax.axhline(y=1.0, color='red', linestyle='--', linewidth=0.8, label='Min Separation')
-    ax.axhline(y=4.0, color='orange', linestyle=':', linewidth=0.8, label='Influence Distance')
-    ax.set_ylabel('Distance (m)')
-    ax.set_title('Nearest Neighbor Distance')
-    ax.legend(loc='upper right', fontsize=7)
-    ax.grid(True, alpha=0.3)
-    
-    # 2. 遭遇类型 (分类散点)
-    ax = axes[1]
-    encounter_order = [
-        'none', 'other', 'stationary', 'crossing_give_way',
-        'crossing_stand_on', 'head_on', 'overtaking', 'being_overtaken'
-    ]
-    encounter_map = {etype: idx for idx, etype in enumerate(encounter_order)}
-    encounter_colors = {
-        'none': 'lightgray',
-        'other': 'gray',
-        'stationary': 'purple',
-        'crossing_give_way': 'orange',
-        'crossing_stand_on': 'gold',
-        'head_on': 'red',
-        'overtaking': 'blue',
-        'being_overtaken': 'green',
-    }
-    
-    for etype in encounter_order:
-        yval = encounter_map[etype]
-        indices = [idx for idx, d in enumerate(data) if d.get('orca_encounter_type') == etype and d.get('orca_active') == 1]
-        if indices:
-            ax.scatter([t[i] for i in indices], [yval] * len(indices),
-                      c=encounter_colors.get(etype, 'gray'), s=3, alpha=0.6, label=etype)
-    
-    ax.set_ylabel('Encounter Type')
-    ax.set_yticks(list(encounter_map.values()))
-    ax.set_yticklabels(encounter_order, fontsize=8)
-    ax.set_title('COLREGS Encounter Classification')
-    ax.legend(loc='upper right', fontsize=7)
-    ax.grid(True, alpha=0.3, axis='x')
-    
-    # 3. 选边方向 + 硬刹车标记
-    ax = axes[2]
-    commit_side = [d.get('orca_commit_side', 0) for d in data]
-    hard_brake = [d.get('orca_hard_brake', 0) for d in data]
-    
-    # 只绘制 ORCA 激活时的选边
-    active_t = [t[i] for i in range(len(data)) if orca_active[i] == 1]
-    active_side = [commit_side[i] for i in range(len(data)) if orca_active[i] == 1]
-    if active_t:
-        colors = ['green' if s > 0 else 'red' if s < 0 else 'gray' for s in active_side]
-        ax.scatter(active_t, active_side, c=colors, s=4, alpha=0.5)
-    
-    # 硬刹车标记
-    brake_t = [t[i] for i in range(len(data)) if hard_brake[i] == 1]
-    if brake_t:
-        ax.scatter(brake_t, [0] * len(brake_t), c='black', s=20, marker='x', zorder=5, label='Hard Brake')
-    
-    ax.set_ylabel('Side')
-    ax.set_yticks([-1, 0, 1])
-    ax.set_yticklabels(['Right(-1)', 'None', 'Left(+1)'])
-    ax.set_title('Commit Side & Hard Brake Events')
-    ax.legend(loc='upper right', fontsize=7)
-    ax.grid(True, alpha=0.3)
-    
-    # 4. 线速度修正量
-    ax = axes[3]
-    lin_corr = [d.get('orca_linear_correction', 0) for d in data]
-    ang_corr = [d.get('orca_angular_correction', 0) for d in data]
-    
-    ax.plot(t, lin_corr, 'r-', linewidth=0.8, alpha=0.8, label='Linear Correction (m/s)')
-    ax.axhline(y=0, color='k', linewidth=0.5)
-    ax.fill_between(t, lin_corr, alpha=0.2, color='red')
-    ax.set_ylabel('Linear Corr (m/s)')
-    ax.set_title('Speed Correction (negative = deceleration)')
-    ax.legend(loc='upper right', fontsize=7)
-    ax.grid(True, alpha=0.3)
-    
-    # 5. 角速度修正量
-    ax = axes[4]
-    ax.plot(t, ang_corr, 'b-', linewidth=0.8, alpha=0.8, label='Angular Correction (rad/s)')
-    ax.axhline(y=0, color='k', linewidth=0.5)
-    ax.fill_between(t, ang_corr, alpha=0.2, color='blue')
-    ax.set_ylabel('Angular Corr (rad/s)')
-    ax.set_title('Heading Correction')
-    ax.legend(loc='upper right', fontsize=7)
-    ax.grid(True, alpha=0.3)
-
-    # 6. 脱困阶段 (v17+)
-    ax = axes[5]
-    if 'orca_escape_active' in data[0]:
-        escape_phase = [int(d.get('orca_escape_phase', 0)) if d.get('orca_escape_active') == 1 else 0 for d in data]
-        escape_active = [d.get('orca_escape_active', 0) for d in data]
-        if any(escape_active):
-            ax.step(t, escape_phase, where='post', color='darkred', linewidth=1.2, label='Escape Phase')
-            phase1_t = [t[i] for i in range(len(data)) if escape_phase[i] == 1]
-            phase2_t = [t[i] for i in range(len(data)) if escape_phase[i] == 2]
-            if phase1_t:
-                ax.scatter(phase1_t, [1] * len(phase1_t), c='red', s=5, alpha=0.5, label='Phase1')
-            if phase2_t:
-                ax.scatter(phase2_t, [2] * len(phase2_t), c='orange', s=5, alpha=0.5, label='Phase2')
-            ax.legend(loc='upper right', fontsize=7)
-        else:
-            ax.text(0.5, 0.5, 'No escape triggered', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
-    else:
-        ax.text(0.5, 0.5, 'Escape fields unavailable', ha='center', va='center', transform=ax.transAxes, fontsize=10, color='gray')
-    ax.set_ylabel('Escape')
-    ax.set_yticks([0, 1, 2])
-    ax.set_yticklabels(['Off', 'P1', 'P2'])
-    ax.set_xlabel('Time (s)')
-    ax.set_title('ORCA Escape State (v17+)')
-    ax.grid(True, alpha=0.3)
-    
-    _add_reading_guide(fig,
-        '【阅读指南】第1行: 蓝=最近邻居距离，红色背景=ORCA避障激活中; 距离>4m安全，<1m危险。\n'
-        '第2行: 遇见类型分类，stationary=近距伴随/静态障碍，crossing_give_way 与 crossing_stand_on 区分让路关系。\n'
-        '第3行: 选边+1=左避，-1=右避，X=紧急制动。 第4行: 红填充=线速度修正(负值=减速)。 第5行: 蓝填充=角速度修正。 第6行: 脱困阶段 Off/P1/P2。',
-        bottom=0.06)
-    plt.savefig(output_path / 'orca_analysis.png', dpi=150)
-    plt.close()
-    print(f"   📈 ORCA 避障分析图: {output_path / 'orca_analysis.png'}")
 
 
 def plot_neighbor_distances(data: list, output_path: Path, header_info: dict = None):
@@ -1661,11 +1322,11 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
             plot_velocity(data, output_path, header_info)
             plot_heading_comparison(data, output_path)
             plot_control_commands(data, output_path, header_info)
+            plot_rl_analysis(data, output_path, header_info)
             plot_mpc_debug(data, output_path)
             plot_errors(data, output_path)
             plot_v6_adaptive_tau(data, output_path, header_info)
             plot_v8_ampc(data, output_path, header_info)
-            plot_orca_analysis(data, output_path, header_info)
             plot_neighbor_distances(data, output_path, header_info)
             plot_wifi_signal(data, output_path, header_info)
             plot_dashboard(data, output_path, header_info)
@@ -1937,6 +1598,7 @@ def plot_control_commands(data: list, output_path: Path, header_info: dict = Non
     """绘制控制指令图 - 含 omega 跟踪对比"""
     usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
     has_omega = 'omega_actual' in data[0] and 'omega_cmd' in data[0]
+    has_rl = _has_rl_logging(data)
     nrows = 4 if has_omega else 3
     fig, axes = plt.subplots(nrows, 1, figsize=(14, 3 * nrows), sharex=True)
     
@@ -1946,8 +1608,13 @@ def plot_control_commands(data: list, output_path: Path, header_info: dict = Non
     ax = axes[0]
     cmd_vx = [d['cmd_vx'] for d in data]
     speed = [d['velocity_speed'] for d in data]
-    ax.plot(t, cmd_vx, 'r-', label='Cmd Vx', linewidth=1.2)
+    ax.plot(t, cmd_vx, 'r-', label='Final Cmd Vx' if has_rl else 'Cmd Vx', linewidth=1.2)
     ax.plot(t, speed, 'b-', label='Actual Speed', alpha=0.6, linewidth=1.0)
+    if has_rl:
+        raw_cmd_vx = [d.get('raw_cmd_vx', 0.0) for d in data]
+        rl_delta_vx = [d.get('rl_delta_vx', d.get('cmd_vx', 0.0) - d.get('raw_cmd_vx', 0.0)) for d in data]
+        ax.plot(t, raw_cmd_vx, color='#FF9800', linestyle='--', label='Raw Cmd Vx', linewidth=1.0)
+        ax.plot(t, rl_delta_vx, color='#00BCD4', linestyle=':', label='RL ΔVx', linewidth=1.0)
     ax.set_ylabel('Vx (m/s)')
     ax.set_title(f'Control Commands - {usv_id}')
     ax.legend(loc='upper right')
@@ -1956,15 +1623,27 @@ def plot_control_commands(data: list, output_path: Path, header_info: dict = Non
     # Vy command
     ax = axes[1]
     cmd_vy = [d['cmd_vy'] for d in data]
-    ax.plot(t, cmd_vy, 'g-')
+    ax.plot(t, cmd_vy, 'g-', label='Final Cmd Vy' if has_rl else 'Cmd Vy')
+    if has_rl:
+        raw_cmd_vy = [d.get('raw_cmd_vy', 0.0) for d in data]
+        rl_delta_vy = [d.get('rl_delta_vy', d.get('cmd_vy', 0.0) - d.get('raw_cmd_vy', 0.0)) for d in data]
+        ax.plot(t, raw_cmd_vy, color='#FF9800', linestyle='--', label='Raw Cmd Vy', linewidth=1.0)
+        ax.plot(t, rl_delta_vy, color='#00BCD4', linestyle=':', label='RL ΔVy', linewidth=1.0)
     ax.set_ylabel('Cmd Vy (m/s)')
     ax.axhline(y=0, color='k', linewidth=0.5)
+    if has_rl:
+        ax.legend(loc='upper right')
     ax.grid(True, alpha=0.3)
     
     # cmd_omega
     ax = axes[2]
     cmd_omega = [d['cmd_omega'] for d in data]
-    ax.plot(t, cmd_omega, 'r-', label='Cmd Omega')
+    ax.plot(t, cmd_omega, 'r-', label='Final Cmd Omega' if has_rl else 'Cmd Omega')
+    if has_rl:
+        raw_cmd_omega = [d.get('raw_cmd_omega', 0.0) for d in data]
+        rl_delta_omega = [d.get('rl_delta_omega', d.get('cmd_omega', 0.0) - d.get('raw_cmd_omega', 0.0)) for d in data]
+        ax.plot(t, raw_cmd_omega, color='#FF9800', linestyle='--', label='Raw Cmd Omega', linewidth=1.0)
+        ax.plot(t, rl_delta_omega, color='#00BCD4', linestyle=':', label='RL ΔOmega', linewidth=1.0)
     ax.axhline(y=0, color='k', linewidth=0.5)
     ax.set_ylabel('Cmd Omega (rad/s)')
     ax.legend(loc='upper right')
@@ -1985,13 +1664,93 @@ def plot_control_commands(data: list, output_path: Path, header_info: dict = Non
     axes[-1].set_xlabel('Time (s)')
     
     _add_reading_guide(fig,
-        '【阅读指南】第1行: 红=速度指令Cmd Vx，蓝=实际速度，重合度反映速度执行精度。\n'
-        '第2行: 横向速度指令Cmd Vy，纯路径跟踪时应接近0。\n'
-        '第3行: 角速度指令Cmd Omega，正=左转，负=右转。\n'
+        '【阅读指南】第1行: 红=最终速度指令，蓝=实际速度；若有 RL 日志，橙=导航原始指令，青=RL 策略动作。\n'
+        '第2行: 横向速度指令；若有 RL 日志，可直接看 raw/final/policy 的合成关系。\n'
+        '第3行: 角速度指令；RL 场景下重点看 raw 与 RL ΔOmega 谁在主导转向。\n'
         '第4行(若有): 红=角速度指令ω_cmd，蓝=实际角速度ω_actual，跟踪越紧密转弯控制越好。')
     plt.savefig(output_path / 'control_commands.png', dpi=150)
     plt.close()
     print(f"   📈 控制指令图: {output_path / 'control_commands.png'}")
+
+
+def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
+    """绘制 RL 策略控制分析图 (v18+)"""
+    if not HAS_MATPLOTLIB or not _has_rl_logging(data):
+        return
+
+    usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
+    t = [d['timestamp'] - data[0]['timestamp'] for d in data]
+    rl_active = [int(d.get('rl_cmd_active', 0)) if isinstance(d.get('rl_cmd_active'), (int, float)) else 0 for d in data]
+    raw_vx = [d.get('raw_cmd_vx', 0.0) for d in data]
+    final_vx = [d.get('cmd_vx', 0.0) for d in data]
+    rl_vx = [d.get('rl_cmd_vx', 0.0) for d in data]
+    delta_vx = [d.get('rl_delta_vx', d.get('cmd_vx', 0.0) - d.get('raw_cmd_vx', 0.0)) for d in data]
+    raw_omega = [d.get('raw_cmd_omega', 0.0) for d in data]
+    final_omega = [d.get('cmd_omega', 0.0) for d in data]
+    rl_omega = [d.get('rl_cmd_omega', 0.0) for d in data]
+    delta_omega = [d.get('rl_delta_omega', d.get('cmd_omega', 0.0) - d.get('raw_cmd_omega', 0.0)) for d in data]
+    rl_age = [d.get('rl_cmd_age_s', -1.0) for d in data]
+    neighbor_count = [_neighbor_slot_count(d) for d in data]
+    distance = [d.get('distance_to_goal', 0.0) for d in data]
+
+    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
+    fig.suptitle(f'RL Policy Control Analysis - {usv_id}', fontsize=14, fontweight='bold')
+
+    ax = axes[0]
+    ax.plot(t, distance, color='purple', linewidth=1.2, label='Distance to Goal')
+    ax2 = ax.twinx()
+    ax2.step(t, rl_active, where='post', color='#00BCD4', linewidth=1.0, label='RL Active')
+    ax.set_ylabel('Distance (m)')
+    ax2.set_ylabel('RL Active')
+    ax.set_title('Distance vs RL Activation')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper left')
+    ax2.legend(loc='upper right')
+
+    ax = axes[1]
+    ax.plot(t, raw_vx, color='#FF9800', linestyle='--', linewidth=1.0, label='Raw Vx')
+    ax.plot(t, final_vx, color='#F44336', linewidth=1.2, label='Final Vx')
+    ax.plot(t, rl_vx, color='#00BCD4', linestyle=':', linewidth=1.0, label='RL Cmd Vx')
+    ax.plot(t, delta_vx, color='#4CAF50', linewidth=1.0, alpha=0.8, label='Final-Raw ΔVx')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.set_ylabel('Linear (m/s)')
+    ax.set_title('Raw / RL / Final Linear Command')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[2]
+    ax.plot(t, raw_omega, color='#FF9800', linestyle='--', linewidth=1.0, label='Raw Omega')
+    ax.plot(t, final_omega, color='#F44336', linewidth=1.2, label='Final Omega')
+    ax.plot(t, rl_omega, color='#00BCD4', linestyle=':', linewidth=1.0, label='RL Cmd Omega')
+    ax.plot(t, delta_omega, color='#4CAF50', linewidth=1.0, alpha=0.8, label='Final-Raw ΔOmega')
+    ax.axhline(y=0, color='k', linewidth=0.5)
+    ax.set_ylabel('Angular (rad/s)')
+    ax.set_title('Raw / RL / Final Angular Command')
+    ax.legend(loc='upper right')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3]
+    ax.plot(t, rl_age, color='#607D8B', linewidth=1.0, label='RL Cmd Age')
+    ax.axhline(y=0.5, color='#EF5350', linestyle='--', linewidth=0.8, label='Active Timeout 0.5s')
+    ax2 = ax.twinx()
+    ax2.plot(t, neighbor_count, color='#9C27B0', linewidth=1.0, alpha=0.85, label='Neighbor Slots')
+    ax.set_ylabel('Age (s)')
+    ax2.set_ylabel('Neighbor Count')
+    ax.set_xlabel('Time (s)')
+    ax.set_title('RL Freshness vs Neighbor Context')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper left')
+    ax2.legend(loc='upper right')
+
+    _add_reading_guide(
+        fig,
+        '【阅读指南】上图看 RL 何时介入以及介入时距离是否改善。第二、三图同时展示 raw / RL / final 三路命令，'
+        '可直接判断是导航器在主导还是 RL 策略在主导。第四图看 RL 指令是否过期，以及介入时是否确有邻船上下文。',
+        bottom=0.08,
+    )
+    plt.savefig(output_path / 'rl_analysis.png', dpi=150)
+    plt.close()
+    print(f"   📈 RL 策略控制分析图: {output_path / 'rl_analysis.png'}")
 
 
 def plot_mpc_debug(data: list, output_path: Path):
@@ -2236,7 +1995,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         return
     
     usv_id = header_info.get('usv_id', 'unknown') if header_info else 'unknown'
-    version = header_info.get('version', '?') if header_info else '?'
+    version = header_info.get('version_display', header_info.get('version', '?')) if header_info else '?'
     
     fig = plt.figure(figsize=(18, 14))
     fig.suptitle(f'USV Navigation Dashboard - {usv_id} ({version})', fontsize=16, fontweight='bold')
@@ -2394,64 +2153,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
     s_spd = min(100, avg_spd / 0.3 * 100)
     total = s_cte * 0.4 + s_he * 0.4 + s_mpc * 0.1 + s_spd * 0.1
     grade = "A+" if total >= 80 else "A" if total >= 70 else "B" if total >= 60 else "C" if total >= 40 else "D"
-    orca_quality = _compute_orca_quality_metrics(data)
-    
-    # ORCA 统计
-    orca_active_count = sum(1 for d in data if d.get('orca_active') == 1)
-    orca_pct = orca_active_count / len(data) * 100 if data else 0
-    orca_min_dist = -1.0
-    if orca_active_count > 0:
-        orca_dists = [d.get('orca_closest_distance', -1) for d in data
-                      if d.get('orca_active') == 1 and isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
-        orca_min_dist = min(orca_dists) if orca_dists else -1.0
-
-    orca_line = f"ORCA:      {orca_pct:.0f}% (min {orca_min_dist:.2f}m)" if orca_active_count > 0 else "ORCA:      off"
-
-    escape_line = "Escape:    N/A"
-    if 'orca_escape_active' in data[0]:
-        escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
-        if escape_samples:
-            escape_duration = 0.0
-            escape_episodes = 0
-            i = 0
-            while i < len(data):
-                if data[i].get('orca_escape_active') == 1:
-                    start_ts = data[i]['timestamp']
-                    j = i
-                    while j < len(data) and data[j].get('orca_escape_active') == 1:
-                        j += 1
-                    escape_duration += data[j - 1]['timestamp'] - start_ts
-                    escape_episodes += 1
-                    i = j
-                else:
-                    i += 1
-            escape_line = f"Escape:    {escape_episodes}x ({escape_duration:.0f}s)"
-        else:
-            escape_line = "Escape:    off"
-
-    primary_counts = Counter(
-        d.get('orca_primary_neighbor_id', '').strip()
-        for d in data
-        if d.get('orca_active') == 1 and isinstance(d.get('orca_primary_neighbor_id'), str) and d.get('orca_primary_neighbor_id', '').strip()
-    )
-    primary_line = "Primary:   N/A"
-    if primary_counts and orca_active_count > 0:
-        neighbor_id, count = primary_counts.most_common(1)[0]
-        primary_line = f"Primary:   {neighbor_id} ({count/orca_active_count*100:.0f}%)"
-
-    avoid_line = "Avoid:     N/A"
-    lock_line = "LockRisk:  N/A"
-    elegant_line = "Elegant:   N/A"
-    if orca_quality.get('available'):
-        avoid_line = (
-            f"Avoid:     提前={orca_quality['early_grade']} 丝滑={orca_quality['smooth_grade']}"
-        )
-        lock_line = (
-            f"LockRisk:  {orca_quality['coupling_grade']} ({orca_quality['longest_episode_s']:.0f}s/{orca_quality['escape_episodes']}x)"
-        )
-        elegant_line = (
-            f"Elegant:   {orca_quality['elegance_score']:.0f}/100 [{orca_quality['elegance_grade']}]"
-        )
+    rl_metrics = _compute_rl_metrics(data)
 
     # WiFi 信号摘要
     wifi_line = "WiFi:      N/A"
@@ -2463,6 +2165,19 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
             wifi_min = min(wifi_vals)
             wifi_grade = "Excellent" if wifi_avg >= -50 else "Good" if wifi_avg >= -60 else "Fair" if wifi_avg >= -70 else "Weak"
             wifi_line = f"WiFi:      {wifi_avg:.0f}dBm [{wifi_grade}]"
+
+    rl_line = "RL:        N/A"
+    rl_detail_line = "RL Detail: N/A"
+    if rl_metrics.get('available'):
+        rl_line = (
+            f"RL:        {rl_metrics['active_pct']:.0f}% "
+            f"(|Δv|={rl_metrics['active_mean_abs_delta_vx']:.2f}, |Δω|={rl_metrics['active_mean_abs_delta_omega']:.2f})"
+        )
+        rl_detail_line = (
+            f"RL Detail: 邻船={rl_metrics['active_neighbor_mean']:.1f} age95={rl_metrics['rl_age_p95']:.2f}s"
+            if rl_metrics.get('rl_age_p95') is not None
+            else f"RL Detail: 邻船={rl_metrics['active_neighbor_mean']:.1f}"
+        )
     
     stats_text = (
         f"━━━ Summary ━━━\n"
@@ -2475,12 +2190,8 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"Avg CTE:   {avg_cte:.4f} m\n"
         f"HdgErr(st):{avg_he:.1f}°\n"
         f"MPC Time:  {avg_mpc:.1f} ms\n"
-        f"{orca_line}\n"
-        f"{escape_line}\n"
-        f"{primary_line}\n"
-        f"{avoid_line}\n"
-        f"{lock_line}\n"
-        f"{elegant_line}\n"
+        f"{rl_line}\n"
+        f"{rl_detail_line}\n"
         f"{wifi_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
@@ -2741,11 +2452,11 @@ def analyze_merged_logs(log_files: list, batch_mode: bool = True):
             plot_velocity(all_data, output_path, merged_header)
             plot_heading_comparison(all_data, output_path)
             plot_control_commands(all_data, output_path, merged_header)
+            plot_rl_analysis(all_data, output_path, merged_header)
             plot_mpc_debug(all_data, output_path)
             plot_errors(all_data, output_path)
             plot_v6_adaptive_tau(all_data, output_path, merged_header)
             plot_v8_ampc(all_data, output_path, merged_header)
-            plot_orca_analysis(all_data, output_path, merged_header)
             plot_neighbor_distances(all_data, output_path, merged_header)
             plot_wifi_signal(all_data, output_path, merged_header)
             plot_dashboard(all_data, output_path, merged_header)

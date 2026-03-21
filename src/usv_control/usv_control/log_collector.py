@@ -20,6 +20,8 @@ USV 导航日志收集节点
 - 磁力计航向 (local_position/pose)
 - 导航目标 (set_usv_nav_goal)
 - 控制指令 (setpoint_raw/local)
+- 导航原始指令 (velocity_controller/raw_cmd)
+- RL 策略指令 (rl_policy/cmd_vel)
 
 作者: Auto-generated
 日期: 2026-01-25
@@ -76,6 +78,17 @@ class LogCollectorNode(Node):
         self._cmd_vx = 0.0
         self._cmd_vy = 0.0
         self._cmd_omega = 0.0
+        self._raw_cmd_vx = 0.0
+        self._raw_cmd_vy = 0.0
+        self._raw_cmd_omega = 0.0
+        self._raw_cmd_age_s = -1.0
+        self._rl_cmd_vx = 0.0
+        self._rl_cmd_vy = 0.0
+        self._rl_cmd_omega = 0.0
+        self._rl_cmd_age_s = -1.0
+        self._rl_cmd_active = False
+        self._raw_cmd_stamp_s = 0.0
+        self._rl_cmd_stamp_s = 0.0
         
         self._distance_to_goal = 0.0
         self._heading_error_rad = 0.0  # 弧度
@@ -130,8 +143,8 @@ class LogCollectorNode(Node):
         self._wifi_rssi_dbm = -100
         self._wifi_link_quality = 0
         self._wifi_interface = ''
-        
-        # v14/v17 新增: ORCA/APF 避障与脱困状态
+
+        # 兼容 ORCA/APF 诊断字段，便于老工具继续读取新日志
         self._orca_active = False
         self._orca_closest_distance = -1.0
         self._orca_encounter_type = 'none'
@@ -202,6 +215,14 @@ class LogCollectorNode(Node):
         self.create_subscription(
             PositionTarget, 'setpoint_raw/local',
             self._cmd_callback, qos_best_effort)
+
+        self.create_subscription(
+            TwistStamped, 'velocity_controller/raw_cmd',
+            self._raw_cmd_callback, qos_best_effort)
+
+        self.create_subscription(
+            TwistStamped, 'rl_policy/cmd_vel',
+            self._rl_cmd_callback, qos_best_effort)
             
         self.create_subscription(
             NavigationFeedback, 'navigation_feedback',
@@ -233,7 +254,7 @@ class LogCollectorNode(Node):
             Bool, 'stop_navigation',
             self._stop_navigation_callback, qos_reliable)
         
-        # v16 新增: 邻居USV位置订阅 (来自GS的 apf_neighbor_relay_node)
+        # v16 新增: 邻居USV位置订阅
         self.create_subscription(
             FleetNeighborPoses, 'apf/neighbors',
             self._fleet_neighbors_callback, qos_best_effort)
@@ -273,9 +294,13 @@ class LogCollectorNode(Node):
             self._csv_file = open(self._current_log_path, 'w', newline='')
             self._csv_writer = csv.writer(self._csv_file)
             
-            # 写入 MPC 参数信息作为注释行 (便于后续分析时追溯参数配置)
-            # 始终写入最小头部 (版本号和 USV ID)，即使 MPC 参数尚未到达
-            self._csv_file.write(f'# MPC Parameters Configuration (v17)\n')
+            # 写入日志元信息和参数信息，便于后续分析时准确识别 schema
+            self._csv_file.write(f'# Navigation Log Configuration (v18)\n')
+            self._csv_file.write(f'# Log Version: v18\n')
+            self._csv_file.write(f'# Log Schema: rl_navigation_policy\n')
+            self._csv_file.write(f'# Log Schema Label: RL 导航日志 + pure 控制分解\n')
+            self._csv_file.write(f'# Log Description: 导航主命令、RL 策略输出和最终控制命令同时记录；同时保留 ORCA/APF 兼容字段供历史诊断工具复用\n')
+            self._csv_file.write(f'# Log Features: base_navigation, raw_navigation_cmd, rl_policy_cmd, final_control_cmd, neighbor_context, wifi, ampc, orca_feedback_compat\n')
             self._csv_file.write(f'# USV ID: {self._usv_id}\n')
             if task_name:
                 self._csv_file.write(f'# Task Name: {task_name}\n')
@@ -297,6 +322,10 @@ class LogCollectorNode(Node):
                 self._csv_file.write(f'# --- v8 AMPC Parameters ---\n')
                 self._csv_file.write(f'# ampc_enabled: {self._ampc_enabled}\n')
                 self._csv_file.write(f'#\n')
+            self._csv_file.write(f'# --- v18 RL Logging ---\n')
+            self._csv_file.write(f'# raw_navigation_topic: velocity_controller/raw_cmd\n')
+            self._csv_file.write(f'# rl_policy_topic: rl_policy/cmd_vel\n')
+            self._csv_file.write(f'# final_command_topic: setpoint_raw/local\n')
             
             # 写入表头
             self._csv_writer.writerow([
@@ -306,6 +335,9 @@ class LogCollectorNode(Node):
                 'magnetometer_yaw_deg',
                 'target_x', 'target_y', 'goal_id',
                 'cmd_vx', 'cmd_vy', 'cmd_omega',
+                'raw_cmd_vx', 'raw_cmd_vy', 'raw_cmd_omega', 'raw_cmd_age_s',
+                'rl_cmd_vx', 'rl_cmd_vy', 'rl_cmd_omega', 'rl_cmd_age_s', 'rl_cmd_active',
+                'rl_delta_vx', 'rl_delta_vy', 'rl_delta_omega',
                 'distance_to_goal', 'heading_error_deg',
                 'yaw_diff_deg',
                 'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl',
@@ -320,7 +352,7 @@ class LogCollectorNode(Node):
                 'ampc_heading_noise', 'ampc_rebuild_count', 'ampc_converged',
                 # v14 新增字段
                 'nav_mode',
-                # v14 新增: ORCA/APF 避障字段
+                # ORCA/APF 兼容字段
                 'orca_active', 'orca_closest_distance', 'orca_encounter_type',
                 'orca_encounter_type_raw',
                 'orca_commit_side', 'orca_linear_correction', 'orca_angular_correction',
@@ -457,11 +489,54 @@ class LogCollectorNode(Node):
         self._cmd_vx = msg.velocity.x
         self._cmd_vy = msg.velocity.y
         self._cmd_omega = msg.yaw_rate
+
+    def _raw_cmd_callback(self, msg: TwistStamped):
+        """导航原始控制指令回调"""
+        self._raw_cmd_vx = msg.twist.linear.x
+        self._raw_cmd_vy = msg.twist.linear.y
+        self._raw_cmd_omega = msg.twist.angular.z
+        self._raw_cmd_stamp_s = self._stamp_to_seconds(msg.header.stamp)
+
+    def _rl_cmd_callback(self, msg: TwistStamped):
+        """RL 策略输出回调"""
+        self._rl_cmd_vx = msg.twist.linear.x
+        self._rl_cmd_vy = msg.twist.linear.y
+        self._rl_cmd_omega = msg.twist.angular.z
+        self._rl_cmd_stamp_s = self._stamp_to_seconds(msg.header.stamp)
+
+    @staticmethod
+    def _stamp_to_seconds(stamp) -> float:
+        """将 ROS 时间戳转换为秒。"""
+        if stamp is None:
+            return 0.0
+        sec = float(getattr(stamp, 'sec', 0.0) or 0.0)
+        nanosec = float(getattr(stamp, 'nanosec', 0.0) or 0.0)
+        return sec + nanosec * 1e-9
     
     def _feedback_callback(self, msg: NavigationFeedback):
         """导航反馈回调"""
         self._distance_to_goal = msg.distance_to_goal
         self._heading_error_rad = getattr(msg, 'heading_error', 0.0)  # 弧度
+
+        self._orca_active = getattr(msg, 'orca_active', False)
+        self._orca_closest_distance = getattr(msg, 'orca_closest_distance', -1.0)
+        self._orca_encounter_type = getattr(msg, 'orca_encounter_type', 'none')
+        self._orca_encounter_type_raw = getattr(msg, 'orca_encounter_type_raw', 'none')
+        self._orca_commit_side = getattr(msg, 'orca_commit_side', 0)
+        self._orca_linear_correction = getattr(msg, 'orca_linear_correction', 0.0)
+        self._orca_angular_correction = getattr(msg, 'orca_angular_correction', 0.0)
+        self._orca_hard_brake_active = getattr(msg, 'orca_hard_brake_active', False)
+        self._apf_neighbor_count = getattr(msg, 'apf_neighbor_count', 0)
+        self._orca_rel_bearing_deg = getattr(msg, 'orca_rel_bearing_deg', -1.0)
+        self._orca_rel_course_deg = getattr(msg, 'orca_rel_course_deg', -1.0)
+        self._orca_rel_speed = getattr(msg, 'orca_rel_speed', -1.0)
+        self._orca_tcpa = getattr(msg, 'orca_tcpa', -1.0)
+        self._orca_dcpa = getattr(msg, 'orca_dcpa', -1.0)
+        self._orca_primary_neighbor_id = getattr(msg, 'orca_primary_neighbor_id', '')
+        self._orca_escape_active = getattr(msg, 'orca_escape_active', False)
+        self._orca_escape_phase = getattr(msg, 'orca_escape_phase', 0)
+        self._orca_escape_direction = getattr(msg, 'orca_escape_direction', 0)
+        self._orca_escape_count = getattr(msg, 'orca_escape_count', 0)
         
         # 收到反馈也说明正在导航
         if self._is_navigating:
@@ -509,27 +584,6 @@ class LogCollectorNode(Node):
         self._ampc_heading_noise = getattr(msg, 'ampc_heading_noise', 0.0)
         self._ampc_rebuild_count = getattr(msg, 'ampc_rebuild_count', 0)
         self._ampc_converged = getattr(msg, 'ampc_converged', False)
-        
-        # v14 新增: ORCA/APF 避障状态
-        self._orca_active = getattr(msg, 'orca_active', False)
-        self._orca_closest_distance = getattr(msg, 'orca_closest_distance', -1.0)
-        self._orca_encounter_type = getattr(msg, 'orca_encounter_type', 'none')
-        self._orca_encounter_type_raw = getattr(msg, 'orca_encounter_type_raw', 'none')
-        self._orca_commit_side = getattr(msg, 'orca_commit_side', 0)
-        self._orca_linear_correction = getattr(msg, 'orca_linear_correction', 0.0)
-        self._orca_angular_correction = getattr(msg, 'orca_angular_correction', 0.0)
-        self._orca_hard_brake_active = getattr(msg, 'orca_hard_brake_active', False)
-        self._apf_neighbor_count = getattr(msg, 'apf_neighbor_count', 0)
-        self._orca_rel_bearing_deg = getattr(msg, 'orca_rel_bearing_deg', -1.0)
-        self._orca_rel_course_deg = getattr(msg, 'orca_rel_course_deg', -1.0)
-        self._orca_rel_speed = getattr(msg, 'orca_rel_speed', -1.0)
-        self._orca_tcpa = getattr(msg, 'orca_tcpa', -1.0)
-        self._orca_dcpa = getattr(msg, 'orca_dcpa', -1.0)
-        self._orca_primary_neighbor_id = getattr(msg, 'orca_primary_neighbor_id', '')
-        self._orca_escape_active = getattr(msg, 'orca_escape_active', False)
-        self._orca_escape_phase = getattr(msg, 'orca_escape_phase', 0)
-        self._orca_escape_direction = getattr(msg, 'orca_escape_direction', 0)
-        self._orca_escape_count = getattr(msg, 'orca_escape_count', 0)
         
         self._mpc_params_received = True
 
@@ -588,7 +642,7 @@ class LogCollectorNode(Node):
             self._close_current_log()
 
     def _fleet_neighbors_callback(self, msg: FleetNeighborPoses):
-        """邻居USV位置回调 (来自GS apf_neighbor_relay_node)
+        """邻居USV位置回调
         
         记录所有邻居USV的位置、航向和速度，用于事后分析和回放。
         即使邻居USV已完成任务并停止，只要GS还在广播其位置就持续记录。
@@ -672,6 +726,9 @@ class LogCollectorNode(Node):
             return
         
         timestamp = current_time
+        self._raw_cmd_age_s = (timestamp - self._raw_cmd_stamp_s) if self._raw_cmd_stamp_s > 0.0 else -1.0
+        self._rl_cmd_age_s = (timestamp - self._rl_cmd_stamp_s) if self._rl_cmd_stamp_s > 0.0 else -1.0
+        self._rl_cmd_active = 0.0 <= self._rl_cmd_age_s <= 0.5
         
         # 计算距离 (始终使用当前目标与位姿的几何距离，避免切点时序不一致)
         if self._goal_id > 0:
@@ -702,6 +759,18 @@ class LogCollectorNode(Node):
             f'{self._cmd_vx:.4f}',
             f'{self._cmd_vy:.4f}',
             f'{self._cmd_omega:.4f}',
+            f'{self._raw_cmd_vx:.4f}',
+            f'{self._raw_cmd_vy:.4f}',
+            f'{self._raw_cmd_omega:.4f}',
+            f'{self._raw_cmd_age_s:.3f}',
+            f'{self._rl_cmd_vx:.4f}',
+            f'{self._rl_cmd_vy:.4f}',
+            f'{self._rl_cmd_omega:.4f}',
+            f'{self._rl_cmd_age_s:.3f}',
+            f'{1 if self._rl_cmd_active else 0}',
+            f'{self._cmd_vx - self._raw_cmd_vx:.4f}',
+            f'{self._cmd_vy - self._raw_cmd_vy:.4f}',
+            f'{self._cmd_omega - self._raw_cmd_omega:.4f}',
             f'{self._distance_to_goal:.4f}',
             f'{math.degrees(self._heading_error_rad):.2f}',  # 弧度转度数
             f'{math.degrees(yaw_diff):.2f}',
@@ -729,7 +798,7 @@ class LogCollectorNode(Node):
             f'{1 if self._ampc_converged else 0}',
             # v14 新增字段
             f'{self._nav_mode}',
-            # v14 新增: ORCA/APF 避障字段
+            # ORCA/APF 兼容字段
             f'{1 if self._orca_active else 0}',
             f'{self._orca_closest_distance:.3f}',
             f'{self._orca_encounter_type}',

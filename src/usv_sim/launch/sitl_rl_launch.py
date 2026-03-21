@@ -11,6 +11,7 @@ def _launch_policy_node(context, *args, **kwargs):
     namespace = LaunchConfiguration('namespace').perform(context)
     rl_policy_model = LaunchConfiguration('rl_policy_model').perform(context)
     rl_policy_kind = LaunchConfiguration('rl_policy_kind').perform(context)
+    rl_control_mode = LaunchConfiguration('rl_control_mode').perform(context)
     rl_policy_device = LaunchConfiguration('rl_policy_device').perform(context)
     rl_publish_rate = LaunchConfiguration('rl_publish_rate').perform(context)
     rl_max_neighbors = LaunchConfiguration('rl_max_neighbors').perform(context)
@@ -20,6 +21,7 @@ def _launch_policy_node(context, *args, **kwargs):
         '--namespace', namespace,
         '--model', rl_policy_model,
         '--policy', rl_policy_kind,
+        '--rl-control-mode', rl_control_mode,
         '--device', rl_policy_device,
         '--publish-rate', rl_publish_rate,
         '--max-neighbors', rl_max_neighbors,
@@ -86,17 +88,22 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rl_policy_enabled',
             default_value='true',
-            description='Whether to launch the residual policy inference node.',
+            description='Whether to launch the policy inference node.',
         ),
         DeclareLaunchArgument(
             'rl_policy_model',
             default_value='',
-            description='Absolute or workspace-relative model path for the RL residual policy.',
+            description='Absolute or workspace-relative model path for the RL policy.',
         ),
         DeclareLaunchArgument(
             'rl_policy_kind',
             default_value='bc',
-            description='Residual policy type: auto, bc, ppo, mappo, or zero.',
+            description='Policy type: auto, bc, ppo, mappo, or zero.',
+        ),
+        DeclareLaunchArgument(
+            'rl_control_mode',
+            default_value='pure',
+            description='RL control mode. Pure policy mode publishes final commands directly.',
         ),
         DeclareLaunchArgument(
             'rl_policy_device',
@@ -106,7 +113,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rl_publish_rate',
             default_value='10.0',
-            description='Residual action publish rate in Hz.',
+            description='Policy action publish rate in Hz.',
         ),
         DeclareLaunchArgument(
             'rl_max_neighbors',
@@ -121,7 +128,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'rl_inference_delay',
             default_value='7.0',
-            description='Delay before starting the residual policy node so the SITL control stack is up.',
+            description='Delay before starting the policy node so the SITL control stack is up.',
         ),
         sitl_stack,
         delayed_policy_node,

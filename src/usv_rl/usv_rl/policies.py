@@ -4,7 +4,7 @@ import numpy as np
 
 
 @dataclass
-class LinearResidualPolicy:
+class LinearPolicy:
     weights: np.ndarray
     bias: np.ndarray
     obs_mean: np.ndarray
@@ -13,7 +13,7 @@ class LinearResidualPolicy:
     action_high: np.ndarray
 
     @classmethod
-    def load(cls, path: str) -> 'LinearResidualPolicy':
+    def load(cls, path: str) -> 'LinearPolicy':
         data = np.load(path)
         return cls(
             weights=data['weights'],
@@ -39,7 +39,7 @@ class LinearResidualPolicy:
 
 
 @dataclass
-class MlpResidualPolicy:
+class MlpPolicy:
     layer_weights: list[np.ndarray]
     layer_biases: list[np.ndarray]
     obs_mean: np.ndarray
@@ -49,7 +49,7 @@ class MlpResidualPolicy:
     activation: str = 'tanh'
 
     @classmethod
-    def load(cls, path: str) -> 'MlpResidualPolicy':
+    def load(cls, path: str) -> 'MlpPolicy':
         data = np.load(path)
         hidden_sizes = tuple(int(v) for v in np.asarray(data['hidden_sizes']).tolist())
         layer_sizes = hidden_sizes + (int(np.asarray(data['action_dim']).item()),)
@@ -95,11 +95,11 @@ class MlpResidualPolicy:
         return np.clip(hidden, self.action_low, self.action_high).astype(np.float32)
 
 
-def load_residual_policy(path: str):
+def load_policy(path: str):
     data = np.load(path)
     model_type = str(np.asarray(data['model_type']).item()) if 'model_type' in data else 'linear'
     if model_type == 'linear':
-        return LinearResidualPolicy.load(path)
+        return LinearPolicy.load(path)
     if model_type == 'mlp':
-        return MlpResidualPolicy.load(path)
-    raise RuntimeError(f'Unsupported residual policy type in {path}: {model_type}')
+        return MlpPolicy.load(path)
+    raise RuntimeError(f'Unsupported policy type in {path}: {model_type}')

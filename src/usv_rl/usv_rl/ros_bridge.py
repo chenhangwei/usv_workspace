@@ -43,6 +43,7 @@ class TrainingBridge(Node):
         self._scenario_start_time: float = 0.0
         self._current_neighbor_states: list[NeighborState] = []
         self._goal_id_counter = 1000
+        self._rl_backend_active = False
 
         self.create_subscription(PoseStamped, 'local_position/pose_from_gps', self._pose_callback, qos_best_effort)
         self.create_subscription(TwistStamped, 'local_position/velocity_local', self._velocity_callback, qos_best_effort)
@@ -102,9 +103,11 @@ class TrainingBridge(Node):
         if not self._parameter_client.wait_for_services(timeout_sec=timeout):
             return False
 
+        self._rl_backend_active = bool(enabled)
+
         future = self._parameter_client.set_parameters([
             Parameter('rl_policy_enabled', value=enabled),
-            Parameter('rl_policy_use_residual', value=True),
+            Parameter('rl_policy_fallback_to_raw', value=False),
         ])
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -196,7 +199,7 @@ class TrainingBridge(Node):
             msg.neighbors.append(neighbor)
         self._neighbor_pub.publish(msg)
 
-    def get_teacher_residual_action(self) -> Optional[tuple[float, float]]:
+    def get_teacher_action(self) -> Optional[tuple[float, float]]:
         if self._raw_cmd_msg is None or self._final_cmd_msg is None:
             return None
 
@@ -227,8 +230,8 @@ class TrainingBridge(Node):
         own_vy = float(self._velocity_msg.twist.linear.y)
         speed = math.hypot(own_vx, own_vy)
 
-        raw_linear_x = float(self._raw_cmd_msg.twist.linear.x) if self._raw_cmd_msg is not None else 0.0
-        raw_angular_z = float(self._raw_cmd_msg.twist.angular.z) if self._raw_cmd_msg is not None else 0.0
+        raw_linear_x = 0.0
+        raw_angular_z = 0.0
         final_linear_x = float(self._final_cmd_msg.velocity.x) if self._final_cmd_msg is not None else 0.0
         final_angular_z = float(self._final_cmd_msg.yaw_rate) if self._final_cmd_msg is not None else 0.0
 

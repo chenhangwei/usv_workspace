@@ -10,7 +10,7 @@ def inspect_benchmark_log(log_path: Path | None, scenario: str) -> dict:
             'exists': False,
             'scenario_started': False,
             'observation_ready': False,
-            'first_residual_action_logged': False,
+            'first_policy_action_logged': False,
             'unexpected_traceback': False,
             'content_valid': False,
         }
@@ -21,24 +21,24 @@ def inspect_benchmark_log(log_path: Path | None, scenario: str) -> dict:
             'exists': False,
             'scenario_started': False,
             'observation_ready': False,
-            'first_residual_action_logged': False,
+            'first_policy_action_logged': False,
             'unexpected_traceback': False,
             'content_valid': False,
         }
 
     content = log_path.read_text(encoding='utf-8', errors='replace')
     scenario_started = f'Started synthetic neighbor publisher scenario={scenario} ' in content
-    observation_ready = 'Observation stream ready; residual policy inference is active.' in content
-    first_residual_action_logged = 'Publishing first residual action:' in content
+    observation_ready = 'Observation stream ready; pure RL policy inference is active.' in content
+    first_policy_action_logged = 'Publishing first pure RL action:' in content
     unexpected_traceback = has_unexpected_traceback(content)
-    content_valid = scenario_started and observation_ready and first_residual_action_logged and not unexpected_traceback
+    content_valid = scenario_started and observation_ready and first_policy_action_logged and not unexpected_traceback
 
     return {
         'path': str(log_path),
         'exists': True,
         'scenario_started': scenario_started,
         'observation_ready': observation_ready,
-        'first_residual_action_logged': first_residual_action_logged,
+        'first_policy_action_logged': first_policy_action_logged,
         'unexpected_traceback': unexpected_traceback,
         'content_valid': content_valid,
     }

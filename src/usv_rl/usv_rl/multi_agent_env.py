@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 from dataclasses import dataclass, field
@@ -9,7 +10,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 
-from .action_projection import project_residual_action
+from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds, RewardConfig
 from .multi_agent_bridge import MultiAgentTrainingBridge
 from .multi_agent_scenarios import MultiAgentScenarioFactory
@@ -30,6 +31,7 @@ class MultiAgentEnvConfig:
     agent_namespaces: tuple[str, ...] = ('usv_01', 'usv_02', 'usv_03')
     launch_sitl: bool = True
     enable_rl_backend: bool = True
+    rl_control_mode: str = 'pure'
     action_mode: str = 'full'
     max_neighbors: int = 4
     max_agents: int = 3
@@ -55,6 +57,7 @@ class MultiAgentEnvConfig:
     goal_proximity_heading_relief: float = 0.55
     goal_proximity_smoothness_relief: float = 0.70
     goal_proximity_conflict_relief: float = 0.45
+    goal_proximity_speed_relief: float = 0.0
     team_reward_weight: float = 0.30
     coordination_reward_weight: float = 0.20
     team_progress_weight: float = 1.20
@@ -74,6 +77,7 @@ class MultiAgentEnv(gym.Env):
             rclpy.init()
 
         self.config = config or MultiAgentEnvConfig()
+        self._validate_action_config()
         self._agent_ids = tuple(self.config.agent_namespaces)
         self._episode_index = 0
         self._rng = np.random.default_rng()
@@ -94,20 +98,7 @@ class MultiAgentEnv(gym.Env):
         self._initial_team_mean_goal_distance = float('inf')
 
         self.action_dim = 1 if self.config.action_mode == 'angular_only' else 2
-        self.action_low = np.asarray(
-            [-self.config.action_bounds.angular_delta] if self.action_dim == 1 else [
-                -self.config.action_bounds.linear_delta,
-                -self.config.action_bounds.angular_delta,
-            ],
-            dtype=np.float32,
-        )
-        self.action_high = np.asarray(
-            [self.config.action_bounds.angular_delta] if self.action_dim == 1 else [
-                self.config.action_bounds.linear_delta,
-                self.config.action_bounds.angular_delta,
-            ],
-            dtype=np.float32,
-        )
+        self.action_low, self.action_high = self._policy_action_bounds()
 
         if spaces is not None:
             self.single_agent_action_space = spaces.Box(low=self.action_low, high=self.action_high, dtype=np.float32)
@@ -119,6 +110,27 @@ class MultiAgentEnv(gym.Env):
             )
 
         self._ensure_runtime()
+
+    def _validate_action_config(self):
+        if self.config.action_mode != 'full':
+            raise ValueError('Pure RL control requires action_mode="full".')
+
+    def _pure_linear_speed_limit(self) -> float:
+        return max(float(self.config.action_bounds.linear_delta), float(self.config.cruise_speed))
+
+    def _pure_angular_speed_limit(self) -> float:
+        return max(float(self.config.action_bounds.angular_delta), float(self.config.max_angular_velocity))
+
+    def _policy_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        low = np.asarray([
+            0.0,
+            -self._pure_angular_speed_limit(),
+        ], dtype=np.float32)
+        high = np.asarray([
+            self._pure_linear_speed_limit(),
+            self._pure_angular_speed_limit(),
+        ], dtype=np.float32)
+        return low, high
 
     @property
     def local_observation_size(self) -> int:
@@ -148,6 +160,8 @@ class MultiAgentEnv(gym.Env):
                     parameter_overrides=[
                         Parameter('cruise_speed', value=self.config.cruise_speed),
                         Parameter('max_angular_velocity', value=self.config.max_angular_velocity),
+                        Parameter('ampc_enabled', value=False),
+                        Parameter('adaptive_tau_enabled', value=False),
                         Parameter('apf_enabled', value=True),
                         Parameter('apf_orca_enabled', value=False),
                         Parameter('require_guided_mode', value=True),
@@ -172,14 +186,59 @@ class MultiAgentEnv(gym.Env):
     def project_policy_action(self, agent_id: str, action) -> np.ndarray:
         observation = self._latest_observations.get(agent_id)
         raw_linear_x = None if observation is None else observation.raw_linear_x
-        return project_residual_action(
+        return project_rl_policy_action(
             action,
+            rl_control_mode='pure',
             action_mode=self.config.action_mode,
-            linear_delta_limit=self.config.action_bounds.linear_delta,
-            angular_delta_limit=self.config.action_bounds.angular_delta,
+            linear_delta_limit=self._pure_linear_speed_limit(),
+            angular_delta_limit=self._pure_angular_speed_limit(),
             raw_linear_x=raw_linear_x,
             forward_only=True,
         )
+
+    def _target_forward_speed(
+        self,
+        observation: AgentLocalObservation,
+        *,
+        conflict_level: float,
+        goal_proximity: float = 0.0,
+    ) -> float:
+        cruise_speed = max(0.18, self._pure_linear_speed_limit())
+        target_speed = cruise_speed * (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0)))
+        heading_gate = 0.25 + 0.75 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+        target_speed *= heading_gate
+        if goal_proximity > 0.0:
+            target_speed *= max(
+                0.25,
+                1.0 - (float(np.clip(self.config.goal_proximity_speed_relief, 0.0, 1.0)) * goal_proximity),
+            )
+
+        minimum_speed = max(0.08, min(self.config.reward.desired_conflict_speed, 0.18))
+        return float(np.clip(target_speed, minimum_speed, cruise_speed))
+
+    def _pure_goal_tracking_reward(
+        self,
+        observation: AgentLocalObservation,
+        *,
+        conflict_level: float,
+        goal_proximity: float,
+    ) -> float:
+        target_speed = self._target_forward_speed(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
+        )
+        current_forward_speed = max(0.0, observation.final_linear_x)
+        aligned = max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+        open_water = max(0.0, 1.0 - float(np.clip(conflict_level, 0.0, 1.0)))
+        speed_ratio = min(1.0, current_forward_speed / max(target_speed, 1e-3))
+        speed_deficit_ratio = max(0.0, (target_speed - current_forward_speed) / max(target_speed, 1e-3))
+        excess_turn = max(0.0, abs(observation.final_angular_z) - 0.15)
+
+        reward = self.config.reward.pure_cruise_reward_weight * open_water * aligned * speed_ratio
+        reward -= self.config.reward.pure_idle_penalty_weight * open_water * aligned * speed_deficit_ratio
+        reward -= self.config.reward.pure_turn_penalty_weight * open_water * aligned * excess_turn
+        return reward
 
     def expand_policy_action(self, agent_id: str, action) -> tuple[float, float]:
         projected = self.project_policy_action(agent_id, action)
@@ -314,10 +373,7 @@ class MultiAgentEnv(gym.Env):
         desired_starboard_turn = 0.10 + 0.16 * proximity
         actual_starboard_turn = max(0.0, -observation.final_angular_z)
         turn_progress = max(0.0, min(1.0, actual_starboard_turn / max(desired_starboard_turn, 1e-3)))
-        desired_forward_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
-        )
+        desired_forward_speed = self._target_forward_speed(observation, conflict_level=proximity)
         current_forward_speed = max(0.0, observation.final_linear_x)
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
         speed_drop = max(0.0, previous_forward_speed - current_forward_speed)
@@ -341,10 +397,7 @@ class MultiAgentEnv(gym.Env):
         actual_starboard_turn = max(0.0, -observation.final_angular_z)
         actual_port_turn = max(0.0, observation.final_angular_z)
         current_forward_speed = max(0.0, observation.final_linear_x)
-        desired_forward_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
-        )
+        desired_forward_speed = self._target_forward_speed(observation, conflict_level=0.45)
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
 
         best_crossing_reward = 0.0
@@ -500,9 +553,10 @@ class MultiAgentEnv(gym.Env):
 
         conflict_level = min(conflict_risk, 1.0) * conflict_relief_scale
         current_forward_speed = max(0.0, observation.final_linear_x)
-        desired_conflict_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
+        desired_conflict_speed = self._target_forward_speed(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
         )
         speed_deficit = max(0.0, desired_conflict_speed - current_forward_speed)
         speed_drop = max(0.0, self._previous_forward_speeds.get(agent_id, 0.0) - current_forward_speed)
@@ -514,6 +568,11 @@ class MultiAgentEnv(gym.Env):
                 self._previous_forward_speeds.get(agent_id, current_forward_speed),
             )
             + self._compute_crossing_overtaking_guidance_reward(observation)
+        )
+        progress += self._pure_goal_tracking_reward(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
         )
 
         smoothness_scale = max(0.1, 1.0 - (self.config.goal_proximity_smoothness_relief * goal_proximity))
@@ -647,10 +706,6 @@ class MultiAgentEnv(gym.Env):
 
         if bridge is not None:
             try:
-                bridge.set_rl_backend_enabled(False)
-            except Exception:
-                pass
-            try:
                 bridge.clear_scenario()
             except Exception:
                 pass
@@ -666,6 +721,11 @@ class MultiAgentEnv(gym.Env):
         for controller in controllers:
             try:
                 controller.prepare_for_shutdown()
+            except Exception:
+                pass
+        if bridge is not None:
+            try:
+                bridge.set_rl_backend_enabled(False)
             except Exception:
                 pass
 

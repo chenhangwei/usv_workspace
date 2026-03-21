@@ -13,12 +13,12 @@ from .recommended import RECOMMENDED_MODEL_RELATIVE_PATH, RECOMMENDED_SMOKE_LOG_
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='Smoke test the recommended SITL deployment launch and summarize whether the residual policy node came up cleanly.'
+        description='Smoke test the recommended SITL deployment launch and summarize whether the policy node came up cleanly.'
     )
     parser.add_argument('--namespace', default='usv_03', help='USV namespace for the recommended launch.')
     parser.add_argument('--timeout-seconds', type=float, default=20.0, help='How long to let the launch run before sending SIGINT.')
     parser.add_argument('--model', default=RECOMMENDED_MODEL_RELATIVE_PATH, help='Recommended model path override.')
-    parser.add_argument('--policy', default='bc', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], help='Residual policy type for the recommended launch.')
+    parser.add_argument('--policy', default='bc', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], help='Policy type for the recommended launch.')
     parser.add_argument('--output-json', help='Optional path to save the smoke summary as JSON.')
     parser.add_argument('--output-log', default=RECOMMENDED_SMOKE_LOG_RELATIVE_PATH, help='Path to save the raw launch output for this smoke run.')
     return parser.parse_args(argv)
@@ -27,7 +27,7 @@ def parse_args(argv=None):
 def _parse_launch_output(output: str) -> dict:
     policy_process_started = 'policy_inference_node' in output
     controller_param_enabled = 'Enabled rl_policy_enabled on velocity_controller_node.' in output
-    observation_ready = 'Observation stream ready; residual policy inference is active.' in output
+    observation_ready = 'Observation stream ready; pure RL policy inference is active.' in output
     stale_data_warning = '数据过期 - Pose' in output or 'Pose/State' in output
     model_missing = 'Model file not found' in output
     unexpected_error = has_unexpected_traceback(output) or model_missing

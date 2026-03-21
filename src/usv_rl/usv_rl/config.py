@@ -11,11 +11,11 @@ class ActionBounds:
 class RewardConfig:
     progress_weight: float = 4.0
     goal_bonus: float = 25.0
-    collision_penalty: float = -80.0
-    near_miss_weight: float = 12.0
+    collision_penalty: float = -35.0
+    near_miss_weight: float = 6.0
     conflict_distance: float = 5.0
     anticipation_distance: float = 5.0
-    conflict_risk_weight: float = 3.0
+    conflict_risk_weight: float = 1.5
     conflict_brake_weight: float = 1.2
     desired_conflict_speed: float = 0.26
     stop_go_penalty_weight: float = 1.8
@@ -34,6 +34,9 @@ class RewardConfig:
     heading_relief_factor: float = 0.45
     heading_error_weight: float = 0.2
     action_smoothness_weight: float = 0.35
+    pure_cruise_reward_weight: float = 0.9
+    pure_idle_penalty_weight: float = 0.8
+    pure_turn_penalty_weight: float = 0.12
     time_penalty: float = 0.02
     stall_penalty: float = -12.0
 
@@ -43,6 +46,7 @@ class EnvConfig:
     namespace: str = 'usv_03'
     launch_sitl: bool = True
     enable_rl_backend: bool = False
+    rl_control_mode: str = 'pure'
     action_mode: str = 'full'
     max_neighbors: int = 3
     cruise_speed: float = 0.4
@@ -67,3 +71,4 @@ class EnvConfig:
     goal_proximity_heading_relief: float = 0.55
     goal_proximity_smoothness_relief: float = 0.70
     goal_proximity_conflict_relief: float = 0.45
+    goal_proximity_speed_relief: float = 0.0

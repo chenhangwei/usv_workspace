@@ -28,34 +28,6 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     if not data:
         return {}
 
-    def _valid_primary_neighbor(value: Any) -> str | None:
-        if isinstance(value, str):
-            value = value.strip()
-            if value and value != '0':
-                return value
-            return None
-        if isinstance(value, (int, float)) and value != 0:
-            return str(int(value)) if float(value).is_integer() else str(value)
-        return None
-
-    def _count_active_episodes(field: str) -> tuple[int, float]:
-        total_duration = 0.0
-        episode_count = 0
-        index = 0
-        while index < len(data):
-            if data[index].get(field) == 1:
-                episode_start = data[index]['timestamp']
-                end_index = index
-                while end_index < len(data) and data[end_index].get(field) == 1:
-                    end_index += 1
-                episode_end = data[end_index - 1]['timestamp']
-                total_duration += max(0.0, episode_end - episode_start)
-                episode_count += 1
-                index = end_index
-            else:
-                index += 1
-        return episode_count, total_duration
-
     t0 = data[0]['timestamp']
     duration = data[-1]['timestamp'] - t0
     t = [d['timestamp'] - t0 for d in data]
@@ -65,7 +37,9 @@ def extract_report_data(data: list, header_info: dict) -> dict:
 
     info = {
         'usv_id': header_info.get('usv_id', 'unknown'),
-        'version': header_info.get('version', '?'),
+      'version': header_info.get('version_display', header_info.get('version', '?')),
+      'schema_name': header_info.get('schema_name', ''),
+      'schema_description': header_info.get('schema_description', ''),
         'params': header_info.get('params', {}),
         'duration_s': duration,
         'record_count': len(data),
@@ -182,69 +156,45 @@ def extract_report_data(data: list, header_info: dict) -> dict:
                 'rebuild_count': int(max(d.get('ampc_rebuild_count', 0) for d in ampc_on)),
             }
 
-    orca = {}
-    if 'orca_active' in data[0]:
-        active_samples = [d for d in data if d.get('orca_active') == 1]
-        active_cnt = len(active_samples)
-        orca['active_count'] = active_cnt
-        orca['active_pct'] = active_cnt / len(data) * 100 if data else 0
-        if active_cnt > 0:
-            dists_o = [d.get('orca_closest_distance', -1) for d in active_samples
-                     if isinstance(d.get('orca_closest_distance'), (int, float)) and d['orca_closest_distance'] > 0]
-            orca['min_dist'] = min(dists_o) if dists_o else None
-            orca['avg_dist'] = sum(dists_o)/len(dists_o) if dists_o else None
-            hard_brakes = sum(1 for d in data if d.get('orca_hard_brake') == 1)
-            orca['hard_brake_count'] = hard_brakes
-            encounters = {}
-            for d in active_samples:
-                et = d.get('orca_encounter_type', 'none')
-                if isinstance(et, str) and et != 'none':
-                    encounters[et] = encounters.get(et, 0) + 1
-            orca['encounters'] = encounters
+    rl = {}
+    if 'raw_cmd_vx' in data[0] or 'rl_cmd_vx' in data[0] or 'rl_delta_vx' in data[0]:
+        active_samples = []
+        delta_vx_vals = []
+        delta_omega_vals = []
+        neighbor_counts = []
+        for d in data:
+            active = int(d.get('rl_cmd_active', 0)) == 1 if isinstance(d.get('rl_cmd_active'), (int, float)) else False
+            if not active:
+                active = abs(float(d.get('rl_cmd_vx', 0) or 0)) > 1e-4 or abs(float(d.get('rl_cmd_omega', 0) or 0)) > 1e-4
+            if active:
+                active_samples.append(d)
+            delta_vx_vals.append(float(d.get('rl_delta_vx', d.get('cmd_vx', 0) - d.get('raw_cmd_vx', 0)) or 0))
+            delta_omega_vals.append(float(d.get('rl_delta_omega', d.get('cmd_omega', 0) - d.get('raw_cmd_omega', 0)) or 0))
+            neighbor_count = 0
+            for slot in range(1, 6):
+                nid = d.get(f'neighbor_{slot}_id')
+                if isinstance(nid, str) and nid.strip():
+                    neighbor_count += 1
+                elif isinstance(nid, (int, float)) and nid != 0:
+                    neighbor_count += 1
+            neighbor_counts.append(neighbor_count)
 
-            primary_counts = {}
-            for d in active_samples:
-                primary_id = _valid_primary_neighbor(d.get('orca_primary_neighbor_id'))
-                if primary_id is not None:
-                    primary_counts[primary_id] = primary_counts.get(primary_id, 0) + 1
-            if primary_counts:
-                top_primary_neighbor = max(primary_counts.items(), key=lambda item: item[1])
-                orca['primary_neighbors'] = primary_counts
-                orca['top_primary_neighbor'] = top_primary_neighbor[0]
-                orca['top_primary_neighbor_pct'] = top_primary_neighbor[1] / active_cnt * 100
-
-        if 'orca_escape_active' in data[0]:
-            escape_samples = [d for d in data if d.get('orca_escape_active') == 1]
-            escape_sample_count = len(escape_samples)
-            orca['escape_sample_count'] = escape_sample_count
-            orca['escape_active_pct'] = escape_sample_count / len(data) * 100 if data else 0
-            if escape_sample_count > 0:
-                escape_episode_count, escape_total_duration = _count_active_episodes('orca_escape_active')
-                phase_counts = {}
-                direction_counts = {}
-                for d in escape_samples:
-                    phase = d.get('orca_escape_phase', 0)
-                    if isinstance(phase, (int, float)):
-                        phase_num = int(phase)
-                        if phase_num > 0:
-                            phase_label = 'phase1_reverse_turn' if phase_num == 1 else 'phase2_weakened_orca' if phase_num == 2 else f'phase{phase_num}'
-                            phase_counts[phase_label] = phase_counts.get(phase_label, 0) + 1
-                    direction = d.get('orca_escape_direction', 0)
-                    if isinstance(direction, (int, float)):
-                        direction_num = int(direction)
-                        if direction_num != 0:
-                            direction_label = 'left' if direction_num > 0 else 'right'
-                            direction_counts[direction_label] = direction_counts.get(direction_label, 0) + 1
-
-                orca['escape_episode_count'] = escape_episode_count
-                orca['escape_total_duration'] = escape_total_duration
-                orca['escape_phases'] = phase_counts
-                orca['escape_directions'] = direction_counts
-                orca['max_escape_count'] = max(
-                    int(d.get('orca_escape_count', 0))
-                    for d in data
-                    if isinstance(d.get('orca_escape_count'), (int, float))
-                )
+        active_count = len(active_samples)
+        rl_age = [
+            float(d.get('rl_cmd_age_s'))
+            for d in data
+            if isinstance(d.get('rl_cmd_age_s'), (int, float)) and d.get('rl_cmd_age_s', -1) >= 0
+        ]
+        rl = {
+            'active_count': active_count,
+            'active_pct': active_count / len(data) * 100 if data else 0,
+            'mean_abs_delta_vx': sum(abs(v) for v in delta_vx_vals) / len(delta_vx_vals) if delta_vx_vals else 0,
+            'mean_abs_delta_omega': sum(abs(v) for v in delta_omega_vals) / len(delta_omega_vals) if delta_omega_vals else 0,
+            'max_abs_delta_vx': max((abs(v) for v in delta_vx_vals), default=0),
+            'max_abs_delta_omega': max((abs(v) for v in delta_omega_vals), default=0),
+            'neighbor_nonzero_pct': sum(1 for count in neighbor_counts if count > 0) / len(neighbor_counts) * 100 if neighbor_counts else 0,
+            'age_p95': sorted(rl_age)[int(len(rl_age) * 0.95)] if rl_age else None,
+        }
 
     wifi = {}
     if 'wifi_rssi_dbm' in data[0]:
@@ -393,6 +343,21 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         ts_data['mpc_time'] = [data[i].get('mpc_solve_time_ms', 0) for i in range(0, len(data), step)]
     if 'cmd_omega' in data[0]:
         ts_data['cmd_omega'] = [data[i].get('cmd_omega', 0) for i in range(0, len(data), step)]
+    if 'raw_cmd_vx' in data[0]:
+      ts_data['raw_cmd_vx'] = [data[i].get('raw_cmd_vx', 0) for i in range(0, len(data), step)]
+      ts_data['raw_cmd_vy'] = [data[i].get('raw_cmd_vy', 0) for i in range(0, len(data), step)]
+      ts_data['raw_cmd_omega'] = [data[i].get('raw_cmd_omega', 0) for i in range(0, len(data), step)]
+      ts_data['rl_delta_vx'] = [data[i].get('rl_delta_vx', data[i].get('cmd_vx', 0) - data[i].get('raw_cmd_vx', 0)) for i in range(0, len(data), step)]
+      ts_data['rl_delta_vy'] = [data[i].get('rl_delta_vy', data[i].get('cmd_vy', 0) - data[i].get('raw_cmd_vy', 0)) for i in range(0, len(data), step)]
+      ts_data['rl_delta_omega'] = [data[i].get('rl_delta_omega', data[i].get('cmd_omega', 0) - data[i].get('raw_cmd_omega', 0)) for i in range(0, len(data), step)]
+    if 'rl_cmd_vx' in data[0]:
+      ts_data['rl_cmd_vx'] = [data[i].get('rl_cmd_vx', 0) for i in range(0, len(data), step)]
+      ts_data['rl_cmd_vy'] = [data[i].get('rl_cmd_vy', 0) for i in range(0, len(data), step)]
+      ts_data['rl_cmd_omega'] = [data[i].get('rl_cmd_omega', 0) for i in range(0, len(data), step)]
+    if 'rl_cmd_active' in data[0]:
+      ts_data['rl_active'] = [data[i].get('rl_cmd_active', 0) for i in range(0, len(data), step)]
+    if 'rl_cmd_age_s' in data[0]:
+      ts_data['rl_cmd_age_s'] = [data[i].get('rl_cmd_age_s', -1) for i in range(0, len(data), step)]
     if 'omega_actual' in data[0]:
         ts_data['omega_actual'] = [data[i].get('omega_actual', 0) for i in range(0, len(data), step)]
     if 'current_tau_omega' in data[0]:
@@ -402,29 +367,6 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         ts_data['tau_confidence'] = [data[i].get('ampc_tau_confidence', 0) for i in range(0, len(data), step)]
     if 'wifi_rssi_dbm' in data[0]:
         ts_data['wifi_rssi'] = [data[i].get('wifi_rssi_dbm', -100) for i in range(0, len(data), step)]
-    if 'orca_active' in data[0]:
-        ts_data['orca_active'] = [data[i].get('orca_active', 0) for i in range(0, len(data), step)]
-        ts_data['orca_closest'] = [data[i].get('orca_closest_distance', -1) for i in range(0, len(data), step)]
-        ts_data['orca_linear_corr'] = [data[i].get('orca_linear_correction', 0) for i in range(0, len(data), step)]
-        ts_data['orca_angular_corr'] = [data[i].get('orca_angular_correction', 0) for i in range(0, len(data), step)]
-        ts_data['orca_hard_brake'] = [data[i].get('orca_hard_brake', 0) for i in range(0, len(data), step)]
-    if 'orca_primary_neighbor_id' in data[0]:
-      ts_data['orca_primary_neighbor'] = [
-        _valid_primary_neighbor(data[i].get('orca_primary_neighbor_id')) or ''
-        for i in range(0, len(data), step)
-      ]
-    if 'orca_escape_active' in data[0]:
-      ts_data['orca_escape_active'] = [data[i].get('orca_escape_active', 0) for i in range(0, len(data), step)]
-      ts_data['orca_escape_phase'] = [
-        int(data[i].get('orca_escape_phase', 0)) if data[i].get('orca_escape_active', 0) == 1 else 0
-        for i in range(0, len(data), step)
-      ]
-      ts_data['orca_escape_direction'] = [
-        int(data[i].get('orca_escape_direction', 0)) if data[i].get('orca_escape_active', 0) == 1 else 0
-        for i in range(0, len(data), step)
-      ]
-      ts_data['orca_escape_count'] = [data[i].get('orca_escape_count', 0) for i in range(0, len(data), step)]
-
     # v16: 提取邻居USV位置时间序列 (用于回放中显示其他USV的实时位置)
     if 'neighbor_1_id' in data[0]:
         neighbor_ts = {}  # {neighbor_usv_id: {time: [], x: [], y: [], yaw: []}}
@@ -455,7 +397,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'cte': {'avg': cte_avg, 'max': cte_max, 'rms': cte_rms},
         'heading_error': {'avg': he_avg, 'max': he_max},
         'mpc': mpc, 'omega': omega, 'osc_freq': osc_freq,
-        'ampc': ampc, 'orca': orca, 'wifi': wifi,
+        'ampc': ampc, 'rl': rl, 'wifi': wifi,
         'per_goal': per_goal, 'scoring': scoring,
         'ts': ts_data,
     }
@@ -525,11 +467,7 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
             'he_avg': rd['heading_error'].get('avg'),
             'speed_avg': round(rd['velocity']['guided_avg'], 3),
             'mpc_avg': round(rd['mpc'].get('avg', 0), 1) if rd['mpc'] else None,
-            'orca_active_pct': round(rd['orca'].get('active_pct', 0), 1) if rd['orca'] else 0,
-            'orca_hard_brakes': rd['orca'].get('hard_brake_count', 0) if rd['orca'] else 0,
-            'orca_primary': rd['orca'].get('top_primary_neighbor', '') if rd['orca'] else '',
-            'escape_count': rd['orca'].get('escape_episode_count', 0) if rd['orca'] else 0,
-            'escape_duration': round(rd['orca'].get('escape_total_duration', 0), 1) if rd['orca'] else 0,
+            'rl_active_pct': round(rd['rl'].get('active_pct', 0), 1) if rd.get('rl') else 0,
             'wifi_avg': round(rd['wifi'].get('avg', -100), 1) if rd['wifi'] else None,
             'wifi_grade': rd['wifi'].get('grade', '') if rd['wifi'] else '',
         })
@@ -549,7 +487,7 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
             'omega': rd['omega'],
             'osc_freq': rd['osc_freq'],
             'ampc': rd['ampc'],
-            'orca': rd['orca'],
+            'rl': rd['rl'],
             'wifi': rd['wifi'],
             'distance': rd['distance'],
             'sampling': rd['sampling'],
@@ -679,19 +617,6 @@ body {{
   padding:7px 10px; background:rgba(100,255,218,0.06);
   border-radius:8px; border-left:3px solid var(--accent);
 }}
-.orca-summary-grid {{
-  display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
-  gap:14px; margin-bottom:14px;
-}}
-.orca-summary-card {{ margin-bottom:0; }}
-.orca-summary-card h4 {{
-  display:flex; align-items:center; gap:8px; margin-bottom:10px;
-  font-size:0.95rem; color:var(--text);
-}}
-.orca-summary-card .orca-line {{
-  font-size:0.76rem; color:var(--text2); margin-top:6px; line-height:1.65;
-}}
-.orca-summary-card .orca-line strong {{ color:var(--accent); font-weight:700; }}
 .replay-container {{
   position:relative; border-radius:12px; overflow:hidden;
   background:var(--bg-card); border:1px solid var(--border);
@@ -793,7 +718,6 @@ body {{
     • <strong>均CTE</strong>：横向跟踪偏差均值，&lt;0.1m=优秀，0.1-0.3m=良好，0.3-0.5m=一般，&gt;0.5m=较差<br>
     • <strong>均航向误差</strong>：&lt;5°=优秀，5-10°=良好，10-20°=一般，&gt;20°=较差<br>
     • <strong>GUIDED%</strong>：自动导航模式占比，越高越稳定，低值意味着频繁切为HOLD模式<br>
-    • <strong>ORCA%</strong>：避障系统激活时间占比，反映编队密集程度<br>
     • 🏆标记=该指标最优者 | 绿色=最佳值 | 点击表头可以排序<br>
     <strong>🤖 AI分析摘要</strong>自动评估每个USV的导航质量，用✅❗❌标记关键发现，帮助快速定位问题。
   </div>
@@ -823,6 +747,7 @@ body {{
     <strong>路径重放：</strong>实时回放各USV的航行轨迹。船形图标显示位置和朝向（参考GS导航预览风格）。<br>
     ▶ 播放/暂停 | ⏪⏩ 0.25x~16x变速 | 点击进度条跳转 | ⏮ 重新开始 |
     🟢起点 🔴终点 ⭐目标航点 | 🏷️ 显示/隐藏航点ID | 勾选USV即加入重放<br>
+    如果日志包含 RL 字段，船体外的青色光环表示该时刻 RL 策略输出正在介入控制。<br>
     到达标识(数据驱动)：🟢绿色=确认到达(distance≤1.5m) | 🟡黄色=偏离到达(距离>1.5m，偏离检测判定已到达) | 🔴红色=未到达
   </div>
 </div>
@@ -901,6 +826,7 @@ body {{
   </div>
   <div class="reading-guide">
     <strong>⚙️ 角速度控制阅读指南：</strong>ω_cmd=控制器输出的角速度指令(rad/s)，ω_act=传感器测量的实际角速度。<br>
+    如日志包含 RL 字段，控制图会同时显示 raw / RL / final 三路命令，优先看是谁在主导转向。<br>
     <strong>分析方法：</strong><br>
     • <strong>cmd与act差距</strong>：反映舶机/推进器响应延迟(tau值)，差距越小跟踪越好<br>
     • <strong>高频振荡</strong>：cmd快速正负交替 → 控制器过激，需降低MPC权重或增大预测步长<br>
@@ -944,37 +870,7 @@ body {{
 </div>
 
 <div class="section" id="s9">
-  <div class="section-title"><span class="num">9</span> ORCA 避障分析</div>
-  <div id="orca-summary-area"></div>
-  <div class="chart-box" id="chart-orca-box" style="display:none;">
-    <div id="chart-orca-activation" style="height:280px;"></div>
-  </div>
-  <div class="chart-box" id="chart-orca-dist-box" style="display:none;">
-    <div id="chart-orca-dist" style="height:280px;"></div>
-  </div>
-  <div class="chart-box" id="chart-orca-corr-box" style="display:none;">
-    <div id="chart-orca-corrections" style="height:280px;"></div>
-  </div>
-  <div class="chart-box" id="chart-orca-escape-box" style="display:none;">
-    <div id="chart-orca-escape" style="height:280px;"></div>
-  </div>
-  <div class="reading-guide">
-    <strong>🛡️ ORCA 避障分析阅读指南：</strong>ORCA (Optimal Reciprocal Collision Avoidance) 是USV的分布式避碰算法。<br>
-    <strong>图表1：避障激活</strong> — 显示ORCA是否检测到邻近USV并激活避碰(1=激活, 0=未激活)。激活率高表示编队密集。<br>
-    <strong>图表2：最近邻距离</strong> — 与最近邻USV的实时距离，红虚线=1.0m安全阈值。低于此线需关注。<br>
-    <strong>图表3：速度修正量</strong> — ORCA对原始控制指令的修正量(线速度+角速度)，修正越大说明碰撞风险越高。<br>
-    <strong>图表4：脱困阶段</strong> — v17 新增。0=未脱困，1=后退转向，2=削弱绕行；如果持续停在高位，说明控制器正在主动解除锁死。<br>
-    <strong>关键指标：</strong><br>
-    • <strong>激活率</strong>：0%=全程无碰撞风险，高占比=密集编队或频繁交叉<br>
-    • <strong>硬刹车</strong>：紧急制动次数，≥3次建议检查路径规划是否合理<br>
-    • <strong>主导邻船</strong>：避障激活时最常压制当前艇的邻船，可快速定位互锁对象<br>
-    • <strong>遭遇类型</strong>：head_on=迎面, crossing_give_way/crossing_stand_on=交叉会遇, being_overtaken/overtaking=追越, stationary=近距伴随/静态压制<br>
-    <strong>分析思路：</strong>先看主导邻船是否高度集中，再结合脱困统计判断是正常避障、长时间互抑，还是已经进入脱困恢复流程。
-  </div>
-</div>
-
-<div class="section" id="s10">
-  <div class="section-title"><span class="num">10</span> 每航点统计</div>
+  <div class="section-title"><span class="num">9</span> 每航点统计</div>
   <div id="per-goal-area"></div>
   <div class="reading-guide">
     <strong>📋 每航点统计阅读指南：</strong>按目标航点(G1,G2...)分别统计导航性能。<br>
@@ -1110,64 +1006,7 @@ function toggleAllUSV() {{
 function refreshAll() {{
   buildSummaryCards(); buildCompareTable(); drawTrajectory(); drawVelocity();
   drawCTE(); drawHE(); drawDistance(); drawControl(); drawMPC(); drawTau(); drawWifi();
-  buildOrcaSummary(); drawOrca(); buildPerGoal(); updateReplayInfo();
-}}
-
-function formatOrcaCounter(counter,total,limit) {{
-  if(!counter) return '—';
-  const entries=Object.entries(counter).sort((a,b)=>b[1]-a[1]);
-  if(!entries.length) return '—';
-  return entries.slice(0,limit||3).map(([key,val])=>{{
-    const pct=total&&total>0 ? ` (${{(val/total*100).toFixed(1)}}%)` : '';
-    return `${{key}}: ${{val}}${{pct}}`;
-  }}).join(' | ');
-}}
-
-function buildOrcaSummary() {{
-  const el=document.getElementById('orca-summary-area');
-  if(!el) return;
-  const active=getActive();
-  if(!active.length) {{ el.innerHTML=''; return; }}
-  const cards=[];
-  active.forEach(u=>{{
-    const sum=ALL_SUM[u.idx];
-    const orca=sum&&sum.orca;
-    if(!orca || (!orca.active_count && !orca.escape_sample_count && !orca.top_primary_neighbor)) return;
-    const activeText=orca.active_count
-      ? `${{orca.active_count}} 次 / ${{(orca.active_pct||0).toFixed(1)}}%`
-      : '未触发';
-    const distText=orca.min_dist!==null && orca.min_dist!==undefined
-      ? `${{orca.min_dist.toFixed(2)}}m / 均值 ${{(orca.avg_dist||0).toFixed(2)}}m`
-      : '—';
-    const primaryText=orca.top_primary_neighbor
-      ? `${{orca.top_primary_neighbor}} (${{(orca.top_primary_neighbor_pct||0).toFixed(1)}}%)`
-      : '—';
-    const primaryTopText=formatOrcaCounter(orca.primary_neighbors, orca.active_count, 3);
-    const encounterText=formatOrcaCounter(orca.encounters, orca.active_count, 4);
-    const escapeText=orca.escape_episode_count
-      ? `${{orca.escape_episode_count}} 次 / ${{(orca.escape_total_duration||0).toFixed(1)}}s`
-      : '未触发';
-    const phaseText=formatOrcaCounter(orca.escape_phases, orca.escape_sample_count, 3);
-    const dirText=formatOrcaCounter(orca.escape_directions, orca.escape_sample_count, 2);
-    cards.push(`
-      <div class="chart-box orca-summary-card">
-        <h4><span style="color:${{u.color}};font-weight:700">●</span> ${{u.id}}</h4>
-        <div class="orca-line"><strong>激活:</strong> ${{activeText}}</div>
-        <div class="orca-line"><strong>最近邻距离:</strong> ${{distText}}</div>
-        <div class="orca-line"><strong>硬刹车:</strong> ${{orca.hard_brake_count||0}} 次</div>
-        <div class="orca-line"><strong>主导邻船:</strong> ${{primaryText}}</div>
-        <div class="orca-line"><strong>邻船分布:</strong> ${{primaryTopText}}</div>
-        <div class="orca-line"><strong>遭遇类型:</strong> ${{encounterText}}</div>
-        <div class="orca-line"><strong>脱困:</strong> ${{escapeText}}${{orca.max_escape_count?` | max_count=${{orca.max_escape_count}}`:''}}</div>
-        <div class="orca-line"><strong>脱困阶段:</strong> ${{phaseText}}</div>
-        <div class="orca-line"><strong>脱困方向:</strong> ${{dirText}}</div>
-      </div>`);
-  }});
-  if(!cards.length) {{
-    el.innerHTML='<div class="reading-guide">当前所选 USV 没有可用的 ORCA v14/v17 数据。</div>';
-    return;
-  }}
-  el.innerHTML=`<div class="orca-summary-grid">${{cards.join('')}}</div>`;
+  buildPerGoal(); updateReplayInfo();
 }}
 
 // ═══ 对比表 ═══
@@ -1193,7 +1032,6 @@ function buildCompareTable() {{
       <td class="${{bh?'best':''}}">${{u.he_avg!==null?u.he_avg.toFixed(1)+'°':'N/A'}}</td>
       <td>${{u.speed_avg}} m/s</td>
       <td>${{u.mpc_avg!==null?u.mpc_avg+'ms':'—'}}</td>
-      <td>${{u.orca_active_pct?u.orca_active_pct+'%':'—'}}</td>
       <td>${{u.wifi_avg!==null?u.wifi_avg+'dBm':'—'}}</td></tr>`;
   }}).join('');
   el.innerHTML=`<div class="chart-box" style="overflow-x:auto">
@@ -1201,7 +1039,7 @@ function buildCompareTable() {{
       <th>USV</th><th>文件</th><th>版本</th><th>评分</th>
       <th>时长</th><th>数据</th><th>航点</th><th>GUIDED%</th>
       <th>均CTE</th><th>均航向误差</th><th>均速</th>
-      <th>MPC</th><th>ORCA%</th><th>WiFi</th>
+      <th>MPC</th><th>WiFi</th>
     </tr></thead><tbody>${{rows}}</tbody></table></div>`;
 }}
 
@@ -1296,13 +1134,18 @@ function drawControl() {{
   const traces=[];
   getActive().forEach(u=>{{
     const ts=ALL_TS[u.idx]; if(!ts||!ts.cmd_omega) return;
-    traces.push({{x:ts.time,y:ts.cmd_omega,name:u.id+' ω_cmd',line:{{color:u.color,width:1}}}});
+    traces.push({{x:ts.time,y:ts.cmd_omega,name:u.id+' final ω',line:{{color:u.color,width:1.4}}}});
+    if(ts.raw_cmd_omega) traces.push({{x:ts.time,y:ts.raw_cmd_omega,name:u.id+' raw ω',line:{{color:u.color,width:1,dash:'dash'}},opacity:0.65}});
+    if(ts.rl_delta_omega) traces.push({{x:ts.time,y:ts.rl_delta_omega,name:u.id+' RL Δω',line:{{color:u.color,width:1,dash:'dot'}},opacity:0.85,showlegend:false}});
     if(ts.omega_actual) traces.push({{x:ts.time,y:ts.omega_actual,name:u.id+' ω_act',
       line:{{color:u.color,width:1.5,dash:'dot'}},showlegend:false}});
+    if(ts.raw_cmd_vx) traces.push({{x:ts.time,y:ts.raw_cmd_vx,name:u.id+' raw vx',line:{{color:u.color,width:1,dash:'dash'}},opacity:0.35,visible:'legendonly'}});
+    if(ts.cmd_vx) traces.push({{x:ts.time,y:ts.cmd_vx,name:u.id+' final vx',line:{{color:u.color,width:1}},opacity:0.35,visible:'legendonly'}});
+    if(ts.rl_delta_vx) traces.push({{x:ts.time,y:ts.rl_delta_vx,name:u.id+' RL Δv',line:{{color:u.color,width:1,dash:'dot'}},opacity:0.35,visible:'legendonly'}});
   }});
   Plotly.react('chart-control',traces.length?traces:emptyTrace(),{{
-    ...darkLayout,title:'角速度对比',
-    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'ω (rad/s)'}},
+    ...darkLayout,title:'控制通道对比 (raw / RL / final)',
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Command'}},
   }},cfg);
 }}
 
@@ -1385,7 +1228,7 @@ function buildPerGoal() {{
   el.innerHTML=html;
 }}
 
-// ═══ AI 分析 + 距离 + ORCA 图表 ═══
+// ═══ AI 分析 + 距离图表 ═══
 function buildSummaryCards() {{
   const active=getActive();
   const el=document.getElementById('ai-insights');
@@ -1412,12 +1255,10 @@ function buildSummaryCards() {{
       else if(sum.mpc.avg>30) ins.push('⚠️MPC偏高('+sum.mpc.avg.toFixed(1)+'ms)');
       else ins.push('MPC正常('+sum.mpc.avg.toFixed(1)+'ms)');
     }}
-    if(sum.orca&&sum.orca.active_count>0) {{
-      ins.push('ORCA触发'+sum.orca.active_count+'次('+sum.orca.active_pct.toFixed(1)+'%)');
-      if(sum.orca.hard_brake_count>0) ins.push('⚠️硬刹车'+sum.orca.hard_brake_count+'次');
-      if(sum.orca.min_dist!==null&&sum.orca.min_dist<0.5) ins.push('❌最近距离仅'+sum.orca.min_dist.toFixed(2)+'m');
-      if(sum.orca.top_primary_neighbor) ins.push('主导邻船'+sum.orca.top_primary_neighbor);
-      if(sum.orca.escape_episode_count>0) ins.push('🆘脱困'+sum.orca.escape_episode_count+'次/'+sum.orca.escape_total_duration.toFixed(1)+'s');
+    if(sum.rl&&sum.rl.active_count>0) {{
+      ins.push('🤖RL介入'+sum.rl.active_pct.toFixed(1)+'%');
+      ins.push('|Δv|'+sum.rl.mean_abs_delta_vx.toFixed(3)+'m/s');
+      ins.push('|Δω|'+sum.rl.mean_abs_delta_omega.toFixed(3)+'rad/s');
     }}
     if(sum.wifi&&sum.wifi.avg) ins.push('WiFi '+sum.wifi.grade+'('+sum.wifi.avg.toFixed(0)+'dBm)');
     if(sum.velocity) ins.push('均速'+sum.velocity.guided_avg.toFixed(3)+'m/s');
@@ -1442,55 +1283,6 @@ function drawDistance() {{
     shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:1.5,y1:1.5,
       line:{{color:'#4CAF50',width:1.5,dash:'dash'}}}}],
   }},cfg);
-}}
-
-function drawOrca() {{
-  const active=getActive();
-  const hasOrca=active.some(u=>ALL_TS[u.idx]&&Array.isArray(ALL_TS[u.idx].orca_active));
-  const hasEscape=active.some(u=>ALL_TS[u.idx]&&Array.isArray(ALL_TS[u.idx].orca_escape_active));
-  ['chart-orca-box','chart-orca-dist-box','chart-orca-corr-box'].forEach(id=>{{
-    const el=document.getElementById(id); if(el) el.style.display=hasOrca?'block':'none';
-  }});
-  const escapeBox=document.getElementById('chart-orca-escape-box');
-  if(escapeBox) escapeBox.style.display=hasEscape?'block':'none';
-  if(!hasOrca && !hasEscape) return;
-  const t1=[],t2=[],t3=[],t4=[];
-  active.forEach(u=>{{
-    const ts=ALL_TS[u.idx]; if(!ts||!ts.orca_active) return;
-    t1.push({{x:ts.time,y:ts.orca_active,name:u.id+' 激活',line:{{color:u.color,width:1.5}},fill:'tozeroy',fillcolor:u.color+'20'}});
-    const vd=ts.orca_closest.map(v=>v>0?v:null);
-    t2.push({{x:ts.time,y:vd,name:u.id,line:{{color:u.color,width:1.5}},connectgaps:false}});
-    if(ts.orca_linear_corr) {{
-      t3.push({{x:ts.time,y:ts.orca_linear_corr,name:u.id+' Δv',line:{{color:u.color,width:1}}}});
-      if(ts.orca_angular_corr) t3.push({{x:ts.time,y:ts.orca_angular_corr,name:u.id+' Δω',line:{{color:u.color,width:1,dash:'dash'}},showlegend:false}});
-    }}
-    if(Array.isArray(ts.orca_escape_active)) {{
-      const phase=(ts.orca_escape_phase||[]).map((value,index)=>ts.orca_escape_active[index]===1?value:0);
-      t4.push({{x:ts.time,y:phase,name:u.id+' 脱困阶段',line:{{color:u.color,width:1.8,shape:'hv'}}}});
-    }}
-  }});
-  if(hasOrca) {{
-    Plotly.react('chart-orca-activation',t1.length?t1:emptyTrace(),{{
-      ...darkLayout,title:'ORCA 避障激活',
-      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Active',range:[-0.1,1.3]}},
-    }},cfg);
-    Plotly.react('chart-orca-dist',t2.length?t2:emptyTrace(),{{
-      ...darkLayout,title:'最近邻USV距离',
-      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Distance (m)'}},
-      shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:1.0,y1:1.0,line:{{color:'#EF5350',width:1.5,dash:'dash'}}}}],
-    }},cfg);
-    Plotly.react('chart-orca-corrections',t3.length?t3:emptyTrace(),{{
-      ...darkLayout,title:'ORCA 速度修正量',
-      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Correction'}},
-    }},cfg);
-  }}
-  if(hasEscape) {{
-    Plotly.react('chart-orca-escape',t4.length?t4:emptyTrace(),{{
-      ...darkLayout,title:'ORCA 脱困阶段 (v17)',
-      xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
-      yaxis:{{...darkLayout.yaxis,title:'Escape Phase',tickmode:'array',tickvals:[0,1,2],ticktext:['Off','P1','P2'],range:[-0.2,2.3]}},
-    }},cfg);
-  }}
 }}
 
 // ═══ 路径重放引擎 ═══
@@ -1615,9 +1407,11 @@ function sampleNeighborPos(nb,t) {{
 
 function updateReplayInfo() {{
   const el=document.getElementById('replay-info');
-  el.innerHTML=getActive().map(u=>
-    `<span class="ri-item"><span class="ri-dot" style="background:${{u.color}}"></span>${{u.id}}</span>`
-  ).join('')||'<span style="color:var(--text2)">请选择USV</span>';
+  el.innerHTML=getActive().map(u=>{{
+    const sum=ALL_SUM[u.idx]||{{}};
+    const rl=sum.rl&&sum.rl.active_count>0?` | RL ${{sum.rl.active_pct.toFixed(1)}}%`:'';
+    return `<span class="ri-item"><span class="ri-dot" style="background:${{u.color}}"></span>${{u.id}}${{rl}}</span>`;
+  }}).join('')||'<span style="color:var(--text2)">请选择USV</span>';
   const data=getReplayData();
   replayState.maxTime=Math.max(1,...data.map(d=>d.ts.time[d.ts.time.length-1]));
   updateTimeDisplay();
@@ -2016,11 +1810,27 @@ function renderReplayFrame() {{
 
     // 船 (始终显示,不随任务切换隐藏)
     const[canX,canY]=toC(cx,cy);
+    if(ts.rl_active&&ts.rl_active[idx]===1) {{
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(canX,canY,BOAT_SCALE*0.9,0,Math.PI*2);
+      ctx.strokeStyle='rgba(0,188,212,0.9)';
+      ctx.lineWidth=2.5;
+      ctx.shadowColor='rgba(0,188,212,0.65)';
+      ctx.shadowBlur=12;
+      ctx.stroke();
+      ctx.restore();
+    }}
     drawBoat(ctx,canX,canY,yaw,color,BOAT_SCALE);
 
     // 标签
     ctx.fillStyle=color; ctx.font='bold 11px Inter,system-ui,sans-serif';
     ctx.textAlign='center'; ctx.fillText(d.usv.id,canX,canY-BOAT_SCALE-4);
+    if(ts.rl_active&&ts.rl_active[idx]===1) {{
+      ctx.fillStyle='#00BCD4';
+      ctx.font='bold 9px Inter,system-ui,sans-serif';
+      ctx.fillText('RL',canX,canY+BOAT_SCALE+10);
+    }}
 
     // 到达检测 (使用 taskIdx_goalId 复合键)
     if(ts.goal_id) {{

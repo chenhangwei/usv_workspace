@@ -1,38 +1,39 @@
 from __future__ import annotations
 
-from typing import Optional
-
 import numpy as np
 
-
-def project_residual_action(
+def project_pure_action(
     action,
     *,
-    action_mode: str,
-    linear_delta_limit: float,
-    angular_delta_limit: float,
-    raw_linear_x: Optional[float] = None,
+    max_linear_speed: float,
+    max_angular_speed: float,
     forward_only: bool = True,
 ) -> np.ndarray:
     raw_action = np.asarray(action, dtype=np.float32).reshape(-1)
+    if raw_action.size < 2:
+        raise ValueError('Pure RL control requires a 2D action: [linear_x, angular_z].')
 
-    if action_mode == 'angular_only':
-        if raw_action.size >= 2:
-            angular_delta = float(raw_action[1])
-        elif raw_action.size == 1:
-            angular_delta = float(raw_action[0])
-        else:
-            angular_delta = 0.0
-        angular_delta = float(np.clip(angular_delta, -angular_delta_limit, angular_delta_limit))
-        return np.asarray([angular_delta], dtype=np.float32)
+    min_linear = 0.0 if forward_only else -float(max_linear_speed)
+    linear_x = float(np.clip(raw_action[0], min_linear, float(max_linear_speed)))
+    angular_z = float(np.clip(raw_action[1], -float(max_angular_speed), float(max_angular_speed)))
+    return np.asarray([linear_x, angular_z], dtype=np.float32)
 
-    linear_delta = float(raw_action[0]) if raw_action.size >= 1 else 0.0
-    angular_delta = float(raw_action[1]) if raw_action.size >= 2 else 0.0
 
-    min_linear_delta = -float(linear_delta_limit)
-    if forward_only and raw_linear_x is not None:
-        min_linear_delta = max(min_linear_delta, -max(0.0, float(raw_linear_x)))
-
-    linear_delta = float(np.clip(linear_delta, min_linear_delta, linear_delta_limit))
-    angular_delta = float(np.clip(angular_delta, -angular_delta_limit, angular_delta_limit))
-    return np.asarray([linear_delta, angular_delta], dtype=np.float32)
+def project_policy_action(
+    action,
+    *,
+    rl_control_mode: str = 'pure',
+    action_mode: str,
+    linear_delta_limit: float,
+    angular_delta_limit: float,
+    raw_linear_x=None,
+    forward_only: bool = True,
+) -> np.ndarray:
+    if action_mode != 'full':
+        raise ValueError('Pure RL control requires action_mode="full".')
+    return project_pure_action(
+        action,
+        max_linear_speed=linear_delta_limit,
+        max_angular_speed=angular_delta_limit,
+        forward_only=forward_only,
+    )

@@ -16,9 +16,9 @@ from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
-from .action_projection import project_residual_action
+from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
-from .policies import load_residual_policy
+from .policies import load_policy
 from .types import NeighborObservation, NeighborState, UsvObservation
 
 
@@ -87,13 +87,13 @@ class ZeroPolicy:
         return np.zeros(2, dtype=np.float32)
 
 
-class PpoResidualPolicyRuntime:
+class PpoPolicyRuntime:
     def __init__(self, model_path: str, device: str = 'cpu'):
         try:
             from stable_baselines3 import PPO
         except ImportError as exc:
             raise RuntimeError(
-                'stable_baselines3 is required to load PPO residual policies for online inference.'
+                'stable_baselines3 is required to load PPO policies for online inference.'
             ) from exc
         self._model = PPO.load(model_path, device=device)
 
@@ -109,13 +109,23 @@ class MappoActorPolicyRuntime:
             from torch import nn
         except ImportError as exc:
             raise RuntimeError(
-                'torch is required to load MAPPO residual policies for online inference.'
+                'torch is required to load MAPPO policies for online inference.'
             ) from exc
 
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
         hidden_sizes = tuple(int(value) for value in checkpoint.get('hidden_sizes', [128, 128]))
         self.obs_dim = int(checkpoint['local_observation_size'])
         self.action_dim = int(checkpoint['action_dim'])
+        self.rl_control_mode = 'pure'
+        action_bounds = checkpoint.get('action_bounds', {'linear_delta': 0.3, 'angular_delta': 0.4})
+        linear_bound = float(action_bounds.get('linear_delta', 0.3))
+        angular_bound = float(action_bounds.get('angular_delta', 0.4))
+        linear_bound = max(linear_bound, float(checkpoint.get('cruise_speed', linear_bound)))
+        angular_bound = max(angular_bound, float(checkpoint.get('max_angular_velocity', angular_bound)))
+        self.action_bounds = ActionBounds(
+            linear_delta=linear_bound,
+            angular_delta=angular_bound,
+        )
         self._torch = torch
         self._device = torch.device(device)
 
@@ -159,35 +169,42 @@ def _load_runtime_policy(model_path: str, policy_kind: str, device: str):
             raise RuntimeError(f'Unable to infer policy type from model path: {resolved_model_path}')
 
     if inferred_kind == 'bc':
-        return load_residual_policy(resolved_model_path)
+        return load_policy(resolved_model_path)
     if inferred_kind == 'ppo':
-        return PpoResidualPolicyRuntime(resolved_model_path, device=device)
+        return PpoPolicyRuntime(resolved_model_path, device=device)
     if inferred_kind == 'mappo':
         return MappoActorPolicyRuntime(resolved_model_path, device=device)
     raise RuntimeError(f'Unsupported online policy type: {inferred_kind}')
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description='Run a trained residual policy online and publish to rl_policy/cmd_vel.')
-    parser.add_argument('--model', required=True, help='Path to residual policy model (.npz for BC, .zip for PPO, .pt for MAPPO).')
+    parser = argparse.ArgumentParser(description='Run a trained policy online and publish to rl_policy/cmd_vel.')
+    parser.add_argument('--model', required=True, help='Path to policy model (.npz for BC, .zip for PPO, .pt for MAPPO).')
     parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], default='auto', help='Policy backend.')
+    parser.add_argument('--rl-control-mode', choices=['auto', 'pure'], default='pure', help='Deprecated compatibility flag. Only pure final-command policies are supported.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
     parser.add_argument('--device', default='cpu', help='Torch device for PPO inference.')
-    parser.add_argument('--publish-rate', type=float, default=10.0, help='Residual action publish rate in Hz.')
+    parser.add_argument('--publish-rate', type=float, default=10.0, help='Policy publish rate in Hz.')
     parser.add_argument('--max-neighbors', type=int, default=3, help='Maximum neighbors encoded into the observation vector.')
     parser.add_argument('--disable-controller-param', action='store_true', help='Do not auto-enable rl_policy_enabled on velocity_controller_node.')
     return parser.parse_args(argv)
 
 
-class ResidualPolicyInferenceNode(Node):
-    def __init__(self, *, namespace: str, model_path: str, policy_kind: str, device: str, publish_rate: float, max_neighbors: int, enable_controller_param: bool):
+class PolicyInferenceNode(Node):
+    def __init__(self, *, namespace: str, model_path: str, policy_kind: str, rl_control_mode: str, device: str, publish_rate: float, max_neighbors: int, enable_controller_param: bool):
         resolved_namespace = namespace if namespace.startswith('/') else f'/{namespace}'
-        super().__init__('residual_policy_node', namespace=resolved_namespace)
+        super().__init__('policy_inference_node', namespace=resolved_namespace)
         self._namespace = resolved_namespace
         self._usv_id = resolved_namespace.strip('/')
         self._policy = _load_runtime_policy(model_path, policy_kind, device)
         self._max_neighbors = max(1, max_neighbors)
         self._action_bounds = ActionBounds()
+        if hasattr(self._policy, 'action_bounds'):
+            self._action_bounds = getattr(self._policy, 'action_bounds')
+        resolved_control_mode = 'pure'
+        if int(getattr(self._policy, 'action_dim', 2)) != 2:
+            raise RuntimeError('Pure RL online inference requires a policy with 2D action output.')
+        self._rl_control_mode = resolved_control_mode
         self._enable_controller_param = enable_controller_param
         self._controller_node_name = f'{resolved_namespace}/velocity_controller_node'
         self._parameter_client = AsyncParameterClient(self, self._controller_node_name)
@@ -423,8 +440,6 @@ class ResidualPolicyInferenceNode(Node):
             missing_inputs.append('feedback')
         elif self._active_goal_id is not None and int(self._feedback_msg.goal_id) != self._active_goal_id:
             missing_inputs.append(f'feedback_for_goal({int(self._feedback_msg.goal_id)}!={self._active_goal_id})')
-        if self._raw_cmd_msg is None:
-            missing_inputs.append('raw_cmd')
         if self._final_cmd_msg is None:
             missing_inputs.append('final_cmd')
 
@@ -432,7 +447,6 @@ class ResidualPolicyInferenceNode(Node):
             tuple(missing_inputs),
             len(self._neighbor_states),
             self._active_goal_id,
-            self._raw_cmd_msg is not None,
             self._final_cmd_msg is not None,
         )
 
@@ -453,7 +467,6 @@ class ResidualPolicyInferenceNode(Node):
             f'after {since_start:.2f}s: missing={missing_inputs or ["none"]}, '
             f'neighbors={len(self._neighbor_states)}, '
             f'active_goal_id={self._active_goal_id}, '
-            f'raw_cmd={self._raw_cmd_msg is not None}, '
             f'final_cmd={self._final_cmd_msg is not None}{repeat_suffix}.'
         )
         self._last_waiting_log = now
@@ -473,7 +486,7 @@ class ResidualPolicyInferenceNode(Node):
 
         future = self._parameter_client.set_parameters([
             Parameter('rl_policy_enabled', value=True),
-            Parameter('rl_policy_use_residual', value=True),
+            Parameter('rl_policy_fallback_to_raw', value=False),
             Parameter('rl_policy_allow_reverse', value=False),
             Parameter('apf_orca_enabled', value=False),
         ])
@@ -507,7 +520,6 @@ class ResidualPolicyInferenceNode(Node):
             self._pose_msg is None
             or self._velocity_msg is None
             or self._feedback_msg is None
-            or self._raw_cmd_msg is None
             or self._final_cmd_msg is None
             or self._active_goal_id is None
             or int(self._feedback_msg.goal_id) != self._active_goal_id
@@ -521,8 +533,8 @@ class ResidualPolicyInferenceNode(Node):
         own_vy = float(self._velocity_msg.twist.linear.y)
         speed = math.hypot(own_vx, own_vy)
 
-        raw_linear_x = float(self._raw_cmd_msg.twist.linear.x) if self._raw_cmd_msg is not None else 0.0
-        raw_angular_z = float(self._raw_cmd_msg.twist.angular.z) if self._raw_cmd_msg is not None else 0.0
+        raw_linear_x = 0.0
+        raw_angular_z = 0.0
         final_linear_x = float(self._final_cmd_msg.velocity.x) if self._final_cmd_msg is not None else 0.0
         final_angular_z = float(self._final_cmd_msg.yaw_rate) if self._final_cmd_msg is not None else 0.0
 
@@ -564,129 +576,6 @@ class ResidualPolicyInferenceNode(Node):
             neighbors=neighbors,
         )
 
-    def _apply_head_on_guard(self, observation: UsvObservation, *, linear_x: float, angular_z: float) -> Tuple[float, float]:
-        now = time.monotonic()
-        dt = min(max(now - self._head_on_guard_last_update, 1e-3), 0.3)
-        self._head_on_guard_last_update = now
-
-        own_speed = max(
-            0.0,
-            float(observation.speed),
-            float(observation.final_linear_x),
-            float(observation.raw_linear_x),
-        )
-        guidance_distance = 6.4
-        target_offset = 1.45
-        best_neighbor = None
-        best_score = -1.0
-
-        for neighbor in observation.neighbors:
-            if neighbor.distance <= 1e-3 or neighbor.distance > guidance_distance:
-                continue
-            body_x = float(neighbor.rel_x)
-            body_y = float(neighbor.rel_y)
-            body_vx = float(neighbor.rel_vx)
-            body_vy = float(neighbor.rel_vy)
-            if body_x <= -0.1:
-                continue
-
-            closing_speed = -((body_x * body_vx) + (body_y * body_vy)) / max(neighbor.distance, 1e-3)
-            if closing_speed <= 0.02:
-                continue
-
-            if abs(body_y) > max(1.6, 0.34 * neighbor.distance):
-                continue
-
-            neighbor_forward_speed = own_speed + body_vx
-            if neighbor_forward_speed >= 0.05:
-                continue
-
-            proximity = max(0.0, min(1.0, (guidance_distance - neighbor.distance) / guidance_distance))
-            centerline_exposure = max(0.0, 1.0 - min(1.0, abs(body_y) / max(0.8, target_offset)))
-            score = 0.65 * proximity + 0.35 * centerline_exposure
-            if score > best_score:
-                best_score = score
-                best_neighbor = neighbor
-
-        raw_linear_x = max(0.0, float(observation.raw_linear_x))
-        raw_angular_z = float(observation.raw_angular_z)
-        distance = None
-        closing_speed = 0.0
-
-        if best_neighbor is not None:
-            distance = float(best_neighbor.distance)
-            body_y = float(best_neighbor.rel_y)
-            body_vx = float(best_neighbor.rel_vx)
-            body_vy = float(best_neighbor.rel_vy)
-            body_x = float(best_neighbor.rel_x)
-            closing_speed = -((body_x * body_vx) + (body_y * body_vy)) / max(distance, 1e-3)
-            closing_weight = float(np.clip((closing_speed + 0.18) / 0.95, 0.0, 1.0))
-            conflict_distance = 4.0
-            commit_progress = float(np.clip((guidance_distance - distance) / max(guidance_distance - conflict_distance, 1e-3), 0.0, 1.0))
-            close_quarters = float(np.clip((conflict_distance - distance) / max(conflict_distance, 1e-3), 0.0, 1.0))
-            corridor_deficit = float(np.clip((target_offset + body_y) / target_offset, 0.0, 1.0))
-
-            raw_starboard_rate = max(0.0, -raw_angular_z)
-            sustain_floor = 0.9 * raw_starboard_rate if raw_starboard_rate > 0.03 else 0.0
-            proactive_turn = 0.22 + 0.18 * commit_progress + 0.12 * closing_weight + 0.14 * corridor_deficit
-            emergency_turn = 0.0
-            if distance <= conflict_distance:
-                emergency_turn = 0.10 + 0.12 * close_quarters + 0.10 * corridor_deficit
-
-            desired_turn_floor = float(np.clip(max(sustain_floor, proactive_turn, emergency_turn), 0.18, 0.58))
-            slowdown_ratio = 0.80 - 0.12 * commit_progress - 0.08 * closing_weight - 0.06 * corridor_deficit - 0.06 * close_quarters
-            desired_linear_cap = float(np.clip(raw_linear_x * slowdown_ratio, 0.18, max(0.18, raw_linear_x)))
-
-            if not self._head_on_guard_active:
-                self._head_on_guard_active = True
-                self._head_on_guard_linear_cap = desired_linear_cap
-                self._head_on_guard_turn_floor = desired_turn_floor
-            else:
-                if desired_linear_cap < self._head_on_guard_linear_cap:
-                    self._head_on_guard_linear_cap = max(desired_linear_cap, self._head_on_guard_linear_cap - 0.45 * dt)
-                else:
-                    self._head_on_guard_linear_cap = min(desired_linear_cap, self._head_on_guard_linear_cap + 0.10 * dt)
-
-                if desired_turn_floor > self._head_on_guard_turn_floor:
-                    self._head_on_guard_turn_floor = min(desired_turn_floor, self._head_on_guard_turn_floor + 1.8 * dt)
-                else:
-                    self._head_on_guard_turn_floor = max(desired_turn_floor, self._head_on_guard_turn_floor - 0.45 * dt)
-
-            self._head_on_guard_hold_until = now + 1.2
-
-        elif self._head_on_guard_active:
-            if now >= self._head_on_guard_hold_until:
-                self._head_on_guard_linear_cap = min(raw_linear_x, self._head_on_guard_linear_cap + 0.12 * dt)
-                self._head_on_guard_turn_floor = max(0.0, self._head_on_guard_turn_floor - 0.40 * dt)
-                if self._head_on_guard_turn_floor <= 1e-3 and self._head_on_guard_linear_cap >= raw_linear_x - 1e-3:
-                    self._reset_head_on_guard_state()
-                    return linear_x, angular_z
-            distance = float(observation.min_neighbor_distance()) if observation.neighbors else None
-        else:
-            return linear_x, angular_z
-
-        desired_final_linear_x = min(raw_linear_x, max(0.18, self._head_on_guard_linear_cap))
-        desired_final_angular_z = min(raw_angular_z, -self._head_on_guard_turn_floor)
-
-        guarded_linear_x = desired_final_linear_x - raw_linear_x
-        guarded_angular_z = desired_final_angular_z - raw_angular_z
-
-        if (
-            not self._head_on_guard_logged
-            and (guarded_linear_x != linear_x or guarded_angular_z != angular_z)
-        ):
-            self.get_logger().info(
-                'Applying head-on residual guard: '
-                f'distance={0.0 if distance is None else distance:.2f}, closing_speed={closing_speed:.2f}, '
-                f'raw=({observation.raw_linear_x:.2f}, {observation.raw_angular_z:.2f}), '
-                f'policy=({linear_x:.2f}, {angular_z:.2f}), '
-                f'guarded=({guarded_linear_x:.2f}, {guarded_angular_z:.2f}), '
-                f'target_final=({desired_final_linear_x:.2f}, {desired_final_angular_z:.2f}).'
-            )
-            self._head_on_guard_logged = True
-
-        return guarded_linear_x, guarded_angular_z
-
     def _publish_action(self):
         self._maybe_enable_controller_param()
         observation = self._build_observation()
@@ -695,61 +584,29 @@ class ResidualPolicyInferenceNode(Node):
             return
 
         if not self._ready_logged:
-            self.get_logger().info('Observation stream ready; residual policy inference is active.')
+            self.get_logger().info('Observation stream ready; pure RL policy inference is active.')
             self._ready_logged = True
 
         observation_vector = observation.to_vector(self._max_neighbors)
 
-        if not observation.neighbors:
-            if not self._no_neighbor_passthrough_logged:
-                self.get_logger().info(
-                    'No tracked neighbors for the active goal; publishing zero residual and leaving raw navigation unchanged.'
-                )
-                self._no_neighbor_passthrough_logged = True
-
-            msg = TwistStamped()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = 'base_link'
-            msg.twist.linear.x = 0.0
-            msg.twist.angular.z = 0.0
-            self._action_pub.publish(msg)
-            return
-
         action = np.asarray(self._policy.predict(observation_vector), dtype=np.float32).reshape(-1)
-        if action.size == 1:
-            projected_action = project_residual_action(
-                action,
-                action_mode='angular_only',
-                linear_delta_limit=self._action_bounds.linear_delta,
-                angular_delta_limit=self._action_bounds.angular_delta,
-                raw_linear_x=observation.raw_linear_x,
-                forward_only=True,
-            )
-            linear_x = 0.0
-            angular_z = float(projected_action[0])
-        elif action.size == 2:
-            projected_action = project_residual_action(
-                action,
-                action_mode='full',
-                linear_delta_limit=self._action_bounds.linear_delta,
-                angular_delta_limit=self._action_bounds.angular_delta,
-                raw_linear_x=observation.raw_linear_x,
-                forward_only=True,
-            )
-            linear_x = float(projected_action[0])
-            angular_z = float(projected_action[1])
-        else:
-            raise RuntimeError(f'Unsupported policy action dimension: {action.size}')
-
-        linear_x, angular_z = self._apply_head_on_guard(
-            observation,
-            linear_x=linear_x,
-            angular_z=angular_z,
+        if action.size != 2:
+            raise RuntimeError(f'Pure RL mode requires 2D action output, got {action.size}.')
+        projected_action = project_rl_policy_action(
+            action,
+            rl_control_mode='pure',
+            action_mode='full',
+            linear_delta_limit=self._action_bounds.linear_delta,
+            angular_delta_limit=self._action_bounds.angular_delta,
+            raw_linear_x=observation.raw_linear_x,
+            forward_only=True,
         )
+        linear_x = float(projected_action[0])
+        angular_z = float(projected_action[1])
 
         if not self._first_action_logged:
             self.get_logger().info(
-                f'Publishing first residual action: linear_x={linear_x:.3f}, angular_z={angular_z:.3f}'
+                f'Publishing first pure RL action: linear_x={linear_x:.3f}, angular_z={angular_z:.3f}'
             )
             self._first_action_logged = True
 
@@ -767,10 +624,11 @@ def main(argv=None):
     rclpy.init(args=argv)
     node = None
     try:
-        node = ResidualPolicyInferenceNode(
+        node = PolicyInferenceNode(
             namespace=args.namespace,
             model_path=args.model,
             policy_kind=args.policy,
+            rl_control_mode=args.rl_control_mode,
             device=args.device,
             publish_rate=args.publish_rate,
             max_neighbors=args.max_neighbors,

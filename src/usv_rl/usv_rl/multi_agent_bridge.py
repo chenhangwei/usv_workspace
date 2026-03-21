@@ -36,6 +36,7 @@ class MultiAgentTrainingBridge(Node):
         self._neighbor_publishers = {}
         self._rl_action_publishers = {}
         self._goal_id_counter = {namespace: 1000 + index * 1000 for index, namespace in enumerate(self._agent_namespaces)}
+        self._rl_backend_active = False
 
         self._active_scenario: Optional[FleetScenario] = None
         self._scenario_start_time: float = 0.0
@@ -108,6 +109,7 @@ class MultiAgentTrainingBridge(Node):
         return False
 
     def set_rl_backend_enabled(self, enabled: bool, timeout: float = 10.0) -> bool:
+        self._rl_backend_active = bool(enabled)
         success = True
         for namespace, client in self._parameter_clients.items():
             if not client.wait_for_services(timeout_sec=timeout):
@@ -115,7 +117,7 @@ class MultiAgentTrainingBridge(Node):
                 continue
             future = client.set_parameters([
                 Parameter('rl_policy_enabled', value=enabled),
-                Parameter('rl_policy_use_residual', value=True),
+                Parameter('rl_policy_fallback_to_raw', value=False),
             ])
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline and not future.done():
@@ -264,8 +266,8 @@ class MultiAgentTrainingBridge(Node):
 
             raw_msg = self._raw_cmd_msgs[namespace]
             final_msg = self._final_cmd_msgs[namespace]
-            raw_linear_x = float(raw_msg.twist.linear.x) if raw_msg is not None else 0.0
-            raw_angular_z = float(raw_msg.twist.angular.z) if raw_msg is not None else 0.0
+            raw_linear_x = 0.0
+            raw_angular_z = 0.0
             final_linear_x = float(final_msg.velocity.x) if final_msg is not None else 0.0
             final_angular_z = float(final_msg.yaw_rate) if final_msg is not None else 0.0
 

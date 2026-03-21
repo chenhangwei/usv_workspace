@@ -100,7 +100,7 @@ python3 src/usv_rl/usv_rl/preflight_check.py \
 cd /mnt/workspace/usv_workspace
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
-ros2 run usv_rl evaluate_mappo_residual \
+ros2 run usv_rl evaluate_mappo_policy \
   --policy zero \
   --num-agents 5 \
   --episodes 1 \

@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, TimerAction
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -10,6 +10,8 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     model_path = LaunchConfiguration('model')
     policy_kind = LaunchConfiguration('policy')
+    rl_control_mode = LaunchConfiguration('rl_control_mode')
+    disable_controller_param = LaunchConfiguration('disable_controller_param')
     device = LaunchConfiguration('device')
     publish_rate = LaunchConfiguration('publish_rate')
     max_neighbors = LaunchConfiguration('max_neighbors')
@@ -64,10 +66,19 @@ def generate_launch_description():
             sitl_param_file,
             {
                 'rl_policy_enabled': True,
-                'rl_policy_use_residual': True,
             },
         ],
     )
+
+    common_policy_arguments = [
+        '--namespace', namespace,
+        '--model', model_path,
+        '--policy', policy_kind,
+        '--rl-control-mode', rl_control_mode,
+        '--device', device,
+        '--publish-rate', publish_rate,
+        '--max-neighbors', max_neighbors,
+    ]
 
     policy_node = Node(
         package='usv_rl',
@@ -75,15 +86,18 @@ def generate_launch_description():
         name='policy_inference_node',
         namespace=namespace,
         output='screen',
-        arguments=[
-            '--namespace', namespace,
-            '--model', model_path,
-            '--policy', policy_kind,
-            '--device', device,
-            '--publish-rate', publish_rate,
-            '--max-neighbors', max_neighbors,
-            '--disable-controller-param',
-        ],
+        arguments=common_policy_arguments + ['--disable-controller-param'],
+        condition=IfCondition(disable_controller_param),
+    )
+
+    policy_node_with_controller_param = Node(
+        package='usv_rl',
+        executable='policy_inference_node',
+        name='policy_inference_node',
+        namespace=namespace,
+        output='screen',
+        arguments=common_policy_arguments,
+        condition=UnlessCondition(disable_controller_param),
     )
 
     synthetic_neighbors_node = Node(
@@ -117,15 +131,17 @@ def generate_launch_description():
         ],
     )
 
-    delayed_policy = TimerAction(period=1.5, actions=[policy_node])
+    delayed_policy = TimerAction(period=1.5, actions=[policy_node, policy_node_with_controller_param])
     delayed_goal = TimerAction(period=goal_delay, actions=[goal_publisher_node])
 
     return LaunchDescription([
         DeclareLaunchArgument('namespace', default_value='usv_03', description='USV namespace for validation.'),
-        DeclareLaunchArgument('model', description='Residual policy model path (.npz, .zip, or .pt).'),
-        DeclareLaunchArgument('policy', default_value='bc', description='Residual policy backend: auto, bc, ppo, mappo, zero.'),
+        DeclareLaunchArgument('model', description='Policy model path (.npz, .zip, or .pt).'),
+        DeclareLaunchArgument('policy', default_value='bc', description='Policy backend: auto, bc, ppo, mappo, zero.'),
+        DeclareLaunchArgument('rl_control_mode', default_value='pure', description='Deprecated compatibility flag. Pure final-command control is used.'),
+        DeclareLaunchArgument('disable_controller_param', default_value='false', description='Avoid toggling controller params from the policy node if needed.'),
         DeclareLaunchArgument('device', default_value='cpu', description='Inference device for PPO or MAPPO policies.'),
-        DeclareLaunchArgument('publish_rate', default_value='10.0', description='Residual policy publish rate in Hz.'),
+        DeclareLaunchArgument('publish_rate', default_value='10.0', description='Policy publish rate in Hz.'),
         DeclareLaunchArgument('max_neighbors', default_value='4', description='Max neighbors encoded into the observation.'),
         DeclareLaunchArgument('encounter_enabled', default_value='false', description='Whether to publish synthetic neighbors for an encounter scenario.'),
         DeclareLaunchArgument('encounter_scenario', default_value='head_on', description='Synthetic encounter scenario: head_on, crossing_starboard, overtaking.'),

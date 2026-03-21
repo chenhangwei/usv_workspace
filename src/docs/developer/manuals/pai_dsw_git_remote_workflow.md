@@ -311,7 +311,7 @@ Instead of writing into `./src/tmp_rl`, write into `/mnt/data/checkpoints` and `
 ```bash
 cd /mnt/workspace/usv_workspace
 source install/setup.bash
-/bin/python3 -m usv_rl.train_mappo_residual \
+/bin/python3 -m usv_rl.train_mappo_policy \
 	--output /mnt/data/checkpoints/mappo_balanced_repair_selective_t1280_ckpt.pt \
 	--checkpoint-dir /mnt/data/checkpoints/mappo_balanced_repair_selective_t1280_ckpts \
 	--checkpoint-ranking-json /mnt/data/evals/mappo_balanced_repair_selective_t1280_ranking.json \
@@ -323,7 +323,7 @@ source install/setup.bash
 ```bash
 cd /mnt/workspace/usv_workspace
 source install/setup.bash
-/bin/python3 -m usv_rl.evaluate_mappo_residual \
+/bin/python3 -m usv_rl.evaluate_mappo_policy \
 	--model /mnt/data/checkpoints/mappo_balanced_repair_selective_t1280_ckpts/mappo_balanced_repair_selective_t1280_ckpt_step_0000320.pt \
 	--episodes 15 \
 	--steps-per-episode 180 \

@@ -1,3 +1,4 @@
+import math
 import threading
 import time
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 
-from .action_projection import project_residual_action
+from .action_projection import project_policy_action as project_rl_policy_action
 from .config import EnvConfig
 from .ros_bridge import TrainingBridge
 from .scenarios import ScenarioFactory
@@ -32,6 +33,7 @@ class UsvRlEnv(gym.Env):
             rclpy.init()
 
         self.config = config or EnvConfig()
+        self._validate_action_config()
         self._episode_index = 0
         self._rng = np.random.default_rng()
         self._executor = MultiThreadedExecutor()
@@ -49,23 +51,7 @@ class UsvRlEnv(gym.Env):
         self._latest_observation: Optional[UsvObservation] = None
 
         if spaces is not None:
-            policy_action_dim = self._policy_action_dim()
-            if policy_action_dim == 1:
-                low = np.asarray([
-                    -self.config.action_bounds.angular_delta,
-                ], dtype=np.float32)
-                high = np.asarray([
-                    self.config.action_bounds.angular_delta,
-                ], dtype=np.float32)
-            else:
-                low = np.asarray([
-                    -self.config.action_bounds.linear_delta,
-                    -self.config.action_bounds.angular_delta,
-                ], dtype=np.float32)
-                high = np.asarray([
-                    self.config.action_bounds.linear_delta,
-                    self.config.action_bounds.angular_delta,
-                ], dtype=np.float32)
+            low, high = self._policy_action_bounds()
             self.action_space = spaces.Box(
                 low=low,
                 high=high,
@@ -78,6 +64,27 @@ class UsvRlEnv(gym.Env):
             )
 
         self._ensure_runtime()
+
+    def _validate_action_config(self):
+        if self.config.action_mode != 'full':
+            raise ValueError('Pure RL control requires action_mode="full".')
+
+    def _pure_linear_speed_limit(self) -> float:
+        return max(float(self.config.action_bounds.linear_delta), float(self.config.cruise_speed))
+
+    def _pure_angular_speed_limit(self) -> float:
+        return max(float(self.config.action_bounds.angular_delta), float(self.config.max_angular_velocity))
+
+    def _policy_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        low = np.asarray([
+            0.0,
+            -self._pure_angular_speed_limit(),
+        ], dtype=np.float32)
+        high = np.asarray([
+            self._pure_linear_speed_limit(),
+            self._pure_angular_speed_limit(),
+        ], dtype=np.float32)
+        return low, high
 
     def _compute_conflict_risk(self, observation: UsvObservation) -> float:
         max_risk = 0.0
@@ -152,10 +159,7 @@ class UsvRlEnv(gym.Env):
         desired_starboard_turn = 0.10 + 0.16 * proximity
         actual_starboard_turn = max(0.0, -observation.final_angular_z)
         turn_progress = max(0.0, min(1.0, actual_starboard_turn / desired_starboard_turn))
-        desired_forward_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
-        )
+        desired_forward_speed = self._target_forward_speed(observation, conflict_level=proximity)
         current_forward_speed = max(0.0, observation.final_linear_x)
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
         speed_drop = max(0.0, previous_forward_speed - current_forward_speed)
@@ -180,10 +184,7 @@ class UsvRlEnv(gym.Env):
         actual_starboard_turn = max(0.0, -observation.final_angular_z)
         actual_port_turn = max(0.0, observation.final_angular_z)
         current_forward_speed = max(0.0, observation.final_linear_x)
-        desired_forward_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
-        )
+        desired_forward_speed = self._target_forward_speed(observation, conflict_level=0.45)
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
 
         best_crossing_reward = 0.0
@@ -251,6 +252,50 @@ class UsvRlEnv(gym.Env):
             return 1
         return 2
 
+    def _target_forward_speed(
+        self,
+        observation: UsvObservation,
+        *,
+        conflict_level: float,
+        goal_proximity: float = 0.0,
+    ) -> float:
+        cruise_speed = max(0.18, self._pure_linear_speed_limit())
+        target_speed = cruise_speed * (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0)))
+        heading_gate = 0.25 + 0.75 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+        target_speed *= heading_gate
+        if goal_proximity > 0.0:
+            target_speed *= max(
+                0.25,
+                1.0 - (float(np.clip(self.config.goal_proximity_speed_relief, 0.0, 1.0)) * goal_proximity),
+            )
+
+        minimum_speed = max(0.08, min(self.config.reward.desired_conflict_speed, 0.18))
+        return float(np.clip(target_speed, minimum_speed, cruise_speed))
+
+    def _pure_goal_tracking_reward(
+        self,
+        observation: UsvObservation,
+        *,
+        conflict_level: float,
+        goal_proximity: float,
+    ) -> float:
+        target_speed = self._target_forward_speed(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
+        )
+        current_forward_speed = max(0.0, observation.final_linear_x)
+        aligned = max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+        open_water = max(0.0, 1.0 - float(np.clip(conflict_level, 0.0, 1.0)))
+        speed_ratio = min(1.0, current_forward_speed / max(target_speed, 1e-3))
+        speed_deficit_ratio = max(0.0, (target_speed - current_forward_speed) / max(target_speed, 1e-3))
+        excess_turn = max(0.0, abs(observation.final_angular_z) - 0.15)
+
+        reward = self.config.reward.pure_cruise_reward_weight * open_water * aligned * speed_ratio
+        reward -= self.config.reward.pure_idle_penalty_weight * open_water * aligned * speed_deficit_ratio
+        reward -= self.config.reward.pure_turn_penalty_weight * open_water * aligned * excess_turn
+        return reward
+
     def zero_policy_action(self) -> np.ndarray:
         return np.zeros(self._policy_action_dim(), dtype=np.float32)
 
@@ -259,11 +304,12 @@ class UsvRlEnv(gym.Env):
         if self._latest_observation is not None:
             raw_linear_x = self._latest_observation.raw_linear_x
 
-        return project_residual_action(
+        return project_rl_policy_action(
             action,
+            rl_control_mode='pure',
             action_mode=self.config.action_mode,
-            linear_delta_limit=self.config.action_bounds.linear_delta,
-            angular_delta_limit=self.config.action_bounds.angular_delta,
+            linear_delta_limit=self._pure_linear_speed_limit(),
+            angular_delta_limit=self._pure_angular_speed_limit(),
             raw_linear_x=raw_linear_x,
             forward_only=True,
         )
@@ -416,9 +462,10 @@ class UsvRlEnv(gym.Env):
 
         conflict_level = min(conflict_risk, 1.0) * conflict_relief_scale
         current_forward_speed = max(0.0, observation.final_linear_x)
-        desired_conflict_speed = min(
-            max(self.config.reward.desired_conflict_speed, 0.0),
-            max(observation.raw_linear_x, self.config.reward.desired_conflict_speed),
+        desired_conflict_speed = self._target_forward_speed(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
         )
         speed_deficit = max(0.0, desired_conflict_speed - current_forward_speed)
         speed_drop = max(0.0, self._previous_forward_speed - current_forward_speed)
@@ -430,6 +477,11 @@ class UsvRlEnv(gym.Env):
                 self._previous_forward_speed,
             )
             + self._compute_crossing_overtaking_guidance_reward(observation)
+        )
+        progress += self._pure_goal_tracking_reward(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
         )
 
         heading_scale = max(
@@ -500,10 +552,7 @@ class UsvRlEnv(gym.Env):
         return observation.to_vector(self.config.max_neighbors), reward.total, terminated, truncated, info
 
     def get_teacher_action(self) -> np.ndarray:
-        teacher = self._bridge.get_teacher_residual_action()
-        if teacher is None:
-            return self.zero_policy_action()
-        return self.project_policy_action(np.asarray(teacher, dtype=np.float32))
+        return self.zero_policy_action()
 
     def close(self):
         bridge = self._bridge
@@ -512,31 +561,65 @@ class UsvRlEnv(gym.Env):
 
         if bridge is not None:
             try:
+                bridge.clear_scenario()
+            except Exception:
+                pass
+            try:
+                bridge.prepare_for_shutdown()
+            except Exception:
+                pass
+        if sim_node is not None:
+            try:
+                sim_node.prepare_for_shutdown()
+            except Exception:
+                pass
+        if controller is not None:
+            try:
+                controller.prepare_for_shutdown()
+            except Exception:
+                pass
+        if bridge is not None:
+            try:
                 bridge.set_rl_backend_enabled(False)
             except Exception:
                 pass
-            bridge.clear_scenario()
-            bridge.prepare_for_shutdown()
-        if sim_node is not None:
-            sim_node.prepare_for_shutdown()
-        if controller is not None:
-            controller.prepare_for_shutdown()
         if bridge is not None:
-            self._executor.remove_node(bridge)
+            try:
+                self._executor.remove_node(bridge)
+            except Exception:
+                pass
         if sim_node is not None:
-            self._executor.remove_node(sim_node)
+            try:
+                self._executor.remove_node(sim_node)
+            except Exception:
+                pass
         if controller is not None:
-            self._executor.remove_node(controller)
+            try:
+                self._executor.remove_node(controller)
+            except Exception:
+                pass
         if self._executor is not None:
-            self._executor.shutdown()
+            try:
+                self._executor.shutdown()
+            except Exception:
+                pass
         if self._spin_thread is not None and self._spin_thread.is_alive():
             self._spin_thread.join(timeout=2.0)
         if bridge is not None:
-            bridge.destroy_node()
+            try:
+                bridge.destroy_node()
+            except Exception:
+                pass
             self._bridge = None
         if sim_node is not None:
-            sim_node.destroy_node()
+            try:
+                sim_node.destroy_node()
+            except Exception:
+                pass
             self._sim_node = None
         if controller is not None:
-            controller.destroy_node()
+            try:
+                controller.destroy_node()
+            except Exception:
+                pass
             self._controller = None

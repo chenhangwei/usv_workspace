@@ -10,7 +10,7 @@ from .scenarios import ScenarioFactory
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Collect a scripted residual teacher dataset from the lightweight USV RL environment.')
+    parser = argparse.ArgumentParser(description='Collect a scripted teacher dataset from the lightweight USV RL environment.')
     parser.add_argument('--output', required=True, help='Output .npz file path.')
     parser.add_argument('--episodes', type=int, default=18, help='Number of episodes to collect.')
     parser.add_argument('--steps-per-episode', type=int, default=240, help='Max control steps per episode.')
@@ -23,7 +23,7 @@ def parse_args():
         help='Scripted teacher heuristic profile.',
     )
     parser.add_argument('--external-stack', action='store_true', help='Use an already-running SITL stack.')
-    parser.add_argument('--action-mode', choices=['full', 'angular_only'], default='angular_only', help='Residual action representation used for dataset collection.')
+    parser.add_argument('--action-mode', choices=['full'], default='full', help='Action representation used for dataset collection.')
     parser.add_argument('--max-neighbors', type=int, default=4, help='Number of neighbors encoded for retraining. Use 4 for 5-USV standard scenarios.')
     return parser.parse_args()
 
@@ -95,7 +95,7 @@ def _iter_neighbor_features(observation: np.ndarray):
         }
 
 
-def _scripted_residual_action_cluster_colregs_v1(observation: np.ndarray) -> np.ndarray:
+def _scripted_policy_action_cluster_colregs_v1(observation: np.ndarray) -> np.ndarray:
     action = np.zeros(2, dtype=np.float32)
     if observation.shape[0] < 16:
         return action
@@ -255,7 +255,7 @@ def _scripted_residual_action_cluster_colregs_v1(observation: np.ndarray) -> np.
     return action
 
 
-def _scripted_residual_action_cluster_colregs_v2(observation: np.ndarray) -> np.ndarray:
+def _scripted_policy_action_cluster_colregs_v2(observation: np.ndarray) -> np.ndarray:
     action = np.zeros(2, dtype=np.float32)
     if observation.shape[0] < 16:
         return action
@@ -419,7 +419,7 @@ def _scripted_residual_action_cluster_colregs_v2(observation: np.ndarray) -> np.
     return action
 
 
-def _scripted_residual_action_safety_first_v2(observation: np.ndarray) -> np.ndarray:
+def _scripted_policy_action_safety_first_v2(observation: np.ndarray) -> np.ndarray:
     action = np.zeros(2, dtype=np.float32)
     if observation.shape[0] < 16:
         return action
@@ -461,7 +461,7 @@ def _scripted_residual_action_safety_first_v2(observation: np.ndarray) -> np.nda
     return action
 
 
-def _scripted_residual_action_headon_pass_v1(observation: np.ndarray) -> np.ndarray:
+def _scripted_policy_action_headon_pass_v1(observation: np.ndarray) -> np.ndarray:
     action = np.zeros(2, dtype=np.float32)
     if observation.shape[0] < 16:
         return action
@@ -504,7 +504,7 @@ def _scripted_residual_action_headon_pass_v1(observation: np.ndarray) -> np.ndar
     return action
 
 
-def _scripted_residual_action_safety_anchor_v3(observation: np.ndarray) -> np.ndarray:
+def _scripted_policy_action_safety_anchor_v3(observation: np.ndarray) -> np.ndarray:
     action = np.zeros(2, dtype=np.float32)
     if observation.shape[0] < 16:
         return action
@@ -555,16 +555,16 @@ def _scripted_residual_action_safety_anchor_v3(observation: np.ndarray) -> np.nd
     return action
 
 
-def _scripted_residual_action(observation: np.ndarray, profile: str) -> np.ndarray:
+def _scripted_policy_action(observation: np.ndarray, profile: str) -> np.ndarray:
     if profile == 'cluster_colregs_v2':
-        return _scripted_residual_action_cluster_colregs_v2(observation)
+        return _scripted_policy_action_cluster_colregs_v2(observation)
     if profile == 'cluster_colregs_v1':
-        return _scripted_residual_action_cluster_colregs_v1(observation)
+        return _scripted_policy_action_cluster_colregs_v1(observation)
     if profile == 'safety_anchor_v3':
-        return _scripted_residual_action_safety_anchor_v3(observation)
+        return _scripted_policy_action_safety_anchor_v3(observation)
     if profile == 'headon_pass_v1':
-        return _scripted_residual_action_headon_pass_v1(observation)
-    return _scripted_residual_action_safety_first_v2(observation)
+        return _scripted_policy_action_headon_pass_v1(observation)
+    return _scripted_policy_action_safety_first_v2(observation)
 
 
 def main():
@@ -592,7 +592,7 @@ def main():
             observation, info = env.reset(options={'scenario_kind': scenario_name})
             for _ in range(args.steps_per_episode):
                 teacher_action = env.project_policy_action(
-                    _scripted_residual_action(observation, args.teacher_profile)
+                    _scripted_policy_action(observation, args.teacher_profile)
                 )
                 next_observation, reward, terminated, truncated, _ = env.step(teacher_action)
                 observations.append(observation)

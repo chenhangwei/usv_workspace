@@ -15,8 +15,8 @@ from .scenarios import ScenarioFactory
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description='Benchmark a residual policy in the online simple validation loop across synthetic encounter scenarios.')
-    parser.add_argument('--model', required=True, help='Residual policy model path (.npz, .zip, or .pt).')
+    parser = argparse.ArgumentParser(description='Benchmark a policy in the online simple validation loop across synthetic encounter scenarios.')
+    parser.add_argument('--model', required=True, help='Policy model path (.npz, .zip, or .pt).')
     parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Encounter scenario to benchmark. Repeatable.')
@@ -43,19 +43,22 @@ def _attempt_log_path(raw_log_output_path: Path | None, attempt: int) -> Path | 
 
 def _parse_launch_output(output: str) -> dict:
     first_action_match = re.search(
-        r'Publishing first residual action: linear_x=([-0-9.]+), angular_z=([-0-9.]+)',
+        r'Publishing first pure RL action: linear_x=([-0-9.]+), angular_z=([-0-9.]+)',
         output,
     )
-    runtime_distance_matches = re.findall(r'(?:🚀 导航中:.*?距离=|导航中 \[ID=.*?\]: 距离=)([-0-9.]+)m', output)
+    runtime_distance_matches = re.findall(
+        r'(?:🚀 (?:纯RL)?导航中:.*?距离=|导航中 \[ID=.*?\]: 距离=)([-0-9.]+)m',
+        output,
+    )
     distances = [float(value) for value in runtime_distance_matches]
     velocities = [float(value) for value in re.findall(r'vx=([-0-9.]+) m/s', output)]
-    observation_ready = 'Observation stream ready; residual policy inference is active.' in output
+    observation_ready = 'Observation stream ready; pure RL policy inference is active.' in output
     tracebacks = has_unexpected_traceback(output)
 
     summary = {
         'observation_ready': observation_ready,
         'error_detected': tracebacks,
-        'first_residual_action': None,
+        'first_policy_action': None,
         'distance_start': distances[0] if distances else None,
         'distance_end': distances[-1] if distances else None,
         'distance_delta': None,
@@ -66,7 +69,7 @@ def _parse_launch_output(output: str) -> dict:
     }
 
     if first_action_match:
-        summary['first_residual_action'] = {
+        summary['first_policy_action'] = {
             'linear_x': float(first_action_match.group(1)),
             'angular_z': float(first_action_match.group(2)),
         }
@@ -145,7 +148,7 @@ def should_retry_startup_flake(result: dict) -> bool:
         return False
     if result.get('observation_ready'):
         return False
-    if result.get('first_residual_action') is not None:
+    if result.get('first_policy_action') is not None:
         return False
     if result.get('trend') not in (None, 'unknown'):
         return False
@@ -159,7 +162,7 @@ def should_retry_startup_flake(result: dict) -> bool:
         log_health.get('exists', False)
         and log_health.get('scenario_started', False)
         and not log_health.get('observation_ready', False)
-        and not log_health.get('first_residual_action_logged', False)
+        and not log_health.get('first_policy_action_logged', False)
         and not log_health.get('unexpected_traceback', False)
     )
 

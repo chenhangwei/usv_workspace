@@ -7,11 +7,11 @@ import numpy as np
 from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
-from .policies import load_residual_policy
+from .policies import load_policy
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Evaluate a residual policy in the multi-USV environment.')
+    parser = argparse.ArgumentParser(description='Evaluate an RL policy in the multi-USV environment.')
     parser.add_argument('--policy', choices=['auto', 'mappo', 'bc', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--model', help='Policy model path (.pt for MAPPO, .npz for BC). Not required for zero policy.')
     parser.add_argument('--episodes', type=int, default=6, help='Evaluation episodes.')
@@ -19,7 +19,8 @@ def parse_args():
     parser.add_argument('--device', default='cpu', help='Torch device.')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name. Repeatable.')
     parser.add_argument('--num-agents', type=int, default=5, help='Controlled agent count for BC/zero evaluation.')
-    parser.add_argument('--action-mode', choices=['auto', 'full', 'angular_only'], default='auto', help='Residual action representation for BC/zero evaluation.')
+    parser.add_argument('--rl-control-mode', choices=['auto', 'pure'], default='pure', help='Pure final-command control mode used during evaluation.')
+    parser.add_argument('--action-mode', choices=['auto', 'full'], default='full', help='Action representation for BC/zero evaluation.')
     parser.add_argument('--max-neighbors', default='auto', help='Neighbor slots encoded during BC/zero evaluation. Use auto or an integer such as 4.')
     parser.add_argument('--max-agents', type=int, help='Maximum agents encoded in the global state for BC/zero evaluation.')
     parser.add_argument('--episode-timeout', type=float, help='Optional override for environment episode timeout.')
@@ -73,6 +74,18 @@ class MappoActorPolicy:
         return np.asarray(action, dtype=np.float32)
 
 
+def _require_supported_action_dim(action_dim: int | None, *, model_path: str | None):
+    if action_dim is None:
+        return
+    if int(action_dim) != 2:
+        source = model_path or 'the selected policy'
+        raise RuntimeError(
+            'Pure RL evaluation only supports 2D full-action policies. '
+            f'Received action_dim={int(action_dim)} from {source}. '
+            'Please evaluate a pure policy checkpoint trained with action_mode="full".'
+        )
+
+
 def _detect_policy_kind(policy_kind: str, model_path: str | None) -> str:
     if policy_kind != 'auto':
         return policy_kind
@@ -89,8 +102,7 @@ def _detect_policy_kind(policy_kind: str, model_path: str | None) -> str:
 def _resolve_action_mode(action_mode: str, policy) -> str:
     if action_mode != 'auto':
         return action_mode
-    if getattr(policy, 'action_dim', None) == 1:
-        return 'angular_only'
+    _require_supported_action_dim(getattr(policy, 'action_dim', None), model_path=None)
     return 'full'
 
 
@@ -140,6 +152,7 @@ def _load_policy_bundle(
     scenarios: tuple[str, ...] | None,
     episode_timeout: float | None,
     no_progress_timeout: float | None,
+    rl_control_mode: str,
     action_mode: str,
     max_neighbors: str | int,
     max_agents: int | None,
@@ -148,14 +161,22 @@ def _load_policy_bundle(
         if model_path is None:
             raise RuntimeError('MAPPO evaluation requires --model.')
         checkpoint, policy = _load_mappo_checkpoint(model_path, device)
+        _require_supported_action_dim(policy.action_dim, model_path=model_path)
         agent_namespaces = tuple(checkpoint['agent_namespaces'])
         resolved_scenarios = tuple(scenarios) if scenarios else tuple(checkpoint.get('scenarios', MultiAgentScenarioFactory.available()))
-        resolved_action_mode = str(checkpoint.get('action_mode', 'angular_only' if policy.action_dim == 1 else 'full'))
+        resolved_rl_control_mode = 'pure'
+        resolved_action_mode = str(checkpoint.get('action_mode', 'full'))
+        if resolved_action_mode != 'full':
+            raise RuntimeError(
+                'Pure RL evaluation only supports checkpoints exported with action_mode="full". '
+                f'Received action_mode="{resolved_action_mode}" from {model_path}.'
+            )
         resolved_max_neighbors = int(checkpoint.get('max_neighbors', max(1, int((policy.obs_dim - 10) // 6))))
         resolved_max_agents = int(checkpoint.get('max_agents', len(agent_namespaces)))
         env_kwargs = {
             'agent_namespaces': agent_namespaces,
             'enable_rl_backend': True,
+            'rl_control_mode': resolved_rl_control_mode,
             'action_mode': resolved_action_mode,
             'action_bounds': ActionBounds(**checkpoint.get('action_bounds', {'linear_delta': 0.7, 'angular_delta': 0.6})),
             'max_neighbors': resolved_max_neighbors,
@@ -175,6 +196,7 @@ def _load_policy_bundle(
             'goal_proximity_heading_relief': float(checkpoint.get('goal_proximity_heading_relief', 0.0)),
             'goal_proximity_smoothness_relief': float(checkpoint.get('goal_proximity_smoothness_relief', 0.0)),
             'goal_proximity_conflict_relief': float(checkpoint.get('goal_proximity_conflict_relief', 0.0)),
+            'goal_proximity_speed_relief': float(checkpoint.get('goal_proximity_speed_relief', 0.0)),
             'team_reward_weight': float(checkpoint.get('team_reward_weight', 0.30)),
             'team_progress_weight': float(checkpoint.get('team_progress_weight', 1.20)),
             'team_goal_proximity_weight': float(checkpoint.get('team_goal_proximity_weight', 0.0)),
@@ -190,12 +212,13 @@ def _load_policy_bundle(
     if policy_kind == 'bc':
         if model_path is None:
             raise RuntimeError('BC evaluation requires --model.')
-        policy = load_residual_policy(model_path)
+        policy = load_policy(model_path)
     elif policy_kind == 'zero':
-        policy = ZeroPolicy(action_dim=1 if action_mode == 'angular_only' else 2)
+        policy = ZeroPolicy(action_dim=2)
     else:
         raise RuntimeError(f'Unsupported policy type: {policy_kind}')
 
+    resolved_rl_control_mode = 'pure'
     resolved_action_mode = _resolve_action_mode(action_mode, policy)
     resolved_max_neighbors = _resolve_max_neighbors(max_neighbors, policy)
     required_agents = max((MultiAgentScenarioFactory.required_agent_count(name) for name in (scenarios or MultiAgentScenarioFactory.cluster_available())), default=2)
@@ -204,6 +227,7 @@ def _load_policy_bundle(
     env_kwargs = {
         'agent_namespaces': agent_namespaces,
         'enable_rl_backend': True,
+        'rl_control_mode': resolved_rl_control_mode,
         'action_mode': resolved_action_mode,
         'max_neighbors': resolved_max_neighbors,
         'max_agents': max(len(agent_namespaces), int(max_agents or len(agent_namespaces))),
@@ -268,6 +292,7 @@ def evaluate_policy(
     scenarios: tuple[str, ...] | None = None,
     num_agents: int = 5,
     action_mode: str = 'auto',
+    rl_control_mode: str = 'auto',
     max_neighbors: str | int = 'auto',
     max_agents: int | None = None,
     episode_timeout: float | None = None,
@@ -283,6 +308,7 @@ def evaluate_policy(
         scenarios=scenarios,
         episode_timeout=episode_timeout,
         no_progress_timeout=no_progress_timeout,
+        rl_control_mode=rl_control_mode,
         action_mode=action_mode,
         max_neighbors=max_neighbors,
         max_agents=max_agents,
@@ -420,6 +446,7 @@ def main():
         device=args.device,
         scenarios=tuple(args.scenarios) if args.scenarios else None,
         num_agents=args.num_agents,
+        rl_control_mode=args.rl_control_mode,
         action_mode=args.action_mode,
         max_neighbors=args.max_neighbors,
         max_agents=args.max_agents,

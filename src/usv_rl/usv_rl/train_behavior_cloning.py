@@ -5,7 +5,7 @@ import numpy as np
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Train a behavior cloning residual policy baseline.')
+    parser = argparse.ArgumentParser(description='Train a behavior cloning policy baseline.')
     parser.add_argument('--dataset', required=True, help='Collected .npz dataset path.')
     parser.add_argument('--output', required=True, help='Output model .npz path.')
     parser.add_argument('--model-type', choices=['linear', 'mlp'], default='linear', help='Behavior cloning model type.')

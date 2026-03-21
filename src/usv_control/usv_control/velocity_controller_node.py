@@ -316,7 +316,6 @@ class VelocityControllerNode(Node):
         self.declare_parameter('rl_policy_enabled', False)
         self.declare_parameter('rl_policy_topic', 'rl_policy/cmd_vel')
         self.declare_parameter('rl_policy_action_timeout', 0.5)
-        self.declare_parameter('rl_policy_use_residual', True)
         self.declare_parameter('rl_policy_fallback_to_raw', True)
         self.declare_parameter('rl_policy_allow_reverse', False)
         self.declare_parameter('rl_policy_linear_accel_limit', 0.45)
@@ -614,7 +613,6 @@ class VelocityControllerNode(Node):
         self._rl_policy_action_timeout = float(
             self.get_parameter('rl_policy_action_timeout').value or 0.5
         )
-        self._rl_policy_use_residual = bool(self.get_parameter('rl_policy_use_residual').value)
         self._rl_policy_fallback_to_raw = bool(
             self.get_parameter('rl_policy_fallback_to_raw').value
         )
@@ -803,6 +801,7 @@ class VelocityControllerNode(Node):
         self._last_valid_pose: Optional[Pose2D] = None  # 用于跳变检测
         self._pose_jump_threshold: float = 3.0  # 位姿跳变阈值 (m) - 降低以检测小幅漂移
         self._pose_jump_ignore_until: float = 0.0  # 训练环境 reset 后暂时忽略位姿跳变
+        self._training_reset_pose_jump_ignore_duration: float = 3.0  # 多艇训练 reset 后给仿真位姿足够时间稳定
 
         # APF 邻船状态缓存: topic/usv_id -> (x, y, vx, vy, timestamp)
         self._apf_neighbor_states: Dict[str, Tuple[float, float, float, float, float]] = {}
@@ -899,7 +898,8 @@ class VelocityControllerNode(Node):
         
         # ==================== v6: 速度自适应 tau_omega ====================
         # 低速时舵效差，转向惯性相对更大，需要更大的 tau_omega
-        self._adaptive_tau_enabled = bool(self.get_parameter('adaptive_tau_enabled').value or True)
+        adaptive_tau_enabled = self.get_parameter('adaptive_tau_enabled').value
+        self._adaptive_tau_enabled = True if adaptive_tau_enabled is None else bool(adaptive_tau_enabled)
         self._tau_omega_low = float(self.get_parameter('tau_omega_low_speed').value or 0.8)
         self._tau_omega_high = float(self.get_parameter('tau_omega_high_speed').value or 0.4)
         self._tau_speed_low = float(self.get_parameter('tau_speed_threshold_low').value or 0.15)
@@ -1179,8 +1179,10 @@ class VelocityControllerNode(Node):
         self.get_logger().info('  控制器类型: MPC')
         if self._ampc_enabled:
             self.get_logger().info('  🧠 AMPC 在线辨识: 已启用 (τ_omega 自动适应)')
-        else:
+        elif self._adaptive_tau_enabled:
             self.get_logger().info('  AMPC 在线辨识: 未启用 (使用 v6 速度自适应 tau)')
+        else:
+            self.get_logger().info('  AMPC 在线辨识: 未启用 (使用固定 tau_omega)')
         self.get_logger().info(f'  巡航速度: {self.tracker.cruise_speed} m/s')
         self.get_logger().info(f'  最大角速度: {self.tracker.max_angular_velocity} rad/s')
         self.get_logger().info(f'  到达阈值: {self.tracker.goal_tolerance} m')
@@ -1258,7 +1260,11 @@ class VelocityControllerNode(Node):
 
         if current_time < self._pose_jump_ignore_until:
             self.current_pose = new_pose
-            self._last_valid_pose = new_pose
+            # Training reset may still drain stale pre-reset pose samples from ROS queues.
+            # Keep current_pose fresh for status/observation purposes, but defer jump-detection
+            # baseline establishment until the ignore window expires so the first stable
+            # post-reset pose is accepted unconditionally.
+            self._last_valid_pose = None
             self._last_pose_time = current_time
             self._consecutive_timeout_count = 0
             self._consecutive_jump_count = 0
@@ -2020,43 +2026,8 @@ class VelocityControllerNode(Node):
 
     def _shape_rl_policy_command(self, target_cmd: VelocityCommand, now_sec: float) -> VelocityCommand:
         target_cmd = target_cmd.sanitize()
-        dt = now_sec - self._rl_policy_last_shaped_time
-        if dt <= 1e-6:
-            dt = max(1e-3, getattr(self, '_control_period', 0.05))
-        else:
-            dt = min(dt, max(0.2, getattr(self, '_control_period', 0.05) * 3.0))
-
-        if (now_sec - self._rl_policy_last_shaped_time) > max(0.3, getattr(self, '_control_period', 0.05) * 4.0):
-            self._rl_policy_last_linear_accel = 0.0
-            self._rl_policy_last_angular_accel = 0.0
-
-        shaped_linear_x, linear_accel = self._limit_axis_with_continuous_accel(
-            current_value=self._rl_policy_last_shaped_action.linear_x,
-            target_value=target_cmd.linear_x,
-            current_accel=self._rl_policy_last_linear_accel,
-            dt=dt,
-            accel_limit=max(1e-3, self._rl_policy_linear_accel_limit),
-            jerk_limit=max(0.0, self._rl_policy_linear_jerk_limit),
-        )
-        shaped_angular_z, angular_accel = self._limit_axis_with_continuous_accel(
-            current_value=self._rl_policy_last_shaped_action.angular_z,
-            target_value=target_cmd.angular_z,
-            current_accel=self._rl_policy_last_angular_accel,
-            dt=dt,
-            accel_limit=max(1e-3, self._rl_policy_angular_accel_limit),
-            jerk_limit=max(0.0, self._rl_policy_angular_jerk_limit),
-        )
-
-        self._rl_policy_last_shaped_time = now_sec
-        self._rl_policy_last_linear_accel = linear_accel
-        self._rl_policy_last_angular_accel = angular_accel
-        result = VelocityCommand(
-            linear_x=shaped_linear_x,
-            linear_y=target_cmd.linear_y,
-            angular_z=shaped_angular_z,
-        ).sanitize()
-        self._rl_policy_last_shaped_action = result
-        return result.sanitize()
+        self._sync_rl_command_shaper(target_cmd, now_sec)
+        return target_cmd
 
     def _avoidance_speed_floor_active(self) -> bool:
         if getattr(self, '_retreat_active', False):
@@ -2119,6 +2090,9 @@ class VelocityControllerNode(Node):
 
     def _enforce_avoidance_min_forward_speed(self, cmd: VelocityCommand) -> VelocityCommand:
         cmd = cmd.sanitize()
+        if bool(self.get_parameter('rl_policy_enabled').value):
+            return cmd
+
         min_forward_speed = max(0.0, min(float(self.tracker.cruise_speed), self._avoidance_min_forward_speed))
         if min_forward_speed <= 1e-6 or cmd.linear_x >= min_forward_speed:
             return cmd
@@ -2166,10 +2140,10 @@ class VelocityControllerNode(Node):
             return False
 
         raw_cmd = (self._last_raw_navigation_cmd or VelocityCommand.stop()).sanitize()
-        residual_cmd = self._rl_policy_last_shaped_action.sanitize()
+        policy_cmd = self._rl_policy_last_shaped_action.sanitize()
         if raw_cmd.linear_x < min_forward_speed:
             return False
-        if residual_cmd.linear_x >= -1e-3:
+        if policy_cmd.linear_x >= -1e-3:
             return False
         return cmd.linear_x < min_forward_speed
 
@@ -2180,35 +2154,26 @@ class VelocityControllerNode(Node):
             self._rl_policy_last_action_time <= 0.0
             or (now_sec - self._rl_policy_last_action_time) > max(0.05, self._rl_policy_action_timeout)
         ):
+            self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
             if self._rl_policy_fallback_to_raw:
-                self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
                 return cmd
             return VelocityCommand.stop()
 
         target_action = self._rl_policy_last_action.sanitize()
-        if self._rl_policy_use_residual and (not self._rl_policy_allow_reverse):
-            min_residual_linear = -max(0.0, cmd.linear_x)
-            if target_action.linear_x < min_residual_linear and (now_sec - self._rl_policy_last_safety_log_time) >= 2.0:
+        if not self._rl_policy_allow_reverse and target_action.linear_x < 0.0:
+            if (now_sec - self._rl_policy_last_safety_log_time) >= 2.0:
                 self.get_logger().warning(
-                    f'RL safety clamp active: reverse linear command {cmd.linear_x + target_action.linear_x:.2f} m/s was blocked; residual was clipped to preserve forward-only COLREGS motion.'
+                    f'RL safety clamp active: reverse linear command {target_action.linear_x:.2f} m/s was blocked in pure RL mode.'
                 )
                 self._rl_policy_last_safety_log_time = now_sec
             target_action = VelocityCommand(
-                linear_x=max(target_action.linear_x, min_residual_linear),
+                linear_x=0.0,
                 linear_y=target_action.linear_y,
                 angular_z=target_action.angular_z,
             ).sanitize()
 
         shaped_action = self._shape_rl_policy_command(target_action, now_sec)
-
-        if self._rl_policy_use_residual:
-            corrected = VelocityCommand(
-                linear_x=cmd.linear_x + shaped_action.linear_x,
-                linear_y=cmd.linear_y + shaped_action.linear_y,
-                angular_z=cmd.angular_z + shaped_action.angular_z,
-            )
-        else:
-            corrected = shaped_action
+        corrected = shaped_action
 
         safe_corrected = corrected.sanitize()
         if (not self._rl_policy_allow_reverse) and safe_corrected.linear_x < 0.0:
@@ -3643,11 +3608,11 @@ class VelocityControllerNode(Node):
 
             if bool(self.get_parameter('rl_policy_enabled').value):
                 raw_cmd = self._last_raw_navigation_cmd or VelocityCommand.stop()
-                residual_cmd = self._rl_policy_last_shaped_action
+                policy_cmd = self._rl_policy_last_shaped_action
                 self.get_logger().info(
-                    f'🚀 导航中: raw(vx={raw_cmd.linear_x:.2f}, ω={raw_cmd.angular_z:.2f}) + '
-                    f'rl(Δv={residual_cmd.linear_x:.2f}, Δω={residual_cmd.angular_z:.2f}) -> '
+                    f'🚀 纯RL导航中: rl(vx={policy_cmd.linear_x:.2f}, ω={policy_cmd.angular_z:.2f}) -> '
                     f'final(vx={cmd.linear_x:.2f}, ω={cmd.angular_z:.2f}), '
+                    f'raw仅观测(vx={raw_cmd.linear_x:.2f}, ω={raw_cmd.angular_z:.2f}), '
                     f'距离={dist:.2f}m, 队列={queue_len}'
                 )
             else:
@@ -5162,11 +5127,16 @@ class VelocityControllerNode(Node):
 
         self.current_pose = None
         self._last_valid_pose = None
-        self._pose_jump_ignore_until = time.time() + 1.0
+        self._last_pose_time = 0.0
+        self._last_state_time = 0.0
+        self._consecutive_timeout_count = 0
+        self._was_timed_out = False
+        self._pose_jump_ignore_until = time.time() + self._training_reset_pose_jump_ignore_duration
         self._consecutive_jump_count = 0
         self._last_jump_pose = None
         self._health_last_own_pose = None
         self._health_own_freeze_start = 0.0
+        self._health_own_last_warn = 0.0
         self._health_neighbor_freeze.clear()
     
     def destroy_node(self):

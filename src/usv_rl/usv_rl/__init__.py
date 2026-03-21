@@ -3,14 +3,14 @@
 from .config import EnvConfig
 from .env import UsvRlEnv
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
-from .policies import LinearResidualPolicy, MlpResidualPolicy, load_residual_policy
+from .policies import LinearPolicy, MlpPolicy, load_policy
 
 __all__ = [
 	'EnvConfig',
-	'LinearResidualPolicy',
-	'MlpResidualPolicy',
+	'LinearPolicy',
+	'MlpPolicy',
 	'MultiAgentEnv',
 	'MultiAgentEnvConfig',
-	'load_residual_policy',
+	'load_policy',
 	'UsvRlEnv',
 ]

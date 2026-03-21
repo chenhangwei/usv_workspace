@@ -15,7 +15,7 @@ REQUIRED_TRENDS = {
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description='Compare an online benchmark JSON against the current acceptance gate for residual avoidance policies.'
+        description='Compare an online benchmark JSON against the current acceptance gate for pure RL avoidance policies.'
     )
     parser.add_argument('--candidate', required=True, help='Candidate benchmark JSON path.')
     parser.add_argument('--baseline', help='Optional baseline benchmark JSON path for side-by-side reporting.')
@@ -51,8 +51,8 @@ def _log_diagnostics(log_health: dict) -> list[str]:
         diagnostics.append('raw_log_missing_scenario_started')
     if not log_health.get('observation_ready', False):
         diagnostics.append('raw_log_missing_observation_ready')
-    if not log_health.get('first_residual_action_logged', False):
-        diagnostics.append('raw_log_missing_first_residual_action')
+    if not log_health.get('first_policy_action_logged', False):
+        diagnostics.append('raw_log_missing_first_policy_action')
     if log_health.get('unexpected_traceback', False):
         diagnostics.append('raw_log_unexpected_traceback')
     return diagnostics
@@ -112,7 +112,7 @@ def _evaluate_candidate(candidate: dict) -> tuple[list[dict], bool]:
                 'observation_ready': result.get('observation_ready'),
                 'error_detected': result.get('error_detected'),
                 'distance_delta': result.get('distance_delta'),
-                'first_residual_action': result.get('first_residual_action'),
+                'first_policy_action': result.get('first_policy_action'),
                 'raw_log_path': result.get('raw_log_path'),
                 'raw_log_health': log_health,
                 'raw_log_diagnostics': log_diagnostics,
@@ -143,8 +143,8 @@ def _build_baseline_comparison(candidate: dict, baseline: dict | None) -> list[d
                 'baseline_trend': None if baseline_result is None else baseline_result.get('trend'),
                 'candidate_distance_delta': None if candidate_result is None else candidate_result.get('distance_delta'),
                 'baseline_distance_delta': None if baseline_result is None else baseline_result.get('distance_delta'),
-                'candidate_first_residual_action': None if candidate_result is None else candidate_result.get('first_residual_action'),
-                'baseline_first_residual_action': None if baseline_result is None else baseline_result.get('first_residual_action'),
+                'candidate_first_policy_action': None if candidate_result is None else candidate_result.get('first_policy_action'),
+                'baseline_first_policy_action': None if baseline_result is None else baseline_result.get('first_policy_action'),
                 'candidate_raw_log_path': None if candidate_result is None else candidate_result.get('raw_log_path'),
                 'baseline_raw_log_path': None if baseline_result is None else baseline_result.get('raw_log_path'),
                 'candidate_raw_log_health': candidate_log_health,

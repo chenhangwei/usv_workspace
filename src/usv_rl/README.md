@@ -2,7 +2,7 @@
 
 面向当前仓库的最小 RL 训练骨架。
 
-当前目标不是端到端接管整条导航链，而是保持 MPC/AMPC 导航层不变，由 RL 残差策略承担避让；在 RL 在线路径中不再执行 ORCA 避让算法。
+当前目标不是端到端接管整条导航链，而是保持 MPC/AMPC 导航层不变，由 RL 策略承担局部避让；在 RL 在线路径中不再执行 ORCA 避让算法。
 
 当前实现采用下面这条 MVP 路线：
 
@@ -10,14 +10,14 @@
 2. 在同一训练进程内启动一个轻量动力学仿真节点，模拟本船状态与飞控状态。
 3. 由训练环境合成邻船轨迹，并发布到 `apf/neighbors`。
 3. 控制器额外发布进入 RL 避让前的原始导航命令 `velocity_controller/raw_cmd`。
-4. 专家数据用 `final_cmd - raw_cmd` 的残差动作定义。
+4. 专家数据直接使用 scripted full-action 策略动作定义。
 5. 先做行为克隆基线，再做 PPO 微调。
 
 ## 已新增的运行时接缝
 
 - `rl_policy_enabled`: 是否启用 RL 旁路。
 - `rl_policy/cmd_vel`: RL 动作输入话题，类型为 `geometry_msgs/msg/TwistStamped`。
-- `velocity_controller/raw_cmd`: RL 残差叠加前的原始导航命令，类型为 `geometry_msgs/msg/TwistStamped`。
+- `velocity_controller/raw_cmd`: RL 策略接管前的原始导航命令，类型为 `geometry_msgs/msg/TwistStamped`。
 
 ## 目录说明
 
@@ -28,8 +28,8 @@
 - `usv_rl/ros_bridge.py`: 观测采样、目标注入、RL 动作发布、参数切换。
 - `usv_rl/collect_scripted_dataset.py`: 基于可解释制动规则的 scripted teacher 数据采集。
 - `usv_rl/train_behavior_cloning.py`: 支持线性 ridge 和 MLP 的行为克隆基线。
-- `usv_rl/train_ppo_residual.py`: PPO 微调入口，需要额外安装依赖。
-- `usv_rl/policy_inference_node.py`: 在线加载残差策略并发布到 `rl_policy/cmd_vel`。
+- `ros2 run usv_rl train_ppo_policy`: PPO 微调入口，需要额外安装依赖。
+- `usv_rl/policy_inference_node.py`: 在线加载策略并发布到 `rl_policy/cmd_vel`。
 
 ## 最小使用流程
 
@@ -62,14 +62,14 @@ ros2 run usv_rl collect_scripted_dataset \
   --teacher-profile safety_anchor_v3
 ```
 
-这条 profile 会完整保留 v2 的 `head_on` 强制制动规则，只对 crossing/overtaking 的残差做更轻的制动和更明确的转向承诺，因此它适合作为“效率改进候选”，不适合作为放宽安全约束的激进通过策略。
+这条 profile 会完整保留 v2 的 `head_on` 强制制动规则，只对 crossing/overtaking 的策略动作做更轻的制动和更明确的转向承诺，因此它适合作为“效率改进候选”，不适合作为放宽安全约束的激进通过策略。
 
 ### 3. 训练行为克隆基线
 
 ```bash
 ros2 run usv_rl train_behavior_cloning \
   --dataset ~/usv_rl_datasets/scripted_teacher_wide.npz \
-  --output ~/usv_rl_models/bc_linear_residual.npz
+  --output ~/usv_rl_models/bc_linear_policy.npz
 ```
 
 如果要训练一个更强的非线性基线，可以直接切到 MLP：
@@ -77,7 +77,7 @@ ros2 run usv_rl train_behavior_cloning \
 ```bash
 ros2 run usv_rl train_behavior_cloning \
   --dataset ~/usv_rl_datasets/scripted_teacher_wide.npz \
-  --output ~/usv_rl_models/bc_mlp_residual.npz \
+  --output ~/usv_rl_models/bc_mlp_policy.npz \
   --model-type mlp \
   --hidden-size 128 \
   --hidden-size 128 \
@@ -87,7 +87,7 @@ ros2 run usv_rl train_behavior_cloning \
 当前基线是线性 ridge policy，目的不是直接追求最强性能，而是先验证：
 
 1. 观测定义是否稳定。
-2. 专家残差动作是否有一致模式。
+2. 专家策略动作是否有一致模式。
 3. 环境与数据链是否闭环通顺。
 
 在当前仓库内，`scripted teacher + MLP BC` 已经验证可把 `head_on` 和 `overtaking` 都从碰撞推到超时保守策略，因此它是目前最稳的“安全优先”初始化基线。
@@ -97,15 +97,15 @@ ros2 run usv_rl train_behavior_cloning \
 这一步需要你额外安装 `gymnasium` 和 `stable-baselines3`。当前仓库里的 PPO 入口已经支持小 rollout 参数，便于快速冒烟验证。
 
 ```bash
-ros2 run usv_rl train_ppo_residual \
-  --output ~/usv_rl_models/ppo_residual_usv03 \
+ros2 run usv_rl train_ppo_policy \
+  --output ~/usv_rl_models/ppo_policy_usv03 \
   --total-timesteps 20000
 ```
 
 快速冒烟可直接用：
 
 ```bash
-ros2 run usv_rl train_ppo_residual \
+ros2 run usv_rl train_ppo_policy \
   --output ~/usv_rl_models/ppo_smoke \
   --total-timesteps 32 \
   --n-steps 16 \
@@ -115,8 +115,8 @@ ros2 run usv_rl train_ppo_residual \
 如果要做“教师预训练 + PPO 微调”，可以在已有 PPO checkpoint 基础上增加：
 
 ```bash
-ros2 run usv_rl train_ppo_residual \
-  --load-model ~/usv_rl_models/ppo_residual_usv03.zip \
+ros2 run usv_rl train_ppo_policy \
+  --load-model ~/usv_rl_models/ppo_policy_usv03.zip \
   --pretrain-dataset ~/usv_rl_datasets/scripted_teacher_wide.npz \
   --pretrain-epochs 12 \
   --output ~/usv_rl_models/ppo_teacher_pretrain_ft \
@@ -137,7 +137,7 @@ ros2 run usv_rl train_ppo_residual \
 ```bash
 ros2 run usv_rl evaluate_policy \
   --policy bc \
-  --model ~/usv_rl_models/bc_linear_residual.npz \
+  --model ~/usv_rl_models/bc_linear_policy.npz \
   --episodes 9
 ```
 
@@ -146,7 +146,7 @@ PPO 评估示例：
 ```bash
 ros2 run usv_rl evaluate_policy \
   --policy ppo \
-  --model ~/usv_rl_models/ppo_residual_usv03.zip \
+  --model ~/usv_rl_models/ppo_policy_usv03.zip \
   --episodes 9
 ```
 
@@ -213,7 +213,7 @@ ros2 run usv_rl recommended_status
 2. 当前推荐 benchmark / gate / smoke JSON 是否存在
 3. 当前推荐 benchmark 原始日志目录是否存在，以及三场景日志是否齐全
 4. 当前推荐 smoke 原始日志是否存在
-5. 当前推荐 benchmark 三场景日志是否都包含 scenario 启动、observation ready、首帧残差动作，且没有异常 traceback
+5. 当前推荐 benchmark 三场景日志是否都包含 scenario 启动、observation ready、首帧策略动作，且没有异常 traceback
 6. 当前推荐 smoke 日志是否包含生效配置、策略进程启动、控制器参数打开，且没有异常 traceback
 7. gate 是否通过
 8. smoke 是否通过
@@ -232,7 +232,7 @@ ros2 launch usv_rl online_policy_validation.launch.py \
 
 前者是推荐默认上线跑法，后者是最小在线验证跑法。
 
-如果要把当前最稳的安全基线直接接回控制链，可以运行在线推理节点。它会订阅本船位姿、速度、导航反馈、原始导航命令和 `apf/neighbors`，然后发布残差到 `rl_policy/cmd_vel`。
+如果要把当前最稳的安全基线直接接回控制链，可以运行在线推理节点。它会订阅本船位姿、速度、导航反馈、原始导航命令和 `apf/neighbors`，然后发布策略动作到 `rl_policy/cmd_vel`。
 
 如果你想用一条命令同时拉起现有 SITL 栈和在线策略节点，可以直接使用新的叠加 launch：
 
@@ -290,7 +290,7 @@ ros2 run usv_rl benchmark_online_policy \
 
 这个工具会依次拉起 `online_policy_validation.launch.py` 的 `head_on`、`crossing_starboard`、`overtaking` 三个场景，并汇总：
 
-1. 首帧残差动作
+1. 首帧策略动作
 2. 距离起点与终点
 3. 距离变化趋势（progress / retreat / stalled）
 4. 观测流是否就绪、是否出现运行错误
@@ -304,7 +304,7 @@ ros2 run usv_rl benchmark_online_policy \
   --output-json ~/usv_workspace/tmp_rl/online_bc_v2_benchmark.json
 ```
 
-这和 `validate_online_candidate` 使用同一套判定条件，只会对“场景已启动、但没有 observation ready、没有首帧残差动作、趋势还是 unknown、且没有异常 traceback”的启动类抖动做重试。
+这和 `validate_online_candidate` 使用同一套判定条件，只会对“场景已启动、但没有 observation ready、没有首帧策略动作、趋势还是 unknown、且没有异常 traceback”的启动类抖动做重试。
 
 当前推荐把这份基准摘要作为后续所有模型的统一入口，再通过对比工具执行验收门槛。当前推荐在线候选仍然是 `bc_scripted_teacher_mlp_v2.npz`，它对应的目标门槛是：
 
@@ -326,7 +326,7 @@ ros2 run usv_rl compare_online_benchmark \
 
 如果 candidate benchmark 里已经包含按场景落盘的原始日志，这条 compare 输出现在也会把每个场景对应的 `raw_log_path` 一起带出来。失败时可以直接跳到具体场景的 launch 原始日志，不用再手工回查 benchmark JSON。
 
-现在 compare / validate 的报告里还会直接附带每个场景的 `raw_log_health` 和 `raw_log_diagnostics`。也就是说，如果失败不是单纯的趋势退化，而是日志里缺了 `scenario_started`、`Observation stream ready`、`Publishing first residual action`，或者出现了异常 traceback，报告本身就会把这些缺失信号列出来。
+现在 compare / validate 的报告里还会直接附带每个场景的 `raw_log_health` 和 `raw_log_diagnostics`。也就是说，如果失败不是单纯的趋势退化，而是日志里缺了 `scenario_started`、`Observation stream ready`、`Publishing first pure RL action`，或者出现了异常 traceback，报告本身就会把这些缺失信号列出来。
 
 如果你不想分两步手工执行 `benchmark_online_policy` 和 `compare_online_benchmark`，现在可以直接用一条命令完成候选回归验收：
 
@@ -343,7 +343,7 @@ ros2 run usv_rl validate_online_candidate \
 4. 输出 gate JSON，并用退出码表达通过/失败
 5. 为每个标准场景保存一份原始 launch 日志
 
-默认情况下，`validate_online_candidate` 还会对“明显像启动抖动”的场景自动重试 1 次。判定条件很窄：没有 `observation_ready`、没有首帧残差动作、趋势仍是 `unknown`、且日志里没有异常 traceback。这是为了避免把单次 ROS 启动时序抖动误判成模型退化；如果你想关闭它，可以显式传：
+默认情况下，`validate_online_candidate` 还会对“明显像启动抖动”的场景自动重试 1 次。判定条件很窄：没有 `observation_ready`、没有首帧策略动作、趋势仍是 `unknown`、且日志里没有异常 traceback。这是为了避免把单次 ROS 启动时序抖动误判成模型退化；如果你想关闭它，可以显式传：
 
 ```bash
 ros2 run usv_rl validate_online_candidate \
@@ -379,7 +379,7 @@ ros2 run usv_rl benchmark_online_policy \
 3. 只有退出码为 `0` 的模型才允许进入替换讨论
 4. 只要 `head_on` 不再是 `retreat`，即使其它场景更快，也视为失败
 
-当前已验证这条链能进入 `Observation stream ready`，并打印首帧残差动作。对于 BC 模型，在线节点现在会自动根据模型里的观测维度匹配 `max_neighbors`，不再要求手工保持一致。
+当前已验证这条链能进入 `Observation stream ready`，并打印首帧策略动作。对于 BC 模型，在线节点现在会自动根据模型里的观测维度匹配 `max_neighbors`，不再要求手工保持一致。
 
 当前推荐直接先跑 MLP BC v2：
 
@@ -401,19 +401,19 @@ ros2 run usv_rl policy_inference_node \
 ```bash
 ros2 run usv_rl policy_inference_node \
   --namespace usv_03 \
-  --model ~/usv_rl_models/ppo_residual_usv03.zip \
+  --model ~/usv_rl_models/ppo_policy_usv03.zip \
   --policy ppo
 ```
 
 ## 当前限制
 
 1. 当前不是 ArduPilot/Gazebo 级 SITL，而是训练专用的轻量动力学闭环。
-2. 第一版只适合训练避让残差，不适合端到端直接接管导航。
+2. 第一版只适合训练局部避让策略，不适合端到端直接接管导航。
 3. PPO 入口已接好，但依赖未自动安装到仓库内，需要自行准备 `.venv`。
 4. 在线推理已经可单独运行，也可通过 `usv_sim/sitl_rl_launch.py` 叠加到现有 SITL 流程里；但还没有做正式的 launch 参数体系收敛和实船启动集成。
 
 ## 下一步建议
 
-1. 先采 10 到 30 个 episode，确认数据分布和专家残差量级。
+1. 先采 10 到 30 个 episode，确认数据分布和专家策略动作量级。
 2. 先训行为克隆基线，看 `val_mse` 是否稳定下降。
 3. 再决定是继续线性/MLP 模仿学习，还是直接上 PPO 微调。

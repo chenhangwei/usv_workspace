@@ -145,7 +145,7 @@ ros2 run usv_rl validate_online_candidate \
 2. `observation_not_ready`: 启动链未就绪，先看原始日志而不是先怀疑模型。
 3. `runtime_error_detected`: 运行异常，先修环境或启动链。
 4. `raw_log_missing_observation_ready`: 推理节点没有进入有效观测状态。
-5. `raw_log_missing_first_residual_action`: 策略节点已起，但没真正发出第一帧残差动作。
+5. `raw_log_missing_first_policy_action`: 策略节点已起，但没真正发出第一帧策略动作。
 
 ## 7. 当前推荐顺序
 

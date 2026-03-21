@@ -2,13 +2,13 @@
 
 ## 1. 结论
 
-对于当前项目，长期最值得投入的 RL 路线是 MAPPO，而不是继续在单智能体 PPO residual 上做局部修补。
+对于当前项目，长期最值得投入的 RL 路线是 MAPPO，而不是继续在单智能体 PPO 路线上做局部修补。
 
 原因不是 MAPPO 更“先进”，而是当前瓶颈已经明确来自多艇耦合会遇，尤其是 dense head_on。现有训练栈本质上仍然是：
 
 1. 单个 ego USV 作为唯一 agent
 2. 其它船只只作为观测中的邻船输入
-3. 策略输出 residual action 覆盖本艇 raw 导航命令
+3. 策略输出 pure policy action，并直接形成最终控制命令
 
 这条路线对 crossing 和 overtaking 已经接近上限，但在 dense 多船 head_on 里明显受限。
 
@@ -20,9 +20,9 @@
 2. 单艇观测定义: [usv_rl/usv_rl/types.py](usv_rl/usv_rl/types.py)
 3. 单艇桥接: [usv_rl/usv_rl/ros_bridge.py](usv_rl/usv_rl/ros_bridge.py)
 4. 单艇轻量动力学: [usv_rl/usv_rl/simple_sim.py](usv_rl/usv_rl/simple_sim.py)
-5. 训练入口: [usv_rl/usv_rl/train_ppo_residual.py](usv_rl/usv_rl/train_ppo_residual.py)
+5. 训练入口: [usv_rl/usv_rl/train_ppo_policy.py](usv_rl/usv_rl/train_ppo_policy.py)
 
-它的核心假设是“只学一条船如何对多邻船做 residual avoidance”。
+它的核心假设是“只学一条船如何对多邻船做局部策略避让”。
 
 这和 MAPPO 的目标不同。MAPPO 需要：
 
@@ -38,9 +38,9 @@
 
 1. 每条 USV 一个 actor 输入本地观测
 2. 同构船只共享 actor 权重
-3. actor 仍输出 residual action，而不是直接替代 MPC/AMPC
+3. actor 输出 pure policy action，并直接形成最终控制命令
 
-保留 residual 设计很重要，因为它和当前控制器架构兼容，风险最小。
+保留 pure policy 设计更符合当前控制器与训练栈已经收敛的运行时语义。
 
 ### 3.2 Critic
 
@@ -102,7 +102,7 @@
 
 建议新增独立训练入口：
 
-1. `usv_rl/usv_rl/train_mappo_residual.py`
+1. `usv_rl/usv_rl/train_mappo_policy.py`
 
 训练器至少需要：
 
@@ -131,7 +131,7 @@
 2. 都加载同一份共享 actor 权重
 3. 不在线使用 critic
 
-也就是说，训练是 MAPPO，部署仍然是当前 residual policy inference 模式。
+也就是说，训练是 MAPPO，部署仍然是当前 policy inference 模式。
 
 ## 5. 针对当前仓库的具体改造点
 
@@ -158,7 +158,7 @@ MAPPO 版本需要变成：
 1. 支持多个 namespace
 2. 按 `agent_id -> topic set` 管理缓存
 3. 同时发布多个 navigation goal
-4. 同时发布多个 RL residual action
+4. 同时发布多个 RL policy action
 
 建议保留当前 `TrainingBridge`，新增 `MultiAgentTrainingBridge`。
 
@@ -199,7 +199,7 @@ MAPPO 需要把场景拆成两部分：
 
 ### 6.1 动作空间
 
-第一版仍然使用当前 residual full-action：
+第一版仍然使用当前 full policy action：
 
 1. `linear_delta`
 2. `angular_delta`
@@ -254,20 +254,20 @@ critic 输入建议包含：
 
 1. ROS 闭环环境
 2. 非平稳多艇交互
-3. residual safety semantics
+3. pure policy safety semantics
 
 工程稳定性通常不如 PPO/MAPPO 体系。
 
 ### 7.3 不是 QMIX
 
-QMIX 更适合离散动作或显式 value decomposition 场景，不适合你当前这种连续 residual control。
+QMIX 更适合离散动作或显式 value decomposition 场景，不适合你当前这种连续纯策略控制。
 
 ## 8. 推荐实施顺序
 
 ### 短期
 
 1. 保持 BC v2 作为默认上线基线
-2. 不再继续在单智能体 PPO residual 上做大规模超参搜索
+2. 不再继续在单智能体 PPO 上做大规模超参搜索
 
 ### 中期
 
@@ -287,12 +287,12 @@ QMIX 更适合离散动作或显式 value decomposition 场景，不适合你当
 
 1. 2 艇或 3 艇可控 USV
 2. shared actor + centralized critic
-3. full residual action
+3. full policy action
 4. 只支持 `head_on`, `crossing_starboard`, `overtaking` 三类基础场景
-5. 单独训练入口 `train_mappo_residual.py`
+5. 单独训练入口 `train_mappo_policy.py`
 
 这个版本的目标不是立刻替代所有现有策略，而是回答一个关键问题：
 
-“联合训练是否真的能把 dense 多艇 head_on 的安全边界拉过单智能体 residual PPO/BC 的当前上限？”
+“联合训练是否真的能把 dense 多艇 head_on 的安全边界拉过单智能体 PPO/BC 的当前上限？”
 
 只有这个问题被证明成立，后续扩大工程投入才值得。

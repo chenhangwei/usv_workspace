@@ -72,7 +72,7 @@ def main():
             command = [
                 sys.executable,
                 '-m',
-                'usv_rl.evaluate_mappo_residual',
+                'usv_rl.evaluate_mappo_policy',
                 '--model',
                 str(checkpoint_path),
                 '--episodes',

@@ -79,7 +79,7 @@ def _pretrain_policy_from_dataset(model, dataset_path: str, *, epochs: int, batc
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Optional PPO fine-tuning entry for the residual RL environment.')
+    parser = argparse.ArgumentParser(description='Optional PPO fine-tuning entry for the USV RL environment.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
     parser.add_argument('--total-timesteps', type=int, default=20000, help='Total PPO timesteps.')
     parser.add_argument('--output', required=True, help='Output model path prefix.')
@@ -88,7 +88,8 @@ def parse_args():
     parser.add_argument('--n-steps', type=int, default=None, help='Rollout steps per PPO update. Defaults to a small value for smoke runs.')
     parser.add_argument('--batch-size', type=int, default=None, help='Mini-batch size. Defaults to min(64, n_steps).')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name to train on. Repeatable.')
-    parser.add_argument('--action-mode', choices=['full', 'angular_only'], default='angular_only', help='Residual action representation used during PPO training.')
+    parser.add_argument('--rl-control-mode', choices=['pure'], default='pure', help='Pure final-command control mode used during PPO training.')
+    parser.add_argument('--action-mode', choices=['full'], default='full', help='Action representation used during PPO training.')
     parser.add_argument('--max-neighbors', type=int, default=4, help='Number of neighbors encoded for retraining. Use 4 for 5-USV standard scenarios.')
     parser.add_argument('--load-model', help='Optional PPO checkpoint (.zip) to continue training from.')
     parser.add_argument('--pretrain-dataset', help='Optional .npz dataset with observations/actions for supervised policy pretraining.')
@@ -111,6 +112,7 @@ def main():
         namespace=args.namespace,
         launch_sitl=not args.external_stack,
         enable_rl_backend=True,
+        rl_control_mode=args.rl_control_mode,
         action_mode=args.action_mode,
         max_neighbors=max(1, args.max_neighbors),
         default_scenarios=tuple(args.scenarios) if args.scenarios else ScenarioFactory.cluster_standard_available(),

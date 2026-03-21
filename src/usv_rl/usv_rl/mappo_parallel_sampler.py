@@ -50,6 +50,9 @@ def _build_reward_config(args) -> RewardConfig:
         heading_relief_factor=float(args.heading_relief_factor),
         heading_error_weight=float(args.heading_error_weight),
         action_smoothness_weight=float(args.action_smoothness_weight),
+        pure_cruise_reward_weight=float(args.pure_cruise_reward_weight),
+        pure_idle_penalty_weight=float(args.pure_idle_penalty_weight),
+        pure_turn_penalty_weight=float(args.pure_turn_penalty_weight),
         time_penalty=float(args.time_penalty),
         stall_penalty=float(args.stall_penalty),
     )
@@ -60,6 +63,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
         MultiAgentEnvConfig(
             agent_namespaces=agent_namespaces,
             enable_rl_backend=True,
+            rl_control_mode=args.rl_control_mode,
             action_mode=args.action_mode,
             action_bounds=ActionBounds(
                 linear_delta=float(args.linear_delta_limit),
@@ -81,6 +85,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             goal_proximity_heading_relief=float(args.goal_proximity_heading_relief),
             goal_proximity_smoothness_relief=float(args.goal_proximity_smoothness_relief),
             goal_proximity_conflict_relief=float(args.goal_proximity_conflict_relief),
+            goal_proximity_speed_relief=float(args.goal_proximity_speed_relief),
             scenario_neighbor_speed=float(args.scenario_neighbor_speed),
             team_reward_weight=float(args.team_reward_weight),
             team_progress_weight=float(args.team_progress_weight),

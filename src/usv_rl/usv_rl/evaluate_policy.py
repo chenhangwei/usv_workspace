@@ -6,7 +6,7 @@ import numpy as np
 
 from .config import EnvConfig
 from .env import UsvRlEnv
-from .policies import load_residual_policy
+from .policies import load_policy
 from .scenarios import ScenarioFactory
 
 
@@ -19,7 +19,7 @@ class ZeroPolicy:
         return 2
 
 
-class PpoResidualPolicy:
+class PpoPolicy:
     def __init__(self, model_path: str, device: str = 'cpu'):
         try:
             from stable_baselines3 import PPO
@@ -49,7 +49,7 @@ class PpoResidualPolicy:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Evaluate a residual policy in the lightweight USV RL environment.')
+    parser = argparse.ArgumentParser(description='Evaluate an RL policy in the lightweight USV RL environment.')
     parser.add_argument('--policy', choices=['auto', 'zero', 'bc', 'ppo'], default='auto', help='Policy backend.')
     parser.add_argument('--model', help='Model path for bc (.npz) or ppo (.zip). Not required for zero policy.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
@@ -58,11 +58,24 @@ def parse_args():
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name to include. Repeatable.')
     parser.add_argument('--external-stack', action='store_true', help='Use an already-running stack.')
     parser.add_argument('--device', default='cpu', help='Torch device for PPO evaluation.')
-    parser.add_argument('--action-mode', choices=['auto', 'full', 'angular_only'], default='auto', help='Residual action representation used during evaluation.')
+    parser.add_argument('--rl-control-mode', choices=['auto', 'pure'], default='pure', help='Pure final-command control mode used during evaluation.')
+    parser.add_argument('--action-mode', choices=['auto', 'full'], default='full', help='Action representation used during evaluation.')
     parser.add_argument('--max-neighbors', default='auto', help='Neighbor slots encoded during evaluation. Use auto to infer from the model, or an integer such as 4.')
     parser.add_argument('--min-separation-threshold', type=float, default=0.5, help='Hard acceptance threshold for episode minimum neighbor distance.')
     parser.add_argument('--output-json', help='Optional path to save evaluation metrics as JSON.')
     return parser.parse_args()
+
+
+def _require_supported_action_dim(action_dim: int | None, *, model_path: str | None):
+    if action_dim is None:
+        return
+    if int(action_dim) != 2:
+        source = model_path or 'the selected policy'
+        raise RuntimeError(
+            'Pure RL evaluation only supports 2D full-action policies. '
+            f'Received action_dim={int(action_dim)} from {source}. '
+            'Please evaluate a pure policy checkpoint trained with action_mode="full".'
+        )
 
 
 def _resolve_action_mode(args, policy) -> str:
@@ -73,8 +86,7 @@ def _resolve_action_mode(args, policy) -> str:
         action_high = getattr(policy, 'action_high', None)
         if action_high is not None:
             action_dim = int(np.asarray(action_high).shape[0])
-    if action_dim == 1:
-        return 'angular_only'
+    _require_supported_action_dim(action_dim, model_path=args.model)
     return 'full'
 
 
@@ -114,9 +126,9 @@ def _load_policy(policy_kind: str, model_path: str | None, device: str):
     if model_path is None:
         raise RuntimeError(f'Policy type {policy_kind} requires --model.')
     if policy_kind == 'bc':
-        return load_residual_policy(model_path)
+        return load_policy(model_path)
     if policy_kind == 'ppo':
-        return PpoResidualPolicy(model_path, device=device)
+        return PpoPolicy(model_path, device=device)
     raise RuntimeError(f'Unsupported policy type: {policy_kind}')
 
 
@@ -151,6 +163,7 @@ def main():
     policy_kind = _detect_policy_kind(args.policy, args.model)
     policy = _load_policy(policy_kind, args.model, args.device)
     action_mode = _resolve_action_mode(args, policy)
+    rl_control_mode = 'pure'
     max_neighbors = _resolve_max_neighbors(args, policy)
 
     env = UsvRlEnv(
@@ -158,6 +171,7 @@ def main():
             namespace=args.namespace,
             launch_sitl=not args.external_stack,
             enable_rl_backend=True,
+            rl_control_mode=rl_control_mode,
             action_mode=action_mode,
             max_neighbors=max_neighbors,
             default_scenarios=scenarios,
@@ -223,6 +237,7 @@ def main():
     summary = {
         'policy': policy_kind,
         'model': args.model,
+        'rl_control_mode': rl_control_mode,
         'action_mode': action_mode,
         'max_neighbors': max_neighbors,
         'collision_distance': env.config.collision_distance,

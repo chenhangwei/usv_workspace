@@ -21,7 +21,7 @@ MAX_FASTDDS_SAFE_DOMAIN_ID = 232
 
 def parse_args():
     default_env = MultiAgentEnvConfig()
-    parser = argparse.ArgumentParser(description='Minimal MAPPO training entry for multi-USV residual control.')
+    parser = argparse.ArgumentParser(description='Minimal MAPPO training entry for multi-USV RL control.')
     parser.add_argument('--output', required=True, help='Output model path (.pt).')
     parser.add_argument('--resume-from', help='Optional checkpoint scaffold (.pt) used to resume MAPPO weights and training metadata.')
     parser.add_argument('--reset-optimizer', action='store_true', help='When resuming, ignore optimizer/scaler state stored in the checkpoint and restart optimizer state from scratch.')
@@ -47,9 +47,10 @@ def parse_args():
     parser.add_argument('--scenario-set', choices=['auto', 'smoke', 'dense', 'all'], default='auto', help='Scenario curriculum preset used when --scenario is not provided.')
     parser.add_argument('--max-neighbors', type=int, default=4, help='Neighbor slots in local observation encoding.')
     parser.add_argument('--max-agents', type=int, default=3, help='Maximum agents encoded in global state.')
-    parser.add_argument('--action-mode', choices=['full', 'angular_only'], default='full', help='Residual action representation.')
-    parser.add_argument('--linear-delta-limit', type=float, default=default_env.action_bounds.linear_delta, help='Maximum forward residual delta (m/s).')
-    parser.add_argument('--angular-delta-limit', type=float, default=default_env.action_bounds.angular_delta, help='Maximum yaw-rate residual delta (rad/s).')
+    parser.add_argument('--rl-control-mode', choices=['pure'], default='pure', help='Pure final-command control mode used during training.')
+    parser.add_argument('--action-mode', choices=['full'], default='full', help='Action representation used during training.')
+    parser.add_argument('--linear-delta-limit', type=float, default=default_env.action_bounds.linear_delta, help='Maximum forward command magnitude (m/s).')
+    parser.add_argument('--angular-delta-limit', type=float, default=default_env.action_bounds.angular_delta, help='Maximum yaw-rate command magnitude (rad/s).')
     parser.add_argument('--cruise-speed', type=float, default=default_env.cruise_speed, help='Training controller cruise speed limit (m/s).')
     parser.add_argument('--max-angular-velocity', type=float, default=default_env.max_angular_velocity, help='Training controller yaw-rate limit (rad/s).')
     parser.add_argument('--episode-timeout', type=float, default=45.0, help='Episode timeout in seconds.')
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument('--goal-proximity-heading-relief', type=float, default=default_env.goal_proximity_heading_relief, help='Fractional heading penalty relief applied near goal.')
     parser.add_argument('--goal-proximity-smoothness-relief', type=float, default=default_env.goal_proximity_smoothness_relief, help='Fractional smoothness penalty relief applied near goal.')
     parser.add_argument('--goal-proximity-conflict-relief', type=float, default=default_env.goal_proximity_conflict_relief, help='Fractional relief applied to conflict braking and COLREGs shaping near goal.')
+    parser.add_argument('--goal-proximity-speed-relief', type=float, default=default_env.goal_proximity_speed_relief, help='Fractional reduction of target forward speed near goal. Use 0 to avoid reward-driven slowdown around goal points.')
     parser.add_argument('--goal-bonus', type=float, default=RewardConfig.goal_bonus, help='Per-agent goal completion bonus.')
     parser.add_argument('--collision-distance', type=float, default=default_env.collision_distance, help='Collision threshold derived from hull footprint (m).')
     parser.add_argument('--near-miss-distance', type=float, default=default_env.near_miss_distance, help='Near-miss threshold (m).')
@@ -88,6 +90,9 @@ def parse_args():
     parser.add_argument('--heading-relief-factor', type=float, default=RewardConfig.heading_relief_factor, help='Fractional relief applied to heading penalty during conflict handling.')
     parser.add_argument('--heading-error-weight', type=float, default=RewardConfig.heading_error_weight, help='Heading error penalty weight.')
     parser.add_argument('--action-smoothness-weight', type=float, default=RewardConfig.action_smoothness_weight, help='Action smoothness penalty weight.')
+    parser.add_argument('--pure-cruise-reward-weight', type=float, default=RewardConfig.pure_cruise_reward_weight, help='Pure-RL reward weight for sustaining aligned forward cruise in open water.')
+    parser.add_argument('--pure-idle-penalty-weight', type=float, default=RewardConfig.pure_idle_penalty_weight, help='Pure-RL penalty weight for failing to maintain target forward speed in open water.')
+    parser.add_argument('--pure-turn-penalty-weight', type=float, default=RewardConfig.pure_turn_penalty_weight, help='Pure-RL penalty weight for excessive yaw rate away from conflict handling.')
     parser.add_argument('--time-penalty', type=float, default=RewardConfig.time_penalty, help='Per-step time penalty.')
     parser.add_argument('--stall-penalty', type=float, default=RewardConfig.stall_penalty, help='Penalty applied on episode truncation.')
     parser.add_argument('--team-reward-weight', type=float, default=0.30, help='Fleet near-miss team penalty weight.')
@@ -147,10 +152,43 @@ def _build_mlp(nn, input_dim: int, hidden_sizes: tuple[int, ...], output_dim: in
     return nn.Sequential(*layers)
 
 
+def _cuda_device_support_status(torch, device) -> tuple[bool, str | None]:
+    if not torch.cuda.is_available():
+        return False, 'CUDA is not available.'
+
+    try:
+        device_index = device.index if device.index is not None else torch.cuda.current_device()
+        capability = torch.cuda.get_device_capability(device_index)
+        device_name = torch.cuda.get_device_name(device_index)
+        arch_token = f'sm_{capability[0]}{capability[1]}'
+        arch_list = set(torch.cuda.get_arch_list()) if hasattr(torch.cuda, 'get_arch_list') else set()
+        if arch_list and arch_token not in arch_list:
+            supported = ' '.join(sorted(arch_list))
+            return (
+                False,
+                f'CUDA device {device_name} exposes {arch_token}, but current PyTorch only supports: {supported}',
+            )
+    except Exception as exc:
+        return False, f'Failed to validate CUDA runtime compatibility: {exc}'
+
+    return True, None
+
+
 def _resolve_device(torch, device_arg: str):
     if device_arg == 'auto':
-        return torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    return torch.device(device_arg)
+        cuda_device = torch.device('cuda')
+        cuda_ok, reason = _cuda_device_support_status(torch, cuda_device)
+        if cuda_ok:
+            return cuda_device
+        print(f'Falling back to CPU for MAPPO training: {reason}', flush=True)
+        return torch.device('cpu')
+
+    device = torch.device(device_arg)
+    if device.type == 'cuda':
+        cuda_ok, reason = _cuda_device_support_status(torch, device)
+        if not cuda_ok:
+            raise RuntimeError(reason)
+    return device
 
 
 def _configure_torch_runtime(torch, args, device):
@@ -244,6 +282,9 @@ def _build_reward_config(args) -> RewardConfig:
         heading_relief_factor=float(args.heading_relief_factor),
         heading_error_weight=float(args.heading_error_weight),
         action_smoothness_weight=float(args.action_smoothness_weight),
+        pure_cruise_reward_weight=float(args.pure_cruise_reward_weight),
+        pure_idle_penalty_weight=float(args.pure_idle_penalty_weight),
+        pure_turn_penalty_weight=float(args.pure_turn_penalty_weight),
         time_penalty=float(args.time_penalty),
         stall_penalty=float(args.stall_penalty),
     )
@@ -251,20 +292,32 @@ def _build_reward_config(args) -> RewardConfig:
 
 def _build_model_metadata(args, agent_namespaces: tuple[str, ...]) -> dict:
     action_dim = 1 if args.action_mode == 'angular_only' else 2
-    action_low = np.asarray(
-        [-float(args.angular_delta_limit)] if action_dim == 1 else [
-            -float(args.linear_delta_limit),
-            -float(args.angular_delta_limit),
-        ],
-        dtype=np.float32,
-    )
-    action_high = np.asarray(
-        [float(args.angular_delta_limit)] if action_dim == 1 else [
-            float(args.linear_delta_limit),
-            float(args.angular_delta_limit),
-        ],
-        dtype=np.float32,
-    )
+    if args.rl_control_mode == 'pure':
+        linear_limit = max(float(args.linear_delta_limit), float(args.cruise_speed))
+        angular_limit = max(float(args.angular_delta_limit), float(args.max_angular_velocity))
+        action_low = np.asarray(
+            [0.0, -angular_limit],
+            dtype=np.float32,
+        )
+        action_high = np.asarray(
+            [linear_limit, angular_limit],
+            dtype=np.float32,
+        )
+    else:
+        action_low = np.asarray(
+            [-float(args.angular_delta_limit)] if action_dim == 1 else [
+                -float(args.linear_delta_limit),
+                -float(args.angular_delta_limit),
+            ],
+            dtype=np.float32,
+        )
+        action_high = np.asarray(
+            [float(args.angular_delta_limit)] if action_dim == 1 else [
+                float(args.linear_delta_limit),
+                float(args.angular_delta_limit),
+            ],
+            dtype=np.float32,
+        )
     max_agents = max(len(agent_namespaces), int(args.max_agents))
     return {
         'local_observation_size': AgentLocalObservation.vector_size(int(args.max_neighbors)),
@@ -305,6 +358,7 @@ def _checkpoint_payload(
         'scenarios': scenarios,
         'max_neighbors': args.max_neighbors,
         'max_agents': max(len(agent_namespaces), args.max_agents),
+        'rl_control_mode': args.rl_control_mode,
         'action_mode': args.action_mode,
         'episode_timeout': float(args.episode_timeout),
         'no_progress_timeout': float(args.no_progress_timeout),
@@ -315,6 +369,7 @@ def _checkpoint_payload(
         'goal_proximity_heading_relief': float(args.goal_proximity_heading_relief),
         'goal_proximity_smoothness_relief': float(args.goal_proximity_smoothness_relief),
         'goal_proximity_conflict_relief': float(args.goal_proximity_conflict_relief),
+        'goal_proximity_speed_relief': float(args.goal_proximity_speed_relief),
         'collision_distance': float(args.collision_distance),
         'near_miss_distance': float(args.near_miss_distance),
         'scenario_neighbor_speed': float(args.scenario_neighbor_speed),
@@ -409,6 +464,7 @@ def _apply_resume_configuration(args, payload: dict):
     simple_fields = (
         'max_neighbors',
         'max_agents',
+        'rl_control_mode',
         'action_mode',
         'episode_timeout',
         'no_progress_timeout',
@@ -418,6 +474,7 @@ def _apply_resume_configuration(args, payload: dict):
         'goal_proximity_heading_relief',
         'goal_proximity_smoothness_relief',
         'goal_proximity_conflict_relief',
+        'goal_proximity_speed_relief',
         'collision_distance',
         'near_miss_distance',
         'scenario_neighbor_speed',
@@ -470,6 +527,9 @@ def _apply_resume_configuration(args, payload: dict):
         'heading_relief_factor',
         'heading_error_weight',
         'action_smoothness_weight',
+        'pure_cruise_reward_weight',
+        'pure_idle_penalty_weight',
+        'pure_turn_penalty_weight',
         'time_penalty',
         'stall_penalty',
     )
@@ -563,6 +623,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
         MultiAgentEnvConfig(
             agent_namespaces=agent_namespaces,
             enable_rl_backend=True,
+            rl_control_mode=args.rl_control_mode,
             action_mode=args.action_mode,
             action_bounds=ActionBounds(
                 linear_delta=float(args.linear_delta_limit),
@@ -584,6 +645,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             goal_proximity_heading_relief=float(args.goal_proximity_heading_relief),
             goal_proximity_smoothness_relief=float(args.goal_proximity_smoothness_relief),
             goal_proximity_conflict_relief=float(args.goal_proximity_conflict_relief),
+            goal_proximity_speed_relief=float(args.goal_proximity_speed_relief),
             scenario_neighbor_speed=float(args.scenario_neighbor_speed),
             team_reward_weight=float(args.team_reward_weight),
             team_progress_weight=float(args.team_progress_weight),

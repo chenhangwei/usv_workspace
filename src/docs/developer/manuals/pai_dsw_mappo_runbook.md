@@ -10,8 +10,8 @@
 
 当前限制：
 
-1. `train_mappo_residual` 已可训练多艇 MAPPO checkpoint
-2. `evaluate_mappo_residual` 已可离线评估 MAPPO checkpoint
+1. `train_mappo_policy` 已可训练多艇 MAPPO checkpoint
+2. `evaluate_mappo_policy` 已可离线评估 MAPPO checkpoint
 3. 在线 `policy_inference_node` 现已支持直接加载 MAPPO `.pt` checkpoint
 4. 但当前更推荐先完成离线训练和离线评估，再进入 SITL 在线接入阶段
 
@@ -82,7 +82,7 @@ cd /mnt/workspace/usv_workspace
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 
-ros2 run usv_rl evaluate_mappo_residual \
+ros2 run usv_rl evaluate_mappo_policy \
   --policy zero \
   --num-agents 5 \
   --episodes 1 \
@@ -108,7 +108,7 @@ source install/setup.bash
 
 export EXP_NAME=mappo_dense_v1
 
-ros2 run usv_rl train_mappo_residual \
+ros2 run usv_rl train_mappo_policy \
   --output /mnt/data/checkpoints/usv_rl/${EXP_NAME}.pt \
   --checkpoint-dir /mnt/data/checkpoints/usv_rl/${EXP_NAME}_checkpoints \
   --checkpoint-interval 2560 \
@@ -150,7 +150,7 @@ source install/setup.bash
 
 export EXP_NAME=mappo_dense_v1
 
-ros2 run usv_rl evaluate_mappo_residual \
+ros2 run usv_rl evaluate_mappo_policy \
   --policy mappo \
   --model /mnt/data/checkpoints/usv_rl/${EXP_NAME}.pt \
   --episodes 15 \
@@ -215,9 +215,9 @@ export EXP_NAME=mappo_dense_v1
 每轮实验按下面顺序执行：
 
 1. 构建：`colcon build --packages-up-to usv_rl usv_sim --symlink-install`
-2. 冒烟：`evaluate_mappo_residual --policy zero`
-3. 训练：`train_mappo_residual`
-4. 最终评估：`evaluate_mappo_residual --policy mappo`
+2. 冒烟：`evaluate_mappo_policy --policy zero`
+3. 训练：`train_mappo_policy`
+4. 最终评估：`evaluate_mappo_policy --policy mappo`
 5. 周期 checkpoint 排名：`python -m usv_rl.evaluate_mappo_checkpoints`
 6. 比较不同实验前缀下的评估 JSON，再决定是否进入在线接入阶段
 
