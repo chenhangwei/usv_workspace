@@ -10,6 +10,7 @@ import rclpy
 
 from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
+from .observation_normalizer import ObservationNormalizer
 
 
 def _build_mlp(nn, input_dim: int, hidden_sizes: tuple[int, ...], output_dim: int):
@@ -33,6 +34,13 @@ def _build_reward_config(args) -> RewardConfig:
         anticipation_distance=float(args.anticipation_distance),
         conflict_risk_weight=float(args.conflict_risk_weight),
         conflict_brake_weight=float(args.conflict_brake_weight),
+        conflict_progress_scale=float(args.conflict_progress_scale),
+        conflict_resolution_reward_weight=float(args.conflict_resolution_reward_weight),
+        conflict_escalation_penalty_weight=float(args.conflict_escalation_penalty_weight),
+        unsafe_close_speed_penalty_weight=float(args.unsafe_close_speed_penalty_weight),
+        path_deviation_penalty_weight=float(args.path_deviation_penalty_weight),
+        path_deviation_tolerance=float(args.path_deviation_tolerance),
+        path_deviation_conflict_scale=float(args.path_deviation_conflict_scale),
         desired_conflict_speed=float(args.desired_conflict_speed),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),
@@ -42,10 +50,16 @@ def _build_reward_config(args) -> RewardConfig:
         head_on_turn_reward_weight=float(args.head_on_turn_reward_weight),
         head_on_forward_reward_weight=float(args.head_on_forward_reward_weight),
         head_on_speed_drop_penalty_weight=float(args.head_on_speed_drop_penalty_weight),
+        head_on_close_penalty_weight=float(args.head_on_close_penalty_weight),
+        head_on_no_turn_penalty_weight=float(args.head_on_no_turn_penalty_weight),
+        head_on_phase_gate_strength=float(args.head_on_phase_gate_strength),
         crossing_starboard_turn_reward_weight=float(args.crossing_starboard_turn_reward_weight),
         crossing_forward_reward_weight=float(args.crossing_forward_reward_weight),
         overtaking_starboard_turn_reward_weight=float(args.overtaking_starboard_turn_reward_weight),
         overtaking_forward_reward_weight=float(args.overtaking_forward_reward_weight),
+        overtaking_corridor_reward_weight=float(args.overtaking_corridor_reward_weight),
+        overtaking_centerline_penalty_weight=float(args.overtaking_centerline_penalty_weight),
+        overtaking_close_penalty_weight=float(args.overtaking_close_penalty_weight),
         colregs_port_turn_penalty_weight=float(args.colregs_port_turn_penalty_weight),
         heading_relief_factor=float(args.heading_relief_factor),
         heading_error_weight=float(args.heading_error_weight),
@@ -53,8 +67,10 @@ def _build_reward_config(args) -> RewardConfig:
         pure_cruise_reward_weight=float(args.pure_cruise_reward_weight),
         pure_idle_penalty_weight=float(args.pure_idle_penalty_weight),
         pure_turn_penalty_weight=float(args.pure_turn_penalty_weight),
+        pure_spin_penalty_weight=float(args.pure_spin_penalty_weight),
         time_penalty=float(args.time_penalty),
         stall_penalty=float(args.stall_penalty),
+        angular_accel_penalty_weight=float(args.angular_accel_penalty_weight),
     )
 
 
@@ -96,6 +112,17 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
+            domain_randomization=bool(getattr(args, 'domain_randomization', False)),
+            dr_position_noise_std=float(getattr(args, 'dr_position_noise_std', 0.10)),
+            dr_heading_noise_std=float(getattr(args, 'dr_heading_noise_std', 0.02)),
+            dr_velocity_noise_ratio=float(getattr(args, 'dr_velocity_noise_ratio', 0.03)),
+            dr_current_speed_max=float(getattr(args, 'dr_current_speed_max', 0.04)),
+            dr_current_theta=float(getattr(args, 'dr_current_theta', 0.15)),
+            dr_current_sigma=float(getattr(args, 'dr_current_sigma', 0.02)),
+            dr_velocity_exec_noise=float(getattr(args, 'dr_velocity_exec_noise', 0.05)),
+            scenario_spawn_position_std=float(getattr(args, 'scenario_spawn_position_std', 0.0)),
+            scenario_spawn_heading_std=float(getattr(args, 'scenario_spawn_heading_std', 0.0)),
+            scenario_goal_position_std=float(getattr(args, 'scenario_goal_position_std', 0.0)),
         )
     )
 
@@ -148,6 +175,8 @@ def _collect_worker_rollout(
     consecutive_env_failures: int,
     env_factory,
     worker_rank: int,
+    squash_actions: bool = False,
+    obs_normalizer: ObservationNormalizer = None,
 ):
     import torch
     from torch.distributions import Normal
@@ -166,12 +195,17 @@ def _collect_worker_rollout(
         obs_batch = np.stack([observations[agent_id] for agent_id in agent_order], axis=0).astype(np.float32)
         state_batch = np.repeat(np.asarray(global_state, dtype=np.float32)[None, :], len(agent_order), axis=0)
 
-        obs_tensor = torch.as_tensor(obs_batch, dtype=torch.float32)
+        obs_batch_for_net = obs_normalizer.normalize(obs_batch) if obs_normalizer is not None else obs_batch
+        obs_tensor = torch.as_tensor(obs_batch_for_net, dtype=torch.float32)
         state_tensor = torch.as_tensor(state_batch, dtype=torch.float32)
         critic_input = torch.cat([obs_tensor, state_tensor], dim=-1)
 
         with torch.no_grad():
             action_mean = actor(obs_tensor)
+            if squash_actions:
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
             distribution = Normal(action_mean, actor_log_std.exp().expand_as(action_mean))
             action_tensor = distribution.sample()
             log_prob_tensor = distribution.log_prob(action_tensor).sum(dim=-1)
@@ -264,7 +298,8 @@ def _collect_worker_rollout(
         agent_order = env.agent_ids
         bootstrap_obs = np.stack([observations[agent_id] for agent_id in agent_order], axis=0).astype(np.float32)
         bootstrap_state = np.repeat(np.asarray(global_state, dtype=np.float32)[None, :], len(agent_order), axis=0)
-        bootstrap_obs_tensor = torch.as_tensor(bootstrap_obs, dtype=torch.float32)
+        bootstrap_obs_for_net = obs_normalizer.normalize(bootstrap_obs) if obs_normalizer is not None else bootstrap_obs
+        bootstrap_obs_tensor = torch.as_tensor(bootstrap_obs_for_net, dtype=torch.float32)
         bootstrap_state_tensor = torch.as_tensor(bootstrap_state, dtype=torch.float32)
         bootstrap_values = critic(torch.cat([bootstrap_obs_tensor, bootstrap_state_tensor], dim=-1)).squeeze(-1).cpu().numpy()
 
@@ -312,6 +347,15 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
         actor_log_std = torch.zeros(env.action_dim, dtype=torch.float32)
         action_low_tensor = torch.as_tensor(env.action_low, dtype=torch.float32)
         action_high_tensor = torch.as_tensor(env.action_high, dtype=torch.float32)
+        squash_actions = bool(getattr(args, 'squash_actions', False))
+        use_obs_norm = bool(getattr(args, 'normalize_observations', False))
+        min_fwd = max(0.0, float(getattr(args, 'min_forward_speed', 0.0)))
+        if min_fwd > 0.0:
+            action_low_tensor[0] = min_fwd
+
+        worker_normalizer = None
+        if use_obs_norm:
+            worker_normalizer = ObservationNormalizer(env.local_observation_size)
 
         while True:
             message = connection.recv()
@@ -324,6 +368,10 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
             actor.load_state_dict(message['actor_state_dict'])
             critic.load_state_dict(message['critic_state_dict'])
             actor_log_std = message['actor_log_std'].to(dtype=torch.float32, device='cpu')
+
+            norm_state = message.get('obs_normalizer_state')
+            if use_obs_norm and norm_state is not None and worker_normalizer is not None:
+                worker_normalizer.load_state_dict(norm_state)
 
             result, env, observations, global_state, consecutive_env_failures = _collect_worker_rollout(
                 env=env,
@@ -340,6 +388,8 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
                 consecutive_env_failures=consecutive_env_failures,
                 env_factory=env_factory,
                 worker_rank=worker_rank,
+                squash_actions=squash_actions,
+                obs_normalizer=worker_normalizer,
             )
             connection.send(result)
     except EOFError:
@@ -396,11 +446,13 @@ class ParallelRolloutSampler:
             self._connections.append(parent_conn)
             self._processes.append(process)
 
-    def collect(self, *, actor, critic, actor_log_std, rollout_steps: int, remaining_agent_steps: int):
+    def collect(self, *, actor, critic, actor_log_std, rollout_steps: int, remaining_agent_steps: int,
+                obs_normalizer=None):
         worker_steps = _split_rollout_steps(rollout_steps, remaining_agent_steps, self._agent_count, self._num_workers)
         actor_state_dict = _cpu_state_dict(actor)
         critic_state_dict = _cpu_state_dict(critic)
         log_std = actor_log_std.detach().cpu()
+        norm_state = obs_normalizer.state_dict() if obs_normalizer is not None else None
 
         active_connections = []
         for connection, per_worker_steps in zip(self._connections, worker_steps):
@@ -412,6 +464,7 @@ class ParallelRolloutSampler:
                 'actor_state_dict': actor_state_dict,
                 'critic_state_dict': critic_state_dict,
                 'actor_log_std': log_std,
+                'obs_normalizer_state': norm_state,
             })
             active_connections.append(connection)
 

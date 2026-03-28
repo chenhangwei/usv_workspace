@@ -13,10 +13,20 @@ class RewardConfig:
     goal_bonus: float = 25.0
     collision_penalty: float = -35.0
     near_miss_weight: float = 6.0
+    near_miss_exponent: float = 1.0
+    # Optional head-on-specific near-miss threshold. <= 0 means disabled.
+    head_on_near_miss_distance: float = 0.0
     conflict_distance: float = 5.0
     anticipation_distance: float = 5.0
     conflict_risk_weight: float = 1.5
     conflict_brake_weight: float = 1.2
+    conflict_progress_scale: float = 0.6
+    conflict_resolution_reward_weight: float = 0.9
+    conflict_escalation_penalty_weight: float = 1.2
+    unsafe_close_speed_penalty_weight: float = 1.0
+    path_deviation_penalty_weight: float = 0.55
+    path_deviation_tolerance: float = 0.8
+    path_deviation_conflict_scale: float = 0.9
     desired_conflict_speed: float = 0.26
     stop_go_penalty_weight: float = 1.8
     head_on_guidance_distance: float = 5.0
@@ -26,10 +36,16 @@ class RewardConfig:
     head_on_turn_reward_weight: float = 1.0
     head_on_forward_reward_weight: float = 1.4
     head_on_speed_drop_penalty_weight: float = 1.4
+    head_on_close_penalty_weight: float = 2.2
+    head_on_no_turn_penalty_weight: float = 1.4
+    head_on_phase_gate_strength: float = 0.0
     crossing_starboard_turn_reward_weight: float = 0.7
     crossing_forward_reward_weight: float = 0.45
     overtaking_starboard_turn_reward_weight: float = 0.55
     overtaking_forward_reward_weight: float = 0.35
+    overtaking_corridor_reward_weight: float = 0.9
+    overtaking_centerline_penalty_weight: float = 1.1
+    overtaking_close_penalty_weight: float = 1.2
     colregs_port_turn_penalty_weight: float = 0.45
     heading_relief_factor: float = 0.45
     heading_error_weight: float = 0.2
@@ -37,8 +53,10 @@ class RewardConfig:
     pure_cruise_reward_weight: float = 0.9
     pure_idle_penalty_weight: float = 0.8
     pure_turn_penalty_weight: float = 0.12
+    pure_spin_penalty_weight: float = 0.3
     time_penalty: float = 0.02
     stall_penalty: float = -12.0
+    angular_accel_penalty_weight: float = 0.0
 
 
 @dataclass
@@ -58,7 +76,7 @@ class EnvConfig:
     no_progress_timeout: float = 10.0
     min_progress_delta: float = 0.3
     goal_distance: float = 12.0
-    goal_tolerance: float = 0.8
+    goal_tolerance: float = 0.5
     collision_distance: float = 0.75
     near_miss_distance: float = 1.2
     neighbor_publish_rate: float = 10.0
@@ -70,5 +88,5 @@ class EnvConfig:
     goal_proximity_relief_distance: float = 2.0
     goal_proximity_heading_relief: float = 0.55
     goal_proximity_smoothness_relief: float = 0.70
-    goal_proximity_conflict_relief: float = 0.45
+    goal_proximity_conflict_relief: float = 0.25
     goal_proximity_speed_relief: float = 0.0

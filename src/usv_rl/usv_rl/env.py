@@ -165,12 +165,15 @@ class UsvRlEnv(gym.Env):
         speed_drop = max(0.0, previous_forward_speed - current_forward_speed)
         speed_drop_ratio = max(0.0, min(1.0, speed_drop / max(desired_forward_speed, 1e-3)))
 
+        phase_gate = self.config.reward.head_on_phase_gate_strength
+        forward_gate = max(0.0, min(1.0, 1.0 - phase_gate * (1.0 - corridor_progress)))
+
         guidance_reward = (
             self.config.reward.head_on_corridor_reward_weight * proximity * corridor_progress
             - self.config.reward.head_on_centerline_penalty_weight * proximity * centerline_penalty
             + self.config.reward.head_on_turn_reward_weight * proximity * turn_progress
-            + self.config.reward.head_on_forward_reward_weight * proximity * forward_progress
-            - self.config.reward.head_on_speed_drop_penalty_weight * proximity * speed_drop_ratio
+            + self.config.reward.head_on_forward_reward_weight * proximity * forward_gate * forward_progress
+            - self.config.reward.head_on_speed_drop_penalty_weight * proximity * forward_gate * speed_drop_ratio
         )
         return guidance_reward
 
@@ -327,17 +330,23 @@ class UsvRlEnv(gym.Env):
             self._executor.add_node(self._sim_node)
 
         if self.config.launch_sitl and self._controller is None:
+            controller_parameters = [
+                Parameter('cruise_speed', Parameter.Type.DOUBLE, self.config.cruise_speed),
+                Parameter('max_angular_velocity', Parameter.Type.DOUBLE, self.config.max_angular_velocity),
+                Parameter('ampc_enabled', Parameter.Type.BOOL, False),
+                Parameter('adaptive_tau_enabled', Parameter.Type.BOOL, False),
+                Parameter('apf_enabled', Parameter.Type.BOOL, True),
+                Parameter('apf_orca_enabled', Parameter.Type.BOOL, False),
+                Parameter('require_guided_mode', Parameter.Type.BOOL, True),
+                Parameter('require_armed', Parameter.Type.BOOL, True),
+            ]
             self._controller = VelocityControllerNode(
                 namespace=f'/{self.config.namespace}',
-                parameter_overrides=[
-                    Parameter('cruise_speed', value=self.config.cruise_speed),
-                    Parameter('max_angular_velocity', value=self.config.max_angular_velocity),
-                    Parameter('apf_enabled', value=True),
-                    Parameter('apf_orca_enabled', value=False),
-                    Parameter('require_guided_mode', value=True),
-                    Parameter('require_armed', value=True),
-                ]
+                parameter_overrides=controller_parameters
             )
+            self._controller.set_parameters(controller_parameters)
+            if bool(self._controller.get_parameter('ampc_enabled').value) or bool(self._controller.get_parameter('adaptive_tau_enabled').value):
+                raise RuntimeError('Training controller failed to disable AMPC/adaptive tau overrides.')
             self._executor.add_node(self._controller)
 
         if self._bridge is None:

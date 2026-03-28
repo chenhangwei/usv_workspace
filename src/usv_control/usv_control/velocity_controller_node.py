@@ -112,6 +112,7 @@ class VelocityControllerNode(Node):
         # 当 navigate_to_point_node 快速连发多个目标时（如乱序修正），
         # 确保 set_waypoint 调用按消息到达顺序串行执行
         self._nav_goal_lock = threading.Lock()
+        self._control_loop_lock = threading.Lock()
         
         # ==================== 参数声明 ====================
         # 控制模式
@@ -2148,51 +2149,25 @@ class VelocityControllerNode(Node):
         return cmd.linear_x < min_forward_speed
 
     def _apply_rl_policy_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
-        """将最新 RL 动作叠加到导航原始命令。"""
+        """应用最新 RL 动作作为 pure 模式最终控制指令。"""
         now_sec = time.time()
-        if (
-            self._rl_policy_last_action_time <= 0.0
-            or (now_sec - self._rl_policy_last_action_time) > max(0.05, self._rl_policy_action_timeout)
-        ):
+        fallback_to_raw = bool(self.get_parameter('rl_policy_fallback_to_raw').value)
+        if self._rl_policy_last_action_time <= 0.0:
             self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
-            if self._rl_policy_fallback_to_raw:
+            if fallback_to_raw:
                 return cmd
             return VelocityCommand.stop()
 
+        if (now_sec - self._rl_policy_last_action_time) > max(0.05, self._rl_policy_action_timeout):
+            if fallback_to_raw:
+                self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
+                return cmd
+            # pure RL 训练中允许保持上一帧策略动作，避免发布频率低于控制频率时被控制器强制归零
+            return self._rl_policy_last_shaped_action.sanitize()
+
         target_action = self._rl_policy_last_action.sanitize()
-        if not self._rl_policy_allow_reverse and target_action.linear_x < 0.0:
-            if (now_sec - self._rl_policy_last_safety_log_time) >= 2.0:
-                self.get_logger().warning(
-                    f'RL safety clamp active: reverse linear command {target_action.linear_x:.2f} m/s was blocked in pure RL mode.'
-                )
-                self._rl_policy_last_safety_log_time = now_sec
-            target_action = VelocityCommand(
-                linear_x=0.0,
-                linear_y=target_action.linear_y,
-                angular_z=target_action.angular_z,
-            ).sanitize()
-
-        shaped_action = self._shape_rl_policy_command(target_action, now_sec)
-        corrected = shaped_action
-
-        safe_corrected = corrected.sanitize()
-        if (not self._rl_policy_allow_reverse) and safe_corrected.linear_x < 0.0:
-            safe_corrected = VelocityCommand(
-                linear_x=0.0,
-                linear_y=safe_corrected.linear_y,
-                angular_z=safe_corrected.angular_z,
-            )
-
-        max_forward_speed = max(0.0, float(self.tracker.cruise_speed))
-        max_turn_rate = max(1e-3, float(self.tracker.max_angular_velocity))
-        min_forward_speed = -max_forward_speed if self._rl_policy_allow_reverse else 0.0
-        safe_corrected = VelocityCommand(
-            linear_x=float(np.clip(safe_corrected.linear_x, min_forward_speed, max_forward_speed)),
-            linear_y=safe_corrected.linear_y,
-            angular_z=float(np.clip(safe_corrected.angular_z, -max_turn_rate, max_turn_rate)),
-        )
-
-        return self._enforce_avoidance_min_forward_speed(safe_corrected)
+        pure_action = self._shape_rl_policy_command(target_action, now_sec)
+        return pure_action.sanitize()
 
     def _apply_apf_to_command(self, cmd: VelocityCommand) -> VelocityCommand:
         """
@@ -3520,106 +3495,112 @@ class VelocityControllerNode(Node):
         
         处理优先级: 避障 > 旋转机动 > 常规导航
         """
-        # 仅在速度模式下运行
-        if self.control_mode != 'velocity':
+        if not self._control_loop_lock.acquire(blocking=False):
             return
-        
-        # 检查延迟停止和延迟 HOLD 切换
-        self._check_delayed_stop()
-        self._check_delayed_hold()
-        
-        # ==================== 渐进减速处理 ====================
-        # 导航完成后平滑减速，优先于常规导航控制
-        if self._soft_decel_active:
-            self._handle_soft_deceleration()
-            return
-        
-        # 检查前置条件
-        if not self._check_preconditions():
-            return
-        
-        # 确保 current_pose 不为 None
-        if self.current_pose is None:
-            return
-        
-        # ==================== 优先级 0: 后退动作 ====================
-        if self._retreat_active:
-            self._handle_retreat_control()
-            return
-        
-        # ==================== 优先级 0.5: ORCA 脱困 ====================
-        if self._orca_escape_active:
-            if not self._apf_orca_escape_enabled:
-                self._orca_escape_active = False
-                self._orca_escape_phase = 0
-                self._orca_escape_direction = 0
-                self._orca_escape_start_time = 0.0
-            else:
-                self._handle_orca_escape()
-                return
-        
-        # ==================== 优先级 1: 避障模式 ====================
-        if self._avoidance_active and self._avoidance_position is not None:
-            self._handle_avoidance_control()
-            return
-        
-        # ==================== 优先级 2: 旋转机动 ====================
-        if self._rotation_active:
-            # 检查是否已到达旋转位置
-            dist_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
-            rotation_start_threshold = 1.0  # 开始旋转的距离阈值
-            
-            if dist_to_goal <= rotation_start_threshold or self.tracker.is_goal_reached():
-                # 已到达位置，开始/继续旋转
-                self._handle_rotation_control()
-                return
-            # 否则继续导航到目标位置
-        
-        # ==================== 优先级 3: 常规导航 ====================
-        # 注意：不在这里判断到达，由 navigate_to_point_node 通过 navigation_result 通知
-        # 这样可以避免两个节点判断标准不一致导致的问题
-        # tracker.is_goal_reached() 仅用于防止无目标时的空转
-        if self.tracker.is_goal_reached() and not self._control_active:
-            # 没有活跃目标，不需要控制
-            return
-        
-        # 计算速度指令
-        cmd = self.tracker.compute_velocity(self.current_pose)
-        self._publish_raw_navigation_command(cmd)
-        cmd = self._apply_apf_to_command(cmd)
-        self._last_velocity_cmd = cmd
-        
-        # ORCA 停滞检测: 若长时间无进展则触发脱困
-        if self._check_orca_stall():
-            return  # 脱困已触发，跳过本次指令发布
-        
-        # 发布速度指令
-        self._publish_velocity_command(cmd)
-        
-        # 发布导航反馈 (每 5 个周期一次，约 4Hz)
-        if self._log_counter % 5 == 0:
-            self._publish_navigation_feedback(cmd)
-        
-        # 定期日志
-        self._log_counter += 1
-        if self._log_counter % 40 == 0:  # 约 2 秒一次 (20Hz)
-            dist = self.tracker.get_distance_to_goal(self.current_pose)
-            queue_len = self.tracker.get_queue_length()
 
-            if bool(self.get_parameter('rl_policy_enabled').value):
-                raw_cmd = self._last_raw_navigation_cmd or VelocityCommand.stop()
-                policy_cmd = self._rl_policy_last_shaped_action
-                self.get_logger().info(
-                    f'🚀 纯RL导航中: rl(vx={policy_cmd.linear_x:.2f}, ω={policy_cmd.angular_z:.2f}) -> '
-                    f'final(vx={cmd.linear_x:.2f}, ω={cmd.angular_z:.2f}), '
-                    f'raw仅观测(vx={raw_cmd.linear_x:.2f}, ω={raw_cmd.angular_z:.2f}), '
-                    f'距离={dist:.2f}m, 队列={queue_len}'
-                )
-            else:
-                self.get_logger().info(
-                    f'🚀 导航中: vx={cmd.linear_x:.2f} m/s, ω={cmd.angular_z:.2f} rad/s, '
-                    f'距离={dist:.2f}m, 队列={queue_len}'
-                )
+        try:
+            # 仅在速度模式下运行
+            if self.control_mode != 'velocity':
+                return
+            
+            # 检查延迟停止和延迟 HOLD 切换
+            self._check_delayed_stop()
+            self._check_delayed_hold()
+            
+            # ==================== 渐进减速处理 ====================
+            # 导航完成后平滑减速，优先于常规导航控制
+            if self._soft_decel_active:
+                self._handle_soft_deceleration()
+                return
+            
+            # 检查前置条件
+            if not self._check_preconditions():
+                return
+            
+            # 确保 current_pose 不为 None
+            if self.current_pose is None:
+                return
+            
+            # ==================== 优先级 0: 后退动作 ====================
+            if self._retreat_active:
+                self._handle_retreat_control()
+                return
+            
+            # ==================== 优先级 0.5: ORCA 脱困 ====================
+            if self._orca_escape_active:
+                if not self._apf_orca_escape_enabled:
+                    self._orca_escape_active = False
+                    self._orca_escape_phase = 0
+                    self._orca_escape_direction = 0
+                    self._orca_escape_start_time = 0.0
+                else:
+                    self._handle_orca_escape()
+                    return
+            
+            # ==================== 优先级 1: 避障模式 ====================
+            if self._avoidance_active and self._avoidance_position is not None:
+                self._handle_avoidance_control()
+                return
+            
+            # ==================== 优先级 2: 旋转机动 ====================
+            if self._rotation_active:
+                # 检查是否已到达旋转位置
+                dist_to_goal = self.tracker.get_distance_to_goal(self.current_pose)
+                rotation_start_threshold = 1.0  # 开始旋转的距离阈值
+                
+                if dist_to_goal <= rotation_start_threshold or self.tracker.is_goal_reached():
+                    # 已到达位置，开始/继续旋转
+                    self._handle_rotation_control()
+                    return
+                # 否则继续导航到目标位置
+            
+            # ==================== 优先级 3: 常规导航 ====================
+            # 注意：不在这里判断到达，由 navigate_to_point_node 通过 navigation_result 通知
+            # 这样可以避免两个节点判断标准不一致导致的问题
+            # tracker.is_goal_reached() 仅用于防止无目标时的空转
+            if self.tracker.is_goal_reached() and not self._control_active:
+                # 没有活跃目标，不需要控制
+                return
+            
+            # 计算速度指令
+            cmd = self.tracker.compute_velocity(self.current_pose)
+            self._publish_raw_navigation_command(cmd)
+            cmd = self._apply_apf_to_command(cmd)
+            self._last_velocity_cmd = cmd
+            
+            # ORCA 停滞检测: 若长时间无进展则触发脱困
+            if self._check_orca_stall():
+                return  # 脱困已触发，跳过本次指令发布
+            
+            # 发布速度指令
+            self._publish_velocity_command(cmd)
+            
+            # 发布导航反馈 (每 5 个周期一次，约 4Hz)
+            if self._log_counter % 5 == 0:
+                self._publish_navigation_feedback(cmd)
+            
+            # 定期日志
+            self._log_counter += 1
+            if self._log_counter % 40 == 0:  # 约 2 秒一次 (20Hz)
+                dist = self.tracker.get_distance_to_goal(self.current_pose)
+                queue_len = self.tracker.get_queue_length()
+
+                if bool(self.get_parameter('rl_policy_enabled').value):
+                    raw_cmd = self._last_raw_navigation_cmd or VelocityCommand.stop()
+                    policy_cmd = self._rl_policy_last_shaped_action
+                    self.get_logger().info(
+                        f'🚀 纯RL导航中: rl(vx={policy_cmd.linear_x:.2f}, ω={policy_cmd.angular_z:.2f}) -> '
+                        f'final(vx={cmd.linear_x:.2f}, ω={cmd.angular_z:.2f}), '
+                        f'raw仅观测(vx={raw_cmd.linear_x:.2f}, ω={raw_cmd.angular_z:.2f}), '
+                        f'距离={dist:.2f}m, 队列={queue_len}'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'🚀 导航中: vx={cmd.linear_x:.2f} m/s, ω={cmd.angular_z:.2f} rad/s, '
+                        f'距离={dist:.2f}m, 队列={queue_len}'
+                    )
+        finally:
+            self._control_loop_lock.release()
     
     def _handle_avoidance_control(self):
         """

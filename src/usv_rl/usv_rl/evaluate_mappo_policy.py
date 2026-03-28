@@ -7,6 +7,7 @@ import numpy as np
 from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
+from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 
 
@@ -66,11 +67,30 @@ class MappoActorPolicy:
         self._actor = actor.to(self._device)
         self.action_dim = action_dim
         self.obs_dim = obs_dim
+        self._squash_actions = bool(checkpoint.get('squash_actions', False))
+        if self._squash_actions:
+            _low = checkpoint.get('action_low', [0.0, -0.4])
+            _high = checkpoint.get('action_high', [0.4, 0.4])
+            self._action_low = torch.as_tensor(_low, dtype=torch.float32, device=self._device)
+            self._action_high = torch.as_tensor(_high, dtype=torch.float32, device=self._device)
+
+        self._obs_normalizer = None
+        if checkpoint.get('normalize_observations') and 'obs_normalizer' in checkpoint:
+            self._obs_normalizer = ObservationNormalizer(obs_dim)
+            self._obs_normalizer.load_state_dict(checkpoint['obs_normalizer'])
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
+        if self._obs_normalizer is not None:
+            observation = self._obs_normalizer.normalize(observation)
         obs_tensor = self._torch.as_tensor(observation, dtype=self._torch.float32, device=self._device).unsqueeze(0)
         with self._torch.no_grad():
-            action = self._actor(obs_tensor).cpu().numpy()[0]
+            raw = self._actor(obs_tensor)
+            if self._squash_actions:
+                _half = (self._action_high - self._action_low) / 2.0
+                _mid = (self._action_high + self._action_low) / 2.0
+                action = (self._torch.tanh(raw) * _half + _mid).cpu().numpy()[0]
+            else:
+                action = raw.cpu().numpy()[0]
         return np.asarray(action, dtype=np.float32)
 
 
@@ -133,12 +153,20 @@ def _resolve_scenarios(scenarios: tuple[str, ...] | None, agent_count: int) -> t
     return resolved
 
 
+def _resolve_device(device: str) -> str:
+    if device == 'auto':
+        import torch
+        return 'cuda' if torch.cuda.is_available() else 'cpu'
+    return device
+
+
 def _load_mappo_checkpoint(model_path: str, device: str) -> tuple[dict, MappoActorPolicy]:
     try:
         import torch
     except ImportError as exc:
         raise RuntimeError('torch is required for MAPPO evaluation.') from exc
 
+    device = _resolve_device(device)
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     return checkpoint, MappoActorPolicy(checkpoint, device=device)
 
@@ -253,6 +281,8 @@ def _scenario_summary(metrics: list[dict]) -> dict[str, dict]:
             'timeout_rate': sum(item['timeout'] for item in items) / count,
             'mean_pairwise_min_separation': float(np.mean([item['pairwise_min_separation'] for item in items])),
             'worst_pairwise_min_separation': float(np.min([item['pairwise_min_separation'] for item in items])),
+            'mean_episode_min_separation': float(np.mean([item['episode_min_separation'] for item in items])),
+            'worst_episode_min_separation': float(np.min([item['episode_min_separation'] for item in items])),
             'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in items])),
             'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in items])),
             'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in items])),
@@ -331,6 +361,7 @@ def evaluate_policy(
                     exhausted_horizon = True
                     truncated = False
                     steps = 0
+                    running_pairwise_min = float('inf')
 
                     for step in range(steps_per_episode):
                         action_map = {
@@ -339,6 +370,9 @@ def evaluate_policy(
                         }
                         observations, _, terminated_dict, truncated_dict, last_info = env.step(action_map)
                         steps = step + 1
+                        step_pair_min = float(last_info['pairwise_min_separation'])
+                        if np.isfinite(step_pair_min):
+                            running_pairwise_min = min(running_pairwise_min, step_pair_min)
                         terminated = bool(terminated_dict['__all__'])
                         truncated = bool(truncated_dict['__all__'])
                         if terminated or truncated:
@@ -355,6 +389,7 @@ def evaluate_policy(
                     success = goal_completion_ratio >= 0.999
                     collision = pairwise_min < env.config.collision_distance
                     timeout = (truncated or exhausted_horizon) and not success and not collision
+                    episode_running_min = running_pairwise_min if np.isfinite(running_pairwise_min) else pairwise_min
                     episode_metrics.append(
                         {
                             'episode': episode,
@@ -364,6 +399,7 @@ def evaluate_policy(
                             'collision': collision,
                             'timeout': timeout,
                             'pairwise_min_separation': pairwise_min,
+                            'episode_min_separation': episode_running_min,
                             'pairwise_mean_separation': float(last_info['pairwise_mean_separation']),
                             'goal_completion_ratio': goal_completion_ratio,
                             'initial_team_mean_goal_distance': initial_team_mean_goal_distance,
@@ -402,6 +438,8 @@ def evaluate_policy(
         'timeout_rate': sum(item['timeout'] for item in episode_metrics) / max(1, len(episode_metrics)),
         'mean_pairwise_min_separation': float(np.mean([item['pairwise_min_separation'] for item in episode_metrics])),
         'worst_pairwise_min_separation': float(np.min([item['pairwise_min_separation'] for item in episode_metrics])),
+        'mean_episode_min_separation': float(np.mean([item['episode_min_separation'] for item in episode_metrics])),
+        'worst_episode_min_separation': float(np.min([item['episode_min_separation'] for item in episode_metrics])),
         'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in episode_metrics])),
         'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in episode_metrics])),
         'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in episode_metrics])),

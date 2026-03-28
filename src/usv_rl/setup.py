@@ -30,6 +30,8 @@ setup(
             'train_mappo_policy = usv_rl.train_mappo_policy:main',
             'evaluate_policy = usv_rl.evaluate_policy:main',
             'evaluate_mappo_policy = usv_rl.evaluate_mappo_policy:main',
+            'collect_teacher_trajectories = usv_rl.collect_teacher_trajectories:main',
+            'train_distill_policy = usv_rl.train_distill_policy:main',
             'policy_inference_node = usv_rl.policy_inference_node:main',
             'simple_sim_node = usv_rl.simple_sim:main',
             'multi_usv_sim_node = usv_rl.multi_usv_sim:main',

@@ -1,6 +1,8 @@
 import argparse
 import math
 import os
+import re
+from datetime import datetime
 from pathlib import Path
 import time
 from typing import Dict, Optional, Tuple
@@ -18,6 +20,7 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
+from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 from .types import NeighborObservation, NeighborState, UsvObservation
 
@@ -140,15 +143,34 @@ class MappoActorPolicyRuntime:
         self._actor = nn.Sequential(*layers).to(self._device)
         self._actor.load_state_dict(checkpoint['actor_state_dict'])
         self._actor.eval()
+        self._squash_actions = bool(checkpoint.get('squash_actions', False))
+        if self._squash_actions:
+            _low = checkpoint.get('action_low', [0.0, -0.4])
+            _high = checkpoint.get('action_high', [0.4, 0.4])
+            self._sq_action_low = torch.as_tensor(_low, dtype=torch.float32, device=self._device)
+            self._sq_action_high = torch.as_tensor(_high, dtype=torch.float32, device=self._device)
+
+        self._obs_normalizer = None
+        if checkpoint.get('normalize_observations') and 'obs_normalizer' in checkpoint:
+            self._obs_normalizer = ObservationNormalizer(self.obs_dim)
+            self._obs_normalizer.load_state_dict(checkpoint['obs_normalizer'])
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
+        if self._obs_normalizer is not None:
+            observation = self._obs_normalizer.normalize(observation)
         obs_tensor = self._torch.as_tensor(
             observation,
             dtype=self._torch.float32,
             device=self._device,
         ).unsqueeze(0)
         with self._torch.no_grad():
-            action = self._actor(obs_tensor).cpu().numpy()[0]
+            raw = self._actor(obs_tensor)
+            if self._squash_actions:
+                _half = (self._sq_action_high - self._sq_action_low) / 2.0
+                _mid = (self._sq_action_high + self._sq_action_low) / 2.0
+                action = (self._torch.tanh(raw) * _half + _mid).cpu().numpy()[0]
+            else:
+                action = raw.cpu().numpy()[0]
         return np.asarray(action, dtype=np.float32)
 
 
@@ -197,6 +219,34 @@ class PolicyInferenceNode(Node):
         self._namespace = resolved_namespace
         self._usv_id = resolved_namespace.strip('/')
         self._policy = _load_runtime_policy(model_path, policy_kind, device)
+
+        # ---- Model info logging ----
+        resolved_path = _resolve_model_path(model_path)
+        policy_type_name = type(self._policy).__name__
+        self.get_logger().info('========== Model Info ==========')
+        self.get_logger().info(f'Model path : {resolved_path}')
+        self.get_logger().info(f'Policy type: {policy_type_name}')
+        self.get_logger().info(f'Device     : {device}')
+        try:
+            fstat = os.stat(resolved_path)
+            mod_time = datetime.fromtimestamp(fstat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+            size_mb = fstat.st_size / (1024 * 1024)
+            self.get_logger().info(f'Model size : {size_mb:.2f} MB')
+            self.get_logger().info(f'Modified   : {mod_time}')
+        except OSError:
+            pass
+        step_match = re.search(r'step[_]?(\d+)', os.path.basename(resolved_path))
+        if step_match:
+            self.get_logger().info(f'Checkpoint step: {step_match.group(1)}')
+        if hasattr(self._policy, 'obs_dim'):
+            self.get_logger().info(f'Obs dim    : {self._policy.obs_dim}')
+        if hasattr(self._policy, 'action_dim'):
+            self.get_logger().info(f'Action dim : {self._policy.action_dim}')
+        if hasattr(self._policy, 'action_bounds'):
+            ab = self._policy.action_bounds
+            self.get_logger().info(f'Action bounds: linear={ab.linear_delta:.3f}, angular={ab.angular_delta:.3f}')
+        self.get_logger().info('================================')
+
         self._max_neighbors = max(1, max_neighbors)
         self._action_bounds = ActionBounds()
         if hasattr(self._policy, 'action_bounds'):

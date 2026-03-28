@@ -56,7 +56,7 @@ class MultiAgentEnvConfig:
     goal_proximity_relief_distance: float = 2.0
     goal_proximity_heading_relief: float = 0.55
     goal_proximity_smoothness_relief: float = 0.70
-    goal_proximity_conflict_relief: float = 0.45
+    goal_proximity_conflict_relief: float = 0.25
     goal_proximity_speed_relief: float = 0.0
     team_reward_weight: float = 0.30
     coordination_reward_weight: float = 0.20
@@ -67,6 +67,19 @@ class MultiAgentEnvConfig:
     team_dispersion_margin: float = 0.0
     team_completion_bonus: float = 18.0
     deadlock_penalty_weight: float = 4.0
+    # Domain randomization
+    domain_randomization: bool = False
+    dr_position_noise_std: float = 0.10
+    dr_heading_noise_std: float = 0.02
+    dr_velocity_noise_ratio: float = 0.03
+    dr_current_speed_max: float = 0.04
+    dr_current_theta: float = 0.15
+    dr_current_sigma: float = 0.02
+    dr_velocity_exec_noise: float = 0.05
+    # Scenario randomization
+    scenario_spawn_position_std: float = 0.0
+    scenario_spawn_heading_std: float = 0.0
+    scenario_goal_position_std: float = 0.0
 
 
 class MultiAgentEnv(gym.Env):
@@ -92,6 +105,7 @@ class MultiAgentEnv(gym.Env):
         self._previous_distances: Dict[str, float] = {}
         self._previous_actions: Dict[str, np.ndarray] = {}
         self._previous_forward_speeds: Dict[str, float] = {}
+        self._previous_conflict_risks: Dict[str, float] = {}
         self._latest_observations: Dict[str, AgentLocalObservation] = {}
         self._best_team_mean_distance = float('inf')
         self._initial_team_mean_separation = float('inf')
@@ -147,6 +161,17 @@ class MultiAgentEnv(gym.Env):
     def _ensure_runtime(self):
         if self._sim_node is None:
             self._sim_node = MultiUsvSimNode(self._agent_ids)
+            if self.config.domain_randomization:
+                self._sim_node.set_domain_randomization(
+                    enabled=True,
+                    position_noise_std=self.config.dr_position_noise_std,
+                    heading_noise_std=self.config.dr_heading_noise_std,
+                    velocity_noise_ratio=self.config.dr_velocity_noise_ratio,
+                    current_speed_max=self.config.dr_current_speed_max,
+                    current_theta=self.config.dr_current_theta,
+                    current_sigma=self.config.dr_current_sigma,
+                    velocity_exec_noise=self.config.dr_velocity_exec_noise,
+                )
             self._executor.add_node(self._sim_node)
 
         if self._bridge is None:
@@ -155,19 +180,25 @@ class MultiAgentEnv(gym.Env):
 
         if not self._controllers:
             for namespace in self._agent_ids:
+                controller_parameters = [
+                    Parameter('cruise_speed', Parameter.Type.DOUBLE, self.config.cruise_speed),
+                    Parameter('max_angular_velocity', Parameter.Type.DOUBLE, self.config.max_angular_velocity),
+                    Parameter('ampc_enabled', Parameter.Type.BOOL, False),
+                    Parameter('adaptive_tau_enabled', Parameter.Type.BOOL, False),
+                    Parameter('apf_enabled', Parameter.Type.BOOL, True),
+                    Parameter('apf_orca_enabled', Parameter.Type.BOOL, False),
+                    Parameter('require_guided_mode', Parameter.Type.BOOL, True),
+                    Parameter('require_armed', Parameter.Type.BOOL, True),
+                ]
                 controller = VelocityControllerNode(
                     namespace=f'/{namespace}',
-                    parameter_overrides=[
-                        Parameter('cruise_speed', value=self.config.cruise_speed),
-                        Parameter('max_angular_velocity', value=self.config.max_angular_velocity),
-                        Parameter('ampc_enabled', value=False),
-                        Parameter('adaptive_tau_enabled', value=False),
-                        Parameter('apf_enabled', value=True),
-                        Parameter('apf_orca_enabled', value=False),
-                        Parameter('require_guided_mode', value=True),
-                        Parameter('require_armed', value=True),
-                    ],
+                    parameter_overrides=controller_parameters,
                 )
+                controller.set_parameters(controller_parameters)
+                if bool(controller.get_parameter('ampc_enabled').value) or bool(controller.get_parameter('adaptive_tau_enabled').value):
+                    raise RuntimeError(
+                        f'Training controller {namespace} failed to disable AMPC/adaptive tau overrides.'
+                    )
                 self._controllers[namespace] = controller
                 self._executor.add_node(controller)
 
@@ -205,7 +236,7 @@ class MultiAgentEnv(gym.Env):
     ) -> float:
         cruise_speed = max(0.18, self._pure_linear_speed_limit())
         target_speed = cruise_speed * (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0)))
-        heading_gate = 0.25 + 0.75 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+        heading_gate = 0.30 + 0.70 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
         target_speed *= heading_gate
         if goal_proximity > 0.0:
             target_speed *= max(
@@ -233,11 +264,16 @@ class MultiAgentEnv(gym.Env):
         open_water = max(0.0, 1.0 - float(np.clip(conflict_level, 0.0, 1.0)))
         speed_ratio = min(1.0, current_forward_speed / max(target_speed, 1e-3))
         speed_deficit_ratio = max(0.0, (target_speed - current_forward_speed) / max(target_speed, 1e-3))
-        excess_turn = max(0.0, abs(observation.final_angular_z) - 0.15)
+        turn_rate = abs(observation.final_angular_z)
+        excess_turn = max(0.0, turn_rate - 0.15)
+        low_speed_ratio = max(0.0, 1.0 - speed_ratio)
+        spin_ratio = min(1.0, low_speed_ratio * (0.45 + 0.55 * (1.0 - aligned)))
+        idle_penalty_alignment = 0.45 + 0.55 * aligned
 
         reward = self.config.reward.pure_cruise_reward_weight * open_water * aligned * speed_ratio
-        reward -= self.config.reward.pure_idle_penalty_weight * open_water * aligned * speed_deficit_ratio
-        reward -= self.config.reward.pure_turn_penalty_weight * open_water * aligned * excess_turn
+        reward -= self.config.reward.pure_idle_penalty_weight * idle_penalty_alignment * speed_deficit_ratio
+        reward -= self.config.reward.pure_turn_penalty_weight * (0.50 + 0.50 * low_speed_ratio) * excess_turn
+        reward -= self.config.reward.pure_spin_penalty_weight * spin_ratio * max(0.0, turn_rate - 0.18)
         return reward
 
     def expand_policy_action(self, agent_id: str, action) -> tuple[float, float]:
@@ -308,11 +344,43 @@ class MultiAgentEnv(gym.Env):
 
         return max_risk
 
-    def _compute_head_on_guidance_reward(self, observation: AgentLocalObservation, previous_forward_speed: float) -> float:
-        scenario_name = getattr(self._scenario, 'name', '') if self._scenario is not None else ''
-        if 'head_on' not in scenario_name:
+    def _compute_route_cross_track_error(
+        self,
+        agent_id: str,
+        observation: AgentLocalObservation,
+    ) -> float:
+        if self._scenario is None:
             return 0.0
 
+        spawn = self._scenario.agent_spawns.get(agent_id)
+        goal = self._scenario.agent_goals.get(agent_id)
+        if spawn is None or goal is None:
+            return 0.0
+
+        route_dx = float(goal.x - spawn.x)
+        route_dy = float(goal.y - spawn.y)
+        route_length = float(np.hypot(route_dx, route_dy))
+        if route_length <= 1e-6:
+            return 0.0
+
+        relative_x = float(observation.pose_x - spawn.x)
+        relative_y = float(observation.pose_y - spawn.y)
+        cross_track = abs((relative_x * route_dy) - (relative_y * route_dx)) / route_length
+        return float(cross_track)
+
+    def _effective_near_miss_distance(self) -> float:
+        near_miss_distance = float(self.config.near_miss_distance)
+        if self._scenario is None:
+            return near_miss_distance
+        if self._scenario.name != 'two_usv_head_on':
+            return near_miss_distance
+        head_on_override = float(getattr(self.config.reward, 'head_on_near_miss_distance', 0.0))
+        if head_on_override <= 0.0:
+            return near_miss_distance
+        # Always keep a non-zero safety band above collision threshold.
+        return max(head_on_override, self.config.collision_distance + 1e-3)
+
+    def _compute_head_on_guidance_reward(self, observation: AgentLocalObservation, previous_forward_speed: float) -> float:
         guidance_distance = max(
             self.config.reward.head_on_guidance_distance,
             self.config.reward.anticipation_distance,
@@ -323,6 +391,7 @@ class MultiAgentEnv(gym.Env):
 
         best_neighbor = None
         best_score = -1.0
+        best_range_rate = 0.0
         for neighbor in observation.neighbors:
             if neighbor.distance <= 1e-3 or neighbor.distance > guidance_distance:
                 continue
@@ -362,6 +431,7 @@ class MultiAgentEnv(gym.Env):
             if score > best_score:
                 best_score = score
                 best_neighbor = neighbor
+                best_range_rate = float(range_rate)
 
         if best_neighbor is None:
             return 0.0
@@ -378,13 +448,22 @@ class MultiAgentEnv(gym.Env):
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
         speed_drop = max(0.0, previous_forward_speed - current_forward_speed)
         speed_drop_ratio = max(0.0, min(1.0, speed_drop / max(desired_forward_speed, 1e-3)))
+        closing_weight = max(0.0, min(1.0, (best_range_rate - 0.05) / 0.75))
+        urgency = proximity * (0.45 + 0.55 * closing_weight)
+        close_centerline_penalty = urgency * centerline_penalty * max(0.35, forward_progress)
+        no_turn_penalty = urgency * centerline_penalty * max(0.0, 1.0 - turn_progress)
+
+        phase_gate = self.config.reward.head_on_phase_gate_strength
+        forward_gate = max(0.0, min(1.0, 1.0 - phase_gate * (1.0 - corridor_progress)))
 
         return (
             self.config.reward.head_on_corridor_reward_weight * proximity * corridor_progress
             - self.config.reward.head_on_centerline_penalty_weight * proximity * centerline_penalty
             + self.config.reward.head_on_turn_reward_weight * proximity * turn_progress
-            + self.config.reward.head_on_forward_reward_weight * proximity * forward_progress
-            - self.config.reward.head_on_speed_drop_penalty_weight * proximity * speed_drop_ratio
+            + self.config.reward.head_on_forward_reward_weight * proximity * forward_gate * forward_progress
+            - self.config.reward.head_on_speed_drop_penalty_weight * proximity * forward_gate * speed_drop_ratio
+            - self.config.reward.head_on_close_penalty_weight * close_centerline_penalty
+            - self.config.reward.head_on_no_turn_penalty_weight * no_turn_penalty
         )
 
     def _compute_crossing_overtaking_guidance_reward(self, observation: AgentLocalObservation) -> float:
@@ -404,6 +483,9 @@ class MultiAgentEnv(gym.Env):
         best_crossing_forward_reward = 0.0
         best_overtaking_reward = 0.0
         best_overtaking_forward_reward = 0.0
+        best_overtaking_corridor_reward = 0.0
+        max_overtaking_centerline_penalty = 0.0
+        max_overtaking_close_penalty = 0.0
         max_wrong_way_penalty = 0.0
 
         for neighbor in observation.neighbors:
@@ -427,6 +509,15 @@ class MultiAgentEnv(gym.Env):
                 and neighbor_forward_speed > 0.05
                 and neighbor_forward_speed < own_speed - 0.02
             )
+            co_directional_close = (
+                same_lane_ahead
+                and own_speed > 0.10
+                and neighbor_forward_speed > 0.05
+                and abs(body_vx) < 0.15
+                and neighbor.distance < lookahead_distance * 0.7
+            )
+            if co_directional_close and not overtaking_target:
+                overtaking_target = True
             starboard_crossing = body_y < -0.35 and closing_speed > -0.05
 
             proximity = max(0.0, min(1.0, (lookahead_distance - neighbor.distance) / lookahead_distance))
@@ -445,10 +536,27 @@ class MultiAgentEnv(gym.Env):
                 continue
 
             if overtaking_target:
+                target_offset = 0.55 + 0.35 * proximity
+                starboard_offset = max(0.0, -body_y)
+                corridor_progress = max(0.0, min(1.0, starboard_offset / max(target_offset, 1e-3)))
+                centerline_penalty = max(0.0, 1.0 - corridor_progress)
+                close_penalty = proximity * closing_weight * centerline_penalty * forward_progress
                 best_overtaking_reward = max(best_overtaking_reward, proximity * turn_progress)
                 best_overtaking_forward_reward = max(
                     best_overtaking_forward_reward,
                     proximity * turn_progress * forward_progress,
+                )
+                best_overtaking_corridor_reward = max(
+                    best_overtaking_corridor_reward,
+                    proximity * corridor_progress * max(turn_progress, 0.35),
+                )
+                max_overtaking_centerline_penalty = max(
+                    max_overtaking_centerline_penalty,
+                    proximity * centerline_penalty,
+                )
+                max_overtaking_close_penalty = max(
+                    max_overtaking_close_penalty,
+                    close_penalty,
                 )
                 max_wrong_way_penalty = max(max_wrong_way_penalty, proximity * wrong_way_progress)
 
@@ -457,6 +565,9 @@ class MultiAgentEnv(gym.Env):
             + self.config.reward.crossing_forward_reward_weight * best_crossing_forward_reward
             + self.config.reward.overtaking_starboard_turn_reward_weight * best_overtaking_reward
             + self.config.reward.overtaking_forward_reward_weight * best_overtaking_forward_reward
+            + self.config.reward.overtaking_corridor_reward_weight * best_overtaking_corridor_reward
+            - self.config.reward.overtaking_centerline_penalty_weight * max_overtaking_centerline_penalty
+            - self.config.reward.overtaking_close_penalty_weight * max_overtaking_close_penalty
             - self.config.reward.colregs_port_turn_penalty_weight * max_wrong_way_penalty
         )
 
@@ -474,6 +585,10 @@ class MultiAgentEnv(gym.Env):
             self._agent_ids,
             goal_distance=self.config.goal_distance,
             neighbor_speed=self.config.scenario_neighbor_speed,
+            rng=self._rng if (self.config.scenario_spawn_position_std > 0 or self.config.scenario_spawn_heading_std > 0 or self.config.scenario_goal_position_std > 0) else None,
+            spawn_position_std=self.config.scenario_spawn_position_std,
+            spawn_heading_std=self.config.scenario_spawn_heading_std,
+            goal_position_std=self.config.scenario_goal_position_std,
         )
 
         for controller in self._controllers.values():
@@ -498,6 +613,9 @@ class MultiAgentEnv(gym.Env):
         self._previous_actions = {namespace: self.zero_policy_action() for namespace in self._agent_ids}
         self._previous_forward_speeds = {
             namespace: max(0.0, observation.final_linear_x) for namespace, observation in observations.items()
+        }
+        self._previous_conflict_risks = {
+            namespace: self._compute_conflict_risk(observation) for namespace, observation in observations.items()
         }
         self._episode_start = time.monotonic()
         self._last_team_progress_time = self._episode_start
@@ -544,24 +662,44 @@ class MultiAgentEnv(gym.Env):
 
         safety = 0.0
         conflict_risk = self._compute_conflict_risk(observation)
+        previous_conflict_risk = self._previous_conflict_risks.get(agent_id, conflict_risk)
+        near_miss_distance = self._effective_near_miss_distance()
+
         if pair_min < self.config.collision_distance:
             safety += self.config.reward.collision_penalty
-        elif pair_min < self.config.near_miss_distance:
-            safety -= self.config.reward.near_miss_weight * (self.config.near_miss_distance - pair_min)
+        elif pair_min < near_miss_distance:
+            near_miss_band = max(near_miss_distance - self.config.collision_distance, 1e-3)
+            normalized_proximity = (near_miss_distance - pair_min) / near_miss_band
+            safety -= self.config.reward.near_miss_weight * (normalized_proximity ** self.config.reward.near_miss_exponent) * near_miss_band
         conflict_relief_scale = max(0.35, 1.0 - (self.config.goal_proximity_conflict_relief * goal_proximity))
         safety -= self.config.reward.conflict_risk_weight * conflict_risk * conflict_relief_scale
 
         conflict_level = min(conflict_risk, 1.0) * conflict_relief_scale
+        conflict_active = min(1.0, max(previous_conflict_risk, conflict_risk)) * conflict_relief_scale
         current_forward_speed = max(0.0, observation.final_linear_x)
         desired_conflict_speed = self._target_forward_speed(
             observation,
             conflict_level=conflict_level,
             goal_proximity=goal_proximity,
         )
+        if progress > 0.0:
+            progress_gate = 1.0 - (self.config.reward.conflict_progress_scale * max(0.0, conflict_active - 0.25))
+            progress *= max(0.2, progress_gate)
         speed_deficit = max(0.0, desired_conflict_speed - current_forward_speed)
         speed_drop = max(0.0, self._previous_forward_speeds.get(agent_id, 0.0) - current_forward_speed)
+        risk_drop = max(0.0, previous_conflict_risk - conflict_risk)
+        risk_rise = max(0.0, conflict_risk - previous_conflict_risk)
+        near_miss_band = max(near_miss_distance - self.config.collision_distance, 1e-3)
+        near_miss_ratio = max(
+            0.0,
+            min(1.0, (near_miss_distance - pair_min) / near_miss_band),
+        )
+        unsafe_speed_excess = max(0.0, current_forward_speed - (0.85 * desired_conflict_speed))
         braking = -self.config.reward.conflict_brake_weight * conflict_level * speed_deficit
         braking -= self.config.reward.stop_go_penalty_weight * conflict_level * speed_drop
+        braking += self.config.reward.conflict_resolution_reward_weight * conflict_active * risk_drop
+        braking -= self.config.reward.conflict_escalation_penalty_weight * conflict_active * risk_rise
+        braking -= self.config.reward.unsafe_close_speed_penalty_weight * near_miss_ratio * unsafe_speed_excess
         braking += conflict_relief_scale * (
             self._compute_head_on_guidance_reward(
                 observation,
@@ -574,17 +712,28 @@ class MultiAgentEnv(gym.Env):
             conflict_level=conflict_level,
             goal_proximity=goal_proximity,
         )
+        cross_track_error = self._compute_route_cross_track_error(agent_id, observation)
+        path_tolerance = (
+            self.config.reward.path_deviation_tolerance
+            + self.config.reward.path_deviation_conflict_scale * conflict_level
+        )
+        path_deviation_excess = max(0.0, cross_track_error - path_tolerance)
+        if path_deviation_excess > 0.0:
+            progress -= self.config.reward.path_deviation_penalty_weight * path_deviation_excess
 
         smoothness_scale = max(0.1, 1.0 - (self.config.goal_proximity_smoothness_relief * goal_proximity))
         smoothness = -(self.config.reward.action_smoothness_weight * smoothness_scale) * float(
             np.linalg.norm(action - self._previous_actions[agent_id])
         )
+        if self.config.reward.angular_accel_penalty_weight > 0.0:
+            angular_change = abs(float(action[1]) - float(self._previous_actions[agent_id][1]))
+            smoothness -= self.config.reward.angular_accel_penalty_weight * smoothness_scale * angular_change
         heading_scale = max(
             0.1,
             1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)) - (self.config.goal_proximity_heading_relief * goal_proximity),
         )
         heading = -((self.config.reward.heading_error_weight * heading_scale) * abs(observation.heading_error))
-        team = -self.config.team_reward_weight * max(0.0, self.config.near_miss_distance - pair_min)
+        team = -self.config.team_reward_weight * max(0.0, near_miss_distance - pair_min)
         if team_progress_delta >= 0.0:
             team += self.config.team_progress_weight * team_progress_delta
         else:
@@ -676,6 +825,7 @@ class MultiAgentEnv(gym.Env):
             self._previous_distances[namespace] = observation.distance_to_goal
             self._previous_actions[namespace] = projected_actions[namespace]
             self._previous_forward_speeds[namespace] = max(0.0, observation.final_linear_x)
+            self._previous_conflict_risks[namespace] = self._compute_conflict_risk(observation)
 
         terminated_dict = {namespace: terminated for namespace in self._agent_ids}
         terminated_dict['__all__'] = terminated

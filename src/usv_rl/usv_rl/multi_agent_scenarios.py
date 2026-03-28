@@ -1,6 +1,8 @@
 import math
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from .types import NeighborState
 
@@ -48,6 +50,36 @@ class FleetScenario:
 
     def states_at(self, elapsed: float) -> List[NeighborState]:
         return [track.state_at(elapsed) for track in self.background_tracks]
+
+    def apply_randomization(
+        self,
+        rng: np.random.Generator,
+        *,
+        spawn_position_std: float = 0.5,
+        spawn_heading_std: float = 0.15,
+        goal_position_std: float = 0.3,
+    ) -> 'FleetScenario':
+        """Return a copy with Gaussian jitter on spawn/goal positions and headings."""
+        new_spawns = {}
+        for agent_id, spawn in self.agent_spawns.items():
+            new_spawns[agent_id] = AgentSpawnConfig(
+                x=spawn.x + spawn_position_std * float(rng.standard_normal()),
+                y=spawn.y + spawn_position_std * float(rng.standard_normal()),
+                yaw=spawn.yaw + spawn_heading_std * float(rng.standard_normal()),
+            )
+        new_goals = {}
+        for agent_id, goal in self.agent_goals.items():
+            new_goals[agent_id] = AgentGoalConfig(
+                x=goal.x + goal_position_std * float(rng.standard_normal()),
+                y=goal.y + goal_position_std * float(rng.standard_normal()),
+            )
+        return FleetScenario(
+            name=self.name,
+            duration=self.duration,
+            agent_spawns=new_spawns,
+            agent_goals=new_goals,
+            background_tracks=list(self.background_tracks),
+        )
 
 
 class MultiAgentScenarioFactory:
@@ -133,6 +165,25 @@ class MultiAgentScenarioFactory:
         *,
         goal_distance: float,
         neighbor_speed: float,
+        rng: Optional[np.random.Generator] = None,
+        spawn_position_std: float = 0.0,
+        spawn_heading_std: float = 0.0,
+        goal_position_std: float = 0.0,
+    ) -> FleetScenario:
+        scenario = MultiAgentScenarioFactory._create_base(
+            kind, agent_ids, goal_distance=goal_distance, neighbor_speed=neighbor_speed,
+        )
+        return MultiAgentScenarioFactory._maybe_randomize(
+            scenario, rng, spawn_position_std, spawn_heading_std, goal_position_std,
+        )
+
+    @staticmethod
+    def _create_base(
+        kind: str,
+        agent_ids: tuple[str, ...],
+        *,
+        goal_distance: float,
+        neighbor_speed: float,
     ) -> FleetScenario:
         if kind == 'two_usv_head_on':
             if len(agent_ids) < 2:
@@ -182,13 +233,13 @@ class MultiAgentScenarioFactory:
             first, second, third = agent_ids[:3]
             agent_spawns = {
                 first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
-                second: AgentSpawnConfig(x=2.5, y=0.0, yaw=0.0),
-                third: AgentSpawnConfig(x=4.0, y=-3.0, yaw=math.pi / 2.0),
+                second: AgentSpawnConfig(x=6.0, y=-3.0, yaw=0.0),
+                third: AgentSpawnConfig(x=3.0, y=3.0, yaw=-0.15),
             }
             agent_goals = {
                 first: AgentGoalConfig(x=goal_distance, y=0.0),
-                second: AgentGoalConfig(x=goal_distance + 1.5, y=0.0),
-                third: AgentGoalConfig(x=4.0, y=goal_distance * 0.5),
+                second: AgentGoalConfig(x=goal_distance, y=-3.0),
+                third: AgentGoalConfig(x=goal_distance, y=2.5),
             }
             MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
             return FleetScenario(
@@ -198,12 +249,12 @@ class MultiAgentScenarioFactory:
                 agent_goals=agent_goals,
                 background_tracks=[
                     BackgroundTrack(
-                        track_id='background_head_on',
-                        start_x=goal_distance * 0.75,
-                        start_y=1.5,
-                        vx=-neighbor_speed * 0.7,
+                        track_id='background_slow_ahead',
+                        start_x=4.0,
+                        start_y=0.0,
+                        vx=neighbor_speed * 0.35,
                         vy=0.0,
-                        yaw=math.pi,
+                        yaw=0.0,
                     ),
                 ],
             )
@@ -324,3 +375,20 @@ class MultiAgentScenarioFactory:
             )
 
         raise ValueError(f'Unsupported multi-agent scenario kind: {kind}')
+
+    @staticmethod
+    def _maybe_randomize(
+        scenario: FleetScenario,
+        rng: Optional[np.random.Generator],
+        spawn_position_std: float,
+        spawn_heading_std: float,
+        goal_position_std: float,
+    ) -> FleetScenario:
+        if rng is None or (spawn_position_std <= 0 and spawn_heading_std <= 0 and goal_position_std <= 0):
+            return scenario
+        return scenario.apply_randomization(
+            rng,
+            spawn_position_std=spawn_position_std,
+            spawn_heading_std=spawn_heading_std,
+            goal_position_std=goal_position_std,
+        )

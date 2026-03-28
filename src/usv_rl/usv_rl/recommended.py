@@ -1,4 +1,4 @@
-RECOMMENDED_MODEL_RELATIVE_PATH = './tmp_rl/bc_scripted_teacher_mlp_v2.npz'
+RECOMMENDED_MODEL_RELATIVE_PATH = './tmp_rl/mappo_a10_baseline_step_358400.pt'
 RECOMMENDED_BENCHMARK_RELATIVE_PATH = './tmp_rl/online_bc_v2_benchmark.json'
 RECOMMENDED_BENCHMARK_LOG_DIR_RELATIVE_PATH = './tmp_rl/online_bc_v2_logs'
 RECOMMENDED_GATE_RELATIVE_PATH = './tmp_rl/online_bc_v2_gate.json'

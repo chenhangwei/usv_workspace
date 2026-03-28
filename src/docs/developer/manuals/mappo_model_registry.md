@@ -12,7 +12,8 @@
 
 | 角色 | 产物 | 路径 | 状态 | 说明 |
 | --- | --- | --- | --- | --- |
-| 当前主候选 | `mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt` | `/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_checkpoints/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt` | 推荐保留 | 当前已知最稳的在线候选，3 次在线复跑 `pass_rate=1.0`，适合作为本地续训起点。 |
+| **正式基线** | `mappo_a10_baseline_step_358400.pt` | `/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200_resume_20260320_171751_checkpoints/...step_0358400.pt` (symlink: `tmp_rl/mappo_a10_baseline_step_358400.pt`) | **生产推荐** | a10 resume 训练线 step 358400。11/11 检查点零碰撞，progress +0.064 ~ +0.089（本步 +0.089）。headon20-22 实验证明 PPO 微调无法改善，该检查点即为当前最优。已设为 `recommended.py` 默认模型。 |
+| 旧主候选 | `mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt` | `/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_checkpoints/mappo_dense_a10_parallel_headon_stabilize_20260320_003331_step_0307200.pt` | 归档保留 | 原主候选，3 次在线复跑 `pass_rate=1.0`，被 358400 取代。 |
 | final 备份 | `mappo_dense_a10_parallel_headon_stabilize_20260320_003331.pt` | `/mnt/data/checkpoints/usv_rl/mappo_dense_a10_parallel_headon_stabilize_20260320_003331.pt` | 备份保留 | 该 run 已完整训练到 `500000` timesteps，但在线稳定性不如 `307200-step`，更适合作为归档备份。 |
 | 旧安全基线 | `mappo_dense_colregs_v2_10240_recover_step_0007680.pt` | `/mnt/data/checkpoints/usv_rl/mappo_dense_colregs_v2_10240_recover_checkpoints/mappo_dense_colregs_v2_10240_recover_step_0007680.pt` | 参考保留 | 早期稳定安全基线，适合作为后续在线 benchmark 的比较参考。 |
 
@@ -39,6 +40,7 @@
 
 如果使用 GitHub Release，建议采用稳定的资产命名，而不是直接暴露临时实验目录结构：
 
+- `mappo-a10-baseline-step-358400.pt` ← **当前正式基线**
 - `mappo-headon-stabilize-primary-step-307200.pt`
 - `mappo-headon-stabilize-final-step-500000.pt`
 - `mappo-headon-stabilize-summary-20260320.json`

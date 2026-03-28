@@ -3,6 +3,7 @@ import math
 import time
 from dataclasses import dataclass
 
+import numpy as np
 import rclpy
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
@@ -29,6 +30,26 @@ class _SimAgentState:
     last_cmd_time: float = 0.0
 
 
+@dataclass
+class _DomainRandomizationConfig:
+    """Domain randomization noise parameters for sim-to-real robustness.
+
+    Process noise affects the actual dynamics (simulating wind/current).
+    Observation noise affects published sensor readings (simulating GPS/compass noise).
+    """
+    enabled: bool = False
+    # Observation noise (applied to published values only)
+    position_noise_std: float = 0.10       # GPS jitter (m)
+    heading_noise_std: float = 0.02        # Compass jitter (rad, ~1.1°)
+    velocity_noise_ratio: float = 0.03     # Velocity measurement noise (fraction)
+    # Process noise: water current (Ornstein-Uhlenbeck drift)
+    current_speed_max: float = 0.04        # Maximum current magnitude (m/s)
+    current_theta: float = 0.15            # OU mean-reversion rate
+    current_sigma: float = 0.02            # OU volatility
+    # Process noise: velocity execution noise
+    velocity_exec_noise: float = 0.05      # Fraction of commanded speed
+
+
 class MultiUsvSimNode(Node):
     def __init__(self, agent_namespaces: tuple[str, ...], update_rate: float = 20.0):
         super().__init__('multi_usv_sim')
@@ -37,6 +58,10 @@ class MultiUsvSimNode(Node):
         self._tau_linear = 0.45
         self._tau_angular = 0.25
         self._command_timeout = 0.6
+        self._dr = _DomainRandomizationConfig()
+        self._rng = np.random.default_rng()
+        self._current_x: float = 0.0
+        self._current_y: float = 0.0
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -103,8 +128,51 @@ class MultiUsvSimNode(Node):
         state = self._agent_states[namespace]
         return state.x, state.y, state.yaw, state.v
 
+    def set_domain_randomization(
+        self,
+        enabled: bool = False,
+        position_noise_std: float = 0.10,
+        heading_noise_std: float = 0.02,
+        velocity_noise_ratio: float = 0.03,
+        current_speed_max: float = 0.04,
+        current_theta: float = 0.15,
+        current_sigma: float = 0.02,
+        velocity_exec_noise: float = 0.05,
+    ) -> None:
+        self._dr = _DomainRandomizationConfig(
+            enabled=enabled,
+            position_noise_std=position_noise_std,
+            heading_noise_std=heading_noise_std,
+            velocity_noise_ratio=velocity_noise_ratio,
+            current_speed_max=current_speed_max,
+            current_theta=current_theta,
+            current_sigma=current_sigma,
+            velocity_exec_noise=velocity_exec_noise,
+        )
+        self._current_x = 0.0
+        self._current_y = 0.0
+
+    def _step_current_drift(self) -> tuple[float, float]:
+        """Evolve water current using an Ornstein-Uhlenbeck process."""
+        dt = self._dt
+        theta = self._dr.current_theta
+        sigma = self._dr.current_sigma
+        cap = self._dr.current_speed_max
+        sqrt_dt = math.sqrt(dt)
+        self._current_x += theta * (-self._current_x) * dt + sigma * float(self._rng.standard_normal()) * sqrt_dt
+        self._current_y += theta * (-self._current_y) * dt + sigma * float(self._rng.standard_normal()) * sqrt_dt
+        self._current_x = max(-cap, min(cap, self._current_x))
+        self._current_y = max(-cap, min(cap, self._current_y))
+        return self._current_x, self._current_y
+
     def _on_timer(self):
         now = time.monotonic()
+        dr = self._dr
+        if dr.enabled:
+            current_x, current_y = self._step_current_drift()
+        else:
+            current_x, current_y = 0.0, 0.0
+
         for namespace, state in self._agent_states.items():
             if (now - state.last_cmd_time) > self._command_timeout:
                 state.target_v = 0.0
@@ -115,27 +183,52 @@ class MultiUsvSimNode(Node):
             state.v += linear_alpha * (state.target_v - state.v)
             state.omega += angular_alpha * (state.target_omega - state.omega)
 
-            state.yaw += state.omega * self._dt
+            # Velocity execution noise (actuator imperfection)
+            effective_v = state.v
+            effective_omega = state.omega
+            if dr.enabled and dr.velocity_exec_noise > 0.0:
+                effective_v *= 1.0 + dr.velocity_exec_noise * float(self._rng.standard_normal())
+                effective_omega *= 1.0 + dr.velocity_exec_noise * float(self._rng.standard_normal())
+
+            state.yaw += effective_omega * self._dt
             while state.yaw > math.pi:
                 state.yaw -= 2.0 * math.pi
             while state.yaw < -math.pi:
                 state.yaw += 2.0 * math.pi
 
-            vx_world = state.v * math.cos(state.yaw)
-            vy_world = state.v * math.sin(state.yaw)
-            state.x += vx_world * self._dt
-            state.y += vy_world * self._dt
+            vx_world = effective_v * math.cos(state.yaw)
+            vy_world = effective_v * math.sin(state.yaw)
+            state.x += (vx_world + current_x) * self._dt
+            state.y += (vy_world + current_y) * self._dt
             self._publish_agent_state(namespace, state)
 
     def _publish_agent_state(self, namespace: str, state: _SimAgentState):
         stamp = self.get_clock().now().to_msg()
-        qx, qy, qz, qw = _yaw_to_quaternion(state.yaw)
+        dr = self._dr
+
+        # Apply observation noise (sensor imperfection) to published values only
+        pub_x = state.x
+        pub_y = state.y
+        pub_yaw = state.yaw
+        pub_v = state.v
+        pub_omega = state.omega
+        if dr.enabled:
+            if dr.position_noise_std > 0.0:
+                pub_x += dr.position_noise_std * float(self._rng.standard_normal())
+                pub_y += dr.position_noise_std * float(self._rng.standard_normal())
+            if dr.heading_noise_std > 0.0:
+                pub_yaw += dr.heading_noise_std * float(self._rng.standard_normal())
+            if dr.velocity_noise_ratio > 0.0:
+                pub_v *= 1.0 + dr.velocity_noise_ratio * float(self._rng.standard_normal())
+                pub_omega *= 1.0 + dr.velocity_noise_ratio * float(self._rng.standard_normal())
+
+        qx, qy, qz, qw = _yaw_to_quaternion(pub_yaw)
 
         pose_msg = PoseStamped()
         pose_msg.header.stamp = stamp
         pose_msg.header.frame_id = 'map'
-        pose_msg.pose.position.x = state.x
-        pose_msg.pose.position.y = state.y
+        pose_msg.pose.position.x = pub_x
+        pose_msg.pose.position.y = pub_y
         pose_msg.pose.position.z = 0.0
         pose_msg.pose.orientation.x = qx
         pose_msg.pose.orientation.y = qy
@@ -147,9 +240,9 @@ class MultiUsvSimNode(Node):
         velocity_msg = TwistStamped()
         velocity_msg.header.stamp = stamp
         velocity_msg.header.frame_id = 'map'
-        velocity_msg.twist.linear.x = state.v * math.cos(state.yaw)
-        velocity_msg.twist.linear.y = state.v * math.sin(state.yaw)
-        velocity_msg.twist.angular.z = state.omega
+        velocity_msg.twist.linear.x = pub_v * math.cos(pub_yaw)
+        velocity_msg.twist.linear.y = pub_v * math.sin(pub_yaw)
+        velocity_msg.twist.angular.z = pub_omega
         self._velocity_publishers[namespace].publish(velocity_msg)
 
         state_msg = State()
