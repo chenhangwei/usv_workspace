@@ -39,6 +39,8 @@ rosidl_generate_interfaces(
   "msg/FormationConfig.msg"
   "msg/NeighborPose.msg"
   "msg/FleetNeighborPoses.msg"
+  "msg/VisionObstacle.msg"
+  "msg/VisionObstacleArray.msg"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
 

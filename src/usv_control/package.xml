@@ -35,6 +35,7 @@
   
   <depend>common_utils</depend>
   <depend>mavros_msgs</depend>
+  <depend>common_interfaces</depend>
   
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

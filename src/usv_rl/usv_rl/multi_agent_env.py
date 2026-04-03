@@ -14,7 +14,7 @@ from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds, RewardConfig
 from .multi_agent_bridge import MultiAgentTrainingBridge
 from .multi_agent_scenarios import MultiAgentScenarioFactory
-from .multi_agent_types import AgentLocalObservation, FleetGlobalState, MultiAgentRewardBreakdown
+from .multi_agent_types import AgentLocalObservation, FleetGlobalState, MultiAgentRewardBreakdown, ENCOUNTER_TYPE_COUNT
 from .multi_usv_sim import MultiUsvSimNode
 from usv_control.velocity_controller_node import VelocityControllerNode
 
@@ -24,6 +24,13 @@ try:
 except ImportError:
     gym = SimpleNamespace(Env=object)
     spaces = None
+
+# Maps scenario name → encounter type index for one-hot conditioning.
+_SCENARIO_ENCOUNTER_MAP = {
+    'two_usv_head_on': 0,
+    'three_usv_crossing': 1,
+    'three_usv_overtaking': 2,
+}
 
 
 @dataclass
@@ -38,6 +45,12 @@ class MultiAgentEnvConfig:
     cruise_speed: float = 0.4
     max_angular_velocity: float = 0.4
     control_dt: float = 0.2
+    heading_omega_deadband: float = 0.06
+    heading_omega_reference: float = 0.85
+    angular_authority_power: float = 1.6
+    angular_accel_limit: float = 1.8
+    angular_decel_limit: float = 2.4
+    conflict_turn_relief: float = 0.55
     state_timeout: float = 10.0
     ready_timeout: float = 45.0
     episode_timeout: float = 45.0
@@ -65,6 +78,7 @@ class MultiAgentEnvConfig:
     team_regression_penalty_weight: float = 0.0
     team_dispersion_penalty_weight: float = 0.0
     team_dispersion_margin: float = 0.0
+    separation_recovery_weight: float = 0.0
     team_completion_bonus: float = 18.0
     deadlock_penalty_weight: float = 4.0
     # Domain randomization
@@ -91,7 +105,8 @@ class MultiAgentEnv(gym.Env):
 
         self.config = config or MultiAgentEnvConfig()
         self._validate_action_config()
-        self._agent_ids = tuple(self.config.agent_namespaces)
+        self._runtime_agent_ids = tuple(self.config.agent_namespaces)
+        self._active_agent_ids = self._runtime_agent_ids
         self._episode_index = 0
         self._rng = np.random.default_rng()
         self._executor = MultiThreadedExecutor()
@@ -156,11 +171,23 @@ class MultiAgentEnv(gym.Env):
 
     @property
     def agent_ids(self) -> tuple[str, ...]:
-        return self._agent_ids
+        return self._active_agent_ids
+
+    @property
+    def current_scenario_name(self) -> str:
+        return self._scenario.name if self._scenario is not None else 'unknown'
+
+    @property
+    def runtime_agent_ids(self) -> tuple[str, ...]:
+        return self._runtime_agent_ids
+
+    @property
+    def inactive_agent_ids(self) -> tuple[str, ...]:
+        return tuple(agent_id for agent_id in self._runtime_agent_ids if agent_id not in self._active_agent_ids)
 
     def _ensure_runtime(self):
         if self._sim_node is None:
-            self._sim_node = MultiUsvSimNode(self._agent_ids)
+            self._sim_node = MultiUsvSimNode(self._runtime_agent_ids)
             if self.config.domain_randomization:
                 self._sim_node.set_domain_randomization(
                     enabled=True,
@@ -175,11 +202,11 @@ class MultiAgentEnv(gym.Env):
             self._executor.add_node(self._sim_node)
 
         if self._bridge is None:
-            self._bridge = MultiAgentTrainingBridge(self._agent_ids, self.config.neighbor_publish_rate)
+            self._bridge = MultiAgentTrainingBridge(self._runtime_agent_ids, self.config.neighbor_publish_rate)
             self._executor.add_node(self._bridge)
 
         if not self._controllers:
-            for namespace in self._agent_ids:
+            for namespace in self._runtime_agent_ids:
                 controller_parameters = [
                     Parameter('cruise_speed', Parameter.Type.DOUBLE, self.config.cruise_speed),
                     Parameter('max_angular_velocity', Parameter.Type.DOUBLE, self.config.max_angular_velocity),
@@ -214,6 +241,17 @@ class MultiAgentEnv(gym.Env):
     def zero_policy_action(self) -> np.ndarray:
         return np.zeros(self.action_dim, dtype=np.float32)
 
+    def _projection_conflict_level(self, observation: Optional[AgentLocalObservation]) -> float:
+        if observation is None or not observation.neighbors:
+            return 0.0
+        lookahead_distance = max(
+            self.config.reward.anticipation_distance,
+            self.config.reward.conflict_distance,
+            self.config.collision_distance + 1e-3,
+        )
+        min_neighbor_distance = observation.min_neighbor_distance()
+        return float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+
     def project_policy_action(self, agent_id: str, action) -> np.ndarray:
         observation = self._latest_observations.get(agent_id)
         raw_linear_x = None if observation is None else observation.raw_linear_x
@@ -224,6 +262,16 @@ class MultiAgentEnv(gym.Env):
             linear_delta_limit=self._pure_linear_speed_limit(),
             angular_delta_limit=self._pure_angular_speed_limit(),
             raw_linear_x=raw_linear_x,
+            heading_error=None if observation is None else observation.heading_error,
+            current_angular_z=0.0 if observation is None else observation.final_angular_z,
+            control_dt=self.config.control_dt,
+            conflict_level=self._projection_conflict_level(observation),
+            heading_omega_deadband=self.config.heading_omega_deadband,
+            heading_omega_reference=self.config.heading_omega_reference,
+            angular_authority_power=self.config.angular_authority_power,
+            angular_accel_limit=self.config.angular_accel_limit,
+            angular_decel_limit=self.config.angular_decel_limit,
+            conflict_turn_relief=self.config.conflict_turn_relief,
             forward_only=True,
         )
 
@@ -294,7 +342,12 @@ class MultiAgentEnv(gym.Env):
     def _wait_for_global_state(self, timeout: Optional[float] = None) -> FleetGlobalState:
         deadline = time.monotonic() + (timeout or self.config.state_timeout)
         while time.monotonic() < deadline:
-            state = self._bridge.get_global_state(self.config.max_agents, self.config.max_neighbors)
+            state = self._bridge.get_global_state(
+                self.config.max_agents,
+                self.config.max_neighbors,
+                active_agent_ids=self._active_agent_ids,
+                goal_tolerance=self.config.goal_tolerance,
+            )
             if state is not None:
                 return state
             time.sleep(0.05)
@@ -305,7 +358,7 @@ class MultiAgentEnv(gym.Env):
             return float('inf')
 
         distances = []
-        for agent_id in self._agent_ids:
+        for agent_id in self._active_agent_ids:
             spawn = self._scenario.agent_spawns.get(agent_id)
             goal = self._scenario.agent_goals.get(agent_id)
             if spawn is None or goal is None:
@@ -315,6 +368,49 @@ class MultiAgentEnv(gym.Env):
         if not distances:
             return float('inf')
         return float(np.mean(distances))
+
+    def _refresh_active_agent_ids(self):
+        if self._scenario is None:
+            self._active_agent_ids = self._runtime_agent_ids
+            return
+
+        active_ids = tuple(
+            agent_id
+            for agent_id in self._scenario.active_agent_ids
+            if agent_id in self._runtime_agent_ids
+        )
+        self._active_agent_ids = active_ids or self._runtime_agent_ids
+
+    def _filter_active_observations(self, observations: Dict[str, AgentLocalObservation]) -> Dict[str, AgentLocalObservation]:
+        return {
+            agent_id: observations[agent_id]
+            for agent_id in self._active_agent_ids
+            if agent_id in observations
+        }
+
+    def _annotate_encounter_types(self, observations, global_state):
+        scenario_name = self._scenario.name if self._scenario else ''
+        encounter_idx = _SCENARIO_ENCOUNTER_MAP.get(scenario_name, -1)
+        if encounter_idx < 0:
+            return
+        for obs in observations.values():
+            obs.encounter_type_index = encounter_idx
+        if global_state is not None:
+            for obs in global_state.local_observations.values():
+                obs.encounter_type_index = encounter_idx
+
+    def _build_episode_info(self, global_state: FleetGlobalState) -> dict:
+        return {
+            'scenario': self._scenario.name if self._scenario is not None else 'unknown',
+            'active_agent_ids': list(self._active_agent_ids),
+            'inactive_agent_ids': list(self.inactive_agent_ids),
+            'runtime_agent_ids': list(self._runtime_agent_ids),
+            'pairwise_min_separation': global_state.team_min_separation,
+            'pairwise_mean_separation': global_state.team_mean_separation,
+            'goal_completion_ratio': global_state.goal_completion_ratio,
+            'team_mean_goal_distance': global_state.team_mean_goal_distance,
+            'global_state': global_state.to_vector(self.config.max_agents, self.config.max_neighbors),
+        }
 
     def _compute_conflict_risk(self, observation: AgentLocalObservation) -> float:
         max_risk = 0.0
@@ -582,7 +678,7 @@ class MultiAgentEnv(gym.Env):
 
         self._scenario = MultiAgentScenarioFactory.create(
             scenario_kind,
-            self._agent_ids,
+            self._runtime_agent_ids,
             goal_distance=self.config.goal_distance,
             neighbor_speed=self.config.scenario_neighbor_speed,
             rng=self._rng if (self.config.scenario_spawn_position_std > 0 or self.config.scenario_spawn_heading_std > 0 or self.config.scenario_goal_position_std > 0) else None,
@@ -590,6 +686,7 @@ class MultiAgentEnv(gym.Env):
             spawn_heading_std=self.config.scenario_spawn_heading_std,
             goal_position_std=self.config.scenario_goal_position_std,
         )
+        self._refresh_active_agent_ids()
 
         for controller in self._controllers.values():
             controller.reset_for_training_episode()
@@ -606,17 +703,22 @@ class MultiAgentEnv(gym.Env):
 
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
+        self._annotate_encounter_types(observations, global_state)
         self._latest_observations = observations
         self._previous_distances = {
-            namespace: observation.distance_to_goal for namespace, observation in observations.items()
+            namespace: observations[namespace].distance_to_goal
+            for namespace in self._active_agent_ids
         }
-        self._previous_actions = {namespace: self.zero_policy_action() for namespace in self._agent_ids}
+        self._previous_actions = {namespace: self.zero_policy_action() for namespace in self._active_agent_ids}
         self._previous_forward_speeds = {
-            namespace: max(0.0, observation.final_linear_x) for namespace, observation in observations.items()
+            namespace: max(0.0, observations[namespace].final_linear_x)
+            for namespace in self._active_agent_ids
         }
         self._previous_conflict_risks = {
-            namespace: self._compute_conflict_risk(observation) for namespace, observation in observations.items()
+            namespace: self._compute_conflict_risk(observations[namespace])
+            for namespace in self._active_agent_ids
         }
+        self._previous_pair_min: float = float('inf')
         self._episode_start = time.monotonic()
         self._last_team_progress_time = self._episode_start
         self._best_team_mean_distance = global_state.team_mean_goal_distance
@@ -624,12 +726,10 @@ class MultiAgentEnv(gym.Env):
         self._initial_team_mean_goal_distance = self._scenario_initial_team_mean_goal_distance()
         self._episode_index += 1
 
+        active_observations = self._filter_active_observations(observations)
         return (
-            {namespace: observation.to_vector(self.config.max_neighbors) for namespace, observation in observations.items()},
-            {
-                'scenario': self._scenario.name,
-                'global_state': global_state.to_vector(self.config.max_agents, self.config.max_neighbors),
-            },
+            {namespace: observation.to_vector(self.config.max_neighbors) for namespace, observation in active_observations.items()},
+            self._build_episode_info(global_state),
         )
 
     def _compute_reward(
@@ -700,6 +800,14 @@ class MultiAgentEnv(gym.Env):
         braking += self.config.reward.conflict_resolution_reward_weight * conflict_active * risk_drop
         braking -= self.config.reward.conflict_escalation_penalty_weight * conflict_active * risk_rise
         braking -= self.config.reward.unsafe_close_speed_penalty_weight * near_miss_ratio * unsafe_speed_excess
+
+        # Conflict overspeed penalty: penalise exceeding desired_conflict_speed
+        # during active conflict.  Counteracts the asymmetry where only speed
+        # deficit (too slow) was penalised, encouraging the policy to slow down.
+        if self.config.reward.conflict_overspeed_penalty_weight > 0.0 and conflict_level > 0.25:
+            overspeed = max(0.0, current_forward_speed - desired_conflict_speed)
+            braking -= self.config.reward.conflict_overspeed_penalty_weight * conflict_level * overspeed
+
         braking += conflict_relief_scale * (
             self._compute_head_on_guidance_reward(
                 observation,
@@ -728,12 +836,93 @@ class MultiAgentEnv(gym.Env):
         if self.config.reward.angular_accel_penalty_weight > 0.0:
             angular_change = abs(float(action[1]) - float(self._previous_actions[agent_id][1]))
             smoothness -= self.config.reward.angular_accel_penalty_weight * smoothness_scale * angular_change
+
+        # Forward-speed oscillation penalty: penalise |vx_t - vx_{t-1}| globally
+        # (not gated by conflict) to prevent linear bang-bang behaviour.
+        if self.config.reward.forward_speed_change_penalty_weight > 0.0:
+            speed_change = abs(current_forward_speed - self._previous_forward_speeds.get(agent_id, current_forward_speed))
+            smoothness -= self.config.reward.forward_speed_change_penalty_weight * smoothness_scale * speed_change
+
+        # Proportional angular velocity penalty: penalise large |ω| when heading
+        # error is small.  The alignment factor (cos of heading error) is high when
+        # the USV is roughly pointing at the goal – exactly the situation where a
+        # large angular velocity is undesirable and produces S-curves.
+        if self.config.reward.straight_line_omega_penalty_weight > 0.0:
+            alignment = max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+            abs_omega = abs(float(action[1]))
+            # Scale penalty down during conflicts, but keep a configurable floor
+            # (default 0.1 is too low and nearly disables the penalty during avoidance).
+            conflict_floor = max(0.1, self.config.reward.straight_line_omega_conflict_floor)
+            conflict_gate = max(conflict_floor, 1.0 - min(conflict_risk, 1.0))
+            smoothness -= (
+                self.config.reward.straight_line_omega_penalty_weight
+                * alignment
+                * conflict_gate
+                * abs_omega
+            )
+
+        if self.config.reward.saturated_omega_flip_penalty_weight > 0.0:
+            previous_omega = float(self._previous_actions[agent_id][1])
+            current_omega = float(action[1])
+            if previous_omega * current_omega < 0.0:
+                angular_limit = max(self._pure_angular_speed_limit(), 1e-3)
+                min_saturation_ratio = min(abs(previous_omega), abs(current_omega)) / angular_limit
+                sat_threshold = max(0.1, self.config.reward.omega_flip_saturation_threshold)
+                flip_progress = max(0.0, min(1.0, (min_saturation_ratio - sat_threshold) / max(1.0 - sat_threshold, 0.1)))
+                if flip_progress > 0.0:
+                    alignment = max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+                    conflict_gate = max(0.2, 1.0 - 0.7 * min(conflict_risk, 1.0))
+                    smoothness -= (
+                        self.config.reward.saturated_omega_flip_penalty_weight
+                        * smoothness_scale
+                        * conflict_gate
+                        * (0.35 + 0.65 * alignment)
+                        * flip_progress
+                    )
+
         heading_scale = max(
             0.1,
             1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)) - (self.config.goal_proximity_heading_relief * goal_proximity),
         )
         heading = -((self.config.reward.heading_error_weight * heading_scale) * abs(observation.heading_error))
         team = -self.config.team_reward_weight * max(0.0, near_miss_distance - pair_min)
+
+        # Separation recovery: positive reward when pair_min increases while
+        # still in the near-miss zone, encouraging active disengagement.
+        if self.config.separation_recovery_weight > 0.0:
+            prev_pair_min = self._previous_pair_min
+            if np.isfinite(prev_pair_min) and pair_min < near_miss_distance * 1.5:
+                separation_delta = max(0.0, pair_min - prev_pair_min)
+                team += self.config.separation_recovery_weight * separation_delta
+
+        # Continuous proximity gradient penalty: a 1/d^2 repulsive field that
+        # creates a strong gradient pushing the agent away from neighbours well
+        # before the collision threshold is reached.
+        if self.config.reward.proximity_gradient_penalty_weight > 0.0:
+            pg_dist = max(1e-3, self.config.reward.proximity_gradient_distance)
+            if pair_min < pg_dist:
+                clamped = max(self.config.collision_distance * 0.5, pair_min)
+                normalised_inv_sq = (pg_dist / clamped) ** 2 - 1.0
+                safety -= self.config.reward.proximity_gradient_penalty_weight * normalised_inv_sq
+
+        # Speed-distance coupling penalty: penalise maintaining high forward
+        # speed when a neighbour is dangerously close.  This teaches the policy
+        # to slow down proactively, countering the vx-saturation problem.
+        if self.config.reward.speed_distance_coupling_penalty_weight > 0.0:
+            sd_thresh = self.config.reward.speed_distance_coupling_threshold
+            if pair_min < sd_thresh:
+                speed_excess = max(0.0, current_forward_speed - self.config.reward.desired_conflict_speed)
+                proximity_factor = (sd_thresh - pair_min) / max(sd_thresh, 1e-3)
+                safety -= self.config.reward.speed_distance_coupling_penalty_weight * speed_excess * proximity_factor
+
+        # Heading convergence reward: positive reward for aligning closely with
+        # the goal direction, encouraging straight-line tracking.
+        if self.config.reward.heading_convergence_reward_weight > 0.0:
+            heading_threshold_rad = math.radians(max(1.0, self.config.reward.heading_convergence_threshold_deg))
+            if abs(observation.heading_error) < heading_threshold_rad:
+                convergence_ratio = 1.0 - abs(observation.heading_error) / heading_threshold_rad
+                heading += self.config.reward.heading_convergence_reward_weight * convergence_ratio
+
         if team_progress_delta >= 0.0:
             team += self.config.team_progress_weight * team_progress_delta
         else:
@@ -781,7 +970,7 @@ class MultiAgentEnv(gym.Env):
     def step(self, actions: Dict[str, np.ndarray]):
         action_map = {}
         projected_actions = {}
-        for namespace in self._agent_ids:
+        for namespace in self._runtime_agent_ids:
             raw_action = actions.get(namespace, self.zero_policy_action())
             projected = self.project_policy_action(namespace, raw_action)
             projected_actions[namespace] = projected
@@ -793,10 +982,12 @@ class MultiAgentEnv(gym.Env):
         time.sleep(self.config.control_dt)
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
+        self._annotate_encounter_types(observations, global_state)
         self._latest_observations = observations
 
         team_progress = 0.0
-        for namespace, observation in observations.items():
+        for namespace in self._active_agent_ids:
+            observation = observations[namespace]
             team_progress += self._previous_distances[namespace] - observation.distance_to_goal
         if team_progress >= self.config.min_progress_delta:
             self._last_team_progress_time = time.monotonic()
@@ -804,13 +995,17 @@ class MultiAgentEnv(gym.Env):
 
         pair_min = global_state.team_min_separation
         collision = np.isfinite(pair_min) and pair_min < self.config.collision_distance
-        all_reached = all(observation.distance_to_goal <= self.config.goal_tolerance for observation in observations.values())
+        all_reached = all(
+            observations[namespace].distance_to_goal <= self.config.goal_tolerance
+            for namespace in self._active_agent_ids
+        )
         elapsed = time.monotonic() - self._episode_start
         terminated = collision or all_reached
         truncated = elapsed >= self.config.episode_timeout or (time.monotonic() - self._last_team_progress_time) >= self.config.no_progress_timeout
 
         rewards = {}
-        for namespace, observation in observations.items():
+        for namespace in self._active_agent_ids:
+            observation = observations[namespace]
             breakdown = self._compute_reward(
                 namespace,
                 observation,
@@ -827,22 +1022,18 @@ class MultiAgentEnv(gym.Env):
             self._previous_forward_speeds[namespace] = max(0.0, observation.final_linear_x)
             self._previous_conflict_risks[namespace] = self._compute_conflict_risk(observation)
 
-        terminated_dict = {namespace: terminated for namespace in self._agent_ids}
+        self._previous_pair_min = pair_min
+
+        terminated_dict = {namespace: terminated for namespace in self._active_agent_ids}
         terminated_dict['__all__'] = terminated
-        truncated_dict = {namespace: truncated for namespace in self._agent_ids}
+        truncated_dict = {namespace: truncated for namespace in self._active_agent_ids}
         truncated_dict['__all__'] = truncated
 
-        info = {
-            'scenario': self._scenario.name if self._scenario is not None else 'unknown',
-            'pairwise_min_separation': pair_min,
-            'pairwise_mean_separation': global_state.team_mean_separation,
-            'goal_completion_ratio': global_state.goal_completion_ratio,
-            'team_mean_goal_distance': global_state.team_mean_goal_distance,
-            'global_state': global_state.to_vector(self.config.max_agents, self.config.max_neighbors),
-        }
+        info = self._build_episode_info(global_state)
+        active_observations = self._filter_active_observations(observations)
 
         return (
-            {namespace: observation.to_vector(self.config.max_neighbors) for namespace, observation in observations.items()},
+            {namespace: observation.to_vector(self.config.max_neighbors) for namespace, observation in active_observations.items()},
             rewards,
             terminated_dict,
             truncated_dict,

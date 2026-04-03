@@ -211,6 +211,51 @@ def load_csv(filepath: str) -> tuple:
                     header_info['params'][key] = float(value.split()[0])
                 except (ValueError, IndexError):
                     header_info['params'][key] = value
+            # v19 新增: 解析 RL 模型元数据
+            if key.startswith('rl_'):
+                rl_info = header_info.setdefault('rl_model', {})
+                if key == 'rl_model_name':
+                    rl_info['model_name'] = value
+                elif key == 'rl_model_path':
+                    rl_info['model_path'] = value
+                elif key == 'rl_policy_type':
+                    rl_info['policy_type'] = value
+                elif key == 'rl_checkpoint_step':
+                    try:
+                        rl_info['checkpoint_step'] = int(value)
+                    except ValueError:
+                        rl_info['checkpoint_step'] = value
+                elif key == 'rl_obs_dim':
+                    try:
+                        rl_info['obs_dim'] = int(value)
+                    except ValueError:
+                        pass
+                elif key == 'rl_action_dim':
+                    try:
+                        rl_info['action_dim'] = int(value)
+                    except ValueError:
+                        pass
+                elif key == 'rl_action_bound_linear':
+                    try:
+                        rl_info['action_bound_linear'] = float(value)
+                    except ValueError:
+                        pass
+                elif key == 'rl_action_bound_angular':
+                    try:
+                        rl_info['action_bound_angular'] = float(value)
+                    except ValueError:
+                        pass
+                elif key == 'rl_squash_actions':
+                    rl_info['squash_actions'] = value.lower() in ('true', '1', 'yes')
+                elif key == 'rl_model_info_json':
+                    try:
+                        import json as _json
+                        full_info = _json.loads(value)
+                        for k2, v2 in full_info.items():
+                            if k2 not in rl_info:
+                                rl_info[k2] = v2
+                    except Exception:
+                        pass
             _refresh_version_metadata(header_info)
 
     with open(filepath, 'r', errors='replace', newline='') as f:
@@ -349,6 +394,51 @@ def _compute_rl_metrics(data: list) -> dict[str, Any]:
         hits = sum(1 for value in values if abs(abs(value) - vmax) <= 1e-3)
         return hits / len(values)
 
+    # --- v19: 增强 RL 饱和/bang-bang 检测 ---
+    # 绝对阈值饱和检测 (|ω| >= 95% of configured bound)
+    omega_bound = 0.4  # 默认
+    rl_omega_all = [float(d.get('rl_cmd_omega', 0.0)) for d in data if isinstance(d.get('rl_cmd_omega'), (int, float))]
+    cmd_omega_all = [float(d.get('cmd_omega', 0.0)) for d in data if isinstance(d.get('cmd_omega'), (int, float))]
+    if rl_omega_all:
+        omega_bound = max(abs(v) for v in rl_omega_all) if max(abs(v) for v in rl_omega_all) > 0.1 else 0.4
+    sat_threshold = omega_bound * 0.95
+    omega_saturated_count = sum(1 for v in cmd_omega_all if abs(v) >= sat_threshold)
+    omega_sat_abs_pct = (omega_saturated_count / len(cmd_omega_all) * 100.0) if cmd_omega_all else 0.0
+
+    # Bang-bang detection: sign changes when |ω| is near saturation
+    bang_bang_flips = 0
+    for i in range(1, len(cmd_omega_all)):
+        if (abs(cmd_omega_all[i]) >= sat_threshold and abs(cmd_omega_all[i-1]) >= sat_threshold
+                and cmd_omega_all[i] * cmd_omega_all[i-1] < 0):
+            bang_bang_flips += 1
+    duration_s = data[-1]['timestamp'] - data[0]['timestamp'] if len(data) > 1 else 1.0
+    bang_bang_rate = bang_bang_flips / duration_s if duration_s > 0 else 0.0
+
+    # Heading alignment correlation with RL activity:
+    # mean |heading_error| when RL active vs when inactive
+    he_rl_active = []
+    he_rl_inactive = []
+    for idx, d in enumerate(data):
+        he = d.get('heading_error_deg')
+        if not isinstance(he, (int, float)):
+            continue
+        if idx < len(active_mask) and active_mask[idx]:
+            he_rl_active.append(abs(he))
+        else:
+            he_rl_inactive.append(abs(he))
+
+    # Trajectory straightness: per-goal segment deviation from straight line
+    # Use simplified metric: mean instantaneous curvature (angular_velocity / speed)
+    curvatures = []
+    for d in data:
+        spd = d.get('velocity_speed', 0.0)
+        omega = d.get('cmd_omega', 0.0)
+        if isinstance(spd, (int, float)) and isinstance(omega, (int, float)) and spd > 0.05:
+            curvatures.append(abs(omega) / spd)
+
+    # ω distribution bins for histogram data
+    omega_hist_values = cmd_omega_all  # store for plotting
+
     return {
         'available': True,
         'active_count': active_count,
@@ -371,10 +461,22 @@ def _compute_rl_metrics(data: list) -> dict[str, Any]:
         'delta_omega_sign_flips': _count_significant_sign_flips(delta_omega),
         'raw_vx_mean': _mean(raw_vx),
         'raw_omega_mean': _mean([abs(value) for value in raw_omega]),
+        # --- v19 新增指标 ---
+        'omega_bound': omega_bound,
+        'omega_sat_abs_pct': omega_sat_abs_pct,
+        'bang_bang_flips': bang_bang_flips,
+        'bang_bang_rate_hz': bang_bang_rate,
+        'he_rl_active_mean': _mean(he_rl_active),
+        'he_rl_inactive_mean': _mean(he_rl_inactive),
+        'mean_curvature': _mean(curvatures),
+        'max_curvature': max(curvatures) if curvatures else 0.0,
+        'omega_hist_values': omega_hist_values,
+        'rl_omega_values': rl_omega_all,
+        'cmd_omega_values': cmd_omega_all,
     }
 
 
-def _print_rl_stats(data: list):
+def _print_rl_stats(data: list, header_info: dict = None):
     rl_metrics = _compute_rl_metrics(data)
     if not rl_metrics.get('available'):
         return
@@ -382,7 +484,23 @@ def _print_rl_stats(data: list):
     print(f"\n{'='*60}")
     print("🤖 RL 策略控制统计")
     print("=" * 60)
-    print(f"   RL 活跃样本: {rl_metrics['active_count']}/{len(data)} ({rl_metrics['active_pct']:.1f}%)")
+
+    # v19: 显示模型信息
+    if header_info and header_info.get('rl_model'):
+        rm = header_info['rl_model']
+        model_name = rm.get('model_name', '?')
+        policy_type = rm.get('policy_type', '?')
+        ckpt_step = rm.get('checkpoint_step', '?')
+        print(f"   🧠 模型: {model_name}")
+        print(f"      类型: {policy_type}, 步数: {ckpt_step}")
+        if rm.get('obs_dim'):
+            print(f"      obs_dim={rm['obs_dim']}, action_dim={rm.get('action_dim', '?')}")
+        if rm.get('action_bound_linear') and rm.get('action_bound_angular'):
+            print(f"      action_bounds: linear={rm['action_bound_linear']}, angular={rm['action_bound_angular']}")
+        if rm.get('squash_actions'):
+            print(f"      squash_actions: {rm['squash_actions']}")
+
+    print(f"\n   RL 活跃样本: {rl_metrics['active_count']}/{len(data)} ({rl_metrics['active_pct']:.1f}%)")
     print(f"   RL 输出幅值: |Δv|均值 {rl_metrics['mean_abs_rl_vx']:.3f} m/s, 最大 {rl_metrics['max_abs_rl_vx']:.3f} m/s")
     print(f"                |Δω|均值 {rl_metrics['mean_abs_rl_omega']:.3f} rad/s, 最大 {rl_metrics['max_abs_rl_omega']:.3f} rad/s")
     print(f"   Final-Raw 差值: |Δv|均值 {rl_metrics['mean_abs_delta_vx']:.3f} m/s, |Δω|均值 {rl_metrics['mean_abs_delta_omega']:.3f} rad/s")
@@ -393,6 +511,43 @@ def _print_rl_stats(data: list):
     print(f"   RL 活跃段平均邻船数: {rl_metrics['active_neighbor_mean']:.2f}")
     if rl_metrics.get('rl_age_p95') is not None:
         print(f"   RL 指令年龄 P95: {rl_metrics['rl_age_p95']:.3f}s")
+
+    # v19 新增: 饱和/bang-bang/轨迹质量
+    print(f"\n   --- RL 行为诊断 ---")
+    omega_bound = rl_metrics.get('omega_bound', 0.4)
+    print(f"   ω 饱和检测 (bound={omega_bound:.2f} rad/s):")
+    print(f"     绝对饱和率: {rl_metrics['omega_sat_abs_pct']:.1f}% (|ω|≥{omega_bound*0.95:.2f})")
+    bang_rate = rl_metrics.get('bang_bang_rate_hz', 0.0)
+    bang_flips = rl_metrics.get('bang_bang_flips', 0)
+    if rl_metrics['omega_sat_abs_pct'] > 50:
+        print(f"     ⚠️  高饱和率! 策略输出可能存在 tanh 永久饱和")
+    print(f"   Bang-bang 振荡: {bang_flips} 次饱和反转 ({bang_rate:.2f} Hz)")
+    if bang_rate > 0.2:
+        print(f"     ⚠️  高频 bang-bang 振荡! USV 将走 S 曲线")
+    elif bang_rate > 0.05:
+        print(f"     ⚠️  存在低频 bang-bang 振荡")
+    else:
+        print(f"     ✅ 无明显 bang-bang 振荡")
+
+    # RL 效果对比
+    he_active = rl_metrics.get('he_rl_active_mean', 0.0)
+    he_inactive = rl_metrics.get('he_rl_inactive_mean', 0.0)
+    if he_active > 0 and he_inactive > 0:
+        print(f"   航向误差对比: RL活跃={he_active:.1f}° vs 非活跃={he_inactive:.1f}°")
+        if he_active < he_inactive * 0.8:
+            print(f"     ✅ RL 有效降低航向误差")
+        elif he_active > he_inactive * 1.2:
+            print(f"     ⚠️  RL 活跃时航向误差更大")
+
+    mean_curv = rl_metrics.get('mean_curvature', 0.0)
+    max_curv = rl_metrics.get('max_curvature', 0.0)
+    print(f"   轨迹曲率: 均值={mean_curv:.2f} rad/m, 最大={max_curv:.2f} rad/m")
+    if mean_curv < 0.5:
+        print(f"     ✅ 轨迹整体较直")
+    elif mean_curv < 1.5:
+        print(f"     ⚠️  轨迹有一定弯曲")
+    else:
+        print(f"     ⚠️  轨迹弯曲严重，可能存在策略问题")
 
 
 def analyze_statistics(data: list, header_info: dict = None):
@@ -614,7 +769,7 @@ def analyze_statistics(data: list, header_info: dict = None):
                 true_sat = _sat_ratio(om_cmds, w_max_cfg, tol=0.01)
                 print(f"   → 配置 w_max={w_max_cfg:.2f} 饱和率: {true_sat*100:.1f}%")
 
-    _print_rl_stats(data)
+    _print_rl_stats(data, header_info=header_info)
     
     # v8 AMPC 统计
     if 'ampc_tau_estimated' in data[0]:
@@ -690,7 +845,7 @@ def analyze_statistics(data: list, header_info: dict = None):
     _print_nav_mode_stats(data)
     
     # 质量评分总结
-    _print_quality_score(data)
+    _print_quality_score(data, header_info=header_info)
 
 
 def _print_wifi_stats(data: list):
@@ -853,8 +1008,8 @@ def _count_significant_sign_flips(values: list[float], min_abs: float = 0.05) ->
     )
 
 
-def _print_quality_score(data: list):
-    """打印质量评分总结"""
+def _print_quality_score(data: list, header_info: dict = None):
+    """打印质量评分总结 (v19: 含 RL 评分分量)"""
     guided_data = [d for d in data if d.get('flight_mode') == 'GUIDED']
     if not guided_data:
         return
@@ -896,12 +1051,37 @@ def _print_quality_score(data: list):
     print(f"   MPC求解时间:       均值={avg_mpc:.1f}ms → 【{mpc_grade}】")
     print(f"   GUIDED平均速度:    {avg_speed:.3f} m/s")
     
-    # 综合评分 (CTE 权重 40%, 航向 30%, MPC 20%, 速度 10%)
+    # v19: RL 行为质量评分
+    rl_metrics = _compute_rl_metrics(data)
+    has_rl = rl_metrics.get('available', False)
+    score_rl = 100.0  # 无 RL 时默认满分（不影响总分）
+    rl_weight = 0.0
+    if has_rl:
+        rl_weight = 0.15  # RL 占 15% 权重
+        sat_pct = rl_metrics.get('omega_sat_abs_pct', 0)
+        bb_rate = rl_metrics.get('bang_bang_rate_hz', 0)
+        mean_curv = rl_metrics.get('mean_curvature', 0)
+        # 饱和率惩罚: 0%→100, 50%→50, 100%→0
+        score_sat = max(0.0, 100.0 - sat_pct * 2.0)
+        # bang-bang 频率惩罚: 0Hz→100, 0.5Hz→0
+        score_bb = max(0.0, 100.0 - bb_rate * 200.0)
+        # 曲率惩罚: 0→100, 2.0→0
+        score_curv = max(0.0, 100.0 - mean_curv * 50.0)
+        score_rl = score_sat * 0.4 + score_bb * 0.4 + score_curv * 0.2
+        rl_grade = "优秀" if score_rl >= 80 else "良好" if score_rl >= 60 else "一般" if score_rl >= 40 else "较差"
+        print(f"   RL行为质量:        饱和={sat_pct:.0f}% bb={bb_rate:.2f}Hz 曲率={mean_curv:.2f} → 【{rl_grade}】")
+    
+    # 综合评分 (动态权重: 无 RL 时 CTE40%/HE40%/MPC10%/Spd10%, 有 RL 时 CTE30%/HE30%/MPC10%/Spd15%/RL15%)
     score_cte = max(0, 100 - avg_cte * 200)       # 0.5m → 0分
     score_he = max(0, 100 - avg_he * 2.5)          # 40° → 0分 (仅直线段)
     score_mpc = max(0, 100 - avg_mpc * 1.5)        # 66ms → 0分
     score_spd = min(100, avg_speed / 0.3 * 100)    # 0.3m/s → 100分
-    total = score_cte * 0.4 + score_he * 0.4 + score_mpc * 0.1 + score_spd * 0.1
+    
+    if has_rl:
+        total = (score_cte * 0.30 + score_he * 0.30 + score_mpc * 0.10
+                 + score_spd * 0.15 + score_rl * rl_weight)
+    else:
+        total = score_cte * 0.4 + score_he * 0.4 + score_mpc * 0.1 + score_spd * 0.1
     
     total_grade = "优秀" if total >= 80 else "良好" if total >= 60 else "一般" if total >= 40 else "较差"
     print(f"\n   📊 综合评分: {total:.0f}/100 → 【{total_grade}】")
@@ -1693,9 +1873,14 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
     neighbor_count = [_neighbor_slot_count(d) for d in data]
     distance = [d.get('distance_to_goal', 0.0) for d in data]
 
-    fig, axes = plt.subplots(4, 1, figsize=(14, 14), sharex=True)
+    rl_metrics = _compute_rl_metrics(data)
+    heading_err = [abs(d.get('heading_error_deg', 0.0))
+                   if isinstance(d.get('heading_error_deg'), (int, float)) else 0.0 for d in data]
+
+    fig, axes = plt.subplots(6, 1, figsize=(14, 22), sharex=False)
     fig.suptitle(f'RL Policy Control Analysis - {usv_id}', fontsize=14, fontweight='bold')
 
+    # ---- 子图 1: 距离 vs RL 激活 ----
     ax = axes[0]
     ax.plot(t, distance, color='purple', linewidth=1.2, label='Distance to Goal')
     ax2 = ax.twinx()
@@ -1707,7 +1892,33 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
     ax.legend(loc='upper left')
     ax2.legend(loc='upper right')
 
+    # ---- 子图 2: ω 时序 + 饱和带 ----
     ax = axes[1]
+    omega_bound = rl_metrics.get('omega_bound', 0.4)
+    sat_thresh = omega_bound * 0.95
+    ax.plot(t, final_omega, color='#F44336', linewidth=1.2, label='Final ω')
+    ax.plot(t, raw_omega, color='#FF9800', linestyle='--', linewidth=1.0, label='Raw ω')
+    ax.plot(t, rl_omega, color='#00BCD4', linestyle=':', linewidth=1.0, label='RL Cmd ω')
+    ax.axhline(y=sat_thresh, color='red', linewidth=0.6, linestyle=':')
+    ax.axhline(y=-sat_thresh, color='red', linewidth=0.6, linestyle=':')
+    ax.axhspan(sat_thresh, omega_bound * 1.1, alpha=0.12, color='red', label=f'饱和带 (|ω|≥{sat_thresh:.2f})')
+    ax.axhspan(-omega_bound * 1.1, -sat_thresh, alpha=0.12, color='red')
+    # 标注 bang-bang 翻转点
+    cmd_omega_arr = rl_metrics.get('cmd_omega_values', [])
+    if len(cmd_omega_arr) == len(t):
+        for i in range(1, len(cmd_omega_arr)):
+            if (abs(cmd_omega_arr[i]) >= sat_thresh and abs(cmd_omega_arr[i-1]) >= sat_thresh
+                    and cmd_omega_arr[i] * cmd_omega_arr[i-1] < 0):
+                ax.axvline(x=t[i], color='red', linewidth=0.4, alpha=0.5)
+    sat_pct = rl_metrics.get('omega_sat_abs_pct', 0)
+    bb_rate = rl_metrics.get('bang_bang_rate_hz', 0)
+    ax.set_ylabel('ω (rad/s)')
+    ax.set_title(f'ω Time Series + Saturation Band (sat={sat_pct:.1f}%, bb={bb_rate:.2f}Hz)')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # ---- 子图 3: 线速度 Raw/RL/Final ----
+    ax = axes[2]
     ax.plot(t, raw_vx, color='#FF9800', linestyle='--', linewidth=1.0, label='Raw Vx')
     ax.plot(t, final_vx, color='#F44336', linewidth=1.2, label='Final Vx')
     ax.plot(t, rl_vx, color='#00BCD4', linestyle=':', linewidth=1.0, label='RL Cmd Vx')
@@ -1715,21 +1926,47 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
     ax.axhline(y=0, color='k', linewidth=0.5)
     ax.set_ylabel('Linear (m/s)')
     ax.set_title('Raw / RL / Final Linear Command')
-    ax.legend(loc='upper right')
+    ax.legend(loc='upper right', fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    ax = axes[2]
-    ax.plot(t, raw_omega, color='#FF9800', linestyle='--', linewidth=1.0, label='Raw Omega')
-    ax.plot(t, final_omega, color='#F44336', linewidth=1.2, label='Final Omega')
-    ax.plot(t, rl_omega, color='#00BCD4', linestyle=':', linewidth=1.0, label='RL Cmd Omega')
-    ax.plot(t, delta_omega, color='#4CAF50', linewidth=1.0, alpha=0.8, label='Final-Raw ΔOmega')
-    ax.axhline(y=0, color='k', linewidth=0.5)
-    ax.set_ylabel('Angular (rad/s)')
-    ax.set_title('Raw / RL / Final Angular Command')
-    ax.legend(loc='upper right')
-    ax.grid(True, alpha=0.3)
-
+    # ---- 子图 4: ω 动作分布直方图 ----
     ax = axes[3]
+    rl_omega_vals = rl_metrics.get('rl_omega_values', [])
+    cmd_omega_vals = rl_metrics.get('cmd_omega_values', [])
+    if rl_omega_vals:
+        bins = 50
+        ax.hist(rl_omega_vals, bins=bins, alpha=0.6, color='#00BCD4', label='RL ω', density=True)
+    if cmd_omega_vals:
+        ax.hist(cmd_omega_vals, bins=50, alpha=0.5, color='#F44336', label='Final ω', density=True)
+    ax.axvline(x=sat_thresh, color='red', linewidth=0.8, linestyle=':', label=f'+sat {sat_thresh:.2f}')
+    ax.axvline(x=-sat_thresh, color='red', linewidth=0.8, linestyle=':')
+    ax.set_xlabel('ω (rad/s)')
+    ax.set_ylabel('Density')
+    ax.set_title('ω Action Distribution (bimodal = bang-bang indicator)')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # ---- 子图 5: 航向误差 vs RL 活跃 ----
+    ax = axes[4]
+    ax.plot(t, heading_err, color='#607D8B', linewidth=0.8, alpha=0.7, label='|Heading Error|')
+    # 用彩色 fill 标出 RL 活跃段
+    rl_he = [heading_err[i] if rl_active[i] else float('nan') for i in range(len(heading_err))]
+    ax.fill_between(t, 0, rl_he, alpha=0.3, color='#00BCD4', label='RL Active Period')
+    he_active = rl_metrics.get('he_rl_active_mean', 0.0)
+    he_inactive = rl_metrics.get('he_rl_inactive_mean', 0.0)
+    if he_active > 0:
+        ax.axhline(y=he_active, color='#00BCD4', linewidth=0.8, linestyle='--',
+                    label=f'RL Active Mean={he_active:.1f}°')
+    if he_inactive > 0:
+        ax.axhline(y=he_inactive, color='#FF9800', linewidth=0.8, linestyle='--',
+                    label=f'Inactive Mean={he_inactive:.1f}°')
+    ax.set_ylabel('|Heading Error| (°)')
+    ax.set_title('Heading Error vs RL Activation')
+    ax.legend(loc='upper right', fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    # ---- 子图 6: RL 新鲜度 + 邻船上下文 ----
+    ax = axes[5]
     ax.plot(t, rl_age, color='#607D8B', linewidth=1.0, label='RL Cmd Age')
     ax.axhline(y=0.5, color='#EF5350', linestyle='--', linewidth=0.8, label='Active Timeout 0.5s')
     ax2 = ax.twinx()
@@ -1744,9 +1981,10 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
 
     _add_reading_guide(
         fig,
-        '【阅读指南】上图看 RL 何时介入以及介入时距离是否改善。第二、三图同时展示 raw / RL / final 三路命令，'
-        '可直接判断是导航器在主导还是 RL 策略在主导。第四图看 RL 指令是否过期，以及介入时是否确有邻船上下文。',
-        bottom=0.08,
+        '【阅读指南】图1: RL 介入时机与距离关系。图2: ω 三路指令 + 红色饱和带(|ω|≥95%边界)，竖线=bang-bang 翻转。\n'
+        '图3: 线速度三路指令。图4: ω 动作分布(双峰=bang-bang 模式)。图5: 航向误差随时间变化，青色=RL 活跃段。\n'
+        '图6: RL 指令是否过期 + 邻船上下文。',
+        bottom=0.05,
     )
     plt.savefig(output_path / 'rl_analysis.png', dpi=150)
     plt.close()

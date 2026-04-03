@@ -16,6 +16,7 @@ def _launch_policy_node(context, *args, **kwargs):
     rl_publish_rate = LaunchConfiguration('rl_publish_rate').perform(context)
     rl_max_neighbors = LaunchConfiguration('rl_max_neighbors').perform(context)
     disable_controller_param = LaunchConfiguration('disable_controller_param').perform(context)
+    rl_encounter_type = LaunchConfiguration('rl_encounter_type').perform(context)
 
     node_args = [
         '--namespace', namespace,
@@ -25,6 +26,7 @@ def _launch_policy_node(context, *args, **kwargs):
         '--device', rl_policy_device,
         '--publish-rate', rl_publish_rate,
         '--max-neighbors', rl_max_neighbors,
+        '--encounter-type', rl_encounter_type,
     ]
     if disable_controller_param.lower() in ('1', 'true', 'yes', 'on'):
         node_args.append('--disable-controller-param')
@@ -97,7 +99,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'rl_policy_kind',
-            default_value='bc',
+            default_value='auto',
             description='Policy type: auto, bc, ppo, mappo, or zero.',
         ),
         DeclareLaunchArgument(
@@ -129,6 +131,11 @@ def generate_launch_description():
             'rl_inference_delay',
             default_value='7.0',
             description='Delay before starting the policy node so the SITL control stack is up.',
+        ),
+        DeclareLaunchArgument(
+            'rl_encounter_type',
+            default_value='auto',
+            description='Encounter type for scenario-conditioned models (auto, none, head_on, crossing, overtaking).',
         ),
         sitl_stack,
         delayed_policy_node,

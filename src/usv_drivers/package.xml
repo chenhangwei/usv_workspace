@@ -35,6 +35,8 @@
   <author email="chenhangwei77777@hotmail.com">Chen Hangwei</author>
   
   <depend>common_utils</depend>
+  <depend>common_interfaces</depend>
+  <depend>sensor_msgs</depend>
   
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

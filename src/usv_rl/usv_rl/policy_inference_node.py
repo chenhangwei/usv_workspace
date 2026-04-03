@@ -1,4 +1,5 @@
 import argparse
+import json
 import math
 import os
 import re
@@ -16,13 +17,30 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
+from std_msgs.msg import Int8, String
 
 from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
+from .multi_agent_types import ENCOUNTER_TYPE_COUNT
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 from .types import NeighborObservation, NeighborState, UsvObservation
+
+_ENCOUNTER_TYPE_NAMES = {'head_on': 0, 'crossing': 1, 'overtaking': 2}
+
+# ---------- Auto encounter-type classification constants ----------
+_ENCOUNTER_DETECT_DISTANCE = 15.0   # metres – classify only when nearest neighbour is closer
+_ENCOUNTER_HOLD_TIME = 2.0          # seconds – minimum time to hold a classification before switching
+_ENCOUNTER_SPEED_THRESHOLD = 0.05   # m/s – below this, course is unreliable
+
+# ---------- Distance-aware speed scaling constants ----------
+_SPEED_SCALE_DISTANCE = 3.0         # metres – linear speed scaling starts below this distance
+_SPEED_SCALE_MIN = 0.15             # minimum speed scale factor at zero distance
+_HEAD_ON_BEARING_DEG = 22.5         # |bearing| < this AND reciprocal courses → head_on
+_HEAD_ON_COURSE_DEG = 135.0         # relative course > this → reciprocal
+_OVERTAKING_COURSE_DEG = 45.0       # relative course < this AND ahead → overtaking
+_OVERTAKING_ASTERN_DEG = 112.5      # |bearing| > this → astern sector
 
 
 def _candidate_workspace_roots() -> list[Path]:
@@ -129,20 +147,35 @@ class MappoActorPolicyRuntime:
             linear_delta=linear_bound,
             angular_delta=angular_bound,
         )
+        self.heading_omega_deadband = float(checkpoint.get('heading_omega_deadband', 0.06))
+        self.heading_omega_reference = float(checkpoint.get('heading_omega_reference', 0.85))
+        self.angular_authority_power = float(checkpoint.get('angular_authority_power', 1.6))
+        self.angular_accel_limit = float(checkpoint.get('angular_accel_limit', 1.8))
+        self.angular_decel_limit = float(checkpoint.get('angular_decel_limit', 2.4))
+        self.conflict_turn_relief = float(checkpoint.get('conflict_turn_relief', 0.55))
+        reward_config = checkpoint.get('reward_config', {}) or {}
+        self.conflict_distance = float(reward_config.get('conflict_distance', 5.0))
+        self.anticipation_distance = float(reward_config.get('anticipation_distance', self.conflict_distance))
         self._torch = torch
         self._device = torch.device(device)
 
-        layers = []
-        current_dim = self.obs_dim
-        for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(current_dim, hidden_size))
-            layers.append(nn.Tanh())
-            current_dim = hidden_size
-        layers.append(nn.Linear(current_dim, self.action_dim))
+        if checkpoint.get('neighbor_attention', False):
+            from usv_rl.neighbor_attention import build_attention_actor_from_checkpoint
+            self._actor = build_attention_actor_from_checkpoint(
+                checkpoint, nn, torch, self._device,
+            )
+        else:
+            layers = []
+            current_dim = self.obs_dim
+            for hidden_size in hidden_sizes:
+                layers.append(nn.Linear(current_dim, hidden_size))
+                layers.append(nn.Tanh())
+                current_dim = hidden_size
+            layers.append(nn.Linear(current_dim, self.action_dim))
 
-        self._actor = nn.Sequential(*layers).to(self._device)
-        self._actor.load_state_dict(checkpoint['actor_state_dict'])
-        self._actor.eval()
+            self._actor = nn.Sequential(*layers).to(self._device)
+            self._actor.load_state_dict(checkpoint['actor_state_dict'])
+            self._actor.eval()
         self._squash_actions = bool(checkpoint.get('squash_actions', False))
         if self._squash_actions:
             _low = checkpoint.get('action_low', [0.0, -0.4])
@@ -166,6 +199,7 @@ class MappoActorPolicyRuntime:
         with self._torch.no_grad():
             raw = self._actor(obs_tensor)
             if self._squash_actions:
+                raw = raw.clamp(-3.0, 3.0)
                 _half = (self._sq_action_high - self._sq_action_low) / 2.0
                 _mid = (self._sq_action_high + self._sq_action_low) / 2.0
                 action = (self._torch.tanh(raw) * _half + _mid).cpu().numpy()[0]
@@ -209,11 +243,15 @@ def parse_args(argv=None):
     parser.add_argument('--publish-rate', type=float, default=10.0, help='Policy publish rate in Hz.')
     parser.add_argument('--max-neighbors', type=int, default=3, help='Maximum neighbors encoded into the observation vector.')
     parser.add_argument('--disable-controller-param', action='store_true', help='Do not auto-enable rl_policy_enabled on velocity_controller_node.')
+    parser.add_argument('--encounter-type', choices=['auto', 'none', 'head_on', 'crossing', 'overtaking'], default='auto',
+                        help='Encounter type for models trained with scenario conditioning (fresh54+). '
+                             '"auto" classifies dynamically from neighbour geometry each step; '
+                             'a fixed name uses a static one-hot; "none" sends all-zeros.')
     return parser.parse_args(argv)
 
 
 class PolicyInferenceNode(Node):
-    def __init__(self, *, namespace: str, model_path: str, policy_kind: str, rl_control_mode: str, device: str, publish_rate: float, max_neighbors: int, enable_controller_param: bool):
+    def __init__(self, *, namespace: str, model_path: str, policy_kind: str, rl_control_mode: str, device: str, publish_rate: float, max_neighbors: int, enable_controller_param: bool, encounter_type: str = 'none'):
         resolved_namespace = namespace if namespace.startswith('/') else f'/{namespace}'
         super().__init__('policy_inference_node', namespace=resolved_namespace)
         self._namespace = resolved_namespace
@@ -248,6 +286,7 @@ class PolicyInferenceNode(Node):
         self.get_logger().info('================================')
 
         self._max_neighbors = max(1, max_neighbors)
+        self._publish_rate = float(publish_rate)
         self._action_bounds = ActionBounds()
         if hasattr(self._policy, 'action_bounds'):
             self._action_bounds = getattr(self._policy, 'action_bounds')
@@ -291,7 +330,17 @@ class PolicyInferenceNode(Node):
             if policy_obs_mean is not None:
                 policy_obs_dim = int(np.asarray(policy_obs_mean).shape[0])
 
+        # Detect whether the model uses encounter-type conditioning.
+        self._encounter_type_auto = (encounter_type == 'auto')
+        self._encounter_type_index = _ENCOUNTER_TYPE_NAMES.get(encounter_type, -1)
+        self._encounter_type_enabled = False
+        # Hysteresis state for auto classification
+        self._auto_encounter_current: int = -1     # currently active index
+        self._auto_encounter_candidate: int = -1   # pending switch
+        self._auto_encounter_candidate_since: float = 0.0
+
         if policy_obs_dim is not None:
+            # Check if dimension matches base layout: 10 + N*6
             if policy_obs_dim >= 10 and (policy_obs_dim - 10) % 6 == 0:
                 inferred_neighbors = max(1, (policy_obs_dim - 10) // 6)
                 if inferred_neighbors != self._max_neighbors:
@@ -299,6 +348,29 @@ class PolicyInferenceNode(Node):
                         f'Overriding max_neighbors from {self._max_neighbors} to {inferred_neighbors} based on model observation dimension {policy_obs_dim}.'
                     )
                     self._max_neighbors = inferred_neighbors
+            # Check if dimension matches encounter-type layout: 10 + N*6 + ENCOUNTER_TYPE_COUNT
+            elif policy_obs_dim >= 10 + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - 10 - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                inferred_neighbors = max(1, (policy_obs_dim - 10 - ENCOUNTER_TYPE_COUNT) // 6)
+                self._encounter_type_enabled = True
+                if inferred_neighbors != self._max_neighbors:
+                    self.get_logger().info(
+                        f'Overriding max_neighbors from {self._max_neighbors} to {inferred_neighbors} based on model observation dimension {policy_obs_dim}.'
+                    )
+                    self._max_neighbors = inferred_neighbors
+                if self._encounter_type_auto:
+                    self.get_logger().info(
+                        f'Encounter-type conditioning enabled in AUTO mode (obs_dim={policy_obs_dim}). '
+                        'Will classify dynamically from neighbour geometry each step.'
+                    )
+                elif self._encounter_type_index < 0:
+                    self.get_logger().warn(
+                        f'Model expects encounter-type conditioning (obs_dim={policy_obs_dim}) but --encounter-type is "none". '
+                        'The one-hot will be all zeros; behaviour may differ from training.'
+                    )
+                else:
+                    self.get_logger().info(
+                        f'Encounter-type conditioning enabled: {encounter_type} (index={self._encounter_type_index}).'
+                    )
             else:
                 raise RuntimeError(
                     f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
@@ -324,7 +396,53 @@ class PolicyInferenceNode(Node):
         self.create_subscription(FleetNeighborPoses, 'apf/neighbors', self._fleet_neighbors_callback, qos_best_effort)
 
         self._action_pub = self.create_publisher(TwistStamped, 'rl_policy/cmd_vel', qos_best_effort)
-        self._publish_timer = self.create_timer(1.0 / max(1.0, publish_rate), self._publish_action)
+
+        # Publish encounter-type index so log_collector can record it.
+        self._encounter_type_pub = self.create_publisher(Int8, 'rl_policy/encounter_type', qos_best_effort)
+
+        # Publish model metadata with transient_local so late subscribers can inspect the active model.
+        qos_model_info = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self._model_info_pub = self.create_publisher(String, 'rl_policy/model_info', qos_model_info)
+        model_info_dict = {
+            'model_path': resolved_path,
+            'model_name': os.path.basename(resolved_path),
+            'policy_type': policy_type_name,
+            'device': device,
+        }
+        if step_match:
+            model_info_dict['checkpoint_step'] = int(step_match.group(1))
+        if hasattr(self._policy, 'obs_dim'):
+            model_info_dict['obs_dim'] = self._policy.obs_dim
+        if hasattr(self._policy, 'action_dim'):
+            model_info_dict['action_dim'] = self._policy.action_dim
+        if hasattr(self._policy, 'action_bounds'):
+            ab = self._policy.action_bounds
+            model_info_dict['action_bounds'] = {'linear': ab.linear_delta, 'angular': ab.angular_delta}
+        if hasattr(self._policy, '_squash_actions'):
+            model_info_dict['squash_actions'] = bool(self._policy._squash_actions)
+        try:
+            fstat = os.stat(resolved_path)
+            model_info_dict['size_bytes'] = fstat.st_size
+            model_info_dict['modified'] = datetime.fromtimestamp(fstat.st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+        except OSError:
+            pass
+        model_info_msg = String()
+        model_info_msg.data = json.dumps(model_info_dict, ensure_ascii=False)
+        self._model_info_pub.publish(model_info_msg)
+        self.get_logger().info('Published model info on rl_policy/model_info')
+
+        self._publish_timer = self.create_timer(1.0 / max(1.0, self._publish_rate), self._publish_action)
+
+    def _projection_conflict_level(self, observation) -> float:
+        if observation is None or not observation.neighbors:
+            return 0.0
+        lookahead_distance = max(self._policy.anticipation_distance, self._policy.conflict_distance, 1e-3)
+        min_neighbor_distance = observation.min_neighbor_distance()
+        return float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
 
     def _reset_head_on_guard_state(self):
         self._head_on_guard_logged = False
@@ -626,6 +744,94 @@ class PolicyInferenceNode(Node):
             neighbors=neighbors,
         )
 
+    # ------------------------------------------------------------------
+    #  Auto encounter-type classifier (COLREGS sectors + hysteresis)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _wrap_angle(a: float) -> float:
+        while a > math.pi:
+            a -= 2.0 * math.pi
+        while a < -math.pi:
+            a += 2.0 * math.pi
+        return a
+
+    def _classify_encounter_type(self, obs: 'UsvObservation') -> int:
+        """Return encounter-type index (0=head_on, 1=crossing, 2=overtaking)
+        for the closest neighbour, with hysteresis to avoid jitter.
+        Returns -1 when no neighbour is within detection range."""
+
+        raw_idx = self._classify_encounter_raw(obs)
+        now = time.monotonic()
+
+        # Hysteresis: hold the current classification until a *different*
+        # candidate persists for _ENCOUNTER_HOLD_TIME seconds.
+        if raw_idx == self._auto_encounter_current:
+            self._auto_encounter_candidate = -1
+            self._auto_encounter_candidate_since = 0.0
+            return self._auto_encounter_current
+
+        # First classification or no neighbour → accept immediately
+        if self._auto_encounter_current < 0:
+            self._auto_encounter_current = raw_idx
+            return raw_idx
+
+        # raw_idx differs — start or continue candidate timer
+        if raw_idx != self._auto_encounter_candidate:
+            self._auto_encounter_candidate = raw_idx
+            self._auto_encounter_candidate_since = now
+            return self._auto_encounter_current
+
+        if now - self._auto_encounter_candidate_since >= _ENCOUNTER_HOLD_TIME:
+            self._auto_encounter_current = raw_idx
+            self._auto_encounter_candidate = -1
+            self._auto_encounter_candidate_since = 0.0
+        return self._auto_encounter_current
+
+    def _classify_encounter_raw(self, obs: 'UsvObservation') -> int:
+        """Instantaneous COLREGS-based classification without hysteresis."""
+        if not obs.neighbors:
+            return -1
+
+        closest = min(obs.neighbors, key=lambda n: n.distance)
+        if closest.distance > _ENCOUNTER_DETECT_DISTANCE:
+            return -1
+
+        bearing = closest.bearing  # relative to own heading, [-pi, pi]
+
+        # Reconstruct absolute velocities of neighbour
+        own_vx = obs.speed * math.cos(obs.yaw)
+        own_vy = obs.speed * math.sin(obs.yaw)
+        nei_vx = own_vx + closest.rel_vx
+        nei_vy = own_vy + closest.rel_vy
+
+        # Courses
+        own_course = obs.yaw if obs.speed < _ENCOUNTER_SPEED_THRESHOLD else math.atan2(own_vy, own_vx)
+        nei_speed = math.hypot(nei_vx, nei_vy)
+        if nei_speed > _ENCOUNTER_SPEED_THRESHOLD:
+            nei_course = math.atan2(nei_vy, nei_vx)
+        else:
+            # Stationary neighbour — assume course pointing toward us (worst case)
+            nei_course = math.atan2(-closest.rel_y, -closest.rel_x)
+
+        rel_course = abs(self._wrap_angle(nei_course - own_course))
+        abs_bearing = abs(bearing)
+
+        # Astern sector: neighbour is behind us
+        if abs_bearing > math.radians(_OVERTAKING_ASTERN_DEG):
+            return 2  # overtaking
+
+        # Ahead sector: distinguish head-on vs overtaking
+        if abs_bearing < math.radians(_HEAD_ON_BEARING_DEG):
+            if rel_course > math.radians(_HEAD_ON_COURSE_DEG):
+                return 0  # head_on — nearly reciprocal courses
+            if rel_course < math.radians(_OVERTAKING_COURSE_DEG):
+                return 2  # overtaking — similar courses
+            return 1  # crossing — intermediate angles
+
+        # Side sector (22.5°–112.5°): crossing
+        return 1  # crossing
+
     def _publish_action(self):
         self._maybe_enable_controller_param()
         observation = self._build_observation()
@@ -639,6 +845,21 @@ class PolicyInferenceNode(Node):
 
         observation_vector = observation.to_vector(self._max_neighbors)
 
+        enc_idx = -1
+        if self._encounter_type_enabled:
+            enc_idx = self._encounter_type_index
+            if self._encounter_type_auto:
+                enc_idx = self._classify_encounter_type(observation)
+            one_hot = np.zeros(ENCOUNTER_TYPE_COUNT, dtype=np.float32)
+            if 0 <= enc_idx < ENCOUNTER_TYPE_COUNT:
+                one_hot[enc_idx] = 1.0
+            observation_vector = np.concatenate([observation_vector, one_hot])
+
+        # Publish encounter-type index for downstream logging.
+        enc_msg = Int8()
+        enc_msg.data = int(enc_idx)
+        self._encounter_type_pub.publish(enc_msg)
+
         action = np.asarray(self._policy.predict(observation_vector), dtype=np.float32).reshape(-1)
         if action.size != 2:
             raise RuntimeError(f'Pure RL mode requires 2D action output, got {action.size}.')
@@ -649,10 +870,30 @@ class PolicyInferenceNode(Node):
             linear_delta_limit=self._action_bounds.linear_delta,
             angular_delta_limit=self._action_bounds.angular_delta,
             raw_linear_x=observation.raw_linear_x,
+            heading_error=observation.heading_error,
+            current_angular_z=observation.final_angular_z,
+            control_dt=1.0 / max(1.0, float(self._publish_rate)),
+            conflict_level=self._projection_conflict_level(observation),
+            heading_omega_deadband=self._policy.heading_omega_deadband,
+            heading_omega_reference=self._policy.heading_omega_reference,
+            angular_authority_power=self._policy.angular_authority_power,
+            angular_accel_limit=self._policy.angular_accel_limit,
+            angular_decel_limit=self._policy.angular_decel_limit,
+            conflict_turn_relief=self._policy.conflict_turn_relief,
             forward_only=True,
         )
         linear_x = float(projected_action[0])
         angular_z = float(projected_action[1])
+
+        # Distance-aware speed scaling: reduce linear speed when a neighbour
+        # is dangerously close, preventing high-speed collisions.
+        min_neighbor_dist = observation.min_neighbor_distance()
+        if min_neighbor_dist < _SPEED_SCALE_DISTANCE:
+            speed_scale = max(
+                _SPEED_SCALE_MIN,
+                min_neighbor_dist / _SPEED_SCALE_DISTANCE,
+            )
+            linear_x *= speed_scale
 
         if not self._first_action_logged:
             self.get_logger().info(
@@ -683,6 +924,7 @@ def main(argv=None):
             publish_rate=args.publish_rate,
             max_neighbors=args.max_neighbors,
             enable_controller_param=not args.disable_controller_param,
+            encounter_type=args.encounter_type,
         )
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

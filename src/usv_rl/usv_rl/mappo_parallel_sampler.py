@@ -71,6 +71,8 @@ def _build_reward_config(args) -> RewardConfig:
         time_penalty=float(args.time_penalty),
         stall_penalty=float(args.stall_penalty),
         angular_accel_penalty_weight=float(args.angular_accel_penalty_weight),
+        straight_line_omega_penalty_weight=float(args.straight_line_omega_penalty_weight),
+        saturated_omega_flip_penalty_weight=float(args.saturated_omega_flip_penalty_weight),
     )
 
 
@@ -89,6 +91,12 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             max_agents=max(len(agent_namespaces), args.max_agents),
             cruise_speed=float(args.cruise_speed),
             max_angular_velocity=float(args.max_angular_velocity),
+            heading_omega_deadband=float(args.heading_omega_deadband),
+            heading_omega_reference=float(args.heading_omega_reference),
+            angular_authority_power=float(args.angular_authority_power),
+            angular_accel_limit=float(args.angular_accel_limit),
+            angular_decel_limit=float(args.angular_decel_limit),
+            conflict_turn_relief=float(args.conflict_turn_relief),
             episode_timeout=float(args.episode_timeout),
             no_progress_timeout=float(args.no_progress_timeout),
             min_progress_delta=float(args.min_progress_delta),
@@ -159,6 +167,40 @@ def _cpu_state_dict(module) -> dict:
     return {name: tensor.detach().cpu() for name, tensor in module.state_dict().items()}
 
 
+def _compute_advantages_and_returns(rewards, values, dones, bootstrap_values, gamma: float, gae_lambda: float):
+    advantages_seq = []
+    returns_seq = []
+    next_values = np.asarray(bootstrap_values, dtype=np.float32)
+    gae = np.zeros_like(next_values, dtype=np.float32)
+
+    for step in reversed(range(len(rewards))):
+        rewards_step = np.asarray(rewards[step], dtype=np.float32)
+        values_step = np.asarray(values[step], dtype=np.float32)
+        dones_step = np.asarray(dones[step], dtype=np.float32)
+        if next_values.shape != values_step.shape:
+            next_values = np.zeros_like(values_step, dtype=np.float32)
+            gae = np.zeros_like(values_step, dtype=np.float32)
+        mask = 1.0 - dones_step
+        delta = rewards_step + gamma * next_values * mask - values_step
+        gae = delta + gamma * gae_lambda * mask * gae
+        advantages_seq.append(gae.copy())
+        returns_seq.append((gae + values_step).copy())
+        next_values = values_step
+
+    advantages_seq.reverse()
+    returns_seq.reverse()
+    return (
+        np.concatenate(advantages_seq, axis=0).astype(np.float32),
+        np.concatenate(returns_seq, axis=0).astype(np.float32),
+    )
+
+
+def _flatten_rollout_batches(storage_batches: list[np.ndarray], *, dtype=np.float32) -> np.ndarray:
+    if not storage_batches:
+        return np.asarray([], dtype=dtype)
+    return np.concatenate([np.asarray(batch, dtype=dtype) for batch in storage_batches], axis=0)
+
+
 def _collect_worker_rollout(
     *,
     env,
@@ -170,6 +212,8 @@ def _collect_worker_rollout(
     action_low_tensor,
     action_high_tensor,
     rollout_steps: int,
+    gamma: float,
+    gae_lambda: float,
     max_env_recovery_attempts: int,
     max_consecutive_env_failures: int,
     consecutive_env_failures: int,
@@ -188,7 +232,10 @@ def _collect_worker_rollout(
     storage_values = []
     storage_rewards = []
     storage_dones = []
+    storage_scenario_ids = []
     agent_steps = 0
+    episode_count = 0
+    current_scenario = env.current_scenario_name
 
     for _ in range(rollout_steps):
         agent_order = env.agent_ids
@@ -256,12 +303,14 @@ def _collect_worker_rollout(
         storage_values.append(value_tensor.detach().cpu().numpy())
         storage_rewards.append(reward_batch)
         storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
+        storage_scenario_ids.append(np.full(len(agent_order), hash(current_scenario) & 0x7FFFFFFF, dtype=np.int32))
 
         agent_steps += len(agent_order)
         observations = next_observations
         global_state = next_info['global_state']
 
         if done:
+            episode_count += 1
             try:
                 observations, info = env.reset()
             except RuntimeError as exc:
@@ -285,6 +334,7 @@ def _collect_worker_rollout(
             else:
                 consecutive_env_failures = 0
             global_state = info['global_state']
+            current_scenario = env.current_scenario_name
 
     if not storage_obs:
         return {
@@ -292,6 +342,7 @@ def _collect_worker_rollout(
             'worker_rank': worker_rank,
             'agent_steps': 0,
             'rollout_steps_collected': 0,
+            'episode_count': int(episode_count),
         }, env, observations, global_state, consecutive_env_failures
 
     with torch.no_grad():
@@ -303,19 +354,29 @@ def _collect_worker_rollout(
         bootstrap_state_tensor = torch.as_tensor(bootstrap_state, dtype=torch.float32)
         bootstrap_values = critic(torch.cat([bootstrap_obs_tensor, bootstrap_state_tensor], dim=-1)).squeeze(-1).cpu().numpy()
 
+    advantages, returns = _compute_advantages_and_returns(
+        storage_rewards,
+        storage_values,
+        storage_dones,
+        bootstrap_values,
+        gamma,
+        gae_lambda,
+    )
+
     result = {
         'status': 'ok',
         'worker_rank': worker_rank,
-        'obs': np.asarray(storage_obs, dtype=np.float32),
-        'states': np.asarray(storage_states, dtype=np.float32),
-        'actions': np.asarray(storage_actions, dtype=np.float32),
-        'log_probs': np.asarray(storage_log_probs, dtype=np.float32),
-        'values': np.asarray(storage_values, dtype=np.float32),
-        'rewards': np.asarray(storage_rewards, dtype=np.float32),
-        'dones': np.asarray(storage_dones, dtype=np.float32),
-        'bootstrap_values': bootstrap_values.astype(np.float32),
+        'obs': _flatten_rollout_batches(storage_obs),
+        'states': _flatten_rollout_batches(storage_states),
+        'actions': _flatten_rollout_batches(storage_actions),
+        'log_probs': _flatten_rollout_batches(storage_log_probs),
+        'rewards': _flatten_rollout_batches(storage_rewards),
+        'advantages': advantages,
+        'returns': returns,
+        'scenario_ids': _flatten_rollout_batches(storage_scenario_ids),
         'agent_steps': int(agent_steps),
         'rollout_steps_collected': int(len(storage_obs)),
+        'episode_count': int(episode_count),
     }
     return result, env, observations, global_state, consecutive_env_failures
 
@@ -342,8 +403,34 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
             worker_rank=worker_rank,
         )
         global_state = info['global_state']
-        actor = _build_mlp(nn, env.local_observation_size, hidden_sizes, env.action_dim).to('cpu')
-        critic = _build_mlp(nn, env.local_observation_size + env.global_state_size, hidden_sizes, 1).to('cpu')
+        use_neighbor_attention = bool(getattr(args, 'neighbor_attention', False))
+        if use_neighbor_attention:
+            from usv_rl.neighbor_attention import AttentionActor, AttentionCritic
+            from usv_rl.multi_agent_types import ENCOUNTER_TYPE_COUNT
+            _nb_dim = 6
+            _ego_dim = 10
+            max_neighbors = (env.local_observation_size - _ego_dim - ENCOUNTER_TYPE_COUNT) // _nb_dim
+            embed_dim = int(getattr(args, 'attention_embed_dim', 32))
+            num_heads = int(getattr(args, 'attention_num_heads', 1))
+            actor = AttentionActor(
+                max_neighbors=max_neighbors,
+                encounter_dim=ENCOUNTER_TYPE_COUNT,
+                hidden_sizes=hidden_sizes,
+                action_dim=env.action_dim,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+            ).to('cpu')
+            critic = AttentionCritic(
+                max_neighbors=max_neighbors,
+                encounter_dim=ENCOUNTER_TYPE_COUNT,
+                global_state_dim=env.global_state_size,
+                hidden_sizes=hidden_sizes,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+            ).to('cpu')
+        else:
+            actor = _build_mlp(nn, env.local_observation_size, hidden_sizes, env.action_dim).to('cpu')
+            critic = _build_mlp(nn, env.local_observation_size + env.global_state_size, hidden_sizes, 1).to('cpu')
         actor_log_std = torch.zeros(env.action_dim, dtype=torch.float32)
         action_low_tensor = torch.as_tensor(env.action_low, dtype=torch.float32)
         action_high_tensor = torch.as_tensor(env.action_high, dtype=torch.float32)
@@ -383,6 +470,8 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
                 action_low_tensor=action_low_tensor,
                 action_high_tensor=action_high_tensor,
                 rollout_steps=int(message['rollout_steps']),
+                gamma=float(args.gamma),
+                gae_lambda=float(args.gae_lambda),
                 max_env_recovery_attempts=max_env_recovery_attempts,
                 max_consecutive_env_failures=max_consecutive_env_failures,
                 consecutive_env_failures=consecutive_env_failures,

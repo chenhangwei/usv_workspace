@@ -24,14 +24,16 @@ import math
 from std_msgs.msg import Bool
 from mavros_msgs.msg import State, PositionTarget
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+from common_interfaces.msg import VisionObstacleArray
 
 
 class UsvAvoidanceNode(Node):
     """
     无人船避障节点类
     
-    该节点实现基于超声波雷达的避障功能，当检测到障碍物时，
+    该节点实现基于超声波雷达和双目视觉融合的避障功能，当检测到障碍物时，
     自动调整无人船的目标位置以避开障碍物。
+    视觉数据提供障碍物方位信息，使绕障方向更精准。
     """
 
     def __init__(self):
@@ -53,6 +55,11 @@ class UsvAvoidanceNode(Node):
         self.declare_parameter('in_distance_value', 1.2)
         self.in_distance_value = self.get_parameter('in_distance_value').get_parameter_value().double_value
 
+        # 视觉避障触发距离 (米)
+        self.declare_parameter('vision_distance_threshold', 5.0)
+        # 避障偏移距离 (米)
+        self.declare_parameter('avoidance_offset', 2.0)
+
         # 订阅飞控状态信息
         self.state_sub = self.create_subscription(
             State, 'state', self.state_callback, qos_best_effort)
@@ -60,6 +67,10 @@ class UsvAvoidanceNode(Node):
         # 订阅超声波雷达数据
         self.radar_sub = self.create_subscription(
             Range, 'ultrasonic_radar_range', self.radar_callback, qos_best_effort)
+        
+        # 订阅视觉障碍物数据
+        self.vision_sub = self.create_subscription(
+            VisionObstacleArray, 'vision_obstacles', self.vision_callback, qos_best_effort)
         
         # 订阅当前目标点
         self.target_sub = self.create_subscription(
@@ -83,10 +94,14 @@ class UsvAvoidanceNode(Node):
         self.current_state = State()         # 当前飞控设备状态
         self.current_position = Point()      # 当前位置坐标
         self.current_target = Point()        # 目标位置坐标
-        self.obstacle_detected = False       # 雷达避障动作标志
+        self.obstacle_detected = False       # 避障动作标志
+        self.vision_obstacles = []           # 最近一帧视觉检测结果
 
-        self.get_logger().info('USV 避障节点已启动')
-        self.get_logger().info(f'避障距离阈值: {self.in_distance_value} 米')
+        self.get_logger().info('USV 避障节点已启动 (雷达+视觉融合)')
+        self.get_logger().info(f'雷达避障距离阈值: {self.in_distance_value} 米')
+        self.get_logger().info(
+            f'视觉避障距离阈值: '
+            f'{self.get_parameter("vision_distance_threshold").value} 米')
 
     def radar_callback(self, msg):
         """
@@ -118,6 +133,16 @@ class UsvAvoidanceNode(Node):
         if isinstance(msg, PoseStamped):
             self.current_position = msg.pose.position
 
+    def vision_callback(self, msg):
+        """
+        视觉障碍物回调函数
+        
+        Args:
+            msg (VisionObstacleArray): 包含视觉检测到的障碍物列表
+        """
+        if isinstance(msg, VisionObstacleArray):
+            self.vision_obstacles = msg.obstacles
+
     def target_callback(self, msg):
         """
         目标点回调函数
@@ -130,23 +155,44 @@ class UsvAvoidanceNode(Node):
 
     def avoidance_run(self):
         """
-        避障主逻辑函数
+        避障主逻辑函数 (雷达+视觉融合)
         
-        定期检查是否需要进行避障操作，并在必要时发布新的目标点。
+        融合策略: 保守模式 — 雷达或视觉任一检测到障碍即触发避障。
+        视觉提供方位信息，使绕障方向更精准 (朝障碍物反方向偏移)。
+        雷达无方位信息时沿用原始右偏策略。
         """
         try:
-            # 获取最新的避障距离阈值参数
-            self.in_distance_value = self.get_parameter("in_distance_value").get_parameter_value().double_value
+            # 获取最新参数
+            self.in_distance_value = self.get_parameter(
+                "in_distance_value").get_parameter_value().double_value
+            vision_threshold = self.get_parameter(
+                "vision_distance_threshold").get_parameter_value().double_value
+            avoidance_offset = self.get_parameter(
+                "avoidance_offset").get_parameter_value().double_value
             
             # 检查飞控是否已连接、已解锁且处于GUIDED模式
-            if not self.current_state.connected or not self.current_state.armed or self.current_state.mode != "GUIDED":
+            if (not self.current_state.connected
+                    or not self.current_state.armed
+                    or self.current_state.mode != "GUIDED"):
                 return
-                 
-            # 检测障碍物
-            if self.current_laserscan.range < self.in_distance_value:
-                self.obstacle_detected = True
-            else:
-                self.obstacle_detected = False   
+
+            # ---- 雷达检测 ----
+            radar_obstacle = self.current_laserscan.range < self.in_distance_value
+            radar_distance = (self.current_laserscan.range
+                              if radar_obstacle else float('inf'))
+
+            # ---- 视觉检测 — 取最近的障碍物 ----
+            vision_distance = float('inf')
+            vision_bearing = 0.0
+            for obs in self.vision_obstacles:
+                if obs.distance < vision_threshold and obs.distance < vision_distance:
+                    vision_distance = obs.distance
+                    vision_bearing = obs.bearing
+
+            vision_obstacle = vision_distance < vision_threshold
+
+            # ---- 融合判定: 任一源触发即避障 ----
+            self.obstacle_detected = radar_obstacle or vision_obstacle
 
             # 如果检测到障碍物且位置信息有效，则计算避障目标点
             if self.obstacle_detected and self.current_position and self.current_target:
@@ -160,9 +206,27 @@ class UsvAvoidanceNode(Node):
                 else:
                     heading = math.atan2(dy, dx)
                 
-                # 绕障：向右偏移 2 米（可根据雷达数据动态调整）
-                avoid_x = self.current_position.x + 2.0 * math.sin(heading)
-                avoid_y = self.current_position.y - 2.0 * math.cos(heading)
+                if vision_obstacle and vision_distance < radar_distance:
+                    # 视觉检测到更近的障碍 → 利用方位角信息精准绕障
+                    # 向障碍物反方向偏移
+                    avoid_direction = heading - vision_bearing
+                    avoid_x = (self.current_position.x
+                               + avoidance_offset * math.cos(avoid_direction))
+                    avoid_y = (self.current_position.y
+                               + avoidance_offset * math.sin(avoid_direction))
+                    self.get_logger().info(
+                        f'视觉避障: 障碍距离={vision_distance:.1f}m '
+                        f'方位={math.degrees(vision_bearing):.0f}° → '
+                        f'目标点({avoid_x:.2f}, {avoid_y:.2f})')
+                else:
+                    # 仅雷达触发 → 沿用原始右偏策略
+                    avoid_x = (self.current_position.x
+                               + avoidance_offset * math.sin(heading))
+                    avoid_y = (self.current_position.y
+                               - avoidance_offset * math.cos(heading))
+                    self.get_logger().info(
+                        f'雷达避障: 障碍距离={radar_distance:.2f}m → '
+                        f'目标点({avoid_x:.2f}, {avoid_y:.2f})')
 
                 # 构造并发布避障目标点消息
                 msg = PositionTarget()
@@ -185,7 +249,6 @@ class UsvAvoidanceNode(Node):
                 msg.position.z = 0.0
 
                 self.target_pub.publish(msg)
-                self.get_logger().info(f'避障目标点已发布: ({avoid_x:.2f}, {avoid_y:.2f})')
 
             # 发布避障状态
             temp = Bool()

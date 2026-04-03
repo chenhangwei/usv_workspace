@@ -75,6 +75,17 @@ class UsvRlEnv(gym.Env):
     def _pure_angular_speed_limit(self) -> float:
         return max(float(self.config.action_bounds.angular_delta), float(self.config.max_angular_velocity))
 
+    def _projection_conflict_level(self, observation: Optional[UsvObservation]) -> float:
+        if observation is None or not observation.neighbors:
+            return 0.0
+        lookahead_distance = max(
+            self.config.reward.anticipation_distance,
+            self.config.reward.conflict_distance,
+            self.config.collision_distance + 1e-3,
+        )
+        min_neighbor_distance = observation.min_neighbor_distance()
+        return float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+
     def _policy_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:
         low = np.asarray([
             0.0,
@@ -304,8 +315,14 @@ class UsvRlEnv(gym.Env):
 
     def project_policy_action(self, action) -> np.ndarray:
         raw_linear_x = None
+        heading_error = None
+        current_angular_z = 0.0
+        conflict_level = 0.0
         if self._latest_observation is not None:
             raw_linear_x = self._latest_observation.raw_linear_x
+            heading_error = self._latest_observation.heading_error
+            current_angular_z = self._latest_observation.final_angular_z
+            conflict_level = self._projection_conflict_level(self._latest_observation)
 
         return project_rl_policy_action(
             action,
@@ -314,6 +331,16 @@ class UsvRlEnv(gym.Env):
             linear_delta_limit=self._pure_linear_speed_limit(),
             angular_delta_limit=self._pure_angular_speed_limit(),
             raw_linear_x=raw_linear_x,
+            heading_error=heading_error,
+            current_angular_z=current_angular_z,
+            control_dt=self.config.control_dt,
+            conflict_level=conflict_level,
+            heading_omega_deadband=self.config.heading_omega_deadband,
+            heading_omega_reference=self.config.heading_omega_reference,
+            angular_authority_power=self.config.angular_authority_power,
+            angular_accel_limit=self.config.angular_accel_limit,
+            angular_decel_limit=self.config.angular_decel_limit,
+            conflict_turn_relief=self.config.conflict_turn_relief,
             forward_only=True,
         )
 

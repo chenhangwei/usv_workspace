@@ -3,6 +3,10 @@ from typing import Dict, List
 
 import numpy as np
 
+# Number of distinct encounter types encoded as a one-hot in the observation.
+# 0=head_on, 1=crossing, 2=overtaking.  -1 means unset (zero vector).
+ENCOUNTER_TYPE_COUNT = 3
+
 
 @dataclass
 class AgentNeighborObservation:
@@ -29,10 +33,11 @@ class AgentLocalObservation:
     final_linear_x: float
     final_angular_z: float
     neighbors: List[AgentNeighborObservation] = field(default_factory=list)
+    encounter_type_index: int = -1
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 10 + max_neighbors * 6
+        return 10 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -67,6 +72,12 @@ class AgentLocalObservation:
         for _ in range(max(0, max_neighbors - len(sorted_neighbors))):
             features.extend([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
+        # Encounter type one-hot: allows the network to condition on scenario type
+        encounter_one_hot = [0.0] * ENCOUNTER_TYPE_COUNT
+        if 0 <= self.encounter_type_index < ENCOUNTER_TYPE_COUNT:
+            encounter_one_hot[self.encounter_type_index] = 1.0
+        features.extend(encounter_one_hot)
+
         return np.asarray(features, dtype=np.float32)
 
 
@@ -87,12 +98,25 @@ class FleetGlobalState:
     def from_local_observations(
         cls,
         local_observations: Dict[str, AgentLocalObservation],
+        *,
+        active_agent_ids: tuple[str, ...] | None = None,
+        goal_tolerance: float = 0.8,
     ) -> 'FleetGlobalState':
+        if active_agent_ids:
+            active_set = set(active_agent_ids)
+            selected_observations = {
+                agent_id: observation
+                for agent_id, observation in local_observations.items()
+                if agent_id in active_set
+            }
+        else:
+            selected_observations = dict(local_observations)
+
         distances = []
         heading_errors = []
         positions = []
         pairwise_separations = []
-        for observation in local_observations.values():
+        for observation in selected_observations.values():
             distances.append(observation.distance_to_goal)
             heading_errors.append(abs(observation.heading_error))
             positions.append((observation.pose_x, observation.pose_y))
@@ -106,10 +130,10 @@ class FleetGlobalState:
 
         goal_completion_ratio = 0.0
         if distances:
-            goal_completion_ratio = float(np.mean([1.0 if distance <= 0.8 else 0.0 for distance in distances]))
+            goal_completion_ratio = float(np.mean([1.0 if distance <= goal_tolerance else 0.0 for distance in distances]))
 
         return cls(
-            local_observations=dict(local_observations),
+            local_observations=selected_observations,
             team_min_separation=team_min_separation,
             team_mean_separation=float(np.mean(pairwise_separations)) if pairwise_separations else float('inf'),
             team_mean_goal_distance=float(np.mean(distances)) if distances else 0.0,

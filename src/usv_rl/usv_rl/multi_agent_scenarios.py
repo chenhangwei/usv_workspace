@@ -46,7 +46,16 @@ class FleetScenario:
     duration: float
     agent_spawns: Dict[str, AgentSpawnConfig]
     agent_goals: Dict[str, AgentGoalConfig]
+    active_agent_ids: tuple[str, ...] = field(default_factory=tuple)
     background_tracks: List[BackgroundTrack] = field(default_factory=list)
+
+    def __post_init__(self):
+        if not self.active_agent_ids:
+            self.active_agent_ids = tuple(self.agent_spawns)
+
+    @property
+    def inactive_agent_ids(self) -> tuple[str, ...]:
+        return tuple(agent_id for agent_id in self.agent_spawns if agent_id not in self.active_agent_ids)
 
     def states_at(self, elapsed: float) -> List[NeighborState]:
         return [track.state_at(elapsed) for track in self.background_tracks]
@@ -78,6 +87,7 @@ class FleetScenario:
             duration=self.duration,
             agent_spawns=new_spawns,
             agent_goals=new_goals,
+            active_agent_ids=self.active_agent_ids,
             background_tracks=list(self.background_tracks),
         )
 
@@ -203,6 +213,7 @@ class MultiAgentScenarioFactory:
                 duration=45.0,
                 agent_spawns=agent_spawns,
                 agent_goals=agent_goals,
+                active_agent_ids=(first, second),
             )
 
         if kind == 'three_usv_crossing':
@@ -225,6 +236,7 @@ class MultiAgentScenarioFactory:
                 duration=50.0,
                 agent_spawns=agent_spawns,
                 agent_goals=agent_goals,
+                active_agent_ids=(first, second, third),
             )
 
         if kind == 'three_usv_overtaking':
@@ -247,6 +259,7 @@ class MultiAgentScenarioFactory:
                 duration=50.0,
                 agent_spawns=agent_spawns,
                 agent_goals=agent_goals,
+                active_agent_ids=(first, second, third),
                 background_tracks=[
                     BackgroundTrack(
                         track_id='background_slow_ahead',

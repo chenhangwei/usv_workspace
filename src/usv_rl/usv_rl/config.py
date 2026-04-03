@@ -57,6 +57,32 @@ class RewardConfig:
     time_penalty: float = 0.02
     stall_penalty: float = -12.0
     angular_accel_penalty_weight: float = 0.0
+    straight_line_omega_penalty_weight: float = 2.0
+    saturated_omega_flip_penalty_weight: float = 0.0
+    # Penalise forward-speed oscillation (|vx_t - vx_{t-1}|) independent of conflict state.
+    forward_speed_change_penalty_weight: float = 0.0
+    # Lower saturation threshold for omega-flip detection (default 0.65 is too high).
+    omega_flip_saturation_threshold: float = 0.65
+    # Floor for straight-line omega penalty during conflict (default 0.1 nearly disables it).
+    straight_line_omega_conflict_floor: float = 0.1
+    # Positive reward for increasing pairwise separation while inside near-miss band.
+    # Encourages active disengagement after a close encounter.
+    separation_recovery_weight: float = 0.0
+    # Penalty for exceeding desired_conflict_speed during active conflict.
+    # Addresses the asymmetry where only speed deficit (too slow) is penalised.
+    conflict_overspeed_penalty_weight: float = 0.0
+    # Continuous proximity gradient penalty: 1/d^2 scaled, activates below
+    # ``proximity_gradient_distance`` to create a strong repulsive field.
+    proximity_gradient_penalty_weight: float = 0.0
+    proximity_gradient_distance: float = 3.0
+    # Speed-distance coupling penalty: penalises high forward speed when a
+    # neighbour is within ``speed_distance_coupling_threshold``.
+    speed_distance_coupling_penalty_weight: float = 0.0
+    speed_distance_coupling_threshold: float = 2.0
+    # Heading convergence reward: positive reward when |heading_error| is
+    # below ``heading_convergence_threshold_deg`` degrees.
+    heading_convergence_reward_weight: float = 0.0
+    heading_convergence_threshold_deg: float = 10.0
 
 
 @dataclass
@@ -70,6 +96,12 @@ class EnvConfig:
     cruise_speed: float = 0.4
     max_angular_velocity: float = 0.4
     control_dt: float = 0.2
+    heading_omega_deadband: float = 0.06
+    heading_omega_reference: float = 0.85
+    angular_authority_power: float = 1.6
+    angular_accel_limit: float = 1.8
+    angular_decel_limit: float = 2.4
+    conflict_turn_relief: float = 0.55
     state_timeout: float = 10.0
     ready_timeout: float = 45.0
     episode_timeout: float = 45.0

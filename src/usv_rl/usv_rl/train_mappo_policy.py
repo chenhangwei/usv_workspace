@@ -58,6 +58,12 @@ def parse_args():
     parser.add_argument('--angular-delta-limit', type=float, default=default_env.action_bounds.angular_delta, help='Maximum yaw-rate command magnitude (rad/s).')
     parser.add_argument('--cruise-speed', type=float, default=default_env.cruise_speed, help='Training controller cruise speed limit (m/s).')
     parser.add_argument('--max-angular-velocity', type=float, default=default_env.max_angular_velocity, help='Training controller yaw-rate limit (rad/s).')
+    parser.add_argument('--heading-omega-deadband', type=float, default=default_env.heading_omega_deadband, help='Heading-error deadband (rad) below which yaw-rate authority collapses toward straight-line tracking.')
+    parser.add_argument('--heading-omega-reference', type=float, default=default_env.heading_omega_reference, help='Heading error (rad) that restores full yaw-rate authority.')
+    parser.add_argument('--angular-authority-power', type=float, default=default_env.angular_authority_power, help='Nonlinear power used to shrink yaw-rate authority at small heading errors.')
+    parser.add_argument('--angular-accel-limit', type=float, default=default_env.angular_accel_limit, help='Angular acceleration limit (rad/s^2) used while building turn rate.')
+    parser.add_argument('--angular-decel-limit', type=float, default=default_env.angular_decel_limit, help='Angular deceleration limit (rad/s^2) used while unwinding turn rate near alignment.')
+    parser.add_argument('--conflict-turn-relief', type=float, default=default_env.conflict_turn_relief, help='Minimum yaw-rate authority retained at full conflict even when goal heading error is small.')
     parser.add_argument('--episode-timeout', type=float, default=45.0, help='Episode timeout in seconds.')
     parser.add_argument('--no-progress-timeout', type=float, default=10.0, help='No-progress timeout in seconds.')
     parser.add_argument('--min-progress-delta', type=float, default=0.3, help='Fleet progress threshold for refreshing the no-progress timer.')
@@ -117,6 +123,21 @@ def parse_args():
     parser.add_argument('--time-penalty', type=float, default=RewardConfig.time_penalty, help='Per-step time penalty.')
     parser.add_argument('--stall-penalty', type=float, default=RewardConfig.stall_penalty, help='Penalty applied on episode truncation.')
     parser.add_argument('--angular-accel-penalty-weight', type=float, default=RewardConfig.angular_accel_penalty_weight, help='Angular acceleration penalty weight for smooth turning.')
+    parser.add_argument('--straight-line-omega-penalty-weight', type=float, default=RewardConfig.straight_line_omega_penalty_weight, help='Penalty weight for large angular velocity when heading error is small (prevents S-curve oscillation).')
+    parser.add_argument('--saturated-omega-flip-penalty-weight', type=float, default=RewardConfig.saturated_omega_flip_penalty_weight, help='Penalty weight for bang-bang reversals where consecutive angular commands flip sign near saturation.')
+    parser.add_argument('--forward-speed-change-penalty-weight', type=float, default=RewardConfig.forward_speed_change_penalty_weight, help='Penalty weight for |vx_t - vx_{t-1}| (prevents linear speed oscillation / bang-bang).')
+    parser.add_argument('--omega-flip-saturation-threshold', type=float, default=RewardConfig.omega_flip_saturation_threshold, help='Min saturation ratio to trigger omega-flip penalty (lower = catches milder bang-bang). Default 0.65.')
+    parser.add_argument('--straight-line-omega-conflict-floor', type=float, default=RewardConfig.straight_line_omega_conflict_floor, help='Minimum conflict gate for straight-line omega penalty (higher = less suppression during conflict). Default 0.1.')
+    parser.add_argument('--conflict-overspeed-penalty-weight', type=float, default=RewardConfig.conflict_overspeed_penalty_weight, help='Penalty weight for exceeding desired conflict speed during active conflict. Fixes the asymmetry where only speed deficit was penalised.')
+    parser.add_argument('--proximity-gradient-penalty-weight', type=float, default=RewardConfig.proximity_gradient_penalty_weight, help='Weight for 1/d^2 repulsive gradient penalty when pair distance < proximity-gradient-distance.')
+    parser.add_argument('--proximity-gradient-distance', type=float, default=RewardConfig.proximity_gradient_distance, help='Activation distance (m) for proximity gradient penalty.')
+    parser.add_argument('--speed-distance-coupling-penalty-weight', type=float, default=RewardConfig.speed_distance_coupling_penalty_weight, help='Penalty weight for high speed when close to neighbors.')
+    parser.add_argument('--speed-distance-coupling-threshold', type=float, default=RewardConfig.speed_distance_coupling_threshold, help='Activation distance (m) for speed-distance coupling penalty.')
+    parser.add_argument('--heading-convergence-reward-weight', type=float, default=RewardConfig.heading_convergence_reward_weight, help='Positive reward for heading error within convergence threshold.')
+    parser.add_argument('--heading-convergence-threshold-deg', type=float, default=RewardConfig.heading_convergence_threshold_deg, help='Heading error threshold (degrees) for convergence bonus.')
+    parser.add_argument('--neighbor-attention', action='store_true', help='Replace fixed neighbor padding with attention-based neighbor aggregation. Learns to focus on the most relevant neighbor (nearest, highest TCPA, head-on, etc.).')
+    parser.add_argument('--attention-embed-dim', type=int, default=32, help='Embedding dimension for neighbor attention encoder.')
+    parser.add_argument('--attention-num-heads', type=int, default=1, help='Number of attention heads for neighbor attention encoder.')
     parser.add_argument('--squash-actions', action='store_true', help='Apply tanh squashing to actor output for smooth bounded actions.')
     parser.add_argument('--min-forward-speed', type=float, default=0.0, help='Minimum forward speed enforced via action bounds when squash-actions is enabled.')
     parser.add_argument('--normalize-observations', action='store_true', help='Enable running observation normalization for stable training across mixed feature scales.')
@@ -135,6 +156,7 @@ def parse_args():
     parser.add_argument('--team-regression-penalty-weight', type=float, default=0.0, help='Fleet penalty weight for negative team progress.')
     parser.add_argument('--team-dispersion-penalty-weight', type=float, default=0.0, help='Fleet penalty weight for expanding mean pairwise separation beyond the initial formation.')
     parser.add_argument('--team-dispersion-margin', type=float, default=0.0, help='Allowed increase in fleet mean separation before dispersion penalty applies.')
+    parser.add_argument('--separation-recovery-weight', type=float, default=0.0, help='Positive reward weight for increasing pairwise separation inside near-miss band.')
     parser.add_argument('--coordination-reward-weight', type=float, default=0.20, help='Fleet goal-completion coordination reward weight.')
     parser.add_argument('--team-completion-bonus', type=float, default=18.0, help='Fleet-wide bonus when all agents reach their goals.')
     parser.add_argument('--deadlock-penalty-weight', type=float, default=4.0, help='Penalty weight applied when fleet mean goal distance stalls.')
@@ -150,6 +172,8 @@ def parse_args():
     parser.add_argument('--log-interval-updates', type=int, default=1, help='Print rollout/update throughput every N policy updates.')
     parser.add_argument('--num-sampler-workers', type=int, default=1, help='Number of sampler worker processes. Values >1 use process-level ROS domain isolation for rollout collection.')
     parser.add_argument('--base-ros-domain-id', type=int, default=100, help='Base ROS domain ID used when --num-sampler-workers > 1. Worker rank is added to this base.')
+    parser.add_argument('--per-scenario-advantage-norm', action='store_true', help='Normalize advantages per-scenario instead of globally. Prevents reward-scale imbalance from causing gradient dominance by easier scenarios (anti-forgetting).')
+    parser.add_argument('--scenario-balanced-loss', action='store_true', help='Weight PPO loss samples inversely to their scenario sample count. Equalizes per-scenario gradient contribution regardless of episode length (anti-forgetting).')
     return parser.parse_args()
 
 
@@ -338,6 +362,18 @@ def _build_reward_config(args) -> RewardConfig:
         time_penalty=float(args.time_penalty),
         stall_penalty=float(args.stall_penalty),
         angular_accel_penalty_weight=float(args.angular_accel_penalty_weight),
+        straight_line_omega_penalty_weight=float(args.straight_line_omega_penalty_weight),
+        saturated_omega_flip_penalty_weight=float(args.saturated_omega_flip_penalty_weight),
+        forward_speed_change_penalty_weight=float(args.forward_speed_change_penalty_weight),
+        omega_flip_saturation_threshold=float(args.omega_flip_saturation_threshold),
+        straight_line_omega_conflict_floor=float(args.straight_line_omega_conflict_floor),
+        conflict_overspeed_penalty_weight=float(args.conflict_overspeed_penalty_weight),
+        proximity_gradient_penalty_weight=float(args.proximity_gradient_penalty_weight),
+        proximity_gradient_distance=float(args.proximity_gradient_distance),
+        speed_distance_coupling_penalty_weight=float(args.speed_distance_coupling_penalty_weight),
+        speed_distance_coupling_threshold=float(args.speed_distance_coupling_threshold),
+        heading_convergence_reward_weight=float(args.heading_convergence_reward_weight),
+        heading_convergence_threshold_deg=float(args.heading_convergence_threshold_deg),
     )
 
 
@@ -428,6 +464,12 @@ def _checkpoint_payload(
         'scenario_neighbor_speed': float(args.scenario_neighbor_speed),
         'cruise_speed': float(args.cruise_speed),
         'max_angular_velocity': float(args.max_angular_velocity),
+        'heading_omega_deadband': float(args.heading_omega_deadband),
+        'heading_omega_reference': float(args.heading_omega_reference),
+        'angular_authority_power': float(args.angular_authority_power),
+        'angular_accel_limit': float(args.angular_accel_limit),
+        'angular_decel_limit': float(args.angular_decel_limit),
+        'conflict_turn_relief': float(args.conflict_turn_relief),
         'action_bounds': {
             'linear_delta': float(args.linear_delta_limit),
             'angular_delta': float(args.angular_delta_limit),
@@ -444,6 +486,9 @@ def _checkpoint_payload(
         'squash_actions': bool(getattr(args, 'squash_actions', False)),
         'min_forward_speed': float(getattr(args, 'min_forward_speed', 0.0)),
         'normalize_observations': bool(getattr(args, 'normalize_observations', False)),
+        'neighbor_attention': bool(getattr(args, 'neighbor_attention', False)),
+        'attention_embed_dim': int(getattr(args, 'attention_embed_dim', 32)),
+        'attention_num_heads': int(getattr(args, 'attention_num_heads', 1)),
         'total_timesteps': max(0, args.total_timesteps),
         'completed_timesteps': int(total_steps),
         'update_index': int(update_index),
@@ -459,6 +504,33 @@ def _checkpoint_payload(
 
 
 def _compute_advantages_and_returns(rewards, values, dones, bootstrap_values, gamma: float, gae_lambda: float):
+    if isinstance(rewards, list):
+        advantages_seq = []
+        returns_seq = []
+        next_values = np.asarray(bootstrap_values, dtype=np.float32)
+        gae = np.zeros_like(next_values, dtype=np.float32)
+
+        for step in reversed(range(len(rewards))):
+            rewards_step = np.asarray(rewards[step], dtype=np.float32)
+            values_step = np.asarray(values[step], dtype=np.float32)
+            dones_step = np.asarray(dones[step], dtype=np.float32)
+            if next_values.shape != values_step.shape:
+                next_values = np.zeros_like(values_step, dtype=np.float32)
+                gae = np.zeros_like(values_step, dtype=np.float32)
+            mask = 1.0 - dones_step
+            delta = rewards_step + gamma * next_values * mask - values_step
+            gae = delta + gamma * gae_lambda * mask * gae
+            advantages_seq.append(gae.copy())
+            returns_seq.append((gae + values_step).copy())
+            next_values = values_step
+
+        advantages_seq.reverse()
+        returns_seq.reverse()
+        return (
+            np.concatenate(advantages_seq, axis=0).astype(np.float32),
+            np.concatenate(returns_seq, axis=0).astype(np.float32),
+        )
+
     advantages = np.zeros_like(rewards, dtype=np.float32)
     returns = np.zeros_like(rewards, dtype=np.float32)
     gae = np.zeros(rewards.shape[1], dtype=np.float32)
@@ -473,6 +545,12 @@ def _compute_advantages_and_returns(rewards, values, dones, bootstrap_values, ga
         next_values = values[step]
 
     return advantages, returns
+
+
+def _flatten_rollout_batches(storage_batches: list[np.ndarray], *, dtype=np.float32) -> np.ndarray:
+    if not storage_batches:
+        return np.asarray([], dtype=dtype)
+    return np.concatenate([np.asarray(batch, dtype=dtype) for batch in storage_batches], axis=0)
 
 
 def _save_checkpoint(checkpoint_path: Path, payload: dict):
@@ -505,11 +583,119 @@ def _load_resume_payload(torch, resume_path: Path) -> dict:
     return payload
 
 
-def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path: Path, obs_normalizer=None):
-    """Load actor/critic/normalizer weights without restoring any config or training state."""
+def _migrate_first_layer_weights(torch, old_state_dict, new_state_dict, old_obs_dim, new_obs_dim, num_obs_blocks, layer_key='0'):
+    """Zero-pad the first MLP layer when observation dimension grows.
+
+    Input structure: [obs_block_1, ..., obs_block_N, remaining_features].
+    Each obs block grows from old_obs_dim to new_obs_dim.
+    For actor: num_obs_blocks=1, no remaining.
+    For critic: num_obs_blocks=1+max_agents (self obs + each agent in global state), remaining=fleet_stats.
+    """
+    weight_key = f'{layer_key}.weight'
+    bias_key = f'{layer_key}.bias'
+    old_w = old_state_dict[weight_key]  # [hidden, old_input]
+    delta = new_obs_dim - old_obs_dim
+    new_input_dim = new_state_dict[weight_key].shape[1]
+    expected_new = old_w.shape[1] + num_obs_blocks * delta
+    if expected_new != new_input_dim:
+        raise ValueError(
+            f'Weight migration dimension error: old_input={old_w.shape[1]}, '
+            f'num_obs_blocks={num_obs_blocks}, delta={delta}, '
+            f'expected_new={expected_new}, actual_new={new_input_dim}'
+        )
+    new_w = torch.zeros(old_w.shape[0], new_input_dim, dtype=old_w.dtype, device=old_w.device)
+    old_pos = 0
+    new_pos = 0
+    for _ in range(num_obs_blocks):
+        new_w[:, new_pos:new_pos + old_obs_dim] = old_w[:, old_pos:old_pos + old_obs_dim]
+        old_pos += old_obs_dim
+        new_pos += new_obs_dim
+    remaining = old_w.shape[1] - old_pos
+    if remaining > 0:
+        new_w[:, new_pos:new_pos + remaining] = old_w[:, old_pos:old_pos + remaining]
+    migrated = dict(old_state_dict)
+    migrated[weight_key] = new_w
+    migrated[bias_key] = old_state_dict[bias_key]  # bias unchanged
+    return migrated
+
+
+def _migrate_normalizer_state(old_norm_state, old_obs_dim, new_obs_dim):
+    """Extend observation normalizer running stats for new dimensions."""
+    if old_norm_state is None:
+        return None
+    old_mean = np.asarray(old_norm_state.get('mean', []), dtype=np.float64)
+    old_var = np.asarray(old_norm_state.get('var', []), dtype=np.float64)
+    if old_mean.shape[0] == new_obs_dim:
+        return old_norm_state
+    if old_mean.shape[0] != old_obs_dim:
+        return old_norm_state
+    delta = new_obs_dim - old_obs_dim
+    new_mean = np.concatenate([old_mean, np.zeros(delta, dtype=np.float64)])
+    new_var = np.concatenate([old_var, np.ones(delta, dtype=np.float64)])
+    migrated = dict(old_norm_state)
+    migrated['mean'] = new_mean
+    migrated['var'] = new_var
+    return migrated
+
+
+def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path: Path, obs_normalizer=None, *, max_agents: int = 5, neighbor_attention: bool = False):
+    """Load actor/critic/normalizer weights without restoring any config or training state.
+
+    Handles observation dimension mismatch by zero-padding first-layer weights
+    when the current model has a larger observation than the checkpoint.
+    Also handles flat MLP → attention architecture migration.
+    """
     payload = _load_resume_payload(torch, weights_path)
-    actor.load_state_dict(payload['actor_state_dict'])
-    critic.load_state_dict(payload['critic_state_dict'])
+
+    actor_sd = payload['actor_state_dict']
+    critic_sd = payload['critic_state_dict']
+
+    old_is_attention = 'neighbor_attention.query_proj.weight' in actor_sd
+    new_is_attention = neighbor_attention
+
+    if not old_is_attention and new_is_attention:
+        # Flat MLP checkpoint → attention architecture: smart migration.
+        from usv_rl.neighbor_attention import migrate_flat_actor_to_attention, migrate_flat_critic_to_attention
+        migrate_flat_actor_to_attention(actor_sd, actor, torch)
+        migrate_flat_critic_to_attention(critic_sd, critic, torch)
+        print(
+            f'Migrated flat MLP weights to attention architecture from {weights_path}',
+            flush=True,
+        )
+    elif old_is_attention and new_is_attention:
+        # Attention → attention (same architecture).
+        actor.load_state_dict(actor_sd)
+        critic.load_state_dict(critic_sd)
+    else:
+        # Flat → flat (original migration path).
+        new_actor_sd = actor.state_dict()
+        new_critic_sd = critic.state_dict()
+
+        actor_needs_migration = actor_sd['0.weight'].shape != new_actor_sd['0.weight'].shape
+        critic_needs_migration = critic_sd['0.weight'].shape != new_critic_sd['0.weight'].shape
+
+        if actor_needs_migration or critic_needs_migration:
+            old_obs_dim = int(actor_sd['0.weight'].shape[1])
+            new_obs_dim = int(new_actor_sd['0.weight'].shape[1])
+            print(
+                f'Observation dimension changed: {old_obs_dim} -> {new_obs_dim}. '
+                f'Migrating first-layer weights with zero-padding.',
+                flush=True,
+            )
+            if actor_needs_migration:
+                actor_sd = _migrate_first_layer_weights(
+                    torch, actor_sd, new_actor_sd,
+                    old_obs_dim, new_obs_dim, num_obs_blocks=1,
+                )
+            if critic_needs_migration:
+                critic_sd = _migrate_first_layer_weights(
+                    torch, critic_sd, new_critic_sd,
+                    old_obs_dim, new_obs_dim, num_obs_blocks=1 + max_agents,
+                )
+
+        actor.load_state_dict(actor_sd)
+        critic.load_state_dict(critic_sd)
+
     actor_log_std.data.copy_(
         torch.as_tensor(payload['actor_log_std'], dtype=actor_log_std.dtype, device=device)
     )
@@ -568,6 +754,12 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'scenario_neighbor_speed',
         'cruise_speed',
         'max_angular_velocity',
+        'heading_omega_deadband',
+        'heading_omega_reference',
+        'angular_authority_power',
+        'angular_accel_limit',
+        'angular_decel_limit',
+        'conflict_turn_relief',
         'team_reward_weight',
         'team_progress_weight',
         'team_goal_proximity_weight',
@@ -641,6 +833,11 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'time_penalty',
         'stall_penalty',
         'angular_accel_penalty_weight',
+        'straight_line_omega_penalty_weight',
+        'saturated_omega_flip_penalty_weight',
+        'forward_speed_change_penalty_weight',
+        'omega_flip_saturation_threshold',
+        'straight_line_omega_conflict_floor',
     )
     for field in reward_fields:
         if field in cli_overrides:
@@ -850,6 +1047,12 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             max_agents=max(len(agent_namespaces), args.max_agents),
             cruise_speed=float(args.cruise_speed),
             max_angular_velocity=float(args.max_angular_velocity),
+            heading_omega_deadband=float(args.heading_omega_deadband),
+            heading_omega_reference=float(args.heading_omega_reference),
+            angular_authority_power=float(args.angular_authority_power),
+            angular_accel_limit=float(args.angular_accel_limit),
+            angular_decel_limit=float(args.angular_decel_limit),
+            conflict_turn_relief=float(args.conflict_turn_relief),
             episode_timeout=float(args.episode_timeout),
             no_progress_timeout=float(args.no_progress_timeout),
             min_progress_delta=float(args.min_progress_delta),
@@ -870,6 +1073,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             team_regression_penalty_weight=float(args.team_regression_penalty_weight),
             team_dispersion_penalty_weight=float(args.team_dispersion_penalty_weight),
             team_dispersion_margin=float(args.team_dispersion_margin),
+            separation_recovery_weight=float(args.separation_recovery_weight),
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
@@ -997,8 +1201,29 @@ def main():
             )
             global_state = info['global_state']
 
-        actor = _build_mlp(nn, model_metadata['local_observation_size'], hidden_sizes, model_metadata['action_dim']).to(device)
-        critic = _build_mlp(nn, model_metadata['local_observation_size'] + model_metadata['global_state_size'], hidden_sizes, 1).to(device)
+        use_neighbor_attention = bool(getattr(args, 'neighbor_attention', False))
+        if use_neighbor_attention:
+            from usv_rl.neighbor_attention import AttentionActor, AttentionCritic
+            from usv_rl.multi_agent_types import ENCOUNTER_TYPE_COUNT
+            actor = AttentionActor(
+                max_neighbors=int(args.max_neighbors),
+                encounter_dim=ENCOUNTER_TYPE_COUNT,
+                hidden_sizes=hidden_sizes,
+                action_dim=model_metadata['action_dim'],
+                embed_dim=int(args.attention_embed_dim),
+                num_heads=int(args.attention_num_heads),
+            ).to(device)
+            critic = AttentionCritic(
+                max_neighbors=int(args.max_neighbors),
+                encounter_dim=ENCOUNTER_TYPE_COUNT,
+                global_state_dim=model_metadata['global_state_size'],
+                hidden_sizes=hidden_sizes,
+                embed_dim=int(args.attention_embed_dim),
+                num_heads=int(args.attention_num_heads),
+            ).to(device)
+        else:
+            actor = _build_mlp(nn, model_metadata['local_observation_size'], hidden_sizes, model_metadata['action_dim']).to(device)
+            critic = _build_mlp(nn, model_metadata['local_observation_size'] + model_metadata['global_state_size'], hidden_sizes, 1).to(device)
         actor_log_std = nn.Parameter(torch.zeros(model_metadata['action_dim'], device=device))
         optimizer = torch.optim.Adam(list(actor.parameters()) + list(critic.parameters()) + [actor_log_std], lr=args.learning_rate)
         action_low_tensor = torch.as_tensor(model_metadata['action_low'], dtype=torch.float32, device=device)
@@ -1054,6 +1279,8 @@ def main():
             _load_weights_only(
                 torch, device, actor, critic, actor_log_std,
                 Path(args.load_weights_from), obs_normalizer,
+                max_agents=max(len(agent_namespaces), int(args.max_agents)),
+                neighbor_attention=use_neighbor_attention,
             )
 
         while total_steps < max(0, args.total_timesteps):
@@ -1086,32 +1313,29 @@ def main():
                 flat_log_probs_parts = []
                 flat_advantages_parts = []
                 flat_returns_parts = []
+                flat_scenario_ids_parts = []
+                rollout_reward_count = 0
 
                 for result in worker_results:
                     rewards = np.asarray(result['rewards'], dtype=np.float32)
-                    values = np.asarray(result['values'], dtype=np.float32)
-                    dones = np.asarray(result['dones'], dtype=np.float32)
-                    advantages, returns = _compute_advantages_and_returns(
-                        rewards,
-                        values,
-                        dones,
-                        np.asarray(result['bootstrap_values'], dtype=np.float32),
-                        args.gamma,
-                        args.gae_lambda,
-                    )
+                    advantages = np.asarray(result['advantages'], dtype=np.float32)
+                    returns = np.asarray(result['returns'], dtype=np.float32)
                     flat_obs_parts.append(np.asarray(result['obs'], dtype=np.float32).reshape(-1, model_metadata['local_observation_size']))
                     flat_states_parts.append(np.asarray(result['states'], dtype=np.float32).reshape(-1, model_metadata['global_state_size']))
                     flat_actions_parts.append(np.asarray(result['actions'], dtype=np.float32).reshape(-1, model_metadata['action_dim']))
                     flat_log_probs_parts.append(np.asarray(result['log_probs'], dtype=np.float32).reshape(-1))
                     flat_advantages_parts.append(advantages.reshape(-1))
                     flat_returns_parts.append(returns.reshape(-1))
+                    if 'scenario_ids' in result:
+                        flat_scenario_ids_parts.append(np.asarray(result['scenario_ids'], dtype=np.int32).reshape(-1))
                     rollout_agent_steps += int(result['agent_steps'])
                     rollout_steps_collected += int(result['rollout_steps_collected'])
-                    rollout_mean_reward += float(rewards.mean()) * rewards.shape[0]
-                    rollout_episode_count += int((dones[:, 0] > 0.5).sum()) if dones.ndim == 2 and dones.shape[0] > 0 else 0
+                    rollout_mean_reward += float(rewards.sum())
+                    rollout_reward_count += int(rewards.size)
+                    rollout_episode_count += int(result.get('episode_count', 0))
 
-                if rollout_steps_collected > 0:
-                    rollout_mean_reward /= max(1, rollout_steps_collected)
+                if rollout_reward_count > 0:
+                    rollout_mean_reward /= max(1, rollout_reward_count)
                 total_steps += rollout_agent_steps
                 raw_flat_obs_np = np.concatenate(flat_obs_parts, axis=0)
                 if obs_normalizer is not None:
@@ -1125,6 +1349,7 @@ def main():
                 flat_old_log_probs = torch.as_tensor(np.concatenate(flat_log_probs_parts, axis=0), dtype=torch.float32, device=device)
                 flat_advantages = torch.as_tensor(np.concatenate(flat_advantages_parts, axis=0), dtype=torch.float32, device=device)
                 flat_returns = torch.as_tensor(np.concatenate(flat_returns_parts, axis=0), dtype=torch.float32, device=device)
+                flat_scenario_ids_np = np.concatenate(flat_scenario_ids_parts, axis=0) if flat_scenario_ids_parts else None
             else:
                 storage_obs = []
                 storage_states = []
@@ -1133,6 +1358,9 @@ def main():
                 storage_values = []
                 storage_rewards = []
                 storage_dones = []
+                storage_scenario_ids = []
+                rollout_episode_count = 0
+                current_scenario = env.current_scenario_name
 
                 for _ in range(current_rollout_steps):
                     agent_order = env.agent_ids
@@ -1152,6 +1380,7 @@ def main():
                     with torch.no_grad():
                         action_mean = actor(obs_tensor)
                         if getattr(args, 'squash_actions', False):
+                            action_mean = action_mean.clamp(-3.0, 3.0)
                             _half = (action_high_tensor - action_low_tensor) / 2.0
                             _mid = (action_high_tensor + action_low_tensor) / 2.0
                             action_mean = torch.tanh(action_mean) * _half + _mid
@@ -1192,6 +1421,7 @@ def main():
                             max_attempts=max_env_recovery_attempts,
                         )
                         global_state = info['global_state']
+                        current_scenario = env.current_scenario_name
                         break
 
                     consecutive_env_failures = 0
@@ -1205,10 +1435,13 @@ def main():
                     storage_values.append(value_tensor.detach().cpu().numpy())
                     storage_rewards.append(reward_batch)
                     storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
+                    storage_scenario_ids.append(np.full(len(agent_order), hash(current_scenario) & 0x7FFFFFFF, dtype=np.int32))
 
                     total_steps += len(agent_order)
                     rollout_agent_steps += len(agent_order)
                     rollout_steps_collected += 1
+                    if done:
+                        rollout_episode_count += 1
                     observations = next_observations
                     global_state = next_info['global_state']
                     if done:
@@ -1235,6 +1468,7 @@ def main():
                         else:
                             consecutive_env_failures = 0
                         global_state = info['global_state']
+                        current_scenario = env.current_scenario_name
                     if total_steps >= args.total_timesteps:
                         break
 
@@ -1254,33 +1488,52 @@ def main():
                     bootstrap_state_tensor = torch.as_tensor(bootstrap_state, dtype=torch.float32, device=device)
                     bootstrap_values = critic(torch.cat([bootstrap_obs_tensor, bootstrap_state_tensor], dim=-1)).squeeze(-1).cpu().numpy()
 
-                rewards = np.asarray(storage_rewards, dtype=np.float32)
-                values = np.asarray(storage_values, dtype=np.float32)
-                dones = np.asarray(storage_dones, dtype=np.float32)
+                rewards = _flatten_rollout_batches(storage_rewards)
                 rollout_mean_reward = float(rewards.mean()) if rewards.size > 0 else 0.0
-                rollout_episode_count = int((dones[:, 0] > 0.5).sum()) if dones.ndim == 2 and dones.shape[0] > 0 else 0
                 advantages, returns = _compute_advantages_and_returns(
-                    rewards,
-                    values,
-                    dones,
+                    storage_rewards,
+                    storage_values,
+                    storage_dones,
                     bootstrap_values,
                     args.gamma,
                     args.gae_lambda,
                 )
 
-                raw_flat_obs_sw = np.asarray(storage_obs, dtype=np.float32).reshape(-1, model_metadata['local_observation_size'])
+                raw_flat_obs_sw = _flatten_rollout_batches(storage_obs).reshape(-1, model_metadata['local_observation_size'])
                 if obs_normalizer is not None:
                     flat_obs_sw = obs_normalizer.normalize(raw_flat_obs_sw)
                 else:
                     flat_obs_sw = raw_flat_obs_sw
                 flat_obs = torch.as_tensor(flat_obs_sw, dtype=torch.float32, device=device)
-                flat_states = torch.as_tensor(np.asarray(storage_states, dtype=np.float32).reshape(-1, model_metadata['global_state_size']), dtype=torch.float32, device=device)
-                flat_actions = torch.as_tensor(np.asarray(storage_actions, dtype=np.float32).reshape(-1, model_metadata['action_dim']), dtype=torch.float32, device=device)
-                flat_old_log_probs = torch.as_tensor(np.asarray(storage_log_probs, dtype=np.float32).reshape(-1), dtype=torch.float32, device=device)
+                flat_states = torch.as_tensor(_flatten_rollout_batches(storage_states).reshape(-1, model_metadata['global_state_size']), dtype=torch.float32, device=device)
+                flat_actions = torch.as_tensor(_flatten_rollout_batches(storage_actions).reshape(-1, model_metadata['action_dim']), dtype=torch.float32, device=device)
+                flat_old_log_probs = torch.as_tensor(_flatten_rollout_batches(storage_log_probs).reshape(-1), dtype=torch.float32, device=device)
                 flat_advantages = torch.as_tensor(advantages.reshape(-1), dtype=torch.float32, device=device)
                 flat_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=device)
+                flat_scenario_ids_np = _flatten_rollout_batches(storage_scenario_ids).reshape(-1) if storage_scenario_ids else None
 
-            flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-6)
+            # ---------- Advantage Normalization ----------
+            if getattr(args, 'per_scenario_advantage_norm', False) and flat_scenario_ids_np is not None:
+                unique_ids = np.unique(flat_scenario_ids_np)
+                for sid in unique_ids:
+                    mask = torch.as_tensor(flat_scenario_ids_np == sid, dtype=torch.bool, device=device)
+                    if mask.sum() > 1:
+                        subset = flat_advantages[mask]
+                        flat_advantages[mask] = (subset - subset.mean()) / (subset.std(unbiased=False) + 1e-6)
+            else:
+                flat_advantages = (flat_advantages - flat_advantages.mean()) / (flat_advantages.std(unbiased=False) + 1e-6)
+
+            # ---------- Scenario-Balanced Loss Weights ----------
+            flat_scenario_weights = None
+            if getattr(args, 'scenario_balanced_loss', False) and flat_scenario_ids_np is not None:
+                unique_sids, sid_counts = np.unique(flat_scenario_ids_np, return_counts=True)
+                K = len(unique_sids)
+                N = len(flat_scenario_ids_np)
+                sw = np.ones(N, dtype=np.float32)
+                for sid, count in zip(unique_sids, sid_counts):
+                    sw[flat_scenario_ids_np == sid] = float(N) / float(K * count)
+                flat_scenario_weights = torch.as_tensor(sw, dtype=torch.float32, device=device)
+
             sample_count = flat_obs.shape[0]
             minibatch_size = min(max(1, args.minibatch_size), sample_count)
             update_wall_start = time.perf_counter()
@@ -1310,6 +1563,7 @@ def main():
                     with autocast_context():
                         action_mean = actor(batch_obs)
                         if getattr(args, 'squash_actions', False):
+                            action_mean = action_mean.clamp(-3.0, 3.0)
                             _half = (action_high_tensor - action_low_tensor) / 2.0
                             _mid = (action_high_tensor + action_low_tensor) / 2.0
                             action_mean = torch.tanh(action_mean) * _half + _mid
@@ -1322,13 +1576,18 @@ def main():
                         batch_advantages_cast = batch_advantages.to(dtype=ratio.dtype)
                         surrogate_one = ratio * batch_advantages_cast
                         surrogate_two = torch.clamp(ratio, 1.0 - args.clip_range, 1.0 + args.clip_range) * batch_advantages_cast
-                        actor_loss = -torch.min(surrogate_one, surrogate_two).mean()
+                        clipped_surrogate = torch.min(surrogate_one, surrogate_two)
 
                         critic_values = critic(torch.cat([batch_obs, batch_states], dim=-1)).squeeze(-1)
-                        critic_loss = torch.nn.functional.mse_loss(
-                            critic_values,
-                            batch_returns.to(dtype=critic_values.dtype),
-                        )
+                        value_errors = (critic_values - batch_returns.to(dtype=critic_values.dtype)) ** 2
+
+                        if flat_scenario_weights is not None:
+                            batch_weights = flat_scenario_weights[batch_indices]
+                            actor_loss = -(clipped_surrogate * batch_weights).mean()
+                            critic_loss = (value_errors * batch_weights).mean()
+                        else:
+                            actor_loss = -clipped_surrogate.mean()
+                            critic_loss = value_errors.mean()
 
                         loss = actor_loss + args.value_coef * critic_loss - current_entropy_coef * entropy
 

@@ -325,11 +325,22 @@ class MultiAgentTrainingBridge(Node):
             bearing=bearing,
         )
 
-    def get_global_state(self, max_agents: int, max_neighbors: int) -> Optional[FleetGlobalState]:
+    def get_global_state(
+        self,
+        max_agents: int,
+        max_neighbors: int,
+        *,
+        active_agent_ids: tuple[str, ...] | None = None,
+        goal_tolerance: float = 0.8,
+    ) -> Optional[FleetGlobalState]:
         local_observations = self.get_local_observations(max_neighbors)
         if local_observations is None:
             return None
-        return FleetGlobalState.from_local_observations(local_observations)
+        return FleetGlobalState.from_local_observations(
+            local_observations,
+            active_agent_ids=active_agent_ids,
+            goal_tolerance=goal_tolerance,
+        )
 
     def prepare_for_shutdown(self):
         self._active_scenario = None

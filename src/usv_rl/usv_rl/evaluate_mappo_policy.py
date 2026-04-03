@@ -51,16 +51,22 @@ class MappoActorPolicy:
         action_dim = int(checkpoint['action_dim'])
         obs_dim = int(checkpoint['local_observation_size'])
 
-        layers = []
-        current_dim = obs_dim
-        for hidden_size in hidden_sizes:
-            layers.append(nn.Linear(current_dim, hidden_size))
-            layers.append(nn.Tanh())
-            current_dim = hidden_size
-        layers.append(nn.Linear(current_dim, action_dim))
-        actor = nn.Sequential(*layers)
-        actor.load_state_dict(checkpoint['actor_state_dict'])
-        actor.eval()
+        if checkpoint.get('neighbor_attention', False):
+            from usv_rl.neighbor_attention import build_attention_actor_from_checkpoint
+            actor = build_attention_actor_from_checkpoint(
+                checkpoint, nn, torch, torch.device(device),
+            )
+        else:
+            layers = []
+            current_dim = obs_dim
+            for hidden_size in hidden_sizes:
+                layers.append(nn.Linear(current_dim, hidden_size))
+                layers.append(nn.Tanh())
+                current_dim = hidden_size
+            layers.append(nn.Linear(current_dim, action_dim))
+            actor = nn.Sequential(*layers)
+            actor.load_state_dict(checkpoint['actor_state_dict'])
+            actor.eval()
 
         self._torch = torch
         self._device = torch.device(device)
@@ -211,6 +217,12 @@ def _load_policy_bundle(
             'max_agents': max(resolved_max_agents, len(agent_namespaces)),
             'cruise_speed': float(checkpoint.get('cruise_speed', 0.5)),
             'max_angular_velocity': float(checkpoint.get('max_angular_velocity', 0.5)),
+            'heading_omega_deadband': float(checkpoint.get('heading_omega_deadband', 0.06)),
+            'heading_omega_reference': float(checkpoint.get('heading_omega_reference', 0.85)),
+            'angular_authority_power': float(checkpoint.get('angular_authority_power', 1.6)),
+            'angular_accel_limit': float(checkpoint.get('angular_accel_limit', 1.8)),
+            'angular_decel_limit': float(checkpoint.get('angular_decel_limit', 2.4)),
+            'conflict_turn_relief': float(checkpoint.get('conflict_turn_relief', 0.55)),
             'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
             'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
             'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
@@ -276,9 +288,13 @@ def _scenario_summary(metrics: list[dict]) -> dict[str, dict]:
         count = max(1, len(items))
         result[scenario] = {
             'episodes': len(items),
+            'active_agent_count': len(items[0].get('active_agent_ids', [])),
+            'runtime_agent_count': len(items[0].get('runtime_agent_ids', [])),
+            'inactive_agent_ids': list(items[0].get('inactive_agent_ids', [])),
             'collision_rate': sum(item['collision'] for item in items) / count,
             'success_rate': sum(item['success'] for item in items) / count,
             'timeout_rate': sum(item['timeout'] for item in items) / count,
+            'mean_steps': float(np.mean([item['steps'] for item in items])),
             'mean_pairwise_min_separation': float(np.mean([item['pairwise_min_separation'] for item in items])),
             'worst_pairwise_min_separation': float(np.min([item['pairwise_min_separation'] for item in items])),
             'mean_episode_min_separation': float(np.mean([item['episode_min_separation'] for item in items])),
@@ -286,6 +302,12 @@ def _scenario_summary(metrics: list[dict]) -> dict[str, dict]:
             'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in items])),
             'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in items])),
             'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in items])),
+            # Smoothness metrics
+            'mean_linear_accel': float(np.mean([item['mean_linear_accel'] for item in items])),
+            'mean_angular_accel': float(np.mean([item['mean_angular_accel'] for item in items])),
+            'mean_omega_flip_count': float(np.mean([item['omega_flip_count'] for item in items])),
+            'mean_heading_sign_flip_count': float(np.mean([item['heading_sign_flip_count'] for item in items])),
+            'mean_heading_error': float(np.mean([item['mean_heading_error'] for item in items])),
         }
     return result
 
@@ -362,6 +384,16 @@ def evaluate_policy(
                     truncated = False
                     steps = 0
                     running_pairwise_min = float('inf')
+                    # --- Smoothness tracking ---
+                    prev_vx: dict[str, float] = {}
+                    prev_vw: dict[str, float] = {}
+                    total_linear_accel = 0.0
+                    total_angular_accel = 0.0
+                    omega_flip_count = 0
+                    total_heading_error = 0.0
+                    heading_sign_flip_count = 0
+                    prev_heading_sign: dict[str, int] = {}
+                    smoothness_samples = 0
 
                     for step in range(steps_per_episode):
                         action_map = {
@@ -373,6 +405,29 @@ def evaluate_policy(
                         step_pair_min = float(last_info['pairwise_min_separation'])
                         if np.isfinite(step_pair_min):
                             running_pairwise_min = min(running_pairwise_min, step_pair_min)
+
+                        # Collect smoothness data from actual vehicle state
+                        for agent_id in env.agent_ids:
+                            obs_obj = env._latest_observations.get(agent_id)
+                            if obs_obj is None:
+                                continue
+                            vx = max(0.0, float(obs_obj.final_linear_x))
+                            vw = float(obs_obj.final_angular_z)
+                            he = float(obs_obj.heading_error)
+                            total_heading_error += abs(he)
+                            if agent_id in prev_vx:
+                                total_linear_accel += abs(vx - prev_vx[agent_id])
+                                total_angular_accel += abs(vw - prev_vw[agent_id])
+                                if prev_vw[agent_id] * vw < 0.0 and abs(prev_vw[agent_id]) > 0.03 and abs(vw) > 0.03:
+                                    omega_flip_count += 1
+                            he_sign = 1 if he >= 0 else -1
+                            if agent_id in prev_heading_sign and prev_heading_sign[agent_id] != he_sign and abs(he) > 0.03:
+                                heading_sign_flip_count += 1
+                            prev_heading_sign[agent_id] = he_sign
+                            prev_vx[agent_id] = vx
+                            prev_vw[agent_id] = vw
+                            smoothness_samples += 1
+
                         terminated = bool(terminated_dict['__all__'])
                         truncated = bool(truncated_dict['__all__'])
                         if terminated or truncated:
@@ -390,10 +445,14 @@ def evaluate_policy(
                     collision = pairwise_min < env.config.collision_distance
                     timeout = (truncated or exhausted_horizon) and not success and not collision
                     episode_running_min = running_pairwise_min if np.isfinite(running_pairwise_min) else pairwise_min
+                    n_smooth = max(1, smoothness_samples)
                     episode_metrics.append(
                         {
                             'episode': episode,
                             'scenario': scenario_name,
+                            'active_agent_ids': list(last_info.get('active_agent_ids', [])),
+                            'inactive_agent_ids': list(last_info.get('inactive_agent_ids', [])),
+                            'runtime_agent_ids': list(last_info.get('runtime_agent_ids', [])),
                             'steps': steps,
                             'success': success,
                             'collision': collision,
@@ -406,6 +465,12 @@ def evaluate_policy(
                             'team_mean_goal_distance': final_team_mean_goal_distance,
                             'team_goal_distance_delta': team_goal_distance_delta,
                             'team_goal_progress_ratio': team_goal_progress_ratio,
+                            # Smoothness metrics (per-step averages over all agents)
+                            'mean_linear_accel': total_linear_accel / n_smooth,
+                            'mean_angular_accel': total_angular_accel / n_smooth,
+                            'omega_flip_count': omega_flip_count,
+                            'heading_sign_flip_count': heading_sign_flip_count,
+                            'mean_heading_error': total_heading_error / n_smooth,
                         }
                     )
                     break
@@ -443,6 +508,12 @@ def evaluate_policy(
         'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in episode_metrics])),
         'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in episode_metrics])),
         'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in episode_metrics])),
+        # Smoothness metrics (independent quality indicators)
+        'mean_linear_accel': float(np.mean([item['mean_linear_accel'] for item in episode_metrics])),
+        'mean_angular_accel': float(np.mean([item['mean_angular_accel'] for item in episode_metrics])),
+        'mean_omega_flip_count': float(np.mean([item['omega_flip_count'] for item in episode_metrics])),
+        'mean_heading_sign_flip_count': float(np.mean([item['heading_sign_flip_count'] for item in episode_metrics])),
+        'mean_heading_error': float(np.mean([item['mean_heading_error'] for item in episode_metrics])),
         'scenario_summaries': _scenario_summary(episode_metrics),
         'episode_metrics': episode_metrics,
     }

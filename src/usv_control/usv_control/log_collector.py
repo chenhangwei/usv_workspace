@@ -33,9 +33,10 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget, State
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, Int8, String
 from common_interfaces.msg import NavigationGoal, NavigationFeedback, NavigationResult, MpcDebug, UsvStatus, FleetNeighborPoses
 
+import json
 import math
 import csv
 import os
@@ -89,6 +90,7 @@ class LogCollectorNode(Node):
         self._rl_cmd_active = False
         self._raw_cmd_stamp_s = 0.0
         self._rl_cmd_stamp_s = 0.0
+        self._rl_encounter_type_index = -1  # v20: RL auto encounter classifier output
         
         self._distance_to_goal = 0.0
         self._heading_error_rad = 0.0  # 弧度
@@ -179,6 +181,9 @@ class LogCollectorNode(Node):
         self._neighbor_data = {}  # type: dict[str, tuple]
         self._max_neighbor_slots = 5
         
+        # v19 新增: RL 模型元数据 (来自 rl_policy/model_info)
+        self._rl_model_info = {}  # type: dict
+        
         # ==================== 任务状态 ====================
         self._is_navigating = False       # 是否正在导航
         self._is_paused = False           # 是否处于暂停状态 (HOLD)
@@ -223,6 +228,11 @@ class LogCollectorNode(Node):
         self.create_subscription(
             TwistStamped, 'rl_policy/cmd_vel',
             self._rl_cmd_callback, qos_best_effort)
+
+        # v20: RL auto encounter classifier output
+        self.create_subscription(
+            Int8, 'rl_policy/encounter_type',
+            self._rl_encounter_type_callback, qos_best_effort)
             
         self.create_subscription(
             NavigationFeedback, 'navigation_feedback',
@@ -258,6 +268,17 @@ class LogCollectorNode(Node):
         self.create_subscription(
             FleetNeighborPoses, 'apf/neighbors',
             self._fleet_neighbors_callback, qos_best_effort)
+        
+        # v19 新增: RL 模型元数据订阅 (transient_local 确保晚加入也能收到)
+        from rclpy.qos import QoSDurabilityPolicy
+        qos_model_info = QoSProfile(
+            depth=1,
+            reliability=QoSReliabilityPolicy.RELIABLE,
+            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.create_subscription(
+            String, 'rl_policy/model_info',
+            self._rl_model_info_callback, qos_model_info)
             
         # ==================== 定时器 ====================
         self.create_timer(0.1, self._log_data)
@@ -326,6 +347,27 @@ class LogCollectorNode(Node):
             self._csv_file.write(f'# raw_navigation_topic: velocity_controller/raw_cmd\n')
             self._csv_file.write(f'# rl_policy_topic: rl_policy/cmd_vel\n')
             self._csv_file.write(f'# final_command_topic: setpoint_raw/local\n')
+            # v19 新增: 写入 RL 模型元数据
+            if self._rl_model_info:
+                self._csv_file.write(f'# --- v19 RL Model Metadata ---\n')
+                self._csv_file.write(f'# rl_model_name: {self._rl_model_info.get("model_name", "")}\n')
+                self._csv_file.write(f'# rl_model_path: {self._rl_model_info.get("model_path", "")}\n')
+                self._csv_file.write(f'# rl_policy_type: {self._rl_model_info.get("policy_type", "")}\n')
+                if 'checkpoint_step' in self._rl_model_info:
+                    self._csv_file.write(f'# rl_checkpoint_step: {self._rl_model_info["checkpoint_step"]}\n')
+                if 'obs_dim' in self._rl_model_info:
+                    self._csv_file.write(f'# rl_obs_dim: {self._rl_model_info["obs_dim"]}\n')
+                if 'action_dim' in self._rl_model_info:
+                    self._csv_file.write(f'# rl_action_dim: {self._rl_model_info["action_dim"]}\n')
+                if 'action_bounds' in self._rl_model_info:
+                    ab = self._rl_model_info['action_bounds']
+                    self._csv_file.write(f'# rl_action_bound_linear: {ab.get("linear", "")}\n')
+                    self._csv_file.write(f'# rl_action_bound_angular: {ab.get("angular", "")}\n')
+                if 'squash_actions' in self._rl_model_info:
+                    self._csv_file.write(f'# rl_squash_actions: {self._rl_model_info["squash_actions"]}\n')
+                if 'modified' in self._rl_model_info:
+                    self._csv_file.write(f'# rl_model_modified: {self._rl_model_info["modified"]}\n')
+                self._csv_file.write(f'# rl_model_info_json: {json.dumps(self._rl_model_info, ensure_ascii=False)}\n')
             
             # 写入表头
             self._csv_writer.writerow([
@@ -338,6 +380,8 @@ class LogCollectorNode(Node):
                 'raw_cmd_vx', 'raw_cmd_vy', 'raw_cmd_omega', 'raw_cmd_age_s',
                 'rl_cmd_vx', 'rl_cmd_vy', 'rl_cmd_omega', 'rl_cmd_age_s', 'rl_cmd_active',
                 'rl_delta_vx', 'rl_delta_vy', 'rl_delta_omega',
+                # v20 新增: RL encounter classifier
+                'rl_encounter_type_index',
                 'distance_to_goal', 'heading_error_deg',
                 'yaw_diff_deg',
                 'mpc_solve_time_ms', 'mpc_cost', 'mpc_pred_theta_deg', 'active_ctrl',
@@ -504,6 +548,10 @@ class LogCollectorNode(Node):
         self._rl_cmd_omega = msg.twist.angular.z
         self._rl_cmd_stamp_s = self._stamp_to_seconds(msg.header.stamp)
 
+    def _rl_encounter_type_callback(self, msg: Int8):
+        """RL auto encounter classifier 输出回调"""
+        self._rl_encounter_type_index = int(msg.data)
+
     @staticmethod
     def _stamp_to_seconds(stamp) -> float:
         """将 ROS 时间戳转换为秒。"""
@@ -653,6 +701,16 @@ class LogCollectorNode(Node):
                 nb.x, nb.y, nb.yaw, nb.vx, nb.vy
             )
 
+    def _rl_model_info_callback(self, msg: String):
+        """RL 模型元数据回调"""
+        try:
+            self._rl_model_info = json.loads(msg.data)
+            model_name = self._rl_model_info.get('model_name', '?')
+            policy_type = self._rl_model_info.get('policy_type', '?')
+            self.get_logger().info(f'📦 收到 RL 模型信息: {model_name} ({policy_type})')
+        except (json.JSONDecodeError, AttributeError) as e:
+            self.get_logger().warn(f'RL 模型信息解析失败: {e}')
+
     def _result_callback(self, msg: NavigationResult):
         """导航结果回调
         
@@ -771,6 +829,8 @@ class LogCollectorNode(Node):
             f'{self._cmd_vx - self._raw_cmd_vx:.4f}',
             f'{self._cmd_vy - self._raw_cmd_vy:.4f}',
             f'{self._cmd_omega - self._raw_cmd_omega:.4f}',
+            # v20 新增: RL encounter classifier
+            f'{self._rl_encounter_type_index}',
             f'{self._distance_to_goal:.4f}',
             f'{math.degrees(self._heading_error_rad):.2f}',  # 弧度转度数
             f'{math.degrees(yaw_diff):.2f}',

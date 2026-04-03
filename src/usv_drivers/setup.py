@@ -53,6 +53,7 @@ modules, and motor controllers.""",
             'usv_ultrasonic_node = usv_drivers.usv_ultrasonic_node:main',
             'usv_su04_node = usv_drivers.usv_su04_node:main',
             'usv_ultrasonic_radar_node = usv_drivers.usv_ultrasonic_radar_node:main',
+            'usv_vision_node = usv_drivers.usv_vision_node:main',
         ],
     },
     classifiers=[
