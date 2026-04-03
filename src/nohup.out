@@ -2876,3 +2876,13 @@ Saved MAPPO checkpoint scaffold to /mnt/data/checkpoints/usv_rl/unified45_checkp
 [INFO] [1774659832.904232573] [usv_02.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=0.40) -> final(vx=0.40, ω=0.40), raw仅观测(vx=0.11, ω=0.40), 距离=8.17m, 队列=0
 [INFO] [1774659833.360093455] [usv_03.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=-0.40) -> final(vx=0.12, ω=-0.40), raw仅观测(vx=0.00, ω=0.00), 距离=4.87m, 队列=0
 [INFO] [1774659833.506398484] [usv_01.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=-0.40) -> final(vx=0.12, ω=-0.40), raw仅观测(vx=0.40, ω=-0.11), 距离=8.74m, 队列=0
+[INFO] [1774659833.959011409] [usv_03.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=0.40) -> final(vx=0.12, ω=0.40), raw仅观测(vx=0.00, ω=0.00), 距离=1.06m, 队列=0
+[INFO] [1774659834.138898419] [usv_01.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=-0.40) -> final(vx=0.12, ω=-0.40), raw仅观测(vx=0.00, ω=0.00), 距离=3.53m, 队列=0
+[INFO] [1774659834.929788993] [usv_02.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=-0.03) -> final(vx=0.40, ω=-0.03), raw仅观测(vx=0.19, ω=0.05), 距离=3.14m, 队列=0
+[INFO] [1774659834.974005257] [usv_02.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=0.40) -> final(vx=0.40, ω=0.40), raw仅观测(vx=0.00, ω=0.00), 距离=7.51m, 队列=0
+[INFO] [1774659835.363288188] [usv_03.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=0.40) -> final(vx=0.12, ω=0.40), raw仅观测(vx=0.00, ω=0.00), 距离=5.44m, 队列=0
+[INFO] [1774659835.702266248] [usv_01.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=0.40) -> final(vx=0.12, ω=0.40), raw仅观测(vx=0.40, ω=-0.25), 距离=8.18m, 队列=0
+[INFO] [1774659836.032631660] [usv_03.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=0.40) -> final(vx=0.40, ω=0.40), raw仅观测(vx=0.00, ω=0.00), 距离=1.70m, 队列=0
+[INFO] [1774659836.219264687] [usv_01.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.12, ω=-0.07) -> final(vx=0.12, ω=-0.07), raw仅观测(vx=0.00, ω=0.00), 距离=2.98m, 队列=0
+[INFO] [1774659837.030371810] [usv_02.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=0.40) -> final(vx=0.40, ω=0.40), raw仅观测(vx=0.17, ω=-0.11), 距离=2.70m, 队列=0
+[INFO] [1774659837.033410562] [usv_02.velocity_controller_node]: 🚀 纯RL导航中: rl(vx=0.40, ω=-0.40) -> final(vx=0.40, ω=-0.40), raw仅观测(vx=0.00, ω=0.00), 距离=6.93m, 队列=0
