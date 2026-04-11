@@ -32,12 +32,13 @@ class AgentLocalObservation:
     raw_angular_z: float
     final_linear_x: float
     final_angular_z: float
+    cross_track_error: float = 0.0
     neighbors: List[AgentNeighborObservation] = field(default_factory=list)
     encounter_type_index: int = -1
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 10 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
+        return 11 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -56,6 +57,7 @@ class AgentLocalObservation:
             self.raw_angular_z,
             self.final_linear_x,
             self.final_angular_z,
+            self.cross_track_error,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]

@@ -117,6 +117,10 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             team_regression_penalty_weight=float(args.team_regression_penalty_weight),
             team_dispersion_penalty_weight=float(args.team_dispersion_penalty_weight),
             team_dispersion_margin=float(args.team_dispersion_margin),
+            separation_recovery_weight=float(args.separation_recovery_weight),
+            entanglement_penalty_weight=float(args.entanglement_penalty_weight),
+            entanglement_distance=float(args.entanglement_distance),
+            entanglement_grace_steps=int(args.entanglement_grace_steps),
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
@@ -131,6 +135,14 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             scenario_spawn_position_std=float(getattr(args, 'scenario_spawn_position_std', 0.0)),
             scenario_spawn_heading_std=float(getattr(args, 'scenario_spawn_heading_std', 0.0)),
             scenario_goal_position_std=float(getattr(args, 'scenario_goal_position_std', 0.0)),
+            sim_tau_linear=float(getattr(args, 'sim_tau_linear', 0.45)),
+            sim_tau_angular=float(getattr(args, 'sim_tau_angular', 0.25)),
+            dr_tau_linear_low=float(getattr(args, 'dr_tau_linear_low', 0.0)),
+            dr_tau_linear_high=float(getattr(args, 'dr_tau_linear_high', 0.0)),
+            dr_tau_angular_low=float(getattr(args, 'dr_tau_angular_low', 0.0)),
+            dr_tau_angular_high=float(getattr(args, 'dr_tau_angular_high', 0.0)),
+            speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
+            speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
         )
     )
 

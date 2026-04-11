@@ -36,7 +36,7 @@ _ENCOUNTER_SPEED_THRESHOLD = 0.05   # m/s – below this, course is unreliable
 
 # ---------- Distance-aware speed scaling constants ----------
 _SPEED_SCALE_DISTANCE = 3.0         # metres – linear speed scaling starts below this distance
-_SPEED_SCALE_MIN = 0.15             # minimum speed scale factor at zero distance
+_SPEED_SCALE_MIN = 0.35             # minimum speed scale factor at zero distance
 _HEAD_ON_BEARING_DEG = 22.5         # |bearing| < this AND reciprocal courses → head_on
 _HEAD_ON_COURSE_DEG = 135.0         # relative course > this → reciprocal
 _OVERTAKING_COURSE_DEG = 45.0       # relative course < this AND ahead → overtaking
@@ -313,6 +313,8 @@ class PolicyInferenceNode(Node):
         self._first_neighbor_update_logged = False
         self._no_neighbor_passthrough_logged = False
         self._active_goal_id: Optional[int] = None
+        self._route_start: Optional[Tuple[float, float]] = None
+        self._route_goal: Optional[Tuple[float, float]] = None
         self._first_goal_logged = False
         self._first_active_goal_feedback_logged = False
         self._head_on_guard_logged = False
@@ -340,17 +342,18 @@ class PolicyInferenceNode(Node):
         self._auto_encounter_candidate_since: float = 0.0
 
         if policy_obs_dim is not None:
-            # Check if dimension matches base layout: 10 + N*6
-            if policy_obs_dim >= 10 and (policy_obs_dim - 10) % 6 == 0:
-                inferred_neighbors = max(1, (policy_obs_dim - 10) // 6)
+            _ego_dim = 11  # current ego dimension (including cross_track_error)
+            # Check if dimension matches base layout: ego + N*6
+            if policy_obs_dim >= _ego_dim and (policy_obs_dim - _ego_dim) % 6 == 0:
+                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim) // 6)
                 if inferred_neighbors != self._max_neighbors:
                     self.get_logger().info(
                         f'Overriding max_neighbors from {self._max_neighbors} to {inferred_neighbors} based on model observation dimension {policy_obs_dim}.'
                     )
                     self._max_neighbors = inferred_neighbors
-            # Check if dimension matches encounter-type layout: 10 + N*6 + ENCOUNTER_TYPE_COUNT
-            elif policy_obs_dim >= 10 + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - 10 - ENCOUNTER_TYPE_COUNT) % 6 == 0:
-                inferred_neighbors = max(1, (policy_obs_dim - 10 - ENCOUNTER_TYPE_COUNT) // 6)
+            # Check if dimension matches encounter-type layout: ego + N*6 + ENCOUNTER_TYPE_COUNT
+            elif policy_obs_dim >= _ego_dim + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) // 6)
                 self._encounter_type_enabled = True
                 if inferred_neighbors != self._max_neighbors:
                     self.get_logger().info(
@@ -372,9 +375,29 @@ class PolicyInferenceNode(Node):
                         f'Encounter-type conditioning enabled: {encounter_type} (index={self._encounter_type_index}).'
                     )
             else:
-                raise RuntimeError(
-                    f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
-                )
+                # Backwards compatibility: try old ego_dim=10 layouts.
+                _old_ego = 10
+                if policy_obs_dim >= _old_ego and (policy_obs_dim - _old_ego) % 6 == 0:
+                    inferred_neighbors = max(1, (policy_obs_dim - _old_ego) // 6)
+                    self.get_logger().warn(
+                        f'Model uses legacy ego_dim=10 layout (obs_dim={policy_obs_dim}). '
+                        f'CTE observation will be ignored by the model.'
+                    )
+                    if inferred_neighbors != self._max_neighbors:
+                        self._max_neighbors = inferred_neighbors
+                elif policy_obs_dim >= _old_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                    inferred_neighbors = max(1, (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) // 6)
+                    self._encounter_type_enabled = True
+                    self.get_logger().warn(
+                        f'Model uses legacy ego_dim=10 layout with encounter type (obs_dim={policy_obs_dim}). '
+                        f'CTE observation will be ignored by the model.'
+                    )
+                    if inferred_neighbors != self._max_neighbors:
+                        self._max_neighbors = inferred_neighbors
+                else:
+                    raise RuntimeError(
+                        f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
+                    )
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -442,7 +465,17 @@ class PolicyInferenceNode(Node):
             return 0.0
         lookahead_distance = max(self._policy.anticipation_distance, self._policy.conflict_distance, 1e-3)
         min_neighbor_distance = observation.min_neighbor_distance()
-        return float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+        raw_level = float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+        # Reduce conflict level when the closest neighbour is separating,
+        # so the agent regains turning authority to break free.
+        if observation.neighbors and raw_level > 0.0:
+            closest = min(observation.neighbors, key=lambda n: n.distance)
+            d = max(closest.distance, 1e-3)
+            range_rate = -(closest.rel_x * closest.rel_vx + closest.rel_y * closest.rel_vy) / d
+            if range_rate < -0.02:
+                separation_relief = min(1.0, abs(range_rate) / 0.15)
+                raw_level *= max(0.25, 1.0 - 0.6 * separation_relief)
+        return raw_level
 
     def _reset_head_on_guard_state(self):
         self._head_on_guard_logged = False
@@ -487,6 +520,17 @@ class PolicyInferenceNode(Node):
         self._last_waiting_signature = None
         self._waiting_repeat_count = 0
         self._reset_head_on_guard_state()
+
+        # Record route start (current position) and goal for CTE computation.
+        if target is not None:
+            self._route_goal = target
+            if self._pose_msg is not None:
+                self._route_start = (
+                    float(self._pose_msg.pose.position.x),
+                    float(self._pose_msg.pose.position.y),
+                )
+            else:
+                self._route_start = None
 
         details = [
             f'goal_id={goal_id}',
@@ -730,6 +774,19 @@ class PolicyInferenceNode(Node):
                 )
             )
 
+        # Compute cross-track error from spawn→goal line.
+        cte = 0.0
+        if self._route_start is not None and self._route_goal is not None:
+            sx, sy = self._route_start
+            gx, gy = self._route_goal
+            route_dx = gx - sx
+            route_dy = gy - sy
+            route_len = math.hypot(route_dx, route_dy)
+            if route_len > 1e-6:
+                rel_x = own_x - sx
+                rel_y = own_y - sy
+                cte = abs(rel_x * route_dy - rel_y * route_dx) / route_len
+
         return UsvObservation(
             pose_x=own_x,
             pose_y=own_y,
@@ -741,6 +798,7 @@ class PolicyInferenceNode(Node):
             raw_angular_z=raw_angular_z,
             final_linear_x=final_linear_x,
             final_angular_z=final_angular_z,
+            cross_track_error=cte,
             neighbors=neighbors,
         )
 

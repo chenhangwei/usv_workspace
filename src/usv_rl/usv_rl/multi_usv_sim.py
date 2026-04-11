@@ -51,12 +51,13 @@ class _DomainRandomizationConfig:
 
 
 class MultiUsvSimNode(Node):
-    def __init__(self, agent_namespaces: tuple[str, ...], update_rate: float = 20.0):
+    def __init__(self, agent_namespaces: tuple[str, ...], update_rate: float = 20.0,
+                 tau_linear: float = 0.45, tau_angular: float = 0.25):
         super().__init__('multi_usv_sim')
         self._agent_namespaces = tuple(agent_namespaces)
         self._dt = 1.0 / max(update_rate, 1.0)
-        self._tau_linear = 0.45
-        self._tau_angular = 0.25
+        self._tau_linear = tau_linear
+        self._tau_angular = tau_angular
         self._command_timeout = 0.6
         self._dr = _DomainRandomizationConfig()
         self._rng = np.random.default_rng()
@@ -127,6 +128,17 @@ class MultiUsvSimNode(Node):
     def get_agent_snapshot(self, namespace: str) -> tuple[float, float, float, float]:
         state = self._agent_states[namespace]
         return state.x, state.y, state.yaw, state.v
+
+    def randomize_tau(
+        self,
+        tau_linear_low: float,
+        tau_linear_high: float,
+        tau_angular_low: float,
+        tau_angular_high: float,
+    ) -> None:
+        """Randomize dynamics time constants (call once per episode reset)."""
+        self._tau_linear = float(self._rng.uniform(tau_linear_low, tau_linear_high))
+        self._tau_angular = float(self._rng.uniform(tau_angular_low, tau_angular_high))
 
     def set_domain_randomization(
         self,

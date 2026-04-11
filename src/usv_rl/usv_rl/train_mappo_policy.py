@@ -150,6 +150,16 @@ def parse_args():
     parser.add_argument('--scenario-spawn-position-std', type=float, default=0.0, help='Spawn position Gaussian jitter std (m). 0 disables.')
     parser.add_argument('--scenario-spawn-heading-std', type=float, default=0.0, help='Spawn heading Gaussian jitter std (rad). 0 disables.')
     parser.add_argument('--scenario-goal-position-std', type=float, default=0.0, help='Goal position Gaussian jitter std (m). 0 disables.')
+    parser.add_argument('--sim-tau-linear', type=float, default=0.45, help='Sim first-order linear velocity time constant (s). Higher = more inertia.')
+    parser.add_argument('--sim-tau-angular', type=float, default=0.25, help='Sim first-order angular velocity time constant (s). Higher = more inertia.')
+    parser.add_argument('--dr-tau-linear-low', type=float, default=0.0, help='Tau linear DR lower bound (s). 0 disables tau randomization.')
+    parser.add_argument('--dr-tau-linear-high', type=float, default=0.0, help='Tau linear DR upper bound (s).')
+    parser.add_argument('--dr-tau-angular-low', type=float, default=0.0, help='Tau angular DR lower bound (s).')
+    parser.add_argument('--dr-tau-angular-high', type=float, default=0.0, help='Tau angular DR upper bound (s).')
+    parser.add_argument('--speed-scale-distance', type=float, default=0.0, help='Distance threshold for neighbour-proximity speed scaling in training sim (m). 0 disables.')
+    parser.add_argument('--speed-scale-min', type=float, default=0.35, help='Minimum speed scale factor at zero neighbour distance.')
+    parser.add_argument('--actor-log-std-init', type=float, default=0.0, help='Initial value for actor_log_std parameter. Negative values reduce initial exploration noise.')
+    parser.add_argument('--force-actor-log-std', type=float, default=None, help='If set, override actor_log_std to this value after loading checkpoint weights.')
     parser.add_argument('--team-reward-weight', type=float, default=0.30, help='Fleet near-miss team penalty weight.')
     parser.add_argument('--team-progress-weight', type=float, default=1.20, help='Fleet progress reward weight.')
     parser.add_argument('--team-goal-proximity-weight', type=float, default=0.0, help='Fleet dense reward weight for reducing mean distance to goals from the scenario start.')
@@ -157,6 +167,9 @@ def parse_args():
     parser.add_argument('--team-dispersion-penalty-weight', type=float, default=0.0, help='Fleet penalty weight for expanding mean pairwise separation beyond the initial formation.')
     parser.add_argument('--team-dispersion-margin', type=float, default=0.0, help='Allowed increase in fleet mean separation before dispersion penalty applies.')
     parser.add_argument('--separation-recovery-weight', type=float, default=0.0, help='Positive reward weight for increasing pairwise separation inside near-miss band.')
+    parser.add_argument('--entanglement-penalty-weight', type=float, default=0.0, help='Penalty weight for sustained close proximity (anti-orbital-lock). Ramps up after grace period.')
+    parser.add_argument('--entanglement-distance', type=float, default=3.0, help='Distance threshold (m) below which entanglement counter increments.')
+    parser.add_argument('--entanglement-grace-steps', type=int, default=30, help='Number of close-proximity steps allowed before entanglement penalty activates.')
     parser.add_argument('--coordination-reward-weight', type=float, default=0.20, help='Fleet goal-completion coordination reward weight.')
     parser.add_argument('--team-completion-bonus', type=float, default=18.0, help='Fleet-wide bonus when all agents reach their goals.')
     parser.add_argument('--deadlock-penalty-weight', type=float, default=4.0, help='Penalty weight applied when fleet mean goal distance stalls.')
@@ -489,6 +502,7 @@ def _checkpoint_payload(
         'neighbor_attention': bool(getattr(args, 'neighbor_attention', False)),
         'attention_embed_dim': int(getattr(args, 'attention_embed_dim', 32)),
         'attention_num_heads': int(getattr(args, 'attention_num_heads', 1)),
+        'ego_dim': 11,  # current ego feature count (added cross_track_error)
         'total_timesteps': max(0, args.total_timesteps),
         'completed_timesteps': int(total_steps),
         'update_index': int(update_index),
@@ -663,9 +677,28 @@ def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path
             flush=True,
         )
     elif old_is_attention and new_is_attention:
-        # Attention → attention (same architecture).
-        actor.load_state_dict(actor_sd)
-        critic.load_state_dict(critic_sd)
+        # Attention → attention: check for obs_dim mismatch (e.g. ego_dim change).
+        old_q_shape = actor_sd['neighbor_attention.query_proj.weight'].shape  # [embed, old_ego]
+        new_q_shape = actor.state_dict()['neighbor_attention.query_proj.weight'].shape
+        if old_q_shape != new_q_shape:
+            from usv_rl.neighbor_attention import (
+                _migrate_attention_actor_ego_dim,
+                _migrate_attention_critic_ego_dim,
+                _OLD_EGO_DIM,
+                _EGO_DIM,
+            )
+            old_ego = old_q_shape[1]
+            new_ego = new_q_shape[1]
+            print(
+                f'Attention ego_dim changed: {old_ego} -> {new_ego}. '
+                f'Migrating attention weights with zero-padding.',
+                flush=True,
+            )
+            _migrate_attention_actor_ego_dim(actor_sd, actor, torch, old_ego, new_ego)
+            _migrate_attention_critic_ego_dim(critic_sd, critic, torch, old_ego, new_ego, max_agents)
+        else:
+            actor.load_state_dict(actor_sd)
+            critic.load_state_dict(critic_sd)
     else:
         # Flat → flat (original migration path).
         new_actor_sd = actor.state_dict()
@@ -702,6 +735,12 @@ def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path
     if obs_normalizer is not None:
         saved_norm = payload.get('obs_normalizer')
         if saved_norm is not None:
+            # Check if normalizer dimensions changed and need migration.
+            old_norm_dim = int(np.asarray(saved_norm.get('mean', [])).shape[0]) if 'mean' in saved_norm else 0
+            new_norm_dim = int(obs_normalizer.rms.mean.shape[0])
+            if old_norm_dim > 0 and old_norm_dim != new_norm_dim:
+                saved_norm = _migrate_normalizer_state(saved_norm, old_norm_dim, new_norm_dim)
+                print(f'Migrated observation normalizer: {old_norm_dim} -> {new_norm_dim} dims.', flush=True)
             obs_normalizer.load_state_dict(saved_norm)
     print(f'Loaded weights from {weights_path} (no config/optimizer/training state restored).', flush=True)
 
@@ -1074,6 +1113,9 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             team_dispersion_penalty_weight=float(args.team_dispersion_penalty_weight),
             team_dispersion_margin=float(args.team_dispersion_margin),
             separation_recovery_weight=float(args.separation_recovery_weight),
+            entanglement_penalty_weight=float(args.entanglement_penalty_weight),
+            entanglement_distance=float(args.entanglement_distance),
+            entanglement_grace_steps=int(args.entanglement_grace_steps),
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
@@ -1088,6 +1130,10 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             scenario_spawn_position_std=float(getattr(args, 'scenario_spawn_position_std', 0.0)),
             scenario_spawn_heading_std=float(getattr(args, 'scenario_spawn_heading_std', 0.0)),
             scenario_goal_position_std=float(getattr(args, 'scenario_goal_position_std', 0.0)),
+            sim_tau_linear=float(getattr(args, 'sim_tau_linear', 0.45)),
+            sim_tau_angular=float(getattr(args, 'sim_tau_angular', 0.25)),
+            speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
+            speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
         )
     )
 
@@ -1224,7 +1270,8 @@ def main():
         else:
             actor = _build_mlp(nn, model_metadata['local_observation_size'], hidden_sizes, model_metadata['action_dim']).to(device)
             critic = _build_mlp(nn, model_metadata['local_observation_size'] + model_metadata['global_state_size'], hidden_sizes, 1).to(device)
-        actor_log_std = nn.Parameter(torch.zeros(model_metadata['action_dim'], device=device))
+        _log_std_init = float(getattr(args, 'actor_log_std_init', 0.0))
+        actor_log_std = nn.Parameter(torch.full((model_metadata['action_dim'],), _log_std_init, device=device))
         optimizer = torch.optim.Adam(list(actor.parameters()) + list(critic.parameters()) + [actor_log_std], lr=args.learning_rate)
         action_low_tensor = torch.as_tensor(model_metadata['action_low'], dtype=torch.float32, device=device)
         action_high_tensor = torch.as_tensor(model_metadata['action_high'], dtype=torch.float32, device=device)
@@ -1282,6 +1329,12 @@ def main():
                 max_agents=max(len(agent_namespaces), int(args.max_agents)),
                 neighbor_attention=use_neighbor_attention,
             )
+
+        # Override actor_log_std if --force-actor-log-std is set
+        _force_log_std = getattr(args, 'force_actor_log_std', None)
+        if _force_log_std is not None:
+            actor_log_std.data.fill_(float(_force_log_std))
+            print(f'Forced actor_log_std to {_force_log_std} (σ={math.exp(_force_log_std):.4f}).', flush=True)
 
         while total_steps < max(0, args.total_timesteps):
             rollout_wall_start = time.perf_counter()

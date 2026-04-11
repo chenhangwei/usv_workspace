@@ -19,8 +19,9 @@ import torch
 import torch.nn as nn
 
 # Fixed observation layout constants (must match multi_agent_types / types).
-_EGO_DIM = 10               # pose_x/y, yaw, speed, dist_goal, heading_err, raw/final vels
+_EGO_DIM = 11               # pose_x/y, yaw, speed, dist_goal, heading_err, raw/final vels, cross_track_error
 _NEIGHBOR_FEATURE_DIM = 6    # rel_x, rel_y, rel_vx, rel_vy, distance, bearing
+_OLD_EGO_DIM = 10            # previous ego dimension (before cross_track_error was added)
 
 
 # ───────────────────────────────────────────────────────────
@@ -307,6 +308,137 @@ def migrate_flat_critic_to_attention(
     new_critic.load_state_dict(new_sd)
 
 
+# ───────────────────────────────────────────────────────────
+# Weight migration:  attention → attention (ego_dim change)
+# ───────────────────────────────────────────────────────────
+
+def _migrate_attention_actor_ego_dim(
+    old_state_dict: dict,
+    new_actor: AttentionActor,
+    torch_module,
+    old_ego_dim: int,
+    new_ego_dim: int,
+) -> None:
+    """Migrate an AttentionActor checkpoint when ego_dim changes.
+
+    Handles:
+    - query_proj: Linear(old_ego, embed) → Linear(new_ego, embed)
+    - mlp.0: ego columns expand from old_ego to new_ego
+    Other layers are copied verbatim.
+    """
+    new_sd = new_actor.state_dict()
+    delta = new_ego_dim - old_ego_dim
+
+    # --- query_proj: weight [embed, old_ego] → [embed, new_ego] ---
+    old_q_w = old_state_dict['neighbor_attention.query_proj.weight']  # [embed, old_ego]
+    new_q_w = torch_module.zeros_like(new_sd['neighbor_attention.query_proj.weight'])
+    new_q_w[:, :old_ego_dim] = old_q_w
+    new_sd['neighbor_attention.query_proj.weight'] = new_q_w
+    new_sd['neighbor_attention.query_proj.bias'] = old_state_dict['neighbor_attention.query_proj.bias'].clone()
+
+    # --- mlp.0: input is [ego, attended, encounter] ---
+    # ego grows by delta, rest stays the same.
+    old_first_w = old_state_dict['mlp.0.weight']  # [hidden, old_ego + embed + enc]
+    new_first_w = torch_module.zeros_like(new_sd['mlp.0.weight'])  # [hidden, new_ego + embed + enc]
+    embed_dim = new_actor.neighbor_attention.embed_dim
+    enc_dim = new_actor.encounter_dim
+
+    # Copy ego columns
+    new_first_w[:, :old_ego_dim] = old_first_w[:, :old_ego_dim]
+    # Copy attended + encounter columns (shifted by delta)
+    old_rest_start = old_ego_dim
+    new_rest_start = new_ego_dim
+    rest_cols = embed_dim + enc_dim
+    new_first_w[:, new_rest_start:new_rest_start + rest_cols] = old_first_w[:, old_rest_start:old_rest_start + rest_cols]
+    new_sd['mlp.0.weight'] = new_first_w
+    new_sd['mlp.0.bias'] = old_state_dict['mlp.0.bias'].clone()
+
+    # --- Copy all other layers verbatim ---
+    for key, value in old_state_dict.items():
+        if key in ('neighbor_attention.query_proj.weight', 'neighbor_attention.query_proj.bias',
+                    'mlp.0.weight', 'mlp.0.bias'):
+            continue
+        if key in new_sd and new_sd[key].shape == value.shape:
+            new_sd[key] = value.clone()
+
+    new_actor.load_state_dict(new_sd)
+
+
+def _migrate_attention_critic_ego_dim(
+    old_state_dict: dict,
+    new_critic: AttentionCritic,
+    torch_module,
+    old_ego_dim: int,
+    new_ego_dim: int,
+    max_agents: int,
+) -> None:
+    """Migrate an AttentionCritic checkpoint when ego_dim changes.
+
+    The critic MLP input is: [ego, attended, encounter, global_state]
+    where global_state = [agent1_obs, agent2_obs, ..., fleet_stats(5)].
+    Each agent_obs block grows by (new_ego_dim - old_ego_dim).
+    """
+    new_sd = new_critic.state_dict()
+    delta = new_ego_dim - old_ego_dim
+
+    # --- query_proj: same as actor ---
+    old_q_w = old_state_dict['neighbor_attention.query_proj.weight']
+    new_q_w = torch_module.zeros_like(new_sd['neighbor_attention.query_proj.weight'])
+    new_q_w[:, :old_ego_dim] = old_q_w
+    new_sd['neighbor_attention.query_proj.weight'] = new_q_w
+    new_sd['neighbor_attention.query_proj.bias'] = old_state_dict['neighbor_attention.query_proj.bias'].clone()
+
+    # --- mlp.0: input is [ego, attended, encounter, global_state] ---
+    # global_state = [obs_1, obs_2, ..., obs_max_agents, fleet_metrics(5)]
+    # Each obs_i has old_obs_dim → new_obs_dim
+    old_first_w = old_state_dict['mlp.0.weight']
+    new_first_w = torch_module.zeros_like(new_sd['mlp.0.weight'])
+
+    embed_dim = new_critic.neighbor_attention.embed_dim
+    enc_dim = new_critic.encounter_dim
+    old_local_obs_dim = new_critic.local_obs_dim - delta  # old local_obs_dim
+    new_local_obs_dim = new_critic.local_obs_dim
+
+    # Structure: [ego(old), attended(embed), encounter(enc), agent1_obs(old_local), ..., agentN_obs(old_local), fleet(5)]
+    # After migration: [ego(new), attended(embed), encounter(enc), agent1_obs(new_local), ..., agentN_obs(new_local), fleet(5)]
+
+    old_pos = 0
+    new_pos = 0
+
+    # 1. ego columns
+    new_first_w[:, new_pos:new_pos + old_ego_dim] = old_first_w[:, old_pos:old_pos + old_ego_dim]
+    old_pos += old_ego_dim
+    new_pos += new_ego_dim
+
+    # 2. attended + encounter columns (unchanged size)
+    ae_cols = embed_dim + enc_dim
+    new_first_w[:, new_pos:new_pos + ae_cols] = old_first_w[:, old_pos:old_pos + ae_cols]
+    old_pos += ae_cols
+    new_pos += ae_cols
+
+    # 3. Global state: max_agents obs blocks, each grows from old_local to new_local
+    for _ in range(max_agents):
+        new_first_w[:, new_pos:new_pos + old_local_obs_dim] = old_first_w[:, old_pos:old_pos + old_local_obs_dim]
+        old_pos += old_local_obs_dim
+        new_pos += new_local_obs_dim
+
+    # 4. Fleet metrics (5 features, unchanged)
+    remaining = old_first_w.shape[1] - old_pos
+    if remaining > 0:
+        new_first_w[:, new_pos:new_pos + remaining] = old_first_w[:, old_pos:old_pos + remaining]
+
+    new_sd['mlp.0.weight'] = new_first_w
+    new_sd['mlp.0.bias'] = old_state_dict['mlp.0.bias'].clone()
+
+    # --- Copy all other layers verbatim ---
+    for key, value in old_state_dict.items():
+        if key in ('neighbor_attention.query_proj.weight', 'neighbor_attention.query_proj.bias',
+                    'mlp.0.weight', 'mlp.0.bias'):
+            continue
+        if key in new_sd and new_sd[key].shape == value.shape:
+            new_sd[key] = value.clone()
+
+    new_critic.load_state_dict(new_sd)
 def build_attention_actor_from_checkpoint(
     checkpoint: dict, nn_module, torch_module, device,
 ) -> AttentionActor:
@@ -318,7 +450,10 @@ def build_attention_actor_from_checkpoint(
     embed_dim = int(checkpoint.get('attention_embed_dim', 32))
     num_heads = int(checkpoint.get('attention_num_heads', 1))
     encounter_dim = ENCOUNTER_TYPE_COUNT
-    max_neighbors = (obs_dim - _EGO_DIM - encounter_dim) // _NEIGHBOR_FEATURE_DIM
+
+    # Backwards compatibility: old checkpoints used ego_dim=10.
+    saved_ego_dim = int(checkpoint.get('ego_dim', _OLD_EGO_DIM))
+    max_neighbors = (obs_dim - saved_ego_dim - encounter_dim) // _NEIGHBOR_FEATURE_DIM
 
     actor = AttentionActor(
         max_neighbors=max_neighbors,
@@ -328,6 +463,12 @@ def build_attention_actor_from_checkpoint(
         embed_dim=embed_dim,
         num_heads=num_heads,
     ).to(device)
-    actor.load_state_dict(checkpoint['actor_state_dict'])
+
+    actor_sd = checkpoint['actor_state_dict']
+    # If checkpoint ego_dim differs from current _EGO_DIM, migrate weights.
+    if saved_ego_dim != _EGO_DIM:
+        _migrate_attention_actor_ego_dim(actor_sd, actor, torch_module, saved_ego_dim, _EGO_DIM)
+    else:
+        actor.load_state_dict(actor_sd)
     actor.eval()
     return actor

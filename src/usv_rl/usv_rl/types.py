@@ -37,11 +37,12 @@ class UsvObservation:
     raw_angular_z: float
     final_linear_x: float
     final_angular_z: float
+    cross_track_error: float = 0.0
     neighbors: List[NeighborObservation] = field(default_factory=list)
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 10 + max_neighbors * 6
+        return 11 + max_neighbors * 6
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -60,6 +61,7 @@ class UsvObservation:
             self.raw_angular_z,
             self.final_linear_x,
             self.final_angular_z,
+            self.cross_track_error,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]

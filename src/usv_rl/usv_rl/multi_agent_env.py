@@ -81,6 +81,11 @@ class MultiAgentEnvConfig:
     separation_recovery_weight: float = 0.0
     team_completion_bonus: float = 18.0
     deadlock_penalty_weight: float = 4.0
+    # Entanglement duration penalty: penalises sustained close proximity
+    # to break orbital-lock behaviour where USVs circle each other.
+    entanglement_penalty_weight: float = 0.0
+    entanglement_distance: float = 3.0
+    entanglement_grace_steps: int = 30
     # Domain randomization
     domain_randomization: bool = False
     dr_position_noise_std: float = 0.10
@@ -94,6 +99,18 @@ class MultiAgentEnvConfig:
     scenario_spawn_position_std: float = 0.0
     scenario_spawn_heading_std: float = 0.0
     scenario_goal_position_std: float = 0.0
+    # Sim dynamics time constants (first-order velocity filter)
+    sim_tau_linear: float = 0.45
+    sim_tau_angular: float = 0.25
+    # Tau domain randomization: if ranges are set (low>0 and high>low), tau is
+    # sampled uniformly each episode reset for sim-to-real robustness.
+    dr_tau_linear_low: float = 0.0
+    dr_tau_linear_high: float = 0.0
+    dr_tau_angular_low: float = 0.0
+    dr_tau_angular_high: float = 0.0
+    # Distance-aware speed scaling (must match SITL deployment)
+    speed_scale_distance: float = 0.0
+    speed_scale_min: float = 0.35
 
 
 class MultiAgentEnv(gym.Env):
@@ -187,7 +204,11 @@ class MultiAgentEnv(gym.Env):
 
     def _ensure_runtime(self):
         if self._sim_node is None:
-            self._sim_node = MultiUsvSimNode(self._runtime_agent_ids)
+            self._sim_node = MultiUsvSimNode(
+                self._runtime_agent_ids,
+                tau_linear=self.config.sim_tau_linear,
+                tau_angular=self.config.sim_tau_angular,
+            )
             if self.config.domain_randomization:
                 self._sim_node.set_domain_randomization(
                     enabled=True,
@@ -250,7 +271,18 @@ class MultiAgentEnv(gym.Env):
             self.config.collision_distance + 1e-3,
         )
         min_neighbor_distance = observation.min_neighbor_distance()
-        return float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+        raw_level = float(np.clip((lookahead_distance - min_neighbor_distance) / lookahead_distance, 0.0, 1.0))
+        # Reduce conflict level when the closest neighbour is separating,
+        # so the agent regains turning authority to break free.
+        if observation.neighbors and raw_level > 0.0:
+            closest = min(observation.neighbors, key=lambda n: n.distance)
+            d = max(closest.distance, 1e-3)
+            # range_rate > 0 means closing, < 0 means separating
+            range_rate = -(closest.rel_x * closest.rel_vx + closest.rel_y * closest.rel_vy) / d
+            if range_rate < -0.02:
+                separation_relief = min(1.0, abs(range_rate) / 0.15)
+                raw_level *= max(0.25, 1.0 - 0.6 * separation_relief)
+        return raw_level
 
     def project_policy_action(self, agent_id: str, action) -> np.ndarray:
         observation = self._latest_observations.get(agent_id)
@@ -328,7 +360,20 @@ class MultiAgentEnv(gym.Env):
         projected = self.project_policy_action(agent_id, action)
         if self.config.action_mode == 'angular_only':
             return 0.0, float(projected[0])
-        return float(projected[0]), float(projected[1])
+        linear_x = float(projected[0])
+        angular_z = float(projected[1])
+        # Distance-aware speed scaling (mirrors SITL deployment behaviour)
+        if self.config.speed_scale_distance > 0.0:
+            observation = self._latest_observations.get(agent_id)
+            if observation is not None:
+                min_dist = observation.min_neighbor_distance()
+                if min_dist < self.config.speed_scale_distance:
+                    speed_scale = max(
+                        self.config.speed_scale_min,
+                        min_dist / self.config.speed_scale_distance,
+                    )
+                    linear_x *= speed_scale
+        return linear_x, angular_z
 
     def _wait_for_local_observations(self, timeout: Optional[float] = None) -> Dict[str, AgentLocalObservation]:
         deadline = time.monotonic() + (timeout or self.config.state_timeout)
@@ -387,6 +432,12 @@ class MultiAgentEnv(gym.Env):
             for agent_id in self._active_agent_ids
             if agent_id in observations
         }
+
+    def _annotate_cross_track_errors(self, observations: Dict[str, AgentLocalObservation]) -> None:
+        """Inject cross-track error into each agent's observation so it is
+        available in the vectorised observation fed to the policy network."""
+        for agent_id, observation in observations.items():
+            observation.cross_track_error = self._compute_route_cross_track_error(agent_id, observation)
 
     def _annotate_encounter_types(self, observations, global_state):
         scenario_name = self._scenario.name if self._scenario else ''
@@ -691,6 +742,15 @@ class MultiAgentEnv(gym.Env):
         for controller in self._controllers.values():
             controller.reset_for_training_episode()
 
+        # Tau domain randomization: sample new time constants each episode
+        if (self.config.dr_tau_linear_low > 0 and self.config.dr_tau_linear_high > self.config.dr_tau_linear_low):
+            self._sim_node.randomize_tau(
+                self.config.dr_tau_linear_low,
+                self.config.dr_tau_linear_high,
+                self.config.dr_tau_angular_low if self.config.dr_tau_angular_high > self.config.dr_tau_angular_low else self.config.sim_tau_angular,
+                self.config.dr_tau_angular_high if self.config.dr_tau_angular_high > self.config.dr_tau_angular_low else self.config.sim_tau_angular,
+            )
+
         self._bridge.reset_episode_state()
         self._sim_node.reset_agents(self._scenario)
         time.sleep(0.3)
@@ -704,6 +764,7 @@ class MultiAgentEnv(gym.Env):
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
         self._annotate_encounter_types(observations, global_state)
+        self._annotate_cross_track_errors(observations)
         self._latest_observations = observations
         self._previous_distances = {
             namespace: observations[namespace].distance_to_goal
@@ -719,6 +780,7 @@ class MultiAgentEnv(gym.Env):
             for namespace in self._active_agent_ids
         }
         self._previous_pair_min: float = float('inf')
+        self._entanglement_steps: int = 0
         self._episode_start = time.monotonic()
         self._last_team_progress_time = self._episode_start
         self._best_team_mean_distance = global_state.team_mean_goal_distance
@@ -895,6 +957,15 @@ class MultiAgentEnv(gym.Env):
                 separation_delta = max(0.0, pair_min - prev_pair_min)
                 team += self.config.separation_recovery_weight * separation_delta
 
+        # Entanglement duration penalty: ramps up when any pair stays within
+        # entanglement_distance for longer than the grace period.  Discourages
+        # stable orbital locks where USVs circle each other indefinitely.
+        if self.config.entanglement_penalty_weight > 0.0:
+            exceeded = max(0, self._entanglement_steps - self.config.entanglement_grace_steps)
+            if exceeded > 0:
+                penalty_strength = min(10.0, math.sqrt(exceeded / 10.0))
+                team -= self.config.entanglement_penalty_weight * penalty_strength
+
         # Continuous proximity gradient penalty: a 1/d^2 repulsive field that
         # creates a strong gradient pushing the agent away from neighbours well
         # before the collision threshold is reached.
@@ -983,6 +1054,7 @@ class MultiAgentEnv(gym.Env):
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
         self._annotate_encounter_types(observations, global_state)
+        self._annotate_cross_track_errors(observations)
         self._latest_observations = observations
 
         team_progress = 0.0
@@ -1002,6 +1074,14 @@ class MultiAgentEnv(gym.Env):
         elapsed = time.monotonic() - self._episode_start
         terminated = collision or all_reached
         truncated = elapsed >= self.config.episode_timeout or (time.monotonic() - self._last_team_progress_time) >= self.config.no_progress_timeout
+
+        # Update entanglement counter (once per step, shared across agents)
+        if self.config.entanglement_penalty_weight > 0.0:
+            if np.isfinite(pair_min) and pair_min < self.config.entanglement_distance:
+                self._entanglement_steps += 1
+            else:
+                # Decay quickly when separated to allow re-encounters
+                self._entanglement_steps = max(0, self._entanglement_steps - 5)
 
         rewards = {}
         for namespace in self._active_agent_ids:
