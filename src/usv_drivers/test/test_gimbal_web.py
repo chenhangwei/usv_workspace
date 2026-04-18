@@ -1279,13 +1279,40 @@ def _detect_faces(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.equalizeHist(gray)
     image_width = gray.shape[1]
+    
+    # 辅助函数: ONNX 推理表情
+    def _get_emotion(gray_frame, bx1, by1, bx2, by2):
+        if not getattr(s, 'emotion_model', None):
+            return None, None
+        face_roi = gray_frame[by1:by2, bx1:bx2]
+        if face_roi.shape[0] == 0 or face_roi.shape[1] == 0:
+            return None, None
+        try:
+            inp = cv2.resize(face_roi, (64, 64)).astype(np.float32)
+            inp = np.expand_dims(inp, axis=(0, 1))
+            out = s.emotion_model.run(None, {s.emotion_input_name: inp})[0]
+            # FER+ labels: 0:neutral 1:happiness 2:surprise 3:sadness 4:anger 5:disgust 6:fear 7:contempt
+            emotions = [
+                ("[ Neutral ._. ]", (200, 200, 200)),
+                ("[ Happy ^_^ ]", (0, 255, 0)),
+                ("[ Surprise O_O ]", (0, 255, 255)),
+                ("[ Sad T_T ]", (255, 0, 0)),
+                ("[ Angry >_< ]", (0, 0, 255)),
+                ("[ Disgust +_+ ]", (128, 0, 128)),
+                ("[ Fear =_= ]", (0, 165, 255)),
+                ("[ Contempt -_- ]", (128, 128, 128)),
+            ]
+            idx = np.argmax(out[0])
+            return emotions[idx][0], emotions[idx][1]
+        except Exception:
+            return None, None
 
     if s.detector is not None and s.detector.get('kind') == 'scrfd':
         try:
-            boxes, _ = s.detector['model'].detect(
+            boxes, kpss = s.detector['model'].detect(
                 image, thresh=s.conf_thresh, input_size=(640, 640))
             detected = []
-            for box in boxes:
+            for i, box in enumerate(boxes):
                 x1, y1, x2, y2, score = box
                 x1 = max(0, int(round(x1)))
                 y1 = max(0, int(round(y1)))
@@ -1302,10 +1329,62 @@ def _detect_faces(image):
                     if not _has_enough_face_structure(
                             gray, x1, y1, bw_i, bh_i, relaxed=True):
                         continue
+                
+                # 表情推断
+                expression = "[ Neutral ._. ]"
+                color = (200, 200, 200)
+                
+                # 预处理：利用人脸关键点识别“歪头”动作 (替代嘟嘴，彻底解决说话时的误触问题)
+                is_head_tilt = False
+                eye_dist = 0
+                if kpss is not None and i < len(kpss):
+                    pts = kpss[i]
+                    if pts.ndim == 1 and pts.shape[0] == 10:
+                        eye_dx = pts[2] - pts[0]
+                        eye_dy = pts[3] - pts[1]
+                    elif pts.ndim == 2 and pts.shape[0] == 5:
+                        eye_dx = pts[1][0] - pts[0][0]
+                        eye_dy = pts[1][1] - pts[0][1]
+                    else:
+                        eye_dx = eye_dy = 0
+                    
+                    eye_dist = math.hypot(eye_dx, eye_dy)
+                    
+                    # 只要眼睛水平线歪斜超过 15 度，即判断为歪头
+                    if eye_dist > 5:
+                        if eye_dx == 0:  # 完全垂直
+                            is_head_tilt = True
+                        else:
+                            angle = abs(math.degrees(math.atan2(eye_dy, eye_dx)))
+                            if angle > 15.0 and angle < 165.0:
+                                is_head_tilt = True
+
+                if is_head_tilt:
+                    expression = "[ HeadTilt /_\\ ]"
+                    color = (0, 255, 255) # 黄色
+                else:
+                    # 使用 ONNX FER+ 模型 (如果存在)
+                    onnx_expr, onnx_color = _get_emotion(gray, x1, y1, x2, y2)
+                    if onnx_expr:
+                        expression = onnx_expr
+                        color = onnx_color
+                    elif kpss is not None and i < len(kpss):
+                        # 降级到几何关键点分析
+                        if eye_dist > 5:
+                            ratio = mouth_width / eye_dist
+                            if ratio > 1.15:
+                                expression = "[ Laughing =D ]"
+                                color = (0, 165, 255)
+                            elif ratio > 0.90:
+                                expression = "[ Smiling ^_^ ]"
+                                color = (0, 255, 0)
+
                 face = {
                     'cls': 'face', 'conf': float(score),
                     'x1': x1, 'y1': y1,
                     'x2': x2, 'y2': y2,
+                    'expr': expression,
+                    'expr_color': color
                 }
                 if _passes_face_detection_gate(face, image.shape[1], image.shape[0]):
                     detected.append(face)
@@ -1337,13 +1416,37 @@ def _detect_faces(image):
                         continue
                     if not _has_enough_face_structure(gray, x1, y1, bw_i, bh_i):
                         continue
-                    face = {
+
+                    # 表情推断
+                    expression = "[ Neutral ._. ]"
+                    color = (200, 200, 200)
+                    if len(face) >= 15:
+                        eye_dx = face[6] - face[4]
+                        eye_dy = face[7] - face[5]
+                        eye_dist = math.hypot(eye_dx, eye_dy)
+
+                        mouth_dx = face[12] - face[10]
+                        mouth_dy = face[13] - face[11]
+                        mouth_width = math.hypot(mouth_dx, mouth_dy)
+
+                        if eye_dist > 5:
+                            ratio = mouth_width / eye_dist
+                            if ratio > 1.15:
+                                expression = "[ Laughing =D ]"
+                                color = (0, 165, 255)
+                            elif ratio > 0.90:
+                                expression = "[ Smiling ^_^ ]"
+                                color = (0, 255, 0)
+
+                    out_face = {
                         'cls': 'face', 'conf': score,
                         'x1': x1, 'y1': y1,
                         'x2': x2, 'y2': y2,
+                        'expr': expression,
+                        'expr_color': color
                     }
-                    if _passes_face_detection_gate(face, image.shape[1], image.shape[0]):
-                        detected.append(face)
+                    if _passes_face_detection_gate(out_face, image.shape[1], image.shape[0]):
+                        detected.append(out_face)
                 return _dedupe_face_boxes(detected)
         except Exception as e:
             print(f'[WARN] YuNet 检测失败，回退到 Haar: {e}')
@@ -1371,6 +1474,8 @@ def _detect_faces(image):
                 'cls': 'face', 'conf': conf,
                 'x1': int(x), 'y1': int(y),
                 'x2': int(x + bw), 'y2': int(y + bh),
+                'expr': '[ Neutral ._. ]',
+                'expr_color': (200, 200, 200)
             }
             if _passes_face_detection_gate(face, image.shape[1], image.shape[0]):
                 detected.append(face)
@@ -1387,6 +1492,8 @@ def _detect_faces(image):
                 'cls': 'face', 'conf': 0.86,
                 'x1': int(x), 'y1': int(y),
                 'x2': int(x + bw), 'y2': int(y + bh),
+                'expr': '[ Neutral ._. ]',
+                'expr_color': (200, 200, 200)
             }
             if _passes_face_detection_gate(face, image.shape[1], image.shape[0]):
                 detected.append(face)
@@ -1405,6 +1512,8 @@ def _detect_faces(image):
                 'cls': 'face', 'conf': 0.84,
                 'x1': int(x1), 'y1': int(y),
                 'x2': int(x2), 'y2': int(y + bh),
+                'expr': '[ Neutral ._. ]',
+                'expr_color': (200, 200, 200)
             }
             if _passes_face_detection_gate(face, image.shape[1], image.shape[0]):
                 detected.append(face)
@@ -1543,6 +1652,76 @@ def gimbal_control_step(dets_enriched):
             s.track_target_face_id = best.get('face_id')
             s._track_last_seen = now
             s.tracking = True
+            
+            # --- 表情联动行为策略 ---
+            if prev_face_id != s.track_target_face_id:
+                s._kiss_triggered = False
+                s._is_shaking = False
+                s._is_nodding = False
+                s._kiss_detect_frames = 0 # 重置连续帧计数
+
+            expr = best.get('expr', '')
+
+            # 当检测到歪头(HeadTilt)，并持续靠近时，强制触发厌恶回避
+            if 'HeadTilt' in expr:
+                # 增加时序过滤：连续 3 帧以上识别为歪头才真正触发
+                s._kiss_detect_frames = getattr(s, '_kiss_detect_frames', 0) + 1
+                if s._kiss_detect_frames >= 3:
+                    if getattr(s, '_kiss_triggered', False):
+                        # 持续歪头状态下，判断是否靠近 (距离减小 0.1m 以上)
+                        if getattr(s, '_kiss_start_dist', best['dist']) - best['dist'] > 0.10:
+                            print(f"[GIMBAL] 探测到持续歪头并靠近 -> 转为厌恶回避")
+                            expr = 'Disgust' # 篡改表情为厌恶，走躲避逻辑
+                            s._kiss_detect_frames = 0 # 触发后清空计数避免循环触发
+                    else:
+                        s._kiss_triggered = True
+                        s._kiss_start_time = now
+                        s._kiss_start_dist = best['dist']
+                else:
+                    # 侦测中，但还没达到稳定帧数，先当成 Neutral 处理，不触发任何动作
+                    expr = 'Neutral'
+            else:
+                s._kiss_detect_frames = 0
+                # 如果表情不再是HeadTilt，且摇头动作已经结束，则重置触发器，允许下次重新触发
+                if getattr(s, '_kiss_triggered', False) and not getattr(s, '_is_shaking', False):
+                    s._kiss_triggered = False
+
+            if 'Happy' in expr or 'Laughing' in expr or 'Smiling' in expr or 'Surprise' in expr:
+                s.face_gaze_duration = 15.0
+                if not getattr(s, '_is_nodding', False):
+                    # 检查是否完成了上一次点头，以及是否过了 2 秒的冷却期 (点头耗时1秒 + 2秒间隔 = 3秒)
+                    if now - getattr(s, '_nod_start_time', 0) > 3.0:
+                        # 触发点头动画
+                        print(f"[GIMBAL] 探测到喜悦/惊讶 {expr} -> 触发 2 次点头")
+                        s._is_nodding = True
+                        s._nod_start_time = now
+            elif 'HeadTilt' in expr:
+                s.face_gaze_duration = 15.0
+                if getattr(s, '_kiss_start_time', 0) == now: # 刚触发的第一帧
+                    print(f"[GIMBAL] 探测到歪头动作 {expr} -> 仅触发摇头")
+                    s._is_shaking = True
+            elif 'Angry' in expr or 'Disgust' in expr:
+                # 产生排斥情绪
+                if len(s._face_roster) <= 1:
+                    # 只有一张脸时，不脱战，而是触发 3 秒低头回避
+                    if not getattr(s, '_is_hiding', False):
+                        print(f"[GIMBAL] 探测到负面情绪 {expr} -> 单人环境，执行低头回避动作 3 秒")
+                        s._is_hiding = True
+                        s._hide_start_time = now
+                else:
+                    # 多张脸时主动抛弃当前目标轮换
+                    print(f"[GIMBAL] 探测到负面情绪 {expr} -> 抛弃 Face#{s.track_target_face_id}")
+                    s._face_switch_time = 0.0 # 使得下一个 tick 立刻触发轮换
+                    _trigger_track_speed_boost(now)
+            else:
+                s.face_gaze_duration = 8.0
+            
+            if getattr(s, '_is_nodding', False) and now - getattr(s, '_nod_start_time', 0) > 1.0:
+                s._is_nodding = False
+                
+            if getattr(s, '_is_shaking', False) and now - getattr(s, '_kiss_start_time', 0) > 1.0:
+                s._is_shaking = False # 摇头持续1秒
+
             if s.mode == MODE_PATROL:
                 s.mode = MODE_TRACK
                 s._face_switch_time = now  # 首次进入跟踪, 重置轮换计时
@@ -1668,6 +1847,38 @@ def _update_patrol(dt, now):
 
 def _update_track(dt, now):
     s = STATE
+    
+    # --- 优先处理单人情绪回避（低头掩面）逻辑 ---
+    if getattr(s, '_is_hiding', False):
+        if now - getattr(s, '_hide_start_time', now) < 3.0:
+            # 维持 TRACK 模式且不超时，暂停 PID 计算
+            s._track_last_seen = now 
+            s.pan_pid.reset()
+            s.tilt_pid.reset()
+            # -20.0 修正低头方向
+            apply_angles(s.current_pan, -20.0)
+            return
+        else:
+            s._is_hiding = False
+            s._is_recovering = True
+            s._recover_start_time = now
+            print("[GIMBAL] 结束低头回避 3 秒，快速重新抬头恢复捕捉")
+            
+    if getattr(s, '_is_recovering', False):
+        if now - getattr(s, '_recover_start_time', now) < 0.5:
+            # 强行快速抬头到水平 (0.0度)，跳过巡视模式的缓速上限
+            s._track_last_seen = now 
+            s.pan_pid.reset()
+            s.tilt_pid.reset()
+            apply_angles(s.current_pan, 0.0)
+            return
+        else:
+            s._is_recovering = False
+            # 抬头动作完成后，清空滞后的目标框，迫使云台利用新视线重新寻找并锁定
+            s._track_target_bbox = None
+            s._track_last_seen = 0
+            return
+
     if now - s._track_last_seen > s.track_lost_timeout:
         print(f'[GIMBAL] 目标丢失 {s.track_lost_timeout:.1f}s → PATROL')
         s.tracking = False
@@ -1720,6 +1931,23 @@ def _update_track(dt, now):
     )
     pan_rate = s.pan_pid.compute(err_x, dt)
     tilt_rate = s.tilt_pid.compute(err_y, dt)
+
+    # 惊讶/高兴情绪 -> 加入硬件点头动作
+    if getattr(s, '_is_nodding', False):
+        t_elapsed = now - getattr(s, '_nod_start_time', now)
+        if t_elapsed < 1.0:
+            # 2Hz 频率的点头，上下摆动幅度约 30 度/秒
+            nod_rate = math.sin(t_elapsed * math.pi * 4.0) * 30.0
+            tilt_rate += nod_rate
+            
+    # 亲吻情绪 -> 加入硬件摇头动作
+    if getattr(s, '_is_shaking', False):
+        t_elapsed = now - getattr(s, '_kiss_start_time', now)
+        if t_elapsed < 1.0:
+            # 2Hz 频率的摇头，左右摆动幅度约 30 度/秒
+            shake_rate = math.sin(t_elapsed * math.pi * 4.0) * 30.0
+            pan_rate += shake_rate
+
     apply_angles(s.current_pan + pan_rate * dt,
                  s.current_tilt - tilt_rate * dt)
 
@@ -1788,7 +2016,9 @@ def vision_gimbal_thread():
                 'cls': 'face', 'conf': face['conf'],
                 'x1': int(fx), 'y1': int(fy),
                 'x2': int(fx2), 'y2': int(fy2),
-                'dist': dist, 'bearing': bearing_deg
+                'dist': dist, 'bearing': bearing_deg,
+                'expr': face.get('expr', '[ Neutral ._. ]'),
+                'expr_color': face.get('expr_color', (200, 200, 200))
             })
 
         face_dets_enriched = _assign_face_ids(face_dets_enriched, now)
@@ -1822,6 +2052,14 @@ def vision_gimbal_thread():
                 label = '[LOOK] ' + label
             if dist > 0:
                 label += f' {dist:.2f}m'
+                
+            # 绘制表情符号
+            expr = d.get('expr', '')
+            expr_color = d.get('expr_color', (200, 200, 200))
+            if expr:
+                cv2.putText(disp, expr, (x1, max(y1 - 36, 0)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, expr_color, 2, cv2.LINE_AA)
+
             (tw, th), _ = cv2.getTextSize(
                 label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
             cv2.rectangle(disp, (x1, y1 - th - 8), (x1 + tw + 4, y1),
@@ -2412,6 +2650,7 @@ def main():
     p.add_argument('--calib', default='./stereo_calibration.yaml',
                    help='标定文件路径')
     p.add_argument('--model', default='', help='SCRFD/YuNet 人脸模型路径 (.onnx)')
+    p.add_argument('--emotion-model', default='/tmp/emotion.onnx', help='FER+ 情绪模型路径 (.onnx)')
     p.add_argument('--confidence', type=float, default=0.45)
     p.add_argument('--port', type=int, default=8767)
     p.add_argument('--no-hardware', action='store_true',
@@ -2431,6 +2670,25 @@ def main():
     s.frame_w = args.width
     s.frame_h = args.height
     s.conf_thresh = args.confidence
+
+    # 下载情绪模型
+    if args.emotion_model and not os.path.exists(args.emotion_model):
+        try:
+            print(f"[INFO] 自动下载情绪识别模型 {args.emotion_model}...")
+            urllib.request.urlretrieve("https://github.com/onnx/models/raw/main/validated/vision/body_analysis/emotion_ferplus/model/emotion-ferplus-8.onnx", args.emotion_model)
+        except Exception as e:
+            print(f"[WARN] 情绪模型下载失败: {e}")
+
+    if args.emotion_model and os.path.exists(args.emotion_model) and ORT_AVAILABLE:
+        try:
+            s.emotion_model = ort.InferenceSession(args.emotion_model)
+            s.emotion_input_name = s.emotion_model.get_inputs()[0].name
+            print(f"[INFO] 已加载情绪识别模型 {args.emotion_model}")
+        except Exception as e:
+            print(f"[WARN] 情绪模型加载失败: {e}")
+            s.emotion_model = None
+    else:
+        s.emotion_model = None
 
     # 标定
     load_calibration(args.calib)
