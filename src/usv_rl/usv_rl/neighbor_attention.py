@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 
 # Fixed observation layout constants (must match multi_agent_types / types).
-_EGO_DIM = 11               # pose_x/y, yaw, speed, dist_goal, heading_err, raw/final vels, cross_track_error
+_EGO_DIM = 12               # pose_x/y, yaw, speed, dist_goal, sin/cos(heading_err), raw/final vels, cross_track_error
 _NEIGHBOR_FEATURE_DIM = 6    # rel_x, rel_y, rel_vx, rel_vy, distance, bearing
-_OLD_EGO_DIM = 10            # previous ego dimension (before cross_track_error was added)
+_OLD_EGO_DIM = 11            # previous ego dimension (before sin/cos heading_error split)
 
 
 # ───────────────────────────────────────────────────────────

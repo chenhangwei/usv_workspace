@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from typing import List
 
@@ -42,7 +43,7 @@ class UsvObservation:
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 11 + max_neighbors * 6
+        return 12 + max_neighbors * 6
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -56,7 +57,8 @@ class UsvObservation:
             self.yaw,
             self.speed,
             self.distance_to_goal,
-            self.heading_error,
+            math.sin(self.heading_error),
+            math.cos(self.heading_error),
             self.raw_linear_x,
             self.raw_angular_z,
             self.final_linear_x,

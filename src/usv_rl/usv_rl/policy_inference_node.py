@@ -342,7 +342,7 @@ class PolicyInferenceNode(Node):
         self._auto_encounter_candidate_since: float = 0.0
 
         if policy_obs_dim is not None:
-            _ego_dim = 11  # current ego dimension (including cross_track_error)
+            _ego_dim = 12  # current ego dimension (sin/cos heading_error + cross_track_error)
             # Check if dimension matches base layout: ego + N*6
             if policy_obs_dim >= _ego_dim and (policy_obs_dim - _ego_dim) % 6 == 0:
                 inferred_neighbors = max(1, (policy_obs_dim - _ego_dim) // 6)
@@ -375,13 +375,13 @@ class PolicyInferenceNode(Node):
                         f'Encounter-type conditioning enabled: {encounter_type} (index={self._encounter_type_index}).'
                     )
             else:
-                # Backwards compatibility: try old ego_dim=10 layouts.
-                _old_ego = 10
+                # Backwards compatibility: try old ego_dim=11 layouts (scalar heading_error).
+                _old_ego = 11
                 if policy_obs_dim >= _old_ego and (policy_obs_dim - _old_ego) % 6 == 0:
                     inferred_neighbors = max(1, (policy_obs_dim - _old_ego) // 6)
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=10 layout (obs_dim={policy_obs_dim}). '
-                        f'CTE observation will be ignored by the model.'
+                        f'Model uses legacy ego_dim=11 layout (obs_dim={policy_obs_dim}). '
+                        f'sin/cos heading_error observation will be collapsed to scalar for this model.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
@@ -389,15 +389,35 @@ class PolicyInferenceNode(Node):
                     inferred_neighbors = max(1, (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) // 6)
                     self._encounter_type_enabled = True
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=10 layout with encounter type (obs_dim={policy_obs_dim}). '
-                        f'CTE observation will be ignored by the model.'
+                        f'Model uses legacy ego_dim=11 layout with encounter type (obs_dim={policy_obs_dim}). '
+                        f'sin/cos heading_error observation will be collapsed to scalar for this model.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
                 else:
-                    raise RuntimeError(
-                        f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
-                    )
+                    # Try even older ego_dim=10 layouts.
+                    _oldest_ego = 10
+                    if policy_obs_dim >= _oldest_ego and (policy_obs_dim - _oldest_ego) % 6 == 0:
+                        inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego) // 6)
+                        self.get_logger().warn(
+                            f'Model uses legacy ego_dim=10 layout (obs_dim={policy_obs_dim}). '
+                            f'CTE and sin/cos heading observations will be ignored by the model.'
+                        )
+                        if inferred_neighbors != self._max_neighbors:
+                            self._max_neighbors = inferred_neighbors
+                    elif policy_obs_dim >= _oldest_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                        inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) // 6)
+                        self._encounter_type_enabled = True
+                        self.get_logger().warn(
+                            f'Model uses legacy ego_dim=10 layout with encounter type (obs_dim={policy_obs_dim}). '
+                            f'CTE and sin/cos heading observations will be ignored by the model.'
+                        )
+                        if inferred_neighbors != self._max_neighbors:
+                            self._max_neighbors = inferred_neighbors
+                    else:
+                        raise RuntimeError(
+                            f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
+                        )
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -785,7 +805,8 @@ class PolicyInferenceNode(Node):
             if route_len > 1e-6:
                 rel_x = own_x - sx
                 rel_y = own_y - sy
-                cte = abs(rel_x * route_dy - rel_y * route_dx) / route_len
+                cte = (rel_x * route_dy - rel_y * route_dx) / route_len
+                cte = max(-3.0, min(3.0, cte))
 
         return UsvObservation(
             pose_x=own_x,

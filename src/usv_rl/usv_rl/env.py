@@ -341,6 +341,8 @@ class UsvRlEnv(gym.Env):
             angular_accel_limit=self.config.angular_accel_limit,
             angular_decel_limit=self.config.angular_decel_limit,
             conflict_turn_relief=self.config.conflict_turn_relief,
+            authority_floor=getattr(self.config, 'angular_authority_floor', 0.35),
+            min_forward_speed_floor=getattr(self.config, 'min_forward_speed_floor', 0.08),
             forward_only=True,
         )
 

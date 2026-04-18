@@ -11,21 +11,22 @@
 # Date: 2026-01-26
 # Updated: 2026-02-10 - 增强: 综合仪表盘、模式着色轨迹、每航点统计、质量评分
 """
-USV 导航日志分析脚本 (v2)
+USV 导航日志分析脚本 (v4)
 
-分析日志文件，生成可视化图表，帮助调试导航问题。
+分析日志文件（支持 .csv 和 .csv.gz），生成可视化图表，帮助调试导航问题。
 
 用法:
     python3 analyze_nav_log.py <log_file.csv>
+    python3 analyze_nav_log.py <log_file.csv.gz>
     python3 analyze_nav_log.py <log_dir>   # 分析目录下全部日志
     python3 analyze_nav_log.py             # 自动使用最新的日志文件
 
 输出图表:
-    1. trajectory.png       - 轨迹图 (模式着色 + 目标点 + 方向箭头)
+    1. trajectory.png       - 轨迹图 (模式着色 + 目标点 + 方向箭头 + nav_event 标记)
     2. velocity.png         - 速度分析 (实际 vs 指令 + 距离)
     3. heading_comparison.png - 航向对比 (速度航向 vs 磁力计航向)
     4. control_commands.png - 控制指令图 (含 omega 跟踪对比)
-    5. rl_analysis.png      - RL 策略控制分析 (v18+)
+    5. rl_analysis.png      - RL 策略控制分析 (v18+, v20 含 encounter type 时序)
     5. errors.png           - 误差图 (距离/航向/CTE)
     6. mpc_debug.png        - MPC 调试 (求解时间/代价/预测航向)
     7. adaptive_tau.png    - 自适应 Tau 分析
@@ -41,6 +42,7 @@ Updated: 2026-02-27 - v14 新增 nav_mode 分析
 import sys
 import csv
 import math
+import gzip
 import io
 import contextlib
 from collections import Counter
@@ -110,6 +112,21 @@ VERSION_SCHEMA_INFO = {
     'v14': ('wifi_navigation', '导航日志 + WiFi 状态'),
     'v16': ('neighbor_context_navigation', '导航日志 + 邻船回放上下文'),
     'v18': ('rl_navigation_policy', 'RL 导航日志 + pure 控制分解'),
+    'v20': ('rl_navigation_policy', 'RL 导航日志 + encounter classifier'),
+}
+
+# v20: encounter type 映射 (与 usv_rl/multi_agent_types.py 保持一致)
+ENCOUNTER_TYPE_NAMES = {
+    -1: 'unset',
+    0: 'head_on',
+    1: 'crossing',
+    2: 'overtaking',
+}
+ENCOUNTER_TYPE_COLORS = {
+    -1: '#BDBDBD',   # grey - unset
+    0: '#F44336',     # red - head_on
+    1: '#FF9800',     # orange - crossing
+    2: '#2196F3',     # blue - overtaking
 }
 
 
@@ -135,6 +152,14 @@ def _set_detected_version(header_info: dict, version: str):
     if header_info.get('schema_label') in (None, '', '未知导航日志'):
         header_info['schema_label'] = default_schema_label
     _refresh_version_metadata(header_info)
+
+
+def _open_log(filepath: str):
+    """打开 .csv 或 .csv.gz 日志文件，返回文本流"""
+    p = Path(filepath)
+    if p.suffix == '.gz' or p.name.endswith('.csv.gz'):
+        return io.TextIOWrapper(gzip.open(p, 'rb'), encoding='utf-8', errors='replace', newline='')
+    return open(p, 'r', errors='replace', newline='')
 
 
 def load_csv(filepath: str) -> tuple:
@@ -258,7 +283,7 @@ def load_csv(filepath: str) -> tuple:
                         pass
             _refresh_version_metadata(header_info)
 
-    with open(filepath, 'r', errors='replace', newline='') as f:
+    with _open_log(filepath) as f:
         # 兼容 v5/v6 日志：文件头可能包含若干以 # 开头的注释/参数行
         # 解析并找到第一行非注释作为 CSV header
         while True:
@@ -309,6 +334,8 @@ def load_csv(filepath: str) -> tuple:
         _set_detected_version(header_info, 'v16')
     if data and ('raw_cmd_vx' in data[0] or 'rl_cmd_vx' in data[0]):
         _set_detected_version(header_info, 'v18')
+    if data and 'rl_encounter_type_index' in data[0]:
+        _set_detected_version(header_info, 'v20')
 
     _refresh_version_metadata(header_info)
 
@@ -344,7 +371,19 @@ def _neighbor_slot_count(sample: dict) -> int:
     return count
 
 
+_rl_metrics_cache = {}  # {id(data): metrics_dict}
+
+
 def _compute_rl_metrics(data: list) -> dict[str, Any]:
+    cache_key = id(data)
+    if cache_key in _rl_metrics_cache:
+        return _rl_metrics_cache[cache_key]
+    result = _compute_rl_metrics_impl(data)
+    _rl_metrics_cache[cache_key] = result
+    return result
+
+
+def _compute_rl_metrics_impl(data: list) -> dict[str, Any]:
     if not _has_rl_logging(data):
         return {'available': False}
 
@@ -844,6 +883,12 @@ def analyze_statistics(data: list, header_info: dict = None):
     # v14 导航模式统计
     _print_nav_mode_stats(data)
     
+    # v20 encounter type 统计
+    _print_encounter_stats(data)
+    
+    # v15 nav_event 航点事件统计
+    _print_nav_event_stats(data)
+    
     # 质量评分总结
     _print_quality_score(data, header_info=header_info)
 
@@ -1133,6 +1178,150 @@ def _print_nav_mode_stats(data: list):
                 hold_time = sum(1 for d in gdata if d.get('flight_mode') == 'HOLD') * 0.1
                 total_time = gdata[-1]['timestamp'] - gdata[0]['timestamp'] if len(gdata) > 1 else 0
                 print(f"   - Goal {gid}: 总时长={total_time:.1f}s, HOLD等待={hold_time:.1f}s")
+
+
+def _print_encounter_stats(data: list):
+    """打印 RL encounter type 分布统计 (v20+)"""
+    if 'rl_encounter_type_index' not in data[0]:
+        return
+
+    enc_values = [int(d['rl_encounter_type_index']) for d in data
+                  if isinstance(d.get('rl_encounter_type_index'), (int, float))]
+    if not enc_values:
+        return
+
+    total = len(enc_values)
+    counter = Counter(enc_values)
+
+    print(f"\n{'='*60}")
+    print("🔍 RL Encounter Type 统计 (v20)")
+    print("=" * 60)
+
+    for etype in sorted(counter.keys()):
+        name = ENCOUNTER_TYPE_NAMES.get(etype, f'unknown({etype})')
+        count = counter[etype]
+        print(f"   {name:>12}: {count:>6} ({count/total*100:>5.1f}%)")
+
+    # 有效 encounter (非 unset) 的占比
+    active_enc = sum(c for e, c in counter.items() if e >= 0)
+    print(f"\n   有效 encounter: {active_enc}/{total} ({active_enc/total*100:.1f}%)")
+
+    # 类型切换次数
+    transitions = 0
+    for i in range(1, len(enc_values)):
+        if enc_values[i] != enc_values[i - 1]:
+            transitions += 1
+    duration_s = data[-1]['timestamp'] - data[0]['timestamp'] if len(data) > 1 else 1.0
+    print(f"   类型切换次数: {transitions} ({transitions/duration_s:.2f}/s)")
+
+    # 每个 encounter type 的持续时间段统计
+    if active_enc > 0:
+        print(f"\n   各类型连续段统计:")
+        for etype in sorted(counter.keys()):
+            if etype < 0:
+                continue
+            name = ENCOUNTER_TYPE_NAMES.get(etype, f'unknown({etype})')
+            # 统计连续段
+            segments = []
+            seg_start = None
+            for i, ev in enumerate(enc_values):
+                if ev == etype:
+                    if seg_start is None:
+                        seg_start = i
+                else:
+                    if seg_start is not None:
+                        seg_len = i - seg_start
+                        seg_dur = data[i]['timestamp'] - data[seg_start]['timestamp'] if i < len(data) else 0
+                        segments.append(seg_dur)
+                        seg_start = None
+            if seg_start is not None:
+                seg_dur = data[-1]['timestamp'] - data[seg_start]['timestamp']
+                segments.append(seg_dur)
+            if segments:
+                avg_dur = sum(segments) / len(segments)
+                max_dur = max(segments)
+                print(f"   {name:>12}: {len(segments)} 段, 平均={avg_dur:.1f}s, 最长={max_dur:.1f}s")
+
+    # 每个 goal 对应的主要 encounter type
+    goals_enc = {}
+    for d in data:
+        gid = d.get('goal_id')
+        enc = d.get('rl_encounter_type_index')
+        if isinstance(gid, (int, float)) and isinstance(enc, (int, float)):
+            gid = int(gid)
+            enc = int(enc)
+            if gid not in goals_enc:
+                goals_enc[gid] = Counter()
+            goals_enc[gid][enc] += 1
+
+    if len(goals_enc) > 1:
+        print(f"\n   每航点主要 encounter type:")
+        for gid in sorted(goals_enc.keys()):
+            gc = goals_enc[gid]
+            # 找出非 unset 的最常见类型
+            active_types = {e: c for e, c in gc.items() if e >= 0}
+            if active_types:
+                dominant = max(active_types, key=active_types.get)
+                dominant_name = ENCOUNTER_TYPE_NAMES.get(dominant, '?')
+                dominant_pct = active_types[dominant] / sum(gc.values()) * 100
+                print(f"   Goal {gid:>3}: {dominant_name} ({dominant_pct:.0f}%)")
+            else:
+                print(f"   Goal {gid:>3}: unset (100%)")
+
+
+def _parse_nav_events(data: list) -> list:
+    """从 nav_event 列解析航点事件列表。
+
+    返回: [(timestamp_offset, event_type, goal_id, message, data_index), ...]
+    event_type: 'arrived' | 'passed'
+    """
+    events = []
+    t0 = data[0]['timestamp'] if data else 0
+    for i, d in enumerate(data):
+        raw = d.get('nav_event')
+        if not raw or not isinstance(raw, str) or not raw.strip():
+            continue
+        raw = raw.strip()
+        parts = raw.split(':', 2)
+        if len(parts) < 2:
+            continue
+        event_type = parts[0]  # arrived / passed
+        goal_id = parts[1]
+        message = parts[2] if len(parts) > 2 else ''
+        events.append((d['timestamp'] - t0, event_type, goal_id, message, i))
+    return events
+
+
+def _print_nav_event_stats(data: list):
+    """打印 nav_event 航点事件统计 (v15+)"""
+    if 'nav_event' not in data[0]:
+        return
+
+    events = _parse_nav_events(data)
+    if not events:
+        return
+
+    arrived = [e for e in events if e[1] == 'arrived']
+    passed = [e for e in events if e[1] == 'passed']
+
+    print(f"\n{'='*60}")
+    print("📍 航点事件统计 (nav_event)")
+    print("=" * 60)
+    print(f"   总事件数: {len(events)} (arrived={len(arrived)}, passed={len(passed)})")
+
+    if events:
+        print(f"\n   事件时间线:")
+        for t_off, etype, gid, msg, _ in events:
+            icon = '🏁' if etype == 'arrived' else '➡️'
+            msg_str = f' [{msg}]' if msg else ''
+            print(f"   {icon} t={t_off:>7.1f}s  {etype:>8}  Goal {gid}{msg_str}")
+
+    # 相邻 arrived 事件间隔（每航段用时）
+    if len(arrived) >= 2:
+        print(f"\n   航段用时 (arrived → arrived):")
+        for i in range(1, len(arrived)):
+            dt = arrived[i][0] - arrived[i - 1][0]
+            print(f"   Goal {arrived[i-1][2]} → {arrived[i][2]}: {dt:.1f}s")
 
 
 def _add_reading_guide(fig, text: str, bottom: float = 0.10):
@@ -1467,7 +1656,11 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
         print(f"❌ 文件不存在: {log_file}")
         return False
 
-    output_path = log_file.parent / log_file.stem
+    # .csv.gz 文件的 stem 是 "nav_log_xxx.csv"，需要再去掉一层
+    stem = log_file.stem
+    if stem.endswith('.csv'):
+        stem = stem[:-4]
+    output_path = log_file.parent / stem
     output_path.mkdir(parents=True, exist_ok=True)
 
     report_path = output_path / 'analysis_report.txt'
@@ -1479,6 +1672,7 @@ def analyze_log_file(log_file: Path, batch_mode: bool = False) -> bool:
     report_buffer.write("\n")
 
     print(f"\n📖 加载日志: {log_file}")
+    _rl_metrics_cache.clear()
     data, header_info = load_csv(str(log_file))
     print(f"   记录数: {len(data)}")
     report_buffer.write(f"Records: {len(data)}\n\n")
@@ -1646,7 +1840,29 @@ def plot_trajectory(data: list, output_path: Path, header_info: dict = None):
             legend_elements.append(
                 Line2D([0], [0], color=color, lw=1.0, linestyle='--',
                        alpha=0.5, label=f'{nid}'))
-    
+
+    # v20: nav_event 航点事件标记
+    if 'nav_event' in data[0]:
+        events = _parse_nav_events(data)
+        for t_off, etype, gid, msg, didx in events:
+            if didx >= len(data):
+                continue
+            ex, ey = data[didx]['pose_x'], data[didx]['pose_y']
+            marker = 'D' if etype == 'arrived' else '>'
+            mcolor = '#4CAF50' if etype == 'arrived' else '#FF5722'
+            ax.scatter(ex, ey, c=mcolor, s=80, marker=marker, zorder=6,
+                       edgecolors='black', linewidths=0.5)
+            ax.annotate(f'{etype[0].upper()}{gid}', (ex, ey),
+                        textcoords='offset points', xytext=(4, -8),
+                        fontsize=6, color=mcolor, fontweight='bold')
+        if events:
+            legend_elements.append(
+                Line2D([0], [0], marker='D', color='w', markerfacecolor='#4CAF50',
+                       markersize=7, label='Arrived'))
+            legend_elements.append(
+                Line2D([0], [0], marker='>', color='w', markerfacecolor='#FF5722',
+                       markersize=7, label='Passed'))
+
     ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
     
     ax.set_xlabel('X (m)')
@@ -1877,7 +2093,9 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
     heading_err = [abs(d.get('heading_error_deg', 0.0))
                    if isinstance(d.get('heading_error_deg'), (int, float)) else 0.0 for d in data]
 
-    fig, axes = plt.subplots(6, 1, figsize=(14, 22), sharex=False)
+    has_encounter = 'rl_encounter_type_index' in data[0]
+    n_subplots = 7 if has_encounter else 6
+    fig, axes = plt.subplots(n_subplots, 1, figsize=(14, 4 * n_subplots), sharex=False)
     fig.suptitle(f'RL Policy Control Analysis - {usv_id}', fontsize=14, fontweight='bold')
 
     # ---- 子图 1: 距离 vs RL 激活 ----
@@ -1979,13 +2197,43 @@ def plot_rl_analysis(data: list, output_path: Path, header_info: dict = None):
     ax.legend(loc='upper left')
     ax2.legend(loc='upper right')
 
-    _add_reading_guide(
-        fig,
+    # ---- 子图 7: Encounter Type 时序 (v20, 条件显示) ----
+    if has_encounter:
+        ax = axes[6]
+        enc_raw = [int(d.get('rl_encounter_type_index', -1))
+                   if isinstance(d.get('rl_encounter_type_index'), (int, float)) else -1
+                   for d in data]
+        # 用彩色填充段表示不同 encounter type
+        i = 0
+        legend_added = set()
+        while i < len(enc_raw):
+            etype = enc_raw[i]
+            j = i
+            while j < len(enc_raw) and enc_raw[j] == etype:
+                j += 1
+            color = ENCOUNTER_TYPE_COLORS.get(etype, '#BDBDBD')
+            name = ENCOUNTER_TYPE_NAMES.get(etype, f'unknown({etype})')
+            lbl = name if name not in legend_added else ''
+            ax.axvspan(t[i], t[min(j - 1, len(t) - 1)], alpha=0.5, color=color, label=lbl)
+            legend_added.add(name)
+            i = j
+        # 叠加 RL active 作为参考线
+        ax.step(t, rl_active, where='post', color='black', linewidth=0.8, alpha=0.5, label='RL Active')
+        ax.set_ylabel('Encounter')
+        ax.set_xlabel('Time (s)')
+        ax.set_yticks([])
+        ax.set_title('Encounter Type Timeline (v20)')
+        ax.legend(loc='upper right', fontsize=8, ncol=5)
+        ax.grid(True, alpha=0.3)
+
+    guide_lines = (
         '【阅读指南】图1: RL 介入时机与距离关系。图2: ω 三路指令 + 红色饱和带(|ω|≥95%边界)，竖线=bang-bang 翻转。\n'
         '图3: 线速度三路指令。图4: ω 动作分布(双峰=bang-bang 模式)。图5: 航向误差随时间变化，青色=RL 活跃段。\n'
-        '图6: RL 指令是否过期 + 邻船上下文。',
-        bottom=0.05,
+        '图6: RL 指令是否过期 + 邻船上下文。'
     )
+    if has_encounter:
+        guide_lines += '\n图7: Encounter type 时序 (红=head_on, 橙=crossing, 蓝=overtaking, 灰=unset)。'
+    _add_reading_guide(fig, guide_lines, bottom=0.05)
     plt.savefig(output_path / 'rl_analysis.png', dpi=150)
     plt.close()
     print(f"   📈 RL 策略控制分析图: {output_path / 'rl_analysis.png'}")
@@ -2416,6 +2664,24 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
             if rl_metrics.get('rl_age_p95') is not None
             else f"RL Detail: 邻船={rl_metrics['active_neighbor_mean']:.1f}"
         )
+
+    # v20: encounter type 摘要
+    enc_line = ""
+    if 'rl_encounter_type_index' in data[0]:
+        enc_vals = [int(d['rl_encounter_type_index']) for d in data
+                    if isinstance(d.get('rl_encounter_type_index'), (int, float))]
+        if enc_vals:
+            enc_counter = Counter(enc_vals)
+            enc_total = len(enc_vals)
+            parts = []
+            for etype in sorted(enc_counter.keys()):
+                if etype < 0:
+                    continue
+                name = ENCOUNTER_TYPE_NAMES.get(etype, '?')[:4]
+                pct = enc_counter[etype] / enc_total * 100
+                parts.append(f"{name}={pct:.0f}%")
+            if parts:
+                enc_line = f"Encounter: {' '.join(parts)}\n"
     
     stats_text = (
         f"━━━ Summary ━━━\n"
@@ -2430,6 +2696,7 @@ def plot_dashboard(data: list, output_path: Path, header_info: dict = None):
         f"MPC Time:  {avg_mpc:.1f} ms\n"
         f"{rl_line}\n"
         f"{rl_detail_line}\n"
+        f"{enc_line}"
         f"{wifi_line}\n"
         f"\n━━━ Score ━━━\n"
         f"Total: {total:.0f}/100 [{grade}]"
@@ -2597,7 +2864,7 @@ def _quick_scan_usv_id(log_file: Path) -> str:
     """快速扫描 CSV 文件头，提取 USV ID（不加载全部数据）"""
     usv_id = 'unknown'
     try:
-        with open(log_file, 'r', errors='replace') as f:
+        with _open_log(str(log_file)) as f:
             for _ in range(30):  # 只读前 30 行
                 line = f.readline()
                 if not line:
@@ -2665,6 +2932,7 @@ def analyze_merged_logs(log_files: list, batch_mode: bool = True):
     output_path = parent_dir / output_name
     output_path.mkdir(parents=True, exist_ok=True)
 
+    _rl_metrics_cache.clear()
     print(f"\n🔗 合并 {usv_id} 的 {len(log_files)} 个任务日志 ({len(all_data)} 条记录)")
     for lf in log_files:
         print(f"   📄 {lf.name}")
@@ -2722,6 +2990,16 @@ def analyze_merged_logs(log_files: list, batch_mode: bool = True):
     return True, report_data
 
 
+def _find_log_files(directory: Path) -> list:
+    """在目录中查找 .csv 和 .csv.gz 日志文件，按修改时间排序"""
+    csv_files = list(directory.rglob('nav_log_*.csv'))
+    gz_files = list(directory.rglob('nav_log_*.csv.gz'))
+    # 去重：如果同名 .csv 和 .csv.gz 都存在，优先 .csv.gz
+    csv_stems = {f.name.replace('.csv.gz', '.csv') for f in gz_files}
+    csv_files = [f for f in csv_files if f.name not in csv_stems]
+    return sorted(csv_files + gz_files, key=lambda f: f.stat().st_mtime)
+
+
 def main():
     # 确定日志路径 — 支持多个参数
     log_files = []
@@ -2733,7 +3011,7 @@ def main():
                 print(f"⚠️  路径不存在，已跳过: {p}")
                 continue
             if p.is_dir():
-                found = sorted(p.rglob('nav_log_*.csv'))
+                found = _find_log_files(p)
                 if found:
                     log_files.extend(found)
                 else:
@@ -2745,7 +3023,7 @@ def main():
         if not log_dir.exists():
             print("❌ 未找到日志目录: ~/usv_logs")
             sys.exit(1)
-        log_files = sorted(log_dir.rglob('nav_log_*.csv'))
+        log_files = _find_log_files(log_dir)
         if not log_files:
             print("❌ 未找到日志文件")
             sys.exit(1)

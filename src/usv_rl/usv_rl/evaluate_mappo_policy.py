@@ -302,12 +302,29 @@ def _scenario_summary(metrics: list[dict]) -> dict[str, dict]:
             'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in items])),
             'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in items])),
             'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in items])),
+            # Progress rate metrics
+            'mean_goal_approach_velocity': float(np.mean([item['goal_approach_velocity'] for item in items])),
+            'mean_progress_efficiency': float(np.mean([item['progress_efficiency'] for item in items])),
+            'mean_projected_progress': float(np.mean([item['projected_progress'] for item in items])),
+            'mean_progress_consistency': float(np.mean([item['progress_consistency'] for item in items])),
             # Smoothness metrics
             'mean_linear_accel': float(np.mean([item['mean_linear_accel'] for item in items])),
             'mean_angular_accel': float(np.mean([item['mean_angular_accel'] for item in items])),
             'mean_omega_flip_count': float(np.mean([item['omega_flip_count'] for item in items])),
+            'mean_omega_saturation_ratio': float(np.mean([item['omega_saturation_ratio'] for item in items])),
             'mean_heading_sign_flip_count': float(np.mean([item['heading_sign_flip_count'] for item in items])),
             'mean_heading_error': float(np.mean([item['mean_heading_error'] for item in items])),
+            # Path tracking metrics
+            'mean_cross_track_error': float(np.mean([item['mean_cross_track_error'] for item in items])),
+            # Entanglement metrics
+            'mean_entanglement_ratio': float(np.mean([item['entanglement_ratio'] for item in items])),
+            # COLREGs compliance metrics
+            'mean_colregs_compliance_ratio': float(np.mean([item['colregs_compliance_ratio'] for item in items])),
+            'mean_colregs_violation_ratio': float(np.mean([item['colregs_violation_ratio'] for item in items])),
+            'mean_cpa_starboard_pass_ratio': float(np.mean([item['cpa_starboard_pass_ratio'] for item in items])),
+            'total_colregs_head_on_steps': int(sum(item['colregs_head_on_steps'] for item in items)),
+            'total_colregs_crossing_steps': int(sum(item['colregs_crossing_steps'] for item in items)),
+            'total_colregs_overtaking_steps': int(sum(item['colregs_overtaking_steps'] for item in items)),
         }
     return result
 
@@ -390,10 +407,30 @@ def evaluate_policy(
                     total_linear_accel = 0.0
                     total_angular_accel = 0.0
                     omega_flip_count = 0
+                    omega_saturation_steps = 0
                     total_heading_error = 0.0
                     heading_sign_flip_count = 0
                     prev_heading_sign: dict[str, int] = {}
                     smoothness_samples = 0
+                    # --- CTE tracking ---
+                    total_abs_cte = 0.0
+                    cte_samples = 0
+                    # --- Entanglement tracking ---
+                    entanglement_steps = 0
+                    entanglement_distance = float(env.config.entanglement_distance) if env.config.entanglement_distance > 0 else 4.0
+                    # --- COLREGs compliance tracking ---
+                    colregs_head_on_steps = 0
+                    colregs_crossing_steps = 0
+                    colregs_overtaking_steps = 0
+                    colregs_compliant_steps = 0
+                    colregs_violation_steps = 0
+                    colregs_detect_distance = 5.0
+                    # Per-pair CPA: {(ego, neighbor): {'min_dist', 'body_y', 'encounter'}}
+                    pair_cpa: dict[tuple[str, str], dict] = {}
+                    # --- Progress rate tracking ---
+                    prev_team_goal_dist = initial_team_mean_goal_distance
+                    positive_progress_steps = 0  # steps where distance decreased
+                    stall_steps = 0              # steps where distance didn't change or increased
 
                     for step in range(steps_per_episode):
                         action_map = {
@@ -403,8 +440,17 @@ def evaluate_policy(
                         observations, _, terminated_dict, truncated_dict, last_info = env.step(action_map)
                         steps = step + 1
                         step_pair_min = float(last_info['pairwise_min_separation'])
+                        # Track per-step goal approach
+                        step_team_goal_dist = float(last_info['team_mean_goal_distance'])
+                        if step_team_goal_dist < prev_team_goal_dist - 1e-4:
+                            positive_progress_steps += 1
+                        else:
+                            stall_steps += 1
+                        prev_team_goal_dist = step_team_goal_dist
                         if np.isfinite(step_pair_min):
                             running_pairwise_min = min(running_pairwise_min, step_pair_min)
+                            if step_pair_min < entanglement_distance:
+                                entanglement_steps += 1
 
                         # Collect smoothness data from actual vehicle state
                         for agent_id in env.agent_ids:
@@ -415,6 +461,11 @@ def evaluate_policy(
                             vw = float(obs_obj.final_angular_z)
                             he = float(obs_obj.heading_error)
                             total_heading_error += abs(he)
+                            if abs(vw) > 0.35:
+                                omega_saturation_steps += 1
+                            cte_val = float(obs_obj.cross_track_error)
+                            total_abs_cte += abs(cte_val)
+                            cte_samples += 1
                             if agent_id in prev_vx:
                                 total_linear_accel += abs(vx - prev_vx[agent_id])
                                 total_angular_accel += abs(vw - prev_vw[agent_id])
@@ -427,6 +478,65 @@ def evaluate_policy(
                             prev_vx[agent_id] = vx
                             prev_vw[agent_id] = vw
                             smoothness_samples += 1
+
+                        # --- COLREGs encounter classification & compliance ---
+                        for agent_id in env.agent_ids:
+                            obs_obj = env._latest_observations.get(agent_id)
+                            if obs_obj is None:
+                                continue
+                            own_speed = max(0.0, float(obs_obj.speed), float(obs_obj.final_linear_x))
+                            angular_z = float(obs_obj.final_angular_z)
+                            for neighbor in obs_obj.neighbors:
+                                if neighbor.distance <= 1e-3 or neighbor.distance > colregs_detect_distance:
+                                    continue
+                                bx = float(neighbor.rel_x)
+                                by = float(neighbor.rel_y)
+                                if bx <= 0.0:
+                                    continue
+                                bvx = float(neighbor.rel_vx)
+                                bvy = float(neighbor.rel_vy)
+                                closing = -((bx * bvx) + (by * bvy)) / max(neighbor.distance, 1e-3)
+                                nfwd = own_speed + bvx
+                                same_lane = bx > 0.8 and abs(by) < 1.5
+                                is_overtaking = (
+                                    same_lane and own_speed > 0.18 and bvx < -0.03
+                                    and nfwd > 0.05 and nfwd < own_speed - 0.02
+                                )
+                                opposing = nfwd < 0.05
+                                lateral_tol = max(1.3, 0.28 * neighbor.distance)
+                                is_head_on = (
+                                    not is_overtaking and opposing and closing > 0
+                                    and abs(by) < lateral_tol
+                                )
+                                is_crossing = (
+                                    by < -0.35 and closing > -0.05
+                                    and not is_overtaking and not is_head_on
+                                )
+                                enc_type = 'none'
+                                if is_head_on:
+                                    enc_type = 'head_on'
+                                    colregs_head_on_steps += 1
+                                elif is_crossing:
+                                    enc_type = 'crossing'
+                                    colregs_crossing_steps += 1
+                                elif is_overtaking:
+                                    enc_type = 'overtaking'
+                                    colregs_overtaking_steps += 1
+                                else:
+                                    continue
+                                # Compliance check: starboard turn = correct
+                                if angular_z < -0.03:
+                                    colregs_compliant_steps += 1
+                                elif angular_z > 0.03:
+                                    colregs_violation_steps += 1
+                                # Track CPA per directional pair
+                                pk = (agent_id, neighbor.source_id)
+                                if pk not in pair_cpa:
+                                    pair_cpa[pk] = {'min_dist': float('inf'), 'body_y': 0.0, 'encounter': 'none'}
+                                if neighbor.distance < pair_cpa[pk]['min_dist']:
+                                    pair_cpa[pk]['min_dist'] = neighbor.distance
+                                    pair_cpa[pk]['body_y'] = by
+                                    pair_cpa[pk]['encounter'] = enc_type
 
                         terminated = bool(terminated_dict['__all__'])
                         truncated = bool(truncated_dict['__all__'])
@@ -446,6 +556,29 @@ def evaluate_policy(
                     timeout = (truncated or exhausted_horizon) and not success and not collision
                     episode_running_min = running_pairwise_min if np.isfinite(running_pairwise_min) else pairwise_min
                     n_smooth = max(1, smoothness_samples)
+                    # Progress rate metrics (step-independent)
+                    dt = float(getattr(env.config, 'control_dt', 0.2))
+                    cruise = float(getattr(env.config, 'cruise_speed', 0.36))
+                    elapsed_time = steps * dt
+                    goal_approach_velocity = team_goal_distance_delta / max(elapsed_time, 1e-6)
+                    max_possible_distance = cruise * elapsed_time
+                    progress_efficiency = team_goal_distance_delta / max(max_possible_distance, 1e-6)
+                    progress_efficiency = max(0.0, min(1.0, progress_efficiency))
+                    # Projected: if maintained this rate for full episode
+                    projected_progress = 0.0
+                    if initial_team_mean_goal_distance > 1e-6 and elapsed_time > 1e-6:
+                        full_time = steps_per_episode * dt
+                        projected_distance = goal_approach_velocity * full_time
+                        projected_progress = min(1.0, max(0.0, projected_distance / initial_team_mean_goal_distance))
+                    progress_consistency = positive_progress_steps / max(1, steps)
+                    # COLREGs aggregation
+                    total_colregs = colregs_head_on_steps + colregs_crossing_steps + colregs_overtaking_steps
+                    colregs_compliance_ratio = colregs_compliant_steps / max(1, total_colregs)
+                    colregs_violation_ratio = colregs_violation_steps / max(1, total_colregs)
+                    # CPA pass-side analysis: body_y > 0 at CPA → neighbor on port side → correct starboard pass
+                    cpa_encounters = [v for v in pair_cpa.values() if v['encounter'] != 'none']
+                    cpa_starboard_passes = sum(1 for v in cpa_encounters if v['body_y'] > 0)
+                    cpa_starboard_ratio = cpa_starboard_passes / max(1, len(cpa_encounters))
                     episode_metrics.append(
                         {
                             'episode': episode,
@@ -465,12 +598,32 @@ def evaluate_policy(
                             'team_mean_goal_distance': final_team_mean_goal_distance,
                             'team_goal_distance_delta': team_goal_distance_delta,
                             'team_goal_progress_ratio': team_goal_progress_ratio,
+                            # Progress rate metrics (step-independent)
+                            'goal_approach_velocity': goal_approach_velocity,
+                            'progress_efficiency': progress_efficiency,
+                            'projected_progress': projected_progress,
+                            'progress_consistency': progress_consistency,
                             # Smoothness metrics (per-step averages over all agents)
                             'mean_linear_accel': total_linear_accel / n_smooth,
                             'mean_angular_accel': total_angular_accel / n_smooth,
                             'omega_flip_count': omega_flip_count,
+                            'omega_saturation_ratio': omega_saturation_steps / n_smooth,
                             'heading_sign_flip_count': heading_sign_flip_count,
                             'mean_heading_error': total_heading_error / n_smooth,
+                            # Path tracking metrics
+                            'mean_cross_track_error': total_abs_cte / max(1, cte_samples),
+                            # Entanglement metrics
+                            'entanglement_steps': entanglement_steps,
+                            'entanglement_ratio': entanglement_steps / max(1, steps),
+                            # COLREGs compliance metrics
+                            'colregs_encounter_steps': total_colregs,
+                            'colregs_head_on_steps': colregs_head_on_steps,
+                            'colregs_crossing_steps': colregs_crossing_steps,
+                            'colregs_overtaking_steps': colregs_overtaking_steps,
+                            'colregs_compliance_ratio': colregs_compliance_ratio,
+                            'colregs_violation_ratio': colregs_violation_ratio,
+                            'cpa_starboard_pass_ratio': cpa_starboard_ratio,
+                            'cpa_encounter_count': len(cpa_encounters),
                         }
                     )
                     break
@@ -508,12 +661,26 @@ def evaluate_policy(
         'mean_goal_completion_ratio': float(np.mean([item['goal_completion_ratio'] for item in episode_metrics])),
         'mean_team_goal_distance_delta': float(np.mean([item['team_goal_distance_delta'] for item in episode_metrics])),
         'mean_team_goal_progress_ratio': float(np.mean([item['team_goal_progress_ratio'] for item in episode_metrics])),
+        # Progress rate metrics (step-independent)
+        'mean_goal_approach_velocity': float(np.mean([item['goal_approach_velocity'] for item in episode_metrics])),
+        'mean_progress_efficiency': float(np.mean([item['progress_efficiency'] for item in episode_metrics])),
+        'mean_projected_progress': float(np.mean([item['projected_progress'] for item in episode_metrics])),
+        'mean_progress_consistency': float(np.mean([item['progress_consistency'] for item in episode_metrics])),
         # Smoothness metrics (independent quality indicators)
         'mean_linear_accel': float(np.mean([item['mean_linear_accel'] for item in episode_metrics])),
         'mean_angular_accel': float(np.mean([item['mean_angular_accel'] for item in episode_metrics])),
         'mean_omega_flip_count': float(np.mean([item['omega_flip_count'] for item in episode_metrics])),
+        'mean_omega_saturation_ratio': float(np.mean([item['omega_saturation_ratio'] for item in episode_metrics])),
         'mean_heading_sign_flip_count': float(np.mean([item['heading_sign_flip_count'] for item in episode_metrics])),
         'mean_heading_error': float(np.mean([item['mean_heading_error'] for item in episode_metrics])),
+        # Path tracking metrics
+        'mean_cross_track_error': float(np.mean([item['mean_cross_track_error'] for item in episode_metrics])),
+        # Entanglement metrics
+        'mean_entanglement_ratio': float(np.mean([item['entanglement_ratio'] for item in episode_metrics])),
+        # COLREGs compliance metrics
+        'mean_colregs_compliance_ratio': float(np.mean([item['colregs_compliance_ratio'] for item in episode_metrics])),
+        'mean_colregs_violation_ratio': float(np.mean([item['colregs_violation_ratio'] for item in episode_metrics])),
+        'mean_cpa_starboard_pass_ratio': float(np.mean([item['cpa_starboard_pass_ratio'] for item in episode_metrics])),
         'scenario_summaries': _scenario_summary(episode_metrics),
         'episode_metrics': episode_metrics,
     }

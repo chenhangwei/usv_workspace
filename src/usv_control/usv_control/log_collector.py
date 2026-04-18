@@ -10,20 +10,20 @@
 # Author: chenhangwei
 # Date: 2026-01-26
 """
-USV 导航日志收集节点
+USV 导航日志收集节点 (v20)
 
 收集所有导航相关数据，保存为 CSV 文件，便于事后分析。
+支持周期性刷新防崩溃丢失、关闭时 gzip 压缩、日志滚动清理。
 
 收集内容:
-- 当前位姿 (pose_from_gps)
-- 飞控速度向量 (velocity_local)
-- 磁力计航向 (local_position/pose)
-- 导航目标 (set_usv_nav_goal)
-- 控制指令 (setpoint_raw/local)
-- 导航原始指令 (velocity_controller/raw_cmd)
-- RL 策略指令 (rl_policy/cmd_vel)
+- 位姿 / 速度 / 磁力计航向
+- 导航目标、控制指令、RL 策略指令
+- MPC / AMPC 调试信息
+- ORCA/APF 兼容字段、WiFi 信号
+- 邻居 USV 位置、RL 模型元数据
+- RL encounter classifier 类型
 
-作者: Auto-generated
+作者: chenhangwei
 日期: 2026-01-25
 """
 
@@ -39,6 +39,8 @@ from common_interfaces.msg import NavigationGoal, NavigationFeedback, Navigation
 import json
 import math
 import csv
+import gzip
+import shutil
 import os
 from datetime import datetime
 from pathlib import Path
@@ -200,6 +202,10 @@ class LogCollectorNode(Node):
         self._csv_writer = None
         self._current_log_path = None
         
+        # 日志滚动配置
+        self._max_log_files = 50          # 最多保留日志文件数
+        self._max_log_total_mb = 500      # 最大日志总大小 (MB)
+        
         # ==================== 订阅者 ====================
         self.create_subscription(
             PoseStamped, 'local_position/pose_from_gps',
@@ -282,18 +288,43 @@ class LogCollectorNode(Node):
             
         # ==================== 定时器 ====================
         self.create_timer(0.1, self._log_data)
+        self.create_timer(5.0, self._flush_file)  # 每5秒刷盘，防崩溃丢数据
         
         self.get_logger().info('='*50)
-        self.get_logger().info('📊 日志收集节点已启动')
+        self.get_logger().info('📊 日志收集节点已启动 (v20)')
         self.get_logger().info(f'   日志目录: {self._log_dir}')
-        self.get_logger().info(f'   采样频率: 10 Hz')
+        self.get_logger().info(f'   采样频率: 10 Hz, 刷盘: 5s')
         self.get_logger().info(f'   模式: 整个集群任务记为一个文件')
+        self.get_logger().info(f'   压缩: gzip, 滚动: {self._max_log_files}文件/{self._max_log_total_mb}MB')
         self.get_logger().info(f'   结束条件: stop_navigation 或空闲超时 {self._idle_timeout:.0f}s')
         self.get_logger().info('='*50)
     
+    def _rotate_logs(self):
+        """日志滚动清理: 删除最老的日志直到满足文件数和磁盘限制"""
+        log_files = sorted(
+            [f for f in self._log_dir.iterdir()
+             if f.name.startswith('nav_log_') and (f.suffix == '.gz' or f.suffix == '.csv')],
+            key=lambda f: f.stat().st_mtime
+        )
+        
+        # 按文件数清理
+        while len(log_files) > self._max_log_files:
+            oldest = log_files.pop(0)
+            oldest.unlink()
+            self.get_logger().info(f'🗑️ 日志滚动清理: {oldest.name}')
+        
+        # 按总大小清理
+        total_mb = sum(f.stat().st_size for f in log_files) / (1024 * 1024)
+        while total_mb > self._max_log_total_mb and log_files:
+            oldest = log_files.pop(0)
+            total_mb -= oldest.stat().st_size / (1024 * 1024)
+            oldest.unlink()
+            self.get_logger().info(f'🗑️ 日志空间清理: {oldest.name} (剩余 {total_mb:.1f} MB)')
+
     def _start_new_log(self, goal_id, task_name=None):
         """开始新的日志文件"""
         self._close_current_log()
+        self._rotate_logs()
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         
@@ -312,12 +343,13 @@ class LogCollectorNode(Node):
         self._current_log_path = self._log_dir / filename
         
         try:
-            self._csv_file = open(self._current_log_path, 'w', newline='')
+            self._csv_file = open(self._current_log_path, 'w', newline='',
+                                   buffering=8192)  # 8KB 缓冲减少磁盘 I/O
             self._csv_writer = csv.writer(self._csv_file)
             
             # 写入日志元信息和参数信息，便于后续分析时准确识别 schema
-            self._csv_file.write(f'# Navigation Log Configuration (v18)\n')
-            self._csv_file.write(f'# Log Version: v18\n')
+            self._csv_file.write(f'# Navigation Log Configuration (v20)\n')
+            self._csv_file.write(f'# Log Version: v20\n')
             self._csv_file.write(f'# Log Schema: rl_navigation_policy\n')
             self._csv_file.write(f'# Log Schema Label: RL 导航日志 + pure 控制分解\n')
             self._csv_file.write(f'# Log Description: 导航主命令、RL 策略输出和最终控制命令同时记录；同时保留 ORCA/APF 兼容字段供历史诊断工具复用\n')
@@ -428,8 +460,9 @@ class LogCollectorNode(Node):
             self._csv_file = None
             
     def _close_current_log(self):
-        """关闭当前日志文件"""
+        """关闭当前日志文件并 gzip 压缩"""
         if self._csv_file:
+            log_path = self._current_log_path
             try:
                 # 在文件末尾写入模式切换摘要
                 if self._mode_change_events:
@@ -446,10 +479,22 @@ class LogCollectorNode(Node):
                 
                 # 日志统计
                 mode_changes = len(self._mode_change_events)
-                saved_name = self._current_log_path.name if self._current_log_path is not None else 'unknown'
+                saved_name = log_path.name if log_path is not None else 'unknown'
                 self.get_logger().info(
                     f'📁 日志已保存: {saved_name} '
                     f'({self._record_count} 条, {mode_changes} 次模式切换)')
+                
+                # gzip 压缩
+                if log_path and log_path.exists():
+                    gz_path = log_path.with_suffix('.csv.gz')
+                    try:
+                        with open(log_path, 'rb') as f_in, gzip.open(gz_path, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                        log_path.unlink()  # 删除原始 CSV
+                        self.get_logger().info(f'🗜️ 已压缩: {gz_path.name}')
+                    except Exception as e:
+                        self.get_logger().warn(f'压缩失败，保留原始 CSV: {e}')
+                
             except Exception as e:
                 self.get_logger().error(f'关闭日志文件失败: {e}')
             finally:

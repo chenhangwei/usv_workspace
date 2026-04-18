@@ -31,15 +31,61 @@ def _ranking_record(summary: dict) -> dict:
         for item in scenario_summaries.values()
     ]
     balanced_progress = min(progress_values) if progress_values else float('-inf')
+
+    collision_rate = float(summary['collision_rate'])
+    progress_ratio = float(summary.get('mean_team_goal_progress_ratio', 0.0))
+    projected_progress = float(summary.get('mean_projected_progress', progress_ratio))
+    progress_efficiency = float(summary.get('mean_progress_efficiency', 0.0))
+    progress_consistency = float(summary.get('mean_progress_consistency', 0.0))
+    omega_saturation = float(summary.get('mean_omega_saturation_ratio', 0.0))
+    omega_flip = float(summary.get('mean_omega_flip_count', 0.0))
+    heading_error = float(summary.get('mean_heading_error', 0.0))
+    cte = float(summary.get('mean_cross_track_error', 0.0))
+    entanglement = float(summary.get('mean_entanglement_ratio', 0.0))
+    worst_sep = float(summary.get('worst_episode_min_separation', 0.0))
+    colregs_compliance = float(summary.get('mean_colregs_compliance_ratio', 0.0))
+    colregs_violation = float(summary.get('mean_colregs_violation_ratio', 0.0))
+    cpa_starboard = float(summary.get('mean_cpa_starboard_pass_ratio', 0.0))
+
+    # Composite score: higher is better
+    # Safety component (0-35 points)
+    safety_score = (1.0 - collision_rate) * 25.0 + min(worst_sep / 2.0, 1.0) * 10.0
+    # Progress component (0-25 points): blend projected progress + efficiency + consistency
+    raw_progress_pts = min(projected_progress, 1.0) * 15.0
+    efficiency_pts = min(progress_efficiency, 1.0) * 5.0
+    consistency_pts = min(progress_consistency, 1.0) * 5.0
+    progress_score = raw_progress_pts + efficiency_pts + consistency_pts
+    # Smoothness component (0-15 points): penalize omega saturation, flips, heading error
+    smoothness_score = 15.0 * max(0.0, 1.0 - 0.5 * omega_saturation - 0.02 * omega_flip - 0.3 * heading_error)
+    # Path tracking component (0-10 points): penalize high CTE and entanglement
+    tracking_score = 10.0 * max(0.0, 1.0 - 0.3 * cte - 0.5 * entanglement)
+    # COLREGs compliance component (0-15 points)
+    colregs_score = 15.0 * (0.5 * colregs_compliance + 0.5 * cpa_starboard) - 5.0 * colregs_violation
+    colregs_score = max(0.0, colregs_score)
+    composite_score = safety_score + progress_score + smoothness_score + tracking_score + colregs_score
+
     return {
         'model': summary['model'],
-        'collision_rate': float(summary['collision_rate']),
+        'collision_rate': collision_rate,
         'timeout_rate': float(summary['timeout_rate']),
         'mean_team_goal_distance_delta': float(summary['mean_team_goal_distance_delta']),
-        'mean_team_goal_progress_ratio': float(summary['mean_team_goal_progress_ratio']),
+        'mean_team_goal_progress_ratio': progress_ratio,
+        'projected_progress': projected_progress,
+        'progress_efficiency': progress_efficiency,
+        'progress_consistency': progress_consistency,
         'crossing_team_goal_distance_delta': float(crossing.get('mean_team_goal_distance_delta', float('-inf'))),
         'crossing_team_goal_progress_ratio': float(crossing.get('mean_team_goal_progress_ratio', float('-inf'))),
         'balanced_team_goal_distance_delta': balanced_progress,
+        'mean_omega_saturation_ratio': omega_saturation,
+        'mean_omega_flip_count': omega_flip,
+        'mean_heading_error': heading_error,
+        'mean_cross_track_error': cte,
+        'mean_entanglement_ratio': entanglement,
+        'worst_episode_min_separation': worst_sep,
+        'colregs_compliance_ratio': colregs_compliance,
+        'colregs_violation_ratio': colregs_violation,
+        'cpa_starboard_pass_ratio': cpa_starboard,
+        'composite_score': round(composite_score, 2),
     }
 
 
@@ -105,6 +151,7 @@ def main():
         'best_overall': _best_by(ranking, 'mean_team_goal_distance_delta'),
         'best_crossing': _best_by(ranking, 'crossing_team_goal_distance_delta'),
         'best_balanced': _best_by(ranking, 'balanced_team_goal_distance_delta'),
+        'best_composite': _best_by(ranking, 'composite_score'),
     }
 
     print(json.dumps(result, ensure_ascii=False, indent=2))

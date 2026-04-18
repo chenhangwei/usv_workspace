@@ -97,6 +97,8 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             angular_accel_limit=float(args.angular_accel_limit),
             angular_decel_limit=float(args.angular_decel_limit),
             conflict_turn_relief=float(args.conflict_turn_relief),
+            angular_authority_floor=float(getattr(args, 'angular_authority_floor', 0.35)),
+            min_forward_speed_floor=float(getattr(args, 'min_forward_speed_floor', 0.08)),
             episode_timeout=float(args.episode_timeout),
             no_progress_timeout=float(args.no_progress_timeout),
             min_progress_delta=float(args.min_progress_delta),
@@ -121,6 +123,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             entanglement_penalty_weight=float(args.entanglement_penalty_weight),
             entanglement_distance=float(args.entanglement_distance),
             entanglement_grace_steps=int(args.entanglement_grace_steps),
+            entanglement_low_speed_penalty_weight=float(args.entanglement_low_speed_penalty_weight),
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
@@ -143,6 +146,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             dr_tau_angular_high=float(getattr(args, 'dr_tau_angular_high', 0.0)),
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
+            cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
         )
     )
 

@@ -56,6 +56,7 @@ from gs_gui.velocity_settings_dialog import VelocitySettingsDialog
 from gs_gui.usv_fleet_launcher_optimized import UsvFleetLauncher
 from gs_gui.mission_queue_manager import MissionQueueManager
 from gs_gui.mission_queue_widget import MissionQueueWidget
+from gs_gui.choreographer_widget import ChoreographerWidget
 
 
 class MainWindow(QMainWindow):
@@ -193,6 +194,14 @@ class MainWindow(QMainWindow):
         self.mission_queue_widget = MissionQueueWidget(self.mission_queue_manager)
         self.mission_queue_widget.task_selected.connect(self.update_plot_preview)
         self.right_tab_widget.addTab(self.mission_queue_widget, "📋 任务队列")
+
+        # 初始化表演编排组件
+        self.choreographer_widget = ChoreographerWidget(
+            task_manager=self.task_manager,
+            list_manager=self.list_manager,
+        )
+        self.choreographer_widget.status_message.connect(self.ui_utils.append_info)
+        self.right_tab_widget.addTab(self.choreographer_widget, "🎭 编舞")
 
         # 初始化电子围栏管理器
         self.geofence_manager = GeofenceManager(
@@ -603,6 +612,13 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'mission_queue_widget'):
                 try:
                     self.mission_queue_widget.set_theme(theme_name)
+                except Exception:
+                    pass
+
+            # 8.5 更新编舞组件样式
+            if hasattr(self, 'choreographer_widget'):
+                try:
+                    self.choreographer_widget.set_theme(theme_name)
                 except Exception:
                     pass
 

@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List
 
@@ -38,7 +39,7 @@ class AgentLocalObservation:
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 11 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
+        return 12 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -52,7 +53,8 @@ class AgentLocalObservation:
             self.yaw,
             self.speed,
             self.distance_to_goal,
-            self.heading_error,
+            math.sin(self.heading_error),
+            math.cos(self.heading_error),
             self.raw_linear_x,
             self.raw_angular_z,
             self.final_linear_x,

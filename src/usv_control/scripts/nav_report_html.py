@@ -319,6 +319,134 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'mpc_label': '优秀' if mpc.get('avg', 999) < 15 else '正常' if mpc.get('avg', 999) < 30 else '偏高' if mpc.get('avg', 999) < 50 else '过高',
     }
 
+    # ── 雷达图多维评分 (0-100) ──
+    # 路径跟踪: CTE越小越好, <0.05m→100, >0.5m→0
+    radar_tracking = max(0, min(100, 100 - (cte_avg or 0.5) / 0.5 * 100))
+    # 航向控制: 航向误差越小越好, <3°→100, >30°→0
+    radar_heading = max(0, min(100, 100 - (he_avg or 30) / 30 * 100))
+    # 航行速度: guided均速越接近0.35越好
+    radar_speed = min(100, (velocity['guided_avg'] / 0.35) * 100) if velocity['guided_avg'] > 0 else 0
+    # 行为平滑: omega std越小越好, <0.05→100, >0.4→0
+    omega_std = omega.get('std', 0.4) if omega else 0.4
+    radar_smooth = max(0, min(100, 100 - omega_std / 0.4 * 100))
+    # 任务进度: 航点到达率 (arrived + passed)
+    arrived_count = sum(1 for g in per_goal if g.get('arrival') in ('arrived', 'passed'))
+    radar_progress = (arrived_count / len(per_goal) * 100) if per_goal else 0
+    # 安全避让: 基于邻船最近距离 (全程最小距离越大越安全)
+    # 仅在避让交互期间(encounter_type>=0 或 邻船距离<15m)计算最近距离
+    # 避让中最近距离越大 = 模型越能维持安全间距
+    min_encounter_dist = None
+    encounter_count = 0
+    for d in data:
+        # 判断是否处于避让交互中
+        enc_type = d.get('rl_encounter_type_index', -1)
+        if isinstance(enc_type, (int, float)):
+            enc_type = int(enc_type)
+        else:
+            enc_type = -1
+        px, py = d.get('pose_x', 0), d.get('pose_y', 0)
+        for slot in range(1, 6):
+            nid = d.get(f'neighbor_{slot}_id')
+            if not nid or (isinstance(nid, str) and not nid.strip()):
+                continue
+            if isinstance(nid, (int, float)) and nid == 0:
+                continue
+            nx = d.get(f'neighbor_{slot}_x', 0)
+            ny = d.get(f'neighbor_{slot}_y', 0)
+            if not (isinstance(nx, (int, float)) and isinstance(ny, (int, float))):
+                continue
+            dist = math.hypot(nx - px, ny - py)
+            if dist < 0.01:
+                continue
+            # 只在避让交互中采样: encounter_type有效 或 距离已进入交互区(<15m)
+            if enc_type < 0 and dist >= 15.0:
+                continue
+            encounter_count += 1
+            if min_encounter_dist is None or dist < min_encounter_dist:
+                min_encounter_dist = dist
+    if min_encounter_dist is None:
+        radar_safety = 100  # 无避让交互: 单船或全程无会遇
+    else:
+        # 碰撞距离0.75m→0分, 安全避让5m→100分
+        radar_safety = max(0, min(100, (min_encounter_dist - 0.75) / (5.0 - 0.75) * 100))
+
+    # 脱离能力: 避让结束后多快拉开距离, 不会粘在一起
+    # 检测 encounter 结束时刻 (enc_type从>=0变为-1), 然后计算恢复到脱离距离的用时
+    DISENGAGE_DIST = 8.0   # 脱离判定距离 (m)
+    DISENGAGE_MAX_T = 30.0 # 超过此秒数视为脱离失败
+    disengage_times = []
+    prev_enc = -1
+    enc_exit_time = None
+    for d in data:
+        enc_type = d.get('rl_encounter_type_index', -1)
+        if isinstance(enc_type, (int, float)):
+            enc_type = int(enc_type)
+        else:
+            enc_type = -1
+        cur_t = d.get('timestamp', 0)
+        # 检测避让结束: 从>=0切换到-1
+        if prev_enc >= 0 and enc_type < 0:
+            enc_exit_time = cur_t
+        # 避让结束后, 检查是否已脱离
+        if enc_exit_time is not None and enc_type < 0:
+            px, py = d.get('pose_x', 0), d.get('pose_y', 0)
+            all_clear = True
+            has_neighbor = False
+            for slot in range(1, 6):
+                nid = d.get(f'neighbor_{slot}_id')
+                if not nid or (isinstance(nid, str) and not nid.strip()):
+                    continue
+                if isinstance(nid, (int, float)) and nid == 0:
+                    continue
+                nx = d.get(f'neighbor_{slot}_x', 0)
+                ny = d.get(f'neighbor_{slot}_y', 0)
+                if not (isinstance(nx, (int, float)) and isinstance(ny, (int, float))):
+                    continue
+                dist = math.hypot(nx - px, ny - py)
+                if dist < 0.01:
+                    continue
+                has_neighbor = True
+                if dist < DISENGAGE_DIST:
+                    all_clear = False
+                    break
+            elapsed = cur_t - enc_exit_time
+            if all_clear and has_neighbor:
+                disengage_times.append(elapsed)
+                enc_exit_time = None
+            elif elapsed > DISENGAGE_MAX_T:
+                disengage_times.append(DISENGAGE_MAX_T)
+                enc_exit_time = None
+            elif not has_neighbor:
+                disengage_times.append(0)  # 邻船消失: 视为立即脱离
+                enc_exit_time = None
+        # 如果又进入新的encounter, 取消当前脱离计时
+        if enc_type >= 0:
+            if enc_exit_time is not None:
+                disengage_times.append(min(cur_t - enc_exit_time, DISENGAGE_MAX_T))
+            enc_exit_time = None
+        prev_enc = enc_type
+    if enc_exit_time is not None:
+        # 日志末尾仍未脱离
+        last_t = data[-1].get('timestamp', 0)
+        disengage_times.append(min(last_t - enc_exit_time, DISENGAGE_MAX_T))
+
+    if not disengage_times:
+        radar_disengage = 100  # 无避让→满分
+    else:
+        avg_disengage = sum(disengage_times) / len(disengage_times)
+        # <3s→100分, >25s→0分
+        radar_disengage = max(0, min(100, (1 - (avg_disengage - 3) / (25 - 3)) * 100))
+
+    scoring['radar'] = {
+        'tracking': round(radar_tracking, 1),
+        'heading': round(radar_heading, 1),
+        'speed': round(radar_speed, 1),
+        'smooth': round(radar_smooth, 1),
+        'progress': round(radar_progress, 1),
+        'safety': round(radar_safety, 1),
+        'disengage': round(radar_disengage, 1),
+    }
+
     # ── 时间序列 (降采样) ──
     step = max(1, len(data) // 2000)
     ts_data = {
@@ -358,6 +486,8 @@ def extract_report_data(data: list, header_info: dict) -> dict:
       ts_data['rl_active'] = [data[i].get('rl_cmd_active', 0) for i in range(0, len(data), step)]
     if 'rl_cmd_age_s' in data[0]:
       ts_data['rl_cmd_age_s'] = [data[i].get('rl_cmd_age_s', -1) for i in range(0, len(data), step)]
+    if 'rl_encounter_type_index' in data[0]:
+      ts_data['rl_encounter_type'] = [int(data[i].get('rl_encounter_type_index', -1)) for i in range(0, len(data), step)]
     if 'omega_actual' in data[0]:
         ts_data['omega_actual'] = [data[i].get('omega_actual', 0) for i in range(0, len(data), step)]
     if 'current_tau_omega' in data[0]:
@@ -724,7 +854,23 @@ body {{
 </div>
 
 <div class="section" id="s3">
-  <div class="section-title"><span class="num">3</span> 路径重放</div>
+  <div class="section-title"><span class="num">3</span> 多维评估雷达图</div>
+  <div id="radar-chart" style="width:100%;height:480px;"></div>
+  <div class="reading-guide">
+    <strong>🕸️ 雷达图阅读指南：</strong>六维度综合评估，每个维度 0-100 分，面积越大表现越好。<br>
+    • <strong>路径跟踪</strong>：横向偏差(CTE)精度，&lt;0.05m=满分<br>
+    • <strong>航向控制</strong>：航向误差，&lt;3°=满分<br>
+    • <strong>航行速度</strong>：巡航效率，接近0.35m/s=满分<br>
+    • <strong>行为平滑</strong>：角速度稳定性，低振荡=高分<br>
+    • <strong>任务进度</strong>：航点到达率，100%到达=满分<br>
+    • <strong>安全避让</strong>：避让交互期间与邻船的最近距离，≥5m=满分，≤0.75m=碰撞(0分)，无会遇=满分<br>
+    • <strong>脱离能力</strong>：避让结束后拉开距离的速度，平均脱离时间&lt;3s=满分，&gt;25s=0分，USV不会粘连/纠缠<br>
+    <strong>对比思路：</strong>多USV叠加时，形状差异一目了然，"短板维度"暴露最明显的问题方向。
+  </div>
+</div>
+
+<div class="section" id="s4">
+  <div class="section-title"><span class="num">4</span> 路径重放</div>
   <div class="replay-container">
     <div class="replay-canvas-wrap">
       <canvas id="replay-canvas"></canvas>
@@ -752,8 +898,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s4">
-  <div class="section-title"><span class="num">4</span> 航行轨迹对比</div>
+<div class="section" id="s5">
+  <div class="section-title"><span class="num">5</span> 航行轨迹对比</div>
   <div class="chart-box">
     <div id="chart-traj" style="height:500px;"></div>
   </div>
@@ -769,8 +915,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s5">
-  <div class="section-title"><span class="num">5</span> 速度对比</div>
+<div class="section" id="s6">
+  <div class="section-title"><span class="num">6</span> 速度对比</div>
   <div class="chart-box">
     <div id="chart-velocity" style="height:380px;"></div>
   </div>
@@ -784,8 +930,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s6">
-  <div class="section-title"><span class="num">6</span> 误差分析</div>
+<div class="section" id="s7">
+  <div class="section-title"><span class="num">7</span> 误差分析</div>
   <div class="chart-box">
     <div id="chart-cte" style="height:330px;"></div>
     <div class="chart-guide">
@@ -819,8 +965,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s7">
-  <div class="section-title"><span class="num">7</span> 控制指令</div>
+<div class="section" id="s8">
+  <div class="section-title"><span class="num">8</span> 控制指令</div>
   <div class="chart-box">
     <div id="chart-control" style="height:380px;"></div>
   </div>
@@ -835,8 +981,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s8">
-  <div class="section-title"><span class="num">8</span> 高级分析</div>
+<div class="section" id="s9">
+  <div class="section-title"><span class="num">9</span> 高级分析</div>
   <div class="chart-box">
     <div id="chart-mpc" style="height:280px;"></div>
     <div class="chart-guide">
@@ -869,8 +1015,8 @@ body {{
   </div>
 </div>
 
-<div class="section" id="s9">
-  <div class="section-title"><span class="num">9</span> 每航点统计</div>
+<div class="section" id="s10">
+  <div class="section-title"><span class="num">10</span> 每航点统计</div>
   <div id="per-goal-area"></div>
   <div class="reading-guide">
     <strong>📋 每航点统计阅读指南：</strong>按目标航点(G1,G2...)分别统计导航性能。<br>
@@ -1004,7 +1150,7 @@ function toggleAllUSV() {{
 }}
 
 function refreshAll() {{
-  buildSummaryCards(); buildCompareTable(); drawTrajectory(); drawVelocity();
+  buildSummaryCards(); buildCompareTable(); drawRadar(); drawTrajectory(); drawVelocity();
   drawCTE(); drawHE(); drawDistance(); drawControl(); drawMPC(); drawTau(); drawWifi();
   buildPerGoal(); updateReplayInfo();
 }}
@@ -1046,6 +1192,53 @@ function buildCompareTable() {{
 // ═══ 图表 ═══
 function getActive() {{ return USV_LIST.filter(u=>activeUSVs.has(u.idx)); }}
 function emptyTrace() {{ return [{{x:[],y:[]}}]; }}
+
+function drawRadar() {{
+  const el=document.getElementById('radar-chart');
+  if(!el) return;
+  const active=getActive();
+  if(!active.length) {{ Plotly.purge(el); return; }}
+  const cats=['路径跟踪','航向控制','航行速度','行为平滑','任务进度','安全避让','脱离能力'];
+  const traces=[];
+  active.forEach(u=>{{
+    const sc=ALL_SUM[u.idx];
+    if(!sc||!sc.scoring||!sc.scoring.radar) return;
+    const r=sc.scoring.radar;
+    const vals=[r.tracking,r.heading,r.speed,r.smooth,r.progress,r.safety,r.disengage||0];
+    traces.push({{
+      type:'scatterpolar',
+      r:[...vals, vals[0]],
+      theta:[...cats, cats[0]],
+      fill:'toself',
+      fillcolor:(function(h){{const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);return 'rgba('+r+','+g+','+b+',0.12)';}})(u.color),
+      line:{{color:u.color, width:2.5}},
+      marker:{{size:5, color:u.color}},
+      name:u.id+' ['+sc.scoring.grade+' '+sc.scoring.total.toFixed(0)+']',
+      hovertemplate:'%{{theta}}: %{{r:.1f}}分<extra>'+u.id+'</extra>',
+    }});
+  }});
+  if(!traces.length) {{ Plotly.purge(el); return; }}
+  const layout={{
+    polar:{{
+      radialaxis:{{
+        visible:true, range:[0,100], tickvals:[20,40,60,80,100],
+        tickfont:{{size:10,color:'#888'}},
+        gridcolor:'rgba(255,255,255,0.08)',
+      }},
+      angularaxis:{{
+        tickfont:{{size:12,color:'#B0BEC5'}},
+        gridcolor:'rgba(255,255,255,0.1)',
+      }},
+      bgcolor:'transparent',
+    }},
+    showlegend:true,
+    legend:{{font:{{size:11,color:'#B0BEC5'}}, x:1.05, y:1}},
+    paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+    margin:{{l:60,r:80,t:40,b:40}},
+    font:{{color:'#B0BEC5'}},
+  }};
+  Plotly.react(el,traces,layout,{{responsive:true,displayModeBar:false}});
+}}
 
 function drawTrajectory() {{
   const traces=[];
@@ -1301,6 +1494,59 @@ function catmull(p0,p1,p2,p3,t) {{
 // GS导航预览箭头: 0.6m×0.35m, 归一化后 width/length=0.583
 const BOAT_VERTS = [[0.5,0],[-0.5,0.292],[-0.167,0],[-0.5,-0.292]];
 const BOAT_SCALE = 22;
+
+// 避让类型颜色映射: -1=unset, 0=head_on, 1=crossing, 2=overtaking
+const ENC_COLORS = {{'-1':'#BDBDBD','0':'#F44336','1':'#FF9800','2':'#2196F3'}};
+const ARC_RADIUS = BOAT_SCALE * 1.6;   // 圆弧半径
+const ARC_HALF_DEG = 18 * Math.PI/180; // 单侧半角 18°
+
+function drawAvoidanceArcs(ctx, canX, canY, ts, idx, t, d) {{
+  const nbs = ts.neighbors;
+  if(!nbs) return;
+  const cx = ts.pose_x[idx], cy = ts.pose_y[idx];
+  const encType = (ts.rl_encounter_type && ts.rl_encounter_type[idx] !== undefined)
+                  ? ts.rl_encounter_type[idx] : -1;
+  const encColor = ENC_COLORS[String(encType)] || ENC_COLORS['-1'];
+  const rlOmega = (ts.rl_cmd_omega && ts.rl_cmd_omega[idx] !== undefined)
+                  ? Math.abs(ts.rl_cmd_omega[idx]) : 0;
+  for(const nid in nbs) {{
+    const pos = sampleNeighborPos(nbs[nid], t);
+    if(!pos) continue;
+    const dx = pos.x - cx, dy = pos.y - cy;
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if(dist < 0.1 || dist > 50) continue;
+    // 实际方位角 (Canvas Y轴翻转: 世界y正→canvas y负)
+    const bearing = Math.atan2(-dy, dx);
+    // 紧迫度: 距离越近 & RL omega 越大 → 越紧迫
+    const urgency = Math.min(1.0, Math.max(0, (1 - dist/30) * 0.7 + Math.min(rlOmega/0.6, 1)*0.3));
+    if(urgency < 0.05) continue;
+    // 闪烁: 紧迫度高时闪烁快
+    const blinkPeriod = urgency > 0.7 ? 8 : urgency > 0.4 ? 16 : 32;
+    const frameCount = replayState._arcFrame || 0;
+    const blinkOn = (Math.floor(frameCount / blinkPeriod) % 2) === 0;
+    if(!blinkOn && urgency < 0.85) continue;
+    const alpha = 0.3 + urgency * 0.6;
+    ctx.save();
+    ctx.translate(canX, canY);
+    ctx.beginPath();
+    ctx.arc(0, 0, ARC_RADIUS, bearing - ARC_HALF_DEG, bearing + ARC_HALF_DEG);
+    ctx.strokeStyle = encColor;
+    ctx.lineWidth = 3 + urgency * 3;
+    ctx.globalAlpha = alpha;
+    ctx.shadowColor = encColor;
+    ctx.shadowBlur = 6 + urgency * 8;
+    ctx.stroke();
+    // 高紧迫度双层弧
+    if(urgency > 0.7) {{
+      ctx.beginPath();
+      ctx.arc(0, 0, ARC_RADIUS + 5, bearing - ARC_HALF_DEG*0.7, bearing + ARC_HALF_DEG*0.7);
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = alpha * 0.5;
+      ctx.stroke();
+    }}
+    ctx.restore();
+  }}
+}}
 
 function drawBoat(ctx,x,y,yaw,color,s) {{
   ctx.save(); ctx.translate(x,y); ctx.rotate(-yaw);
@@ -1822,6 +2068,12 @@ function renderReplayFrame() {{
       ctx.restore();
     }}
     drawBoat(ctx,canX,canY,yaw,color,BOAT_SCALE);
+    // 邻船实际方位避让圆弧
+    if(ts.rl_active&&ts.rl_active[idx]===1) {{
+      if(!replayState._arcFrame) replayState._arcFrame=0;
+      replayState._arcFrame++;
+      drawAvoidanceArcs(ctx,canX,canY,ts,idx,t,d);
+    }}
 
     // 标签
     ctx.fillStyle=color; ctx.font='bold 11px Inter,system-ui,sans-serif';

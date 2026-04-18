@@ -24,8 +24,8 @@
 #   bash ~/usv_workspace/src/gs_bringup/scripts/download_usv_logs.sh --clean-local
 #
 # 分析日志:
-#   python3 ~/usv_workspace/src/usv_control/scripts/analyze_nav_log.py
-#   python3 ~/usv_workspace/src/usv_control/scripts/analyze_nav_log.py ~/usv_logs/nav_log_xxx.csv
+#   python3 ~/usv_workspace/src/tools/analyze_nav_log.py
+#   python3 ~/usv_workspace/src/tools/analyze_nav_log.py ~/usv_logs/nav_log_xxx.csv
 #
 # 配置:
 #   修改下方的 USV_HOST 和 USV_USER 变量
@@ -285,7 +285,7 @@ download_latest() {
         # 提示分析
         echo ""
         echo -e "${BLUE}运行分析:${NC}"
-        echo -e "  python3 ~/usv_workspace/src/usv_control/scripts/analyze_nav_log.py ${local_dir}/${filename}"
+        echo -e "  python3 ~/usv_workspace/src/tools/analyze_nav_log.py ${local_dir}/${filename}"
     else
         echo -e "${RED}✗ 下载失败${NC}"
         return 1

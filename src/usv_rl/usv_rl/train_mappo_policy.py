@@ -64,8 +64,12 @@ def parse_args():
     parser.add_argument('--angular-accel-limit', type=float, default=default_env.angular_accel_limit, help='Angular acceleration limit (rad/s^2) used while building turn rate.')
     parser.add_argument('--angular-decel-limit', type=float, default=default_env.angular_decel_limit, help='Angular deceleration limit (rad/s^2) used while unwinding turn rate near alignment.')
     parser.add_argument('--conflict-turn-relief', type=float, default=default_env.conflict_turn_relief, help='Minimum yaw-rate authority retained at full conflict even when goal heading error is small.')
+    parser.add_argument('--angular-authority-floor', type=float, default=default_env.angular_authority_floor, help='[L1-1] Minimum yaw-rate authority preserved at all times (fraction of max omega). Prevents hover-at-goal when heading aligned.')
+    parser.add_argument('--min-forward-speed-floor', type=float, default=default_env.min_forward_speed_floor, help='[L1-1] Actuator-level linear-speed floor applied when policy asks for any forward motion. Eliminates vx=0 stall near goal.')
     parser.add_argument('--episode-timeout', type=float, default=45.0, help='Episode timeout in seconds.')
     parser.add_argument('--no-progress-timeout', type=float, default=10.0, help='No-progress timeout in seconds.')
+    parser.add_argument('--max-waypoints-per-episode', type=int, default=1, help='Number of waypoints per episode (>1 enables multi-waypoint training).')
+    parser.add_argument('--waypoint-bonus', type=float, default=10.0, help='Intermediate reward when reaching a non-final waypoint.')
     parser.add_argument('--min-progress-delta', type=float, default=0.3, help='Fleet progress threshold for refreshing the no-progress timer.')
     parser.add_argument('--progress-weight', type=float, default=RewardConfig.progress_weight, help='Per-agent progress reward weight.')
     parser.add_argument('--goal-proximity-reward-weight', type=float, default=default_env.goal_proximity_reward_weight, help='Per-agent dense reward for moving inside the near-goal relief radius.')
@@ -135,6 +139,11 @@ def parse_args():
     parser.add_argument('--speed-distance-coupling-threshold', type=float, default=RewardConfig.speed_distance_coupling_threshold, help='Activation distance (m) for speed-distance coupling penalty.')
     parser.add_argument('--heading-convergence-reward-weight', type=float, default=RewardConfig.heading_convergence_reward_weight, help='Positive reward for heading error within convergence threshold.')
     parser.add_argument('--heading-convergence-threshold-deg', type=float, default=RewardConfig.heading_convergence_threshold_deg, help='Heading error threshold (degrees) for convergence bonus.')
+    parser.add_argument('--heading-correction-reward-weight', type=float, default=RewardConfig.heading_correction_reward_weight, help='Positive reward for turning in the direction that reduces heading error.')
+    parser.add_argument('--straight-line-omega-cte-gate', type=float, default=RewardConfig.straight_line_omega_cte_gate, help='CTE threshold (m) above which straight-line omega penalty is progressively reduced for path recovery. 0=disabled.')
+    parser.add_argument('--avoidance-turn-reward-weight', type=float, default=RewardConfig.avoidance_turn_reward_weight, help='Positive reward weight for turning away from nearest neighbour inside near-miss zone.')
+    parser.add_argument('--near-goal-idle-penalty-weight', type=float, default=RewardConfig.near_goal_idle_penalty_weight, help='Dense per-step penalty for near-zero speed when close to (but not at) the goal. Prevents hover-near-goal exploit.')
+    parser.add_argument('--cte-clip-range', type=float, default=3.0, help='Symmetric clip range (m) for signed cross-track error observation. Default 3.0.')
     parser.add_argument('--neighbor-attention', action='store_true', help='Replace fixed neighbor padding with attention-based neighbor aggregation. Learns to focus on the most relevant neighbor (nearest, highest TCPA, head-on, etc.).')
     parser.add_argument('--attention-embed-dim', type=int, default=32, help='Embedding dimension for neighbor attention encoder.')
     parser.add_argument('--attention-num-heads', type=int, default=1, help='Number of attention heads for neighbor attention encoder.')
@@ -150,6 +159,7 @@ def parse_args():
     parser.add_argument('--scenario-spawn-position-std', type=float, default=0.0, help='Spawn position Gaussian jitter std (m). 0 disables.')
     parser.add_argument('--scenario-spawn-heading-std', type=float, default=0.0, help='Spawn heading Gaussian jitter std (rad). 0 disables.')
     parser.add_argument('--scenario-goal-position-std', type=float, default=0.0, help='Goal position Gaussian jitter std (m). 0 disables.')
+    parser.add_argument('--encounter-type-dropout', type=float, default=0.0, help='Probability of zeroing encounter one-hot per step (0-1). Improves deployment generalization.')
     parser.add_argument('--sim-tau-linear', type=float, default=0.45, help='Sim first-order linear velocity time constant (s). Higher = more inertia.')
     parser.add_argument('--sim-tau-angular', type=float, default=0.25, help='Sim first-order angular velocity time constant (s). Higher = more inertia.')
     parser.add_argument('--dr-tau-linear-low', type=float, default=0.0, help='Tau linear DR lower bound (s). 0 disables tau randomization.')
@@ -170,6 +180,7 @@ def parse_args():
     parser.add_argument('--entanglement-penalty-weight', type=float, default=0.0, help='Penalty weight for sustained close proximity (anti-orbital-lock). Ramps up after grace period.')
     parser.add_argument('--entanglement-distance', type=float, default=3.0, help='Distance threshold (m) below which entanglement counter increments.')
     parser.add_argument('--entanglement-grace-steps', type=int, default=30, help='Number of close-proximity steps allowed before entanglement penalty activates.')
+    parser.add_argument('--entanglement-low-speed-penalty-weight', type=float, default=0.0, help='Penalty weight for low forward speed during entanglement (anti-orbital stalling).')
     parser.add_argument('--coordination-reward-weight', type=float, default=0.20, help='Fleet goal-completion coordination reward weight.')
     parser.add_argument('--team-completion-bonus', type=float, default=18.0, help='Fleet-wide bonus when all agents reach their goals.')
     parser.add_argument('--deadlock-penalty-weight', type=float, default=4.0, help='Penalty weight applied when fleet mean goal distance stalls.')
@@ -387,6 +398,10 @@ def _build_reward_config(args) -> RewardConfig:
         speed_distance_coupling_threshold=float(args.speed_distance_coupling_threshold),
         heading_convergence_reward_weight=float(args.heading_convergence_reward_weight),
         heading_convergence_threshold_deg=float(args.heading_convergence_threshold_deg),
+        heading_correction_reward_weight=float(args.heading_correction_reward_weight),
+        straight_line_omega_cte_gate=float(args.straight_line_omega_cte_gate),
+        avoidance_turn_reward_weight=float(args.avoidance_turn_reward_weight),
+        near_goal_idle_penalty_weight=float(args.near_goal_idle_penalty_weight),
     )
 
 
@@ -483,6 +498,8 @@ def _checkpoint_payload(
         'angular_accel_limit': float(args.angular_accel_limit),
         'angular_decel_limit': float(args.angular_decel_limit),
         'conflict_turn_relief': float(args.conflict_turn_relief),
+        'angular_authority_floor': float(args.angular_authority_floor),
+        'min_forward_speed_floor': float(args.min_forward_speed_floor),
         'action_bounds': {
             'linear_delta': float(args.linear_delta_limit),
             'angular_delta': float(args.angular_delta_limit),
@@ -502,7 +519,7 @@ def _checkpoint_payload(
         'neighbor_attention': bool(getattr(args, 'neighbor_attention', False)),
         'attention_embed_dim': int(getattr(args, 'attention_embed_dim', 32)),
         'attention_num_heads': int(getattr(args, 'attention_num_heads', 1)),
-        'ego_dim': 11,  # current ego feature count (added cross_track_error)
+        'ego_dim': 12,  # current ego feature count (sin/cos heading_error + cross_track_error)
         'total_timesteps': max(0, args.total_timesteps),
         'completed_timesteps': int(total_steps),
         'update_index': int(update_index),
@@ -799,6 +816,8 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'angular_accel_limit',
         'angular_decel_limit',
         'conflict_turn_relief',
+        'angular_authority_floor',
+        'min_forward_speed_floor',
         'team_reward_weight',
         'team_progress_weight',
         'team_goal_proximity_weight',
@@ -1092,6 +1111,8 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             angular_accel_limit=float(args.angular_accel_limit),
             angular_decel_limit=float(args.angular_decel_limit),
             conflict_turn_relief=float(args.conflict_turn_relief),
+            angular_authority_floor=float(args.angular_authority_floor),
+            min_forward_speed_floor=float(args.min_forward_speed_floor),
             episode_timeout=float(args.episode_timeout),
             no_progress_timeout=float(args.no_progress_timeout),
             min_progress_delta=float(args.min_progress_delta),
@@ -1116,6 +1137,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             entanglement_penalty_weight=float(args.entanglement_penalty_weight),
             entanglement_distance=float(args.entanglement_distance),
             entanglement_grace_steps=int(args.entanglement_grace_steps),
+            entanglement_low_speed_penalty_weight=float(args.entanglement_low_speed_penalty_weight),
             coordination_reward_weight=float(args.coordination_reward_weight),
             team_completion_bonus=float(args.team_completion_bonus),
             deadlock_penalty_weight=float(args.deadlock_penalty_weight),
@@ -1130,10 +1152,14 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             scenario_spawn_position_std=float(getattr(args, 'scenario_spawn_position_std', 0.0)),
             scenario_spawn_heading_std=float(getattr(args, 'scenario_spawn_heading_std', 0.0)),
             scenario_goal_position_std=float(getattr(args, 'scenario_goal_position_std', 0.0)),
+            encounter_type_dropout=float(getattr(args, 'encounter_type_dropout', 0.0)),
             sim_tau_linear=float(getattr(args, 'sim_tau_linear', 0.45)),
             sim_tau_angular=float(getattr(args, 'sim_tau_angular', 0.25)),
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
+            cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
+            max_waypoints_per_episode=int(getattr(args, 'max_waypoints_per_episode', 1)),
+            waypoint_bonus=float(getattr(args, 'waypoint_bonus', 10.0)),
         )
     )
 

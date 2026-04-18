@@ -83,6 +83,23 @@ class RewardConfig:
     # below ``heading_convergence_threshold_deg`` degrees.
     heading_convergence_reward_weight: float = 0.0
     heading_convergence_threshold_deg: float = 10.0
+    # CTE gate for straight-line omega penalty: when |CTE| exceeds this
+    # threshold (m), the omega penalty is progressively reduced so the agent
+    # can turn to recover the path.  0 = disabled (no CTE gating).
+    straight_line_omega_cte_gate: float = 0.0
+    # Heading correction direction reward: positive reward for turning
+    # in the direction that reduces heading error (ω sign matches
+    # -sign(heading_error)).  Provides explicit directional guidance
+    # that the scalar heading_error penalty alone cannot convey.
+    heading_correction_reward_weight: float = 0.0
+    # Avoidance turn reward: positive reward for turning *away* from the
+    # nearest neighbour when inside the near-miss zone.  Helps break
+    # COLREGs-vs-physics conflict where the agent turns into a neighbour.
+    avoidance_turn_reward_weight: float = 0.0
+    # Dense per-step penalty for near-zero speed when close to (but not
+    # at) the goal.  Prevents the "hover near goal" exploit where agents
+    # collect goal_proximity reward without actually arriving.
+    near_goal_idle_penalty_weight: float = 0.0
 
 
 @dataclass
@@ -102,6 +119,15 @@ class EnvConfig:
     angular_accel_limit: float = 1.8
     angular_decel_limit: float = 2.4
     conflict_turn_relief: float = 0.55
+    # L1-1: Floor for angular authority. Prevents authority from collapsing
+    # to 0 near the goal (heading aligned + no conflict) which caused the
+    # "hover near goal" stall.  0.35 preserves ~35% of max omega capacity.
+    angular_authority_floor: float = 0.35
+    # L1-1: Linear-speed floor. When the policy asks for any non-trivial
+    # forward motion AND forward_only is True, enforce a minimum forward
+    # speed so the agent cannot freeze at vx=0.  Works at the actuator
+    # layer instead of reward shaping.
+    min_forward_speed_floor: float = 0.08
     state_timeout: float = 10.0
     ready_timeout: float = 45.0
     episode_timeout: float = 45.0

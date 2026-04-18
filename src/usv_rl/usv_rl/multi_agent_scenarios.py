@@ -94,9 +94,12 @@ class FleetScenario:
 
 class MultiAgentScenarioFactory:
     _REQUIRED_AGENT_COUNTS = {
+        'solo_navigation': 1,
         'two_usv_head_on': 2,
         'three_usv_crossing': 3,
         'three_usv_overtaking': 3,
+        'two_usv_random_encounter': 2,
+        'three_usv_random_encounter': 3,
         'five_usv_dense_head_on': 5,
         'five_usv_dense_crossing': 5,
         'five_usv_dense_overtaking': 5,
@@ -119,7 +122,7 @@ class MultiAgentScenarioFactory:
 
     @staticmethod
     def available() -> tuple[str, ...]:
-        return ('two_usv_head_on', 'three_usv_crossing', 'three_usv_overtaking')
+        return ('solo_navigation', 'two_usv_head_on', 'three_usv_crossing', 'three_usv_overtaking', 'two_usv_random_encounter', 'three_usv_random_encounter')
 
     @staticmethod
     def cluster_available() -> tuple[str, ...]:
@@ -181,7 +184,7 @@ class MultiAgentScenarioFactory:
         goal_position_std: float = 0.0,
     ) -> FleetScenario:
         scenario = MultiAgentScenarioFactory._create_base(
-            kind, agent_ids, goal_distance=goal_distance, neighbor_speed=neighbor_speed,
+            kind, agent_ids, goal_distance=goal_distance, neighbor_speed=neighbor_speed, rng=rng,
         )
         return MultiAgentScenarioFactory._maybe_randomize(
             scenario, rng, spawn_position_std, spawn_heading_std, goal_position_std,
@@ -194,7 +197,25 @@ class MultiAgentScenarioFactory:
         *,
         goal_distance: float,
         neighbor_speed: float,
+        rng: Optional[np.random.Generator] = None,
     ) -> FleetScenario:
+        if kind == 'solo_navigation':
+            first = agent_ids[0]
+            agent_spawns = {
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance, y=0.0),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=40.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first,),
+            )
+
         if kind == 'two_usv_head_on':
             if len(agent_ids) < 2:
                 raise ValueError('two_usv_head_on requires at least 2 agents.')
@@ -270,6 +291,85 @@ class MultiAgentScenarioFactory:
                         yaw=0.0,
                     ),
                 ],
+            )
+
+        if kind == 'two_usv_random_encounter':
+            if len(agent_ids) < 2:
+                raise ValueError('two_usv_random_encounter requires at least 2 agents.')
+            first, second = agent_ids[:2]
+            # Agent 1 always traverses along X-axis.
+            # Agent 2 approaches from a uniformly random angle theta
+            # around an encounter center shifted toward Agent 1 (0.35*goal)
+            # so the orbit wraps behind Agent 1, giving true 360° bearing.
+            _rng = rng if rng is not None else np.random.default_rng()
+            theta = float(_rng.uniform(0.0, 2.0 * math.pi))
+            encounter_x = goal_distance * 0.35
+            radius = goal_distance * 0.45
+            agent_spawns = {
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+                second: AgentSpawnConfig(
+                    x=encounter_x + radius * math.cos(theta),
+                    y=radius * math.sin(theta),
+                    yaw=theta + math.pi,  # heading toward encounter center
+                ),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance, y=0.0),
+                second: AgentGoalConfig(
+                    x=encounter_x - radius * math.cos(theta),
+                    y=-radius * math.sin(theta),
+                ),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=50.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first, second),
+            )
+
+        if kind == 'three_usv_random_encounter':
+            if len(agent_ids) < 3:
+                raise ValueError('three_usv_random_encounter requires at least 3 agents.')
+            first, second, third = agent_ids[:3]
+            _rng = rng if rng is not None else np.random.default_rng()
+            encounter_x = goal_distance * 0.35
+            radius = goal_distance * 0.45
+            theta1 = float(_rng.uniform(0.0, 2.0 * math.pi))
+            # Ensure agent 3 is at least 60 degrees away from agent 2
+            theta2 = theta1 + float(_rng.uniform(math.pi / 3.0, 5.0 * math.pi / 3.0))
+            agent_spawns = {
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+                second: AgentSpawnConfig(
+                    x=encounter_x + radius * math.cos(theta1),
+                    y=radius * math.sin(theta1),
+                    yaw=theta1 + math.pi,
+                ),
+                third: AgentSpawnConfig(
+                    x=encounter_x + radius * math.cos(theta2),
+                    y=radius * math.sin(theta2),
+                    yaw=theta2 + math.pi,
+                ),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance, y=0.0),
+                second: AgentGoalConfig(
+                    x=encounter_x - radius * math.cos(theta1),
+                    y=-radius * math.sin(theta1),
+                ),
+                third: AgentGoalConfig(
+                    x=encounter_x - radius * math.cos(theta2),
+                    y=-radius * math.sin(theta2),
+                ),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=55.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first, second, third),
             )
 
         if kind == 'five_usv_dense_head_on':

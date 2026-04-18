@@ -27,7 +27,7 @@
     ros2 launch usv_bringup usv_launch.py namespace:=usv_01 enable_log_collector:=true
 
 日志文件保存位置: ~/usv_logs/nav_log_YYYYMMDD_HHMMSS.csv
-分析脚本: python3 usv_control/scripts/analyze_nav_log.py
+分析脚本: python3 tools/analyze_nav_log.py
 """
 
 import os
