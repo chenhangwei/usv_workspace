@@ -7,6 +7,11 @@ import numpy as np
 # Number of distinct encounter types encoded as a one-hot in the observation.
 # 0=head_on, 1=crossing, 2=overtaking.  -1 means unset (zero vector).
 ENCOUNTER_TYPE_COUNT = 3
+LOCAL_EGO_FEATURE_COUNT = 17
+# Neighbor layout: relative pose/velocity plus pairwise conflict timing.
+# 0..5: rel_x, rel_y, rel_vx, rel_vy, distance, bearing
+# 6..9: tcpa_norm, dcpa_norm, route_eta_delta, route_priority_delta
+NEIGHBOR_FEATURE_COUNT = 10
 
 
 @dataclass
@@ -18,6 +23,10 @@ class AgentNeighborObservation:
     rel_vy: float
     distance: float
     bearing: float
+    tcpa: float = 1.0
+    dcpa: float = 1.0
+    route_eta_delta: float = 0.0
+    route_priority_delta: float = 0.0
 
 
 @dataclass
@@ -34,12 +43,21 @@ class AgentLocalObservation:
     final_linear_x: float
     final_angular_z: float
     cross_track_error: float = 0.0
+    route_progress: float = 0.0
+    conflict_phase: float = 0.0
+    conflict_eta: float = 1.0
+    crossing_priority: float = 0.0
+    crossing_eta_gap: float = 1.0
     neighbors: List[AgentNeighborObservation] = field(default_factory=list)
     encounter_type_index: int = -1
 
     @staticmethod
+    def ego_feature_size() -> int:
+        return LOCAL_EGO_FEATURE_COUNT
+
+    @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 12 + max_neighbors * 6 + ENCOUNTER_TYPE_COUNT
+        return LOCAL_EGO_FEATURE_COUNT + max_neighbors * NEIGHBOR_FEATURE_COUNT + ENCOUNTER_TYPE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -60,6 +78,11 @@ class AgentLocalObservation:
             self.final_linear_x,
             self.final_angular_z,
             self.cross_track_error,
+            self.route_progress,
+            self.conflict_phase,
+            self.conflict_eta,
+            self.crossing_priority,
+            self.crossing_eta_gap,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]
@@ -71,10 +94,14 @@ class AgentLocalObservation:
                 neighbor.rel_vy,
                 neighbor.distance,
                 neighbor.bearing,
+                neighbor.tcpa,
+                neighbor.dcpa,
+                neighbor.route_eta_delta,
+                neighbor.route_priority_delta,
             ])
 
         for _ in range(max(0, max_neighbors - len(sorted_neighbors))):
-            features.extend([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            features.extend([0.0] * NEIGHBOR_FEATURE_COUNT)
 
         # Encounter type one-hot: allows the network to condition on scenario type
         encounter_one_hot = [0.0] * ENCOUNTER_TYPE_COUNT

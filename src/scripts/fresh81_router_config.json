@@ -1,0 +1,12 @@
+{
+  "policy_type": "mappo_router",
+  "env_template": "/mnt/data/checkpoints/usv_rl/fresh79_best.pt",
+  "default_model": "/mnt/data/checkpoints/usv_rl/fresh79_best.pt",
+  "scenario_models": {
+    "solo_navigation": "/mnt/data/checkpoints/usv_rl/fresh74_best.pt",
+    "two_usv_head_on": "/mnt/data/checkpoints/usv_rl/fresh79_interpolants/fresh74_fresh76focus_a065.pt",
+    "three_usv_crossing": "/mnt/data/checkpoints/usv_rl/fresh74_best.pt",
+    "three_usv_overtaking": "/mnt/data/checkpoints/usv_rl/fresh72_checkpoints/fresh72_sprint_step_0012446.pt",
+    "three_usv_random_encounter": "/mnt/data/checkpoints/usv_rl/fresh79_best.pt"
+  }
+}

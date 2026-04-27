@@ -5,6 +5,11 @@ from typing import List
 import numpy as np
 
 
+USV_EGO_FEATURE_COUNT = 17
+# Must mirror usv_rl.multi_agent_types.NEIGHBOR_FEATURE_COUNT.
+USV_NEIGHBOR_FEATURE_COUNT = 10
+
+
 @dataclass
 class NeighborState:
     usv_id: str
@@ -24,6 +29,10 @@ class NeighborObservation:
     rel_vy: float
     distance: float
     bearing: float
+    tcpa: float = 1.0
+    dcpa: float = 1.0
+    route_eta_delta: float = 0.0
+    route_priority_delta: float = 0.0
 
 
 @dataclass
@@ -39,11 +48,20 @@ class UsvObservation:
     final_linear_x: float
     final_angular_z: float
     cross_track_error: float = 0.0
+    route_progress: float = 0.0
+    conflict_phase: float = 0.0
+    conflict_eta: float = 1.0
+    crossing_priority: float = 0.0
+    crossing_eta_gap: float = 1.0
     neighbors: List[NeighborObservation] = field(default_factory=list)
 
     @staticmethod
+    def ego_feature_size() -> int:
+        return USV_EGO_FEATURE_COUNT
+
+    @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return 12 + max_neighbors * 6
+        return USV_EGO_FEATURE_COUNT + max_neighbors * USV_NEIGHBOR_FEATURE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -64,6 +82,11 @@ class UsvObservation:
             self.final_linear_x,
             self.final_angular_z,
             self.cross_track_error,
+            self.route_progress,
+            self.conflict_phase,
+            self.conflict_eta,
+            self.crossing_priority,
+            self.crossing_eta_gap,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]
@@ -75,11 +98,15 @@ class UsvObservation:
                 neighbor.rel_vy,
                 neighbor.distance,
                 neighbor.bearing,
+                neighbor.tcpa,
+                neighbor.dcpa,
+                neighbor.route_eta_delta,
+                neighbor.route_priority_delta,
             ])
 
         missing = max_neighbors - len(sorted_neighbors)
         for _ in range(missing):
-            features.extend([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            features.extend([0.0] * USV_NEIGHBOR_FEATURE_COUNT)
 
         return np.asarray(features, dtype=np.float32)
 

@@ -476,11 +476,172 @@ class MultiAgentEnv(gym.Env):
             if agent_id in observations
         }
 
-    def _annotate_cross_track_errors(self, observations: Dict[str, AgentLocalObservation]) -> None:
-        """Inject cross-track error into each agent's observation so it is
-        available in the vectorised observation fed to the policy network."""
+    def _scenario_conflict_point(self) -> tuple[float, float] | None:
+        """Return the shared route conflict point for structured crossing scenarios."""
+        if self._scenario is None or self._scenario.name != 'three_usv_crossing':
+            return None
+
+        midpoints: list[tuple[float, float]] = []
+        for agent_id in self._active_agent_ids:
+            spawn = self._scenario.agent_spawns.get(agent_id)
+            goal = self._scenario.agent_goals.get(agent_id)
+            if spawn is None or goal is None:
+                continue
+            midpoints.append(((float(spawn.x) + float(goal.x)) * 0.5, (float(spawn.y) + float(goal.y)) * 0.5))
+        if not midpoints:
+            return None
+        return (
+            float(np.mean([point[0] for point in midpoints])),
+            float(np.mean([point[1] for point in midpoints])),
+        )
+
+    @staticmethod
+    def _crossing_priority_tiebreak(agent_id: str) -> int:
+        # Break the fixed three-way crossing symmetry without prescribing an action.
+        # The learned policy still decides how to use this observation feature.
+        fixed_priority = {'usv_03': 0, 'usv_02': 1, 'usv_01': 2}
+        if agent_id in fixed_priority:
+            return fixed_priority[agent_id]
+        try:
+            return 100 - int(str(agent_id).rsplit('_', 1)[-1])
+        except (TypeError, ValueError):
+            return 100
+
+    def _route_timing_features(
+        self,
+        agent_id: str,
+        observation: AgentLocalObservation,
+        conflict_point: tuple[float, float] | None,
+    ) -> dict[str, float]:
+        if self._scenario is None:
+            return {
+                'cross_track_error': 0.0,
+                'route_progress': 0.0,
+                'conflict_phase': 0.0,
+                'conflict_eta': 1.0,
+                'eta_seconds': 1e3,
+                'to_conflict': 1e3,
+            }
+
+        spawn = self._scenario.agent_spawns.get(agent_id)
+        goal = self._scenario.agent_goals.get(agent_id)
+        if spawn is None or goal is None:
+            return {
+                'cross_track_error': 0.0,
+                'route_progress': 0.0,
+                'conflict_phase': 0.0,
+                'conflict_eta': 1.0,
+                'eta_seconds': 1e3,
+                'to_conflict': 1e3,
+            }
+
+        route_dx = float(goal.x - spawn.x)
+        route_dy = float(goal.y - spawn.y)
+        route_length = float(np.hypot(route_dx, route_dy))
+        if route_length <= 1e-6:
+            return {
+                'cross_track_error': 0.0,
+                'route_progress': 0.0,
+                'conflict_phase': 0.0,
+                'conflict_eta': 1.0,
+                'eta_seconds': 1e3,
+                'to_conflict': 1e3,
+            }
+
+        unit_x = route_dx / route_length
+        unit_y = route_dy / route_length
+        relative_x = float(observation.pose_x - spawn.x)
+        relative_y = float(observation.pose_y - spawn.y)
+        progress_s = (relative_x * unit_x) + (relative_y * unit_y)
+        cross_track = ((relative_x * route_dy) - (relative_y * route_dx)) / route_length
+        clip_range = max(1.0, self.config.cte_clip_range)
+        route_progress = float(np.clip(progress_s / route_length, 0.0, 1.0))
+
+        conflict_phase = 0.0
+        conflict_eta = 1.0
+        eta_seconds = 1e3
+        to_conflict = 1e3
+        if conflict_point is not None:
+            conflict_x, conflict_y = conflict_point
+            conflict_s = ((float(conflict_x) - float(spawn.x)) * unit_x) + ((float(conflict_y) - float(spawn.y)) * unit_y)
+            conflict_s = float(np.clip(conflict_s, 0.0, route_length))
+            to_conflict = conflict_s - progress_s
+            conflict_phase = float(np.clip((progress_s - conflict_s) / max(0.5 * route_length, 1e-3), -1.0, 1.0))
+            along_speed = max(
+                0.0,
+                float(observation.speed) * math.cos(float(observation.heading_error)),
+                float(observation.final_linear_x),
+                float(observation.raw_linear_x),
+            )
+            eta_seconds = max(0.0, to_conflict) / max(along_speed, 0.03)
+            conflict_eta = float(np.clip(eta_seconds / 25.0, 0.0, 1.0))
+
+        return {
+            'cross_track_error': float(np.clip(cross_track, -clip_range, clip_range)),
+            'route_progress': route_progress,
+            'conflict_phase': conflict_phase,
+            'conflict_eta': conflict_eta,
+            'eta_seconds': float(eta_seconds),
+            'to_conflict': float(to_conflict),
+        }
+
+    def _annotate_route_features_for_observations(self, observations: Dict[str, AgentLocalObservation]) -> None:
+        """Inject route progress and crossing timing features into observations."""
+        conflict_point = self._scenario_conflict_point()
+        stats: dict[str, dict[str, float]] = {}
         for agent_id, observation in observations.items():
-            observation.cross_track_error = self._compute_route_cross_track_error(agent_id, observation)
+            stat = self._route_timing_features(agent_id, observation, conflict_point)
+            stats[agent_id] = stat
+            observation.cross_track_error = stat['cross_track_error']
+            observation.route_progress = stat['route_progress']
+            observation.conflict_phase = stat['conflict_phase']
+            observation.conflict_eta = stat['conflict_eta']
+            observation.crossing_priority = 0.0
+            observation.crossing_eta_gap = 1.0
+
+        if conflict_point is None or len(stats) <= 1:
+            return
+
+        ordered_ids = sorted(
+            stats,
+            key=lambda agent_id: (
+                -1.0 if stats[agent_id]['to_conflict'] < -self.config.collision_distance else stats[agent_id]['eta_seconds'],
+                self._crossing_priority_tiebreak(agent_id),
+            ),
+        )
+        rank_by_id = {agent_id: rank for rank, agent_id in enumerate(ordered_ids)}
+        denominator = max(1, len(ordered_ids) - 1)
+        target_gap = max(1.0, float(self.config.reward.crossing_time_gap_target))
+        for agent_id, observation in observations.items():
+            rank = rank_by_id.get(agent_id, denominator)
+            observation.crossing_priority = float(1.0 - (2.0 * rank / denominator))
+            own_eta = stats[agent_id]['eta_seconds']
+            eta_gaps = [abs(own_eta - stats[other_id]['eta_seconds']) for other_id in stats if other_id != agent_id]
+            min_gap = min(eta_gaps) if eta_gaps else target_gap
+            observation.crossing_eta_gap = float(np.clip(min_gap / target_gap, 0.0, 1.0))
+
+        for agent_id, observation in observations.items():
+            own_eta = stats[agent_id]['eta_seconds']
+            own_priority = float(np.clip(observation.crossing_priority, -1.0, 1.0))
+            for neighbor in observation.neighbors:
+                other_id = neighbor.source_id
+                if other_id not in stats or other_id not in observations:
+                    neighbor.route_eta_delta = 0.0
+                    neighbor.route_priority_delta = 0.0
+                    continue
+                other_eta = stats[other_id]['eta_seconds']
+                other_priority = float(np.clip(observations[other_id].crossing_priority, -1.0, 1.0))
+                # Positive ETA delta means this agent is currently later than
+                # the neighbour at the shared conflict point; negative means
+                # this agent is earlier.  The policy still chooses the action.
+                neighbor.route_eta_delta = float(np.clip((own_eta - other_eta) / target_gap, -1.0, 1.0))
+                neighbor.route_priority_delta = float(np.clip((own_priority - other_priority) * 0.5, -1.0, 1.0))
+
+    def _annotate_cross_track_errors(self, observations: Dict[str, AgentLocalObservation], global_state: FleetGlobalState | None = None) -> None:
+        """Inject route features into local observations and critic global-state observations."""
+        self._annotate_route_features_for_observations(observations)
+        if global_state is not None:
+            self._annotate_route_features_for_observations(global_state.local_observations)
 
     def _annotate_encounter_types(self, observations, global_state):
         scenario_name = self._scenario.name if self._scenario else ''
@@ -675,9 +836,13 @@ class MultiAgentEnv(gym.Env):
         current_forward_speed = max(0.0, observation.final_linear_x)
         desired_forward_speed = self._target_forward_speed(observation, conflict_level=0.45)
         forward_progress = max(0.0, min(1.0, current_forward_speed / max(desired_forward_speed, 1e-3)))
+        cruise_reference = max(0.18, self._pure_linear_speed_limit())
 
         best_crossing_reward = 0.0
         best_crossing_forward_reward = 0.0
+        best_crossing_slowdown_reward = 0.0
+        max_crossing_overspeed_penalty = 0.0
+        max_crossing_close_forward_penalty = 0.0
         best_overtaking_reward = 0.0
         best_overtaking_forward_reward = 0.0
         best_overtaking_corridor_reward = 0.0
@@ -716,6 +881,12 @@ class MultiAgentEnv(gym.Env):
             if co_directional_close and not overtaking_target:
                 overtaking_target = True
             starboard_crossing = body_y < -0.35 and closing_speed > -0.05
+            scenario_crossing_conflict = (
+                observation.encounter_type_index == 1
+                and closing_speed > -0.10
+                and (body_x > 0.2 or neighbor.distance < lookahead_distance * 0.65)
+            )
+            crossing_conflict = starboard_crossing or scenario_crossing_conflict
 
             proximity = max(0.0, min(1.0, (lookahead_distance - neighbor.distance) / lookahead_distance))
             closing_weight = max(0.0, min(1.0, (closing_speed + 0.15) / 0.9))
@@ -723,11 +894,30 @@ class MultiAgentEnv(gym.Env):
             turn_progress = max(0.0, min(1.0, actual_starboard_turn / max(desired_starboard_turn, 1e-3)))
             wrong_way_progress = max(0.0, min(1.0, actual_port_turn / max(desired_starboard_turn, 1e-3)))
 
-            if starboard_crossing:
+            if crossing_conflict:
+                crossing_yield_speed = max(0.02, min(float(self.config.reward.crossing_yield_speed), desired_forward_speed))
+                speed_excess = max(0.0, current_forward_speed - crossing_yield_speed)
+                speed_excess_ratio = max(
+                    0.0,
+                    min(1.0, speed_excess / max(cruise_reference - crossing_yield_speed, 1e-3)),
+                )
+                yield_compliance = max(0.0, 1.0 - speed_excess_ratio)
                 best_crossing_reward = max(best_crossing_reward, proximity * turn_progress)
                 best_crossing_forward_reward = max(
                     best_crossing_forward_reward,
                     proximity * turn_progress * forward_progress,
+                )
+                best_crossing_slowdown_reward = max(
+                    best_crossing_slowdown_reward,
+                    proximity * closing_weight * yield_compliance * (0.35 + 0.65 * turn_progress),
+                )
+                max_crossing_overspeed_penalty = max(
+                    max_crossing_overspeed_penalty,
+                    proximity * closing_weight * speed_excess_ratio,
+                )
+                max_crossing_close_forward_penalty = max(
+                    max_crossing_close_forward_penalty,
+                    proximity * closing_weight * forward_progress * (0.35 + 0.65 * max(0.0, 1.0 - turn_progress)),
                 )
                 max_wrong_way_penalty = max(max_wrong_way_penalty, proximity * wrong_way_progress)
                 continue
@@ -760,6 +950,9 @@ class MultiAgentEnv(gym.Env):
         return (
             self.config.reward.crossing_starboard_turn_reward_weight * best_crossing_reward
             + self.config.reward.crossing_forward_reward_weight * best_crossing_forward_reward
+            + self.config.reward.crossing_slowdown_reward_weight * best_crossing_slowdown_reward
+            - self.config.reward.crossing_overspeed_penalty_weight * max_crossing_overspeed_penalty
+            - self.config.reward.crossing_close_forward_penalty_weight * max_crossing_close_forward_penalty
             + self.config.reward.overtaking_starboard_turn_reward_weight * best_overtaking_reward
             + self.config.reward.overtaking_forward_reward_weight * best_overtaking_forward_reward
             + self.config.reward.overtaking_corridor_reward_weight * best_overtaking_corridor_reward
@@ -767,6 +960,47 @@ class MultiAgentEnv(gym.Env):
             - self.config.reward.overtaking_close_penalty_weight * max_overtaking_close_penalty
             - self.config.reward.colregs_port_turn_penalty_weight * max_wrong_way_penalty
         )
+
+    def _compute_crossing_time_coordination_reward(self, observation: AgentLocalObservation) -> float:
+        reward_weight = float(self.config.reward.crossing_time_separation_reward_weight)
+        penalty_weight = float(self.config.reward.crossing_time_separation_penalty_weight)
+        if reward_weight <= 0.0 and penalty_weight <= 0.0:
+            return 0.0
+        if self._scenario is None or self._scenario.name != 'three_usv_crossing':
+            return 0.0
+        if observation.conflict_phase > 0.20:
+            return 0.0
+
+        approach_gate = max(0.0, 1.0 - float(np.clip(observation.conflict_eta, 0.0, 1.0)))
+        gap_deficit = max(0.0, 1.0 - float(np.clip(observation.crossing_eta_gap, 0.0, 1.0)))
+        if approach_gate <= 0.0 or gap_deficit <= 0.0:
+            return 0.0
+
+        role = float(np.clip(observation.crossing_priority, -1.0, 1.0))
+        # role≈+1: clear first; role≈-1: yield/hold gap. Middle roles blend both.
+        clear_role = max(0.0, min(1.0, (role + 0.20) / 1.20))
+        yield_role = max(0.0, min(1.0, (0.50 - role) / 1.50))
+        current_forward_speed = max(0.0, observation.final_linear_x)
+        cruise_reference = max(0.18, self._pure_linear_speed_limit())
+        speed_ratio = max(0.0, min(1.0, current_forward_speed / cruise_reference))
+        crossing_yield_speed = max(0.02, min(float(self.config.reward.crossing_yield_speed), cruise_reference))
+        speed_excess_ratio = max(
+            0.0,
+            min(1.0, (current_forward_speed - crossing_yield_speed) / max(cruise_reference - crossing_yield_speed, 1e-3)),
+        )
+        yield_compliance = max(0.0, 1.0 - speed_excess_ratio)
+        clear_stall_ratio = max(0.0, (crossing_yield_speed - current_forward_speed) / max(crossing_yield_speed, 1e-3))
+
+        shaping_gate = approach_gate * gap_deficit
+        coordination_reward = reward_weight * shaping_gate * (
+            clear_role * speed_ratio
+            + yield_role * yield_compliance
+        )
+        coordination_penalty = penalty_weight * shaping_gate * (
+            yield_role * speed_excess_ratio
+            + 0.35 * clear_role * clear_stall_ratio
+        )
+        return coordination_reward - coordination_penalty
 
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         if seed is not None:
@@ -814,7 +1048,7 @@ class MultiAgentEnv(gym.Env):
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
         self._annotate_encounter_types(observations, global_state)
-        self._annotate_cross_track_errors(observations)
+        self._annotate_cross_track_errors(observations, global_state)
         self._latest_observations = observations
         self._previous_distances = {
             namespace: observations[namespace].distance_to_goal
@@ -949,6 +1183,7 @@ class MultiAgentEnv(gym.Env):
             )
             + self._compute_crossing_overtaking_guidance_reward(observation)
         )
+        braking += self._compute_crossing_time_coordination_reward(observation)
         progress += self._pure_goal_tracking_reward(
             observation,
             conflict_level=conflict_level,
@@ -1166,7 +1401,7 @@ class MultiAgentEnv(gym.Env):
         observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
         global_state = self._wait_for_global_state(timeout=self.config.state_timeout)
         self._annotate_encounter_types(observations, global_state)
-        self._annotate_cross_track_errors(observations)
+        self._annotate_cross_track_errors(observations, global_state)
         self._latest_observations = observations
 
         team_progress = 0.0

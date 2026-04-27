@@ -192,11 +192,13 @@ class PCA9685SMBus:
 # PID 控制器
 # ======================================================================
 class PIDController:
-    def __init__(self, kp, ki, kd, output_limit):
+    def __init__(self, kp, ki, kd, output_limit, i_limit=None):
         self.kp = kp
         self.ki = ki
         self.kd = kd
         self.output_limit = output_limit
+        # 限制积分项的最大贡献量（默认最大占总输出限制的15%，或不超过 30 度/秒）
+        self.i_limit = i_limit if i_limit is not None else min(output_limit * 0.15, 30.0)
         self._integral = 0.0
         self._prev_error = 0.0
 
@@ -208,8 +210,11 @@ class PIDController:
         if dt <= 0:
             return 0.0
         self._integral += error * dt
-        limit = self.output_limit / max(self.ki, 1e-6)
-        self._integral = max(-limit, min(limit, self._integral))
+        # 修复积分抗饱和 (Integral Windup)
+        # 将积分值的绝对上限，限制在合理的范围内，避免舵机在物理死角处长时间累积庞大误差
+        max_integral = self.i_limit / max(self.ki, 1e-6)
+        self._integral = max(-max_integral, min(max_integral, self._integral))
+        
         derivative = (error - self._prev_error) / dt
         self._prev_error = error
         out = self.kp * error + self.ki * self._integral + self.kd * derivative
@@ -296,7 +301,7 @@ class AppState:
         self.switch_smooth_accel = 1800.0 # 切换人脸时的短时最大角加速度
         self.switch_response_gain = 7.5   # 切换人脸时更积极地追目标角
         self.smooth_alpha = 0.25   # 指数平滑因子 (0~1, 越小越平滑)
-        self.mode = MODE_IDLE
+        self.mode = MODE_PATROL
         self.tracking = False
         self.track_target_class = ''
         self.track_target_distance = 0.0
@@ -1334,9 +1339,11 @@ def _detect_faces(image):
                 expression = "[ Neutral ._. ]"
                 color = (200, 200, 200)
                 
-                # 预处理：利用人脸关键点识别“歪头”动作 (替代嘟嘴，彻底解决说话时的误触问题)
+                # 预处理：利用人脸关键点识别“歪头”动作及“露齿”动作
                 is_head_tilt = False
+                is_teeth_showing = False
                 eye_dist = 0
+                mouth_width = 0
                 if kpss is not None and i < len(kpss):
                     pts = kpss[i]
                     if pts.ndim == 1 and pts.shape[0] == 10:
@@ -1358,8 +1365,46 @@ def _detect_faces(image):
                             angle = abs(math.degrees(math.atan2(eye_dy, eye_dx)))
                             if angle > 15.0 and angle < 165.0:
                                 is_head_tilt = True
+                                
+                    # 获取嘴巴坐标用于提取嘴部 ROI 进行露齿检测
+                    if pts.ndim == 1 and pts.shape[0] == 10:
+                        kx3, ky3 = pts[6], pts[7]   # 左嘴角
+                        kx4, ky4 = pts[8], pts[9]   # 右嘴角
+                    elif pts.ndim == 2 and pts.shape[0] == 5:
+                        kx3, ky3 = pts[3]
+                        kx4, ky4 = pts[4]
+                    else:
+                        kx3=ky3=kx4=ky4=0
+                        
+                    if eye_dist > 15 and abs(kx3) > 1:
+                        mouth_width = math.hypot(kx4 - kx3, ky4 - ky3)
+                        # 放宽咧嘴的要求（嘴角宽度达到眼距的70%）
+                        if mouth_width > 10 and mouth_width / eye_dist > 0.70:
+                            mx = int((kx3 + kx4) / 2)
+                            my = int((ky3 + ky4) / 2)
+                            roi_w = int(mouth_width * 0.6)
+                            roi_h = int(mouth_width * 0.4) # 获取嘴唇中间稍微高一点的区域
+                            tx1 = max(0, mx - roi_w // 2)
+                            tx2 = min(image.shape[1], mx + roi_w // 2)
+                            ty1 = max(0, my - roi_h // 2)
+                            ty2 = min(image.shape[0], my + roi_h // 2)
+                            
+                            if tx2 > tx1 and ty2 > ty1:
+                                roi_bgr = image[ty1:ty2, tx1:tx2]
+                                hsv = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2HSV)
+                                # 适度放宽亮度和饱和度限制，兼顾室内环境下的牙齿(可能偏暗偏黄)
+                                lower_white = np.array([0, 0, 110])
+                                upper_white = np.array([180, 70, 255])
+                                teeth_mask = cv2.inRange(hsv, lower_white, upper_white)
+                                
+                                ratio = cv2.countNonZero(teeth_mask) / ((tx2 - tx1) * (ty2 - ty1) + 1e-5)
+                                if ratio > 0.05: # 放宽占比要求到 5%
+                                    is_teeth_showing = True
 
-                if is_head_tilt:
+                if is_teeth_showing:
+                    expression = "[ Teeth :D ]"
+                    color = (255, 255, 255) # 白色
+                elif is_head_tilt:
                     expression = "[ HeadTilt /_\\ ]"
                     color = (0, 255, 255) # 黄色
                 else:
@@ -1370,12 +1415,12 @@ def _detect_faces(image):
                         color = onnx_color
                     elif kpss is not None and i < len(kpss):
                         # 降级到几何关键点分析
-                        if eye_dist > 5:
+                        if eye_dist > 5 and mouth_width > 0:
                             ratio = mouth_width / eye_dist
-                            if ratio > 1.15:
+                            if ratio > 1.25:
                                 expression = "[ Laughing =D ]"
                                 color = (0, 165, 255)
-                            elif ratio > 0.90:
+                            elif ratio > 1.05:
                                 expression = "[ Smiling ^_^ ]"
                                 color = (0, 255, 0)
 
@@ -1431,13 +1476,13 @@ def _detect_faces(image):
 
                         if eye_dist > 5:
                             ratio = mouth_width / eye_dist
-                            if ratio > 1.15:
+                            if ratio > 1.25:
                                 expression = "[ Laughing =D ]"
                                 color = (0, 165, 255)
-                            elif ratio > 0.90:
+                            elif ratio > 1.05:
                                 expression = "[ Smiling ^_^ ]"
                                 color = (0, 255, 0)
-
+                                
                     out_face = {
                         'cls': 'face', 'conf': score,
                         'x1': x1, 'y1': y1,
@@ -1662,59 +1707,46 @@ def gimbal_control_step(dets_enriched):
 
             expr = best.get('expr', '')
 
-            # 当检测到歪头(HeadTilt)，并持续靠近时，强制触发厌恶回避
-            if 'HeadTilt' in expr:
-                # 增加时序过滤：连续 3 帧以上识别为歪头才真正触发
-                s._kiss_detect_frames = getattr(s, '_kiss_detect_frames', 0) + 1
-                if s._kiss_detect_frames >= 3:
-                    if getattr(s, '_kiss_triggered', False):
-                        # 持续歪头状态下，判断是否靠近 (距离减小 0.1m 以上)
-                        if getattr(s, '_kiss_start_dist', best['dist']) - best['dist'] > 0.10:
-                            print(f"[GIMBAL] 探测到持续歪头并靠近 -> 转为厌恶回避")
-                            expr = 'Disgust' # 篡改表情为厌恶，走躲避逻辑
-                            s._kiss_detect_frames = 0 # 触发后清空计数避免循环触发
+            # 当检测到人脸持续靠近一段时间时，触发低头回避动作
+            if getattr(s, "track_target_distance", 2.0) < 0.25:
+                s._proximity_frames = getattr(s, "_proximity_frames", 0) + 1
+                if s._proximity_frames >= 5: # 连续5帧(<0.25m)视为切实贴近
+                    if getattr(s, "_proximity_triggered", False):
+                        pass
                     else:
-                        s._kiss_triggered = True
-                        s._kiss_start_time = now
-                        s._kiss_start_dist = best['dist']
-                else:
-                    # 侦测中，但还没达到稳定帧数，先当成 Neutral 处理，不触发任何动作
-                    expr = 'Neutral'
+                        s._proximity_triggered = True
+                        if not getattr(s, "_is_hiding", False):
+                            print(f"[GIMBAL] 探测到用户持续贴近 (连续5帧 < 0.25m) -> 执行低头回避动作 3 秒")
+                            s._is_hiding = True
+                            s._hide_start_time = now
+                        if len(s._face_roster) > 1:
+                            print(f"[GIMBAL] 抛弃过度贴近的 Face#{s.track_target_face_id}")
+                            s._face_switch_time = 0.0
+                            _trigger_track_speed_boost(now)
             else:
-                s._kiss_detect_frames = 0
-                # 如果表情不再是HeadTilt，且摇头动作已经结束，则重置触发器，允许下次重新触发
-                if getattr(s, '_kiss_triggered', False) and not getattr(s, '_is_shaking', False):
-                    s._kiss_triggered = False
+                s._proximity_frames = 0
+                s._proximity_triggered = False
 
-            if 'Happy' in expr or 'Laughing' in expr or 'Smiling' in expr or 'Surprise' in expr:
+            if "Happy" in expr or "Laughing" in expr or "Smiling" in expr or "Surprise" in expr:
                 s.face_gaze_duration = 15.0
-                if not getattr(s, '_is_nodding', False):
-                    # 检查是否完成了上一次点头，以及是否过了 2 秒的冷却期 (点头耗时1秒 + 2秒间隔 = 3秒)
-                    if now - getattr(s, '_nod_start_time', 0) > 3.0:
-                        # 触发点头动画
+                if not getattr(s, "_is_nodding", False):
+                    if now - getattr(s, "_nod_start_time", 0) > 3.0:
                         print(f"[GIMBAL] 探测到喜悦/惊讶 {expr} -> 触发 2 次点头")
                         s._is_nodding = True
                         s._nod_start_time = now
-            elif 'HeadTilt' in expr:
+            elif "Teeth" in expr:
                 s.face_gaze_duration = 15.0
-                if getattr(s, '_kiss_start_time', 0) == now: # 刚触发的第一帧
-                    print(f"[GIMBAL] 探测到歪头动作 {expr} -> 仅触发摇头")
-                    s._is_shaking = True
-            elif 'Angry' in expr or 'Disgust' in expr:
-                # 产生排斥情绪
-                if len(s._face_roster) <= 1:
-                    # 只有一张脸时，不脱战，而是触发 3 秒低头回避
-                    if not getattr(s, '_is_hiding', False):
-                        print(f"[GIMBAL] 探测到负面情绪 {expr} -> 单人环境，执行低头回避动作 3 秒")
-                        s._is_hiding = True
-                        s._hide_start_time = now
-                else:
-                    # 多张脸时主动抛弃当前目标轮换
-                    print(f"[GIMBAL] 探测到负面情绪 {expr} -> 抛弃 Face#{s.track_target_face_id}")
-                    s._face_switch_time = 0.0 # 使得下一个 tick 立刻触发轮换
-                    _trigger_track_speed_boost(now)
+                if not getattr(s, "_is_shaking", False):
+                    if now - getattr(s, "_kiss_start_time", 0) > 3.0:
+                        print(f"[GIMBAL] 探测到露出牙齿 {expr} -> 触发 2 次摇头反馈")
+                        s._is_shaking = True
+                        s._kiss_start_time = now
+            elif "HeadTilt" in expr:
+                s.face_gaze_duration = 15.0
             else:
                 s.face_gaze_duration = 8.0
+
+
             
             if getattr(s, '_is_nodding', False) and now - getattr(s, '_nod_start_time', 0) > 1.0:
                 s._is_nodding = False
@@ -1940,7 +1972,7 @@ def _update_track(dt, now):
             nod_rate = math.sin(t_elapsed * math.pi * 4.0) * 30.0
             tilt_rate += nod_rate
             
-    # 亲吻情绪 -> 加入硬件摇头动作
+    # 露齿情绪 -> 加入硬件摇头动作
     if getattr(s, '_is_shaking', False):
         t_elapsed = now - getattr(s, '_kiss_start_time', now)
         if t_elapsed < 1.0:

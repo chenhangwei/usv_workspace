@@ -7,13 +7,78 @@ import numpy as np
 from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
+from .multi_agent_types import AgentLocalObservation, ENCOUNTER_TYPE_COUNT, NEIGHBOR_FEATURE_COUNT
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 
 
+def _migrate_obs_normalizer_state_for_obs_dim(state: dict, new_obs_dim: int) -> dict:
+    mean = np.asarray(state.get('mean', ()), dtype=np.float64)
+    var = np.asarray(state.get('var', ()), dtype=np.float64)
+    if mean.ndim != 1 or var.ndim != 1 or mean.shape != var.shape:
+        return state
+    old_obs_dim = int(mean.shape[0])
+    new_obs_dim = int(new_obs_dim)
+    if old_obs_dim == new_obs_dim or old_obs_dim <= 0 or new_obs_dim <= old_obs_dim:
+        return state
+
+    delta = new_obs_dim - old_obs_dim
+    new_ego_dim = AgentLocalObservation.ego_feature_size()
+    old_neighbor_dim = 6
+    old_neighbor_width = old_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
+    new_neighbor_width = new_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
+    can_insert_in_neighbors = (
+        old_neighbor_width >= 0
+        and new_neighbor_width >= 0
+        and old_neighbor_width % old_neighbor_dim == 0
+    )
+    old_ego_dim = new_ego_dim - delta
+    can_insert_in_ego = (
+        old_ego_dim > 0
+        and old_obs_dim >= old_ego_dim + ENCOUNTER_TYPE_COUNT
+        and (old_obs_dim - old_ego_dim - ENCOUNTER_TYPE_COUNT) % 6 == 0
+    )
+    migrated = dict(state)
+    if can_insert_in_neighbors:
+        max_neighbors = old_neighbor_width // old_neighbor_dim
+        if new_neighbor_width == max_neighbors * NEIGHBOR_FEATURE_COUNT and NEIGHBOR_FEATURE_COUNT > old_neighbor_dim:
+            mean_parts = [mean[:new_ego_dim]]
+            var_parts = [var[:new_ego_dim]]
+            old_pos = new_ego_dim
+            for _ in range(max_neighbors):
+                mean_parts.append(mean[old_pos:old_pos + old_neighbor_dim])
+                var_parts.append(var[old_pos:old_pos + old_neighbor_dim])
+                mean_parts.append(np.zeros(NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                var_parts.append(np.ones(NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                old_pos += old_neighbor_dim
+            mean_parts.append(mean[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            var_parts.append(var[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            migrated['mean'] = np.concatenate(mean_parts)
+            migrated['var'] = np.concatenate(var_parts)
+        else:
+            migrated['mean'] = np.concatenate([mean, np.zeros(delta, dtype=np.float64)])
+            migrated['var'] = np.concatenate([var, np.ones(delta, dtype=np.float64)])
+    elif can_insert_in_ego:
+        migrated['mean'] = np.concatenate([
+            mean[:old_ego_dim],
+            np.zeros(delta, dtype=np.float64),
+            mean[old_ego_dim:],
+        ])
+        migrated['var'] = np.concatenate([
+            var[:old_ego_dim],
+            np.ones(delta, dtype=np.float64),
+            var[old_ego_dim:],
+        ])
+    else:
+        migrated['mean'] = np.concatenate([mean, np.zeros(delta, dtype=np.float64)])
+        migrated['var'] = np.concatenate([var, np.ones(delta, dtype=np.float64)])
+    print(f'Migrated eval observation normalizer: {old_obs_dim} -> {new_obs_dim} dims.', flush=True)
+    return migrated
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Evaluate an RL policy in the multi-USV environment.')
-    parser.add_argument('--policy', choices=['auto', 'mappo', 'bc', 'zero'], default='auto', help='Policy backend.')
+    parser.add_argument('--policy', choices=['auto', 'mappo', 'mappo_router', 'bc', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--model', help='Policy model path (.pt for MAPPO, .npz for BC). Not required for zero policy.')
     parser.add_argument('--episodes', type=int, default=6, help='Evaluation episodes.')
     parser.add_argument('--steps-per-episode', type=int, default=160, help='Maximum steps per episode.')
@@ -56,6 +121,7 @@ class MappoActorPolicy:
             actor = build_attention_actor_from_checkpoint(
                 checkpoint, nn, torch, torch.device(device),
             )
+            obs_dim = int(getattr(actor, 'obs_dim', obs_dim))
         else:
             layers = []
             current_dim = obs_dim
@@ -83,7 +149,12 @@ class MappoActorPolicy:
         self._obs_normalizer = None
         if checkpoint.get('normalize_observations') and 'obs_normalizer' in checkpoint:
             self._obs_normalizer = ObservationNormalizer(obs_dim)
-            self._obs_normalizer.load_state_dict(checkpoint['obs_normalizer'])
+            norm_state = _migrate_obs_normalizer_state_for_obs_dim(checkpoint['obs_normalizer'], obs_dim)
+            self._obs_normalizer.load_state_dict(norm_state)
+
+    def set_active_scenario(self, scenario_name: str | None) -> None:
+        if hasattr(self._actor, 'set_active_scenario_name'):
+            self._actor.set_active_scenario_name(scenario_name)
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
         if self._obs_normalizer is not None:
@@ -98,6 +169,141 @@ class MappoActorPolicy:
             else:
                 action = raw.cpu().numpy()[0]
         return np.asarray(action, dtype=np.float32)
+
+
+class WeightedBlendPolicy:
+    def __init__(self, weighted_policies: list[tuple[MappoActorPolicy, float]]):
+        if not weighted_policies:
+            raise RuntimeError('WeightedBlendPolicy requires at least one expert.')
+
+        reference_policy = weighted_policies[0][0]
+        total_weight = 0.0
+        self._weighted_policies: list[tuple[MappoActorPolicy, float]] = []
+        for policy, weight in weighted_policies:
+            if policy.action_dim != reference_policy.action_dim or policy.obs_dim != reference_policy.obs_dim:
+                raise RuntimeError('All blended experts must share the same obs_dim/action_dim.')
+            scalar_weight = float(weight)
+            if scalar_weight <= 0.0:
+                raise RuntimeError('Blend weights must be positive.')
+            total_weight += scalar_weight
+            self._weighted_policies.append((policy, scalar_weight))
+
+        self._weighted_policies = [
+            (policy, weight / total_weight)
+            for policy, weight in self._weighted_policies
+        ]
+        self.action_dim = reference_policy.action_dim
+        self.obs_dim = reference_policy.obs_dim
+
+    def predict(self, observation: np.ndarray) -> np.ndarray:
+        blended = np.zeros(self.action_dim, dtype=np.float32)
+        for policy, weight in self._weighted_policies:
+            blended += np.asarray(policy.predict(observation), dtype=np.float32) * np.float32(weight)
+        return blended
+
+
+class ScenarioRouterPolicy:
+    def __init__(self, router_config: dict, *, device: str = 'cpu'):
+        raw_scenario_models = router_config.get('scenario_models') or {}
+        if not isinstance(raw_scenario_models, dict):
+            raise RuntimeError('MAPPO router config requires scenario_models to be a mapping when provided.')
+
+        raw_scenario_blends = router_config.get('scenario_blends') or {}
+        if not isinstance(raw_scenario_blends, dict):
+            raise RuntimeError('MAPPO router config requires scenario_blends to be a mapping when provided.')
+
+        if not raw_scenario_models and not raw_scenario_blends:
+            raise RuntimeError('MAPPO router config requires at least one scenario_models or scenario_blends entry.')
+
+        overlapping_scenarios = set(raw_scenario_models) & set(raw_scenario_blends)
+        if overlapping_scenarios:
+            joined = ', '.join(sorted(str(value) for value in overlapping_scenarios))
+            raise RuntimeError(f'Scenarios cannot be defined in both scenario_models and scenario_blends: {joined}')
+
+        self._scenario_models = {
+            str(scenario_name): str(model_path)
+            for scenario_name, model_path in raw_scenario_models.items()
+        }
+        self._scenario_blends: dict[str, list[tuple[str, float]]] = {}
+        for scenario_name, raw_specs in raw_scenario_blends.items():
+            if not isinstance(raw_specs, list) or not raw_specs:
+                raise RuntimeError(
+                    'Each scenario_blends entry must be a non-empty list of objects '
+                    f'with model/model_path and weight fields. Problem scenario: {scenario_name}'
+                )
+            specs: list[tuple[str, float]] = []
+            for raw_spec in raw_specs:
+                if not isinstance(raw_spec, dict):
+                    raise RuntimeError(
+                        'Blend entries must be objects with model/model_path and weight fields. '
+                        f'Problem scenario: {scenario_name}'
+                    )
+                model_path = str(raw_spec.get('model') or raw_spec.get('model_path') or '').strip()
+                if not model_path:
+                    raise RuntimeError(
+                        'Blend entries must define model or model_path. '
+                        f'Problem scenario: {scenario_name}'
+                    )
+                weight = float(raw_spec.get('weight', 1.0))
+                if weight <= 0.0:
+                    raise RuntimeError(
+                        f'Blend weights must be positive. Problem scenario: {scenario_name}, model: {model_path}'
+                    )
+                specs.append((model_path, weight))
+            self._scenario_blends[str(scenario_name)] = specs
+
+        self._default_model = str(router_config.get('default_model') or next(iter(self._scenario_models.values())))
+        self._active_scenario: str | None = None
+        self._policies: dict[str, MappoActorPolicy] = {}
+        self._scenario_policies: dict[str, MappoActorPolicy | WeightedBlendPolicy] = {}
+
+        reference_policy: MappoActorPolicy | None = None
+        unique_paths = {self._default_model, *self._scenario_models.values()}
+        for blend_specs in self._scenario_blends.values():
+            unique_paths.update(model_path for model_path, _ in blend_specs)
+        for model_path in unique_paths:
+            _, policy = _load_mappo_checkpoint(model_path, device)
+            _require_supported_action_dim(policy.action_dim, model_path=model_path)
+            if reference_policy is None:
+                reference_policy = policy
+            elif policy.action_dim != reference_policy.action_dim or policy.obs_dim != reference_policy.obs_dim:
+                raise RuntimeError(
+                    'All router experts must share the same obs_dim/action_dim. '
+                    f'Got {model_path} -> (obs={policy.obs_dim}, action={policy.action_dim}), '
+                    f'expected (obs={reference_policy.obs_dim}, action={reference_policy.action_dim}).'
+                )
+            self._policies[model_path] = policy
+
+        if reference_policy is None:
+            raise RuntimeError('MAPPO router config did not resolve any expert checkpoints.')
+
+        self._default_policy = self._policies[self._default_model]
+        for scenario_name, model_path in self._scenario_models.items():
+            self._scenario_policies[scenario_name] = self._policies[model_path]
+        for scenario_name, blend_specs in self._scenario_blends.items():
+            self._scenario_policies[scenario_name] = WeightedBlendPolicy(
+                [(self._policies[model_path], weight) for model_path, weight in blend_specs]
+            )
+
+        self.action_dim = self._default_policy.action_dim
+        self.obs_dim = self._default_policy.obs_dim
+
+    def set_active_scenario(self, scenario_name: str | None) -> None:
+        self._active_scenario = str(scenario_name) if scenario_name else None
+
+    def _resolve_policy(self) -> MappoActorPolicy | WeightedBlendPolicy:
+        return self._scenario_policies.get(self._active_scenario or '', self._default_policy)
+
+    def predict(self, observation: np.ndarray) -> np.ndarray:
+        return self._resolve_policy().predict(observation)
+
+
+def _load_json_payload(model_path: str) -> dict:
+    path = Path(model_path)
+    payload = json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(payload, dict):
+        raise RuntimeError(f'Router config must be a JSON object: {model_path}')
+    return payload
 
 
 def _require_supported_action_dim(action_dim: int | None, *, model_path: str | None):
@@ -122,6 +328,11 @@ def _detect_policy_kind(policy_kind: str, model_path: str | None) -> str:
         return 'mappo'
     if suffix == '.npz':
         return 'bc'
+    if suffix == '.json':
+        payload = _load_json_payload(model_path)
+        policy_type = str(payload.get('policy_type', '')).strip().lower()
+        if policy_type in {'mappo_router', 'router', 'scenario_router'}:
+            return 'mappo_router'
     raise RuntimeError(f'Unable to infer policy type from model path: {model_path}')
 
 
@@ -136,9 +347,9 @@ def _resolve_max_neighbors(max_neighbors: str | int, policy) -> int:
     if str(max_neighbors).lower() != 'auto':
         return max(1, int(max_neighbors))
     obs_dim = getattr(policy, 'obs_dim', None)
-    if obs_dim is None or int(obs_dim) < 10:
+    if obs_dim is None or int(obs_dim) < AgentLocalObservation.ego_feature_size():
         return 4
-    inferred = (int(obs_dim) - 10) // 6
+    inferred = (int(obs_dim) - AgentLocalObservation.ego_feature_size() - ENCOUNTER_TYPE_COUNT) // NEIGHBOR_FEATURE_COUNT
     return max(1, inferred)
 
 
@@ -177,6 +388,82 @@ def _load_mappo_checkpoint(model_path: str, device: str) -> tuple[dict, MappoAct
     return checkpoint, MappoActorPolicy(checkpoint, device=device)
 
 
+def _build_env_kwargs_from_checkpoint(
+    checkpoint: dict,
+    policy,
+    *,
+    scenarios: tuple[str, ...] | None,
+    episode_timeout: float | None,
+    no_progress_timeout: float | None,
+    model_path: str,
+) -> tuple[dict, tuple[str, ...]]:
+    _require_supported_action_dim(getattr(policy, 'action_dim', None), model_path=model_path)
+    agent_namespaces = tuple(checkpoint['agent_namespaces'])
+    resolved_scenarios = tuple(scenarios) if scenarios else tuple(checkpoint.get('scenarios', MultiAgentScenarioFactory.available()))
+    resolved_action_mode = str(checkpoint.get('action_mode', 'full'))
+    if resolved_action_mode != 'full':
+        raise RuntimeError(
+            'Pure RL evaluation only supports checkpoints exported with action_mode="full". '
+            f'Received action_mode="{resolved_action_mode}" from {model_path}.'
+        )
+    resolved_max_neighbors = int(checkpoint.get('max_neighbors', max(1, int((policy.obs_dim - AgentLocalObservation.ego_feature_size() - ENCOUNTER_TYPE_COUNT) // NEIGHBOR_FEATURE_COUNT))))
+    resolved_max_agents = int(checkpoint.get('max_agents', len(agent_namespaces)))
+    env_kwargs = {
+        'agent_namespaces': agent_namespaces,
+        'enable_rl_backend': True,
+        'rl_control_mode': 'pure',
+        'action_mode': resolved_action_mode,
+        'action_bounds': ActionBounds(**checkpoint.get('action_bounds', {'linear_delta': 0.7, 'angular_delta': 0.6})),
+        'max_neighbors': resolved_max_neighbors,
+        'max_agents': max(resolved_max_agents, len(agent_namespaces)),
+        'cruise_speed': float(checkpoint.get('cruise_speed', 0.5)),
+        'max_angular_velocity': float(checkpoint.get('max_angular_velocity', 0.5)),
+        'heading_omega_deadband': float(checkpoint.get('heading_omega_deadband', 0.06)),
+        'heading_omega_reference': float(checkpoint.get('heading_omega_reference', 0.85)),
+        'angular_authority_power': float(checkpoint.get('angular_authority_power', 1.6)),
+        'angular_accel_limit': float(checkpoint.get('angular_accel_limit', 1.8)),
+        'angular_decel_limit': float(checkpoint.get('angular_decel_limit', 2.4)),
+        'conflict_turn_relief': float(checkpoint.get('conflict_turn_relief', 0.55)),
+        'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
+        'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
+        'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
+        'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
+        'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
+        'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
+        'default_scenarios': resolved_scenarios,
+        'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
+        'goal_proximity_reward_weight': float(checkpoint.get('goal_proximity_reward_weight', 0.0)),
+        'goal_proximity_relief_distance': float(checkpoint.get('goal_proximity_relief_distance', 3.0)),
+        'goal_proximity_heading_relief': float(checkpoint.get('goal_proximity_heading_relief', 0.0)),
+        'goal_proximity_smoothness_relief': float(checkpoint.get('goal_proximity_smoothness_relief', 0.0)),
+        'goal_proximity_conflict_relief': float(checkpoint.get('goal_proximity_conflict_relief', 0.0)),
+        'goal_proximity_speed_relief': float(checkpoint.get('goal_proximity_speed_relief', 0.0)),
+        'team_reward_weight': float(checkpoint.get('team_reward_weight', 0.30)),
+        'team_progress_weight': float(checkpoint.get('team_progress_weight', 1.20)),
+        'team_goal_proximity_weight': float(checkpoint.get('team_goal_proximity_weight', 0.0)),
+        'team_regression_penalty_weight': float(checkpoint.get('team_regression_penalty_weight', 0.0)),
+        'team_dispersion_penalty_weight': float(checkpoint.get('team_dispersion_penalty_weight', 0.0)),
+        'team_dispersion_margin': float(checkpoint.get('team_dispersion_margin', 0.0)),
+        'coordination_reward_weight': float(checkpoint.get('coordination_reward_weight', 0.20)),
+        'team_completion_bonus': float(checkpoint.get('team_completion_bonus', 18.0)),
+        'deadlock_penalty_weight': float(checkpoint.get('deadlock_penalty_weight', 4.0)),
+    }
+    return env_kwargs, resolved_scenarios
+
+
+def _load_mappo_router_policy(model_path: str, device: str) -> tuple[dict, ScenarioRouterPolicy, dict]:
+    router_config = _load_json_payload(model_path)
+    template_path = str(
+        router_config.get('env_template')
+        or router_config.get('default_model')
+        or next(iter(router_config.get('scenario_models', {}).values()), '')
+    )
+    if not template_path:
+        raise RuntimeError(f'MAPPO router config does not declare any expert checkpoint: {model_path}')
+    checkpoint, _ = _load_mappo_checkpoint(template_path, device)
+    return checkpoint, ScenarioRouterPolicy(router_config, device=device), router_config
+
+
 def _load_policy_bundle(
     policy_kind: str,
     model_path: str | None,
@@ -195,58 +482,29 @@ def _load_policy_bundle(
         if model_path is None:
             raise RuntimeError('MAPPO evaluation requires --model.')
         checkpoint, policy = _load_mappo_checkpoint(model_path, device)
-        _require_supported_action_dim(policy.action_dim, model_path=model_path)
-        agent_namespaces = tuple(checkpoint['agent_namespaces'])
-        resolved_scenarios = tuple(scenarios) if scenarios else tuple(checkpoint.get('scenarios', MultiAgentScenarioFactory.available()))
-        resolved_rl_control_mode = 'pure'
-        resolved_action_mode = str(checkpoint.get('action_mode', 'full'))
-        if resolved_action_mode != 'full':
-            raise RuntimeError(
-                'Pure RL evaluation only supports checkpoints exported with action_mode="full". '
-                f'Received action_mode="{resolved_action_mode}" from {model_path}.'
-            )
-        resolved_max_neighbors = int(checkpoint.get('max_neighbors', max(1, int((policy.obs_dim - 10) // 6))))
-        resolved_max_agents = int(checkpoint.get('max_agents', len(agent_namespaces)))
-        env_kwargs = {
-            'agent_namespaces': agent_namespaces,
-            'enable_rl_backend': True,
-            'rl_control_mode': resolved_rl_control_mode,
-            'action_mode': resolved_action_mode,
-            'action_bounds': ActionBounds(**checkpoint.get('action_bounds', {'linear_delta': 0.7, 'angular_delta': 0.6})),
-            'max_neighbors': resolved_max_neighbors,
-            'max_agents': max(resolved_max_agents, len(agent_namespaces)),
-            'cruise_speed': float(checkpoint.get('cruise_speed', 0.5)),
-            'max_angular_velocity': float(checkpoint.get('max_angular_velocity', 0.5)),
-            'heading_omega_deadband': float(checkpoint.get('heading_omega_deadband', 0.06)),
-            'heading_omega_reference': float(checkpoint.get('heading_omega_reference', 0.85)),
-            'angular_authority_power': float(checkpoint.get('angular_authority_power', 1.6)),
-            'angular_accel_limit': float(checkpoint.get('angular_accel_limit', 1.8)),
-            'angular_decel_limit': float(checkpoint.get('angular_decel_limit', 2.4)),
-            'conflict_turn_relief': float(checkpoint.get('conflict_turn_relief', 0.55)),
-            'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
-            'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
-            'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
-            'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
-            'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
-            'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
-            'default_scenarios': resolved_scenarios,
-            'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
-            'goal_proximity_reward_weight': float(checkpoint.get('goal_proximity_reward_weight', 0.0)),
-            'goal_proximity_relief_distance': float(checkpoint.get('goal_proximity_relief_distance', 3.0)),
-            'goal_proximity_heading_relief': float(checkpoint.get('goal_proximity_heading_relief', 0.0)),
-            'goal_proximity_smoothness_relief': float(checkpoint.get('goal_proximity_smoothness_relief', 0.0)),
-            'goal_proximity_conflict_relief': float(checkpoint.get('goal_proximity_conflict_relief', 0.0)),
-            'goal_proximity_speed_relief': float(checkpoint.get('goal_proximity_speed_relief', 0.0)),
-            'team_reward_weight': float(checkpoint.get('team_reward_weight', 0.30)),
-            'team_progress_weight': float(checkpoint.get('team_progress_weight', 1.20)),
-            'team_goal_proximity_weight': float(checkpoint.get('team_goal_proximity_weight', 0.0)),
-            'team_regression_penalty_weight': float(checkpoint.get('team_regression_penalty_weight', 0.0)),
-            'team_dispersion_penalty_weight': float(checkpoint.get('team_dispersion_penalty_weight', 0.0)),
-            'team_dispersion_margin': float(checkpoint.get('team_dispersion_margin', 0.0)),
-            'coordination_reward_weight': float(checkpoint.get('coordination_reward_weight', 0.20)),
-            'team_completion_bonus': float(checkpoint.get('team_completion_bonus', 18.0)),
-            'deadlock_penalty_weight': float(checkpoint.get('deadlock_penalty_weight', 4.0)),
-        }
+        env_kwargs, resolved_scenarios = _build_env_kwargs_from_checkpoint(
+            checkpoint,
+            policy,
+            scenarios=scenarios,
+            episode_timeout=episode_timeout,
+            no_progress_timeout=no_progress_timeout,
+            model_path=model_path,
+        )
+        return policy, env_kwargs, resolved_scenarios
+
+    if policy_kind == 'mappo_router':
+        if model_path is None:
+            raise RuntimeError('MAPPO router evaluation requires --model.')
+        checkpoint, policy, router_config = _load_mappo_router_policy(model_path, device)
+        configured_scenarios = tuple(router_config.get('scenarios', ())) or None
+        env_kwargs, resolved_scenarios = _build_env_kwargs_from_checkpoint(
+            checkpoint,
+            policy,
+            scenarios=tuple(scenarios) if scenarios else configured_scenarios,
+            episode_timeout=episode_timeout,
+            no_progress_timeout=no_progress_timeout,
+            model_path=model_path,
+        )
         return policy, env_kwargs, resolved_scenarios
 
     if policy_kind == 'bc':
@@ -432,7 +690,12 @@ def evaluate_policy(
                     positive_progress_steps = 0  # steps where distance decreased
                     stall_steps = 0              # steps where distance didn't change or increased
 
+                    if hasattr(policy_impl, 'set_active_scenario'):
+                        policy_impl.set_active_scenario(last_info.get('scenario', scenario_name))
+
                     for step in range(steps_per_episode):
+                        if hasattr(policy_impl, 'set_active_scenario'):
+                            policy_impl.set_active_scenario(last_info.get('scenario', scenario_name))
                         action_map = {
                             agent_id: policy_impl.predict(observations[agent_id])
                             for agent_id in env.agent_ids

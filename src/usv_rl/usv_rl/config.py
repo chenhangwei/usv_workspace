@@ -41,6 +41,13 @@ class RewardConfig:
     head_on_phase_gate_strength: float = 0.0
     crossing_starboard_turn_reward_weight: float = 0.7
     crossing_forward_reward_weight: float = 0.45
+    crossing_slowdown_reward_weight: float = 0.0
+    crossing_overspeed_penalty_weight: float = 0.0
+    crossing_close_forward_penalty_weight: float = 0.0
+    crossing_yield_speed: float = 0.12
+    crossing_time_separation_reward_weight: float = 0.0
+    crossing_time_separation_penalty_weight: float = 0.0
+    crossing_time_gap_target: float = 6.0
     overtaking_starboard_turn_reward_weight: float = 0.55
     overtaking_forward_reward_weight: float = 0.35
     overtaking_corridor_reward_weight: float = 0.9

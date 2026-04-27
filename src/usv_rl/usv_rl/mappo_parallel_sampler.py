@@ -30,6 +30,8 @@ def _build_reward_config(args) -> RewardConfig:
         goal_bonus=float(args.goal_bonus),
         collision_penalty=float(args.collision_penalty),
         near_miss_weight=float(args.near_miss_weight),
+        near_miss_exponent=float(args.near_miss_exponent),
+        head_on_near_miss_distance=float(args.head_on_near_miss_distance),
         conflict_distance=float(args.conflict_distance),
         anticipation_distance=float(args.anticipation_distance),
         conflict_risk_weight=float(args.conflict_risk_weight),
@@ -55,6 +57,13 @@ def _build_reward_config(args) -> RewardConfig:
         head_on_phase_gate_strength=float(args.head_on_phase_gate_strength),
         crossing_starboard_turn_reward_weight=float(args.crossing_starboard_turn_reward_weight),
         crossing_forward_reward_weight=float(args.crossing_forward_reward_weight),
+        crossing_slowdown_reward_weight=float(args.crossing_slowdown_reward_weight),
+        crossing_overspeed_penalty_weight=float(args.crossing_overspeed_penalty_weight),
+        crossing_close_forward_penalty_weight=float(args.crossing_close_forward_penalty_weight),
+        crossing_yield_speed=float(args.crossing_yield_speed),
+        crossing_time_separation_reward_weight=float(args.crossing_time_separation_reward_weight),
+        crossing_time_separation_penalty_weight=float(args.crossing_time_separation_penalty_weight),
+        crossing_time_gap_target=float(args.crossing_time_gap_target),
         overtaking_starboard_turn_reward_weight=float(args.overtaking_starboard_turn_reward_weight),
         overtaking_forward_reward_weight=float(args.overtaking_forward_reward_weight),
         overtaking_corridor_reward_weight=float(args.overtaking_corridor_reward_weight),
@@ -73,6 +82,20 @@ def _build_reward_config(args) -> RewardConfig:
         angular_accel_penalty_weight=float(args.angular_accel_penalty_weight),
         straight_line_omega_penalty_weight=float(args.straight_line_omega_penalty_weight),
         saturated_omega_flip_penalty_weight=float(args.saturated_omega_flip_penalty_weight),
+        forward_speed_change_penalty_weight=float(args.forward_speed_change_penalty_weight),
+        omega_flip_saturation_threshold=float(args.omega_flip_saturation_threshold),
+        straight_line_omega_conflict_floor=float(args.straight_line_omega_conflict_floor),
+        conflict_overspeed_penalty_weight=float(args.conflict_overspeed_penalty_weight),
+        proximity_gradient_penalty_weight=float(args.proximity_gradient_penalty_weight),
+        proximity_gradient_distance=float(args.proximity_gradient_distance),
+        speed_distance_coupling_penalty_weight=float(args.speed_distance_coupling_penalty_weight),
+        speed_distance_coupling_threshold=float(args.speed_distance_coupling_threshold),
+        heading_convergence_reward_weight=float(args.heading_convergence_reward_weight),
+        heading_convergence_threshold_deg=float(args.heading_convergence_threshold_deg),
+        heading_correction_reward_weight=float(args.heading_correction_reward_weight),
+        straight_line_omega_cte_gate=float(args.straight_line_omega_cte_gate),
+        avoidance_turn_reward_weight=float(args.avoidance_turn_reward_weight),
+        near_goal_idle_penalty_weight=float(args.near_goal_idle_penalty_weight),
     )
 
 
@@ -138,6 +161,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             scenario_spawn_position_std=float(getattr(args, 'scenario_spawn_position_std', 0.0)),
             scenario_spawn_heading_std=float(getattr(args, 'scenario_spawn_heading_std', 0.0)),
             scenario_goal_position_std=float(getattr(args, 'scenario_goal_position_std', 0.0)),
+            encounter_type_dropout=float(getattr(args, 'encounter_type_dropout', 0.0)),
             sim_tau_linear=float(getattr(args, 'sim_tau_linear', 0.45)),
             sim_tau_angular=float(getattr(args, 'sim_tau_angular', 0.25)),
             dr_tau_linear_low=float(getattr(args, 'dr_tau_linear_low', 0.0)),
@@ -147,6 +171,8 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
             cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
+            max_waypoints_per_episode=int(getattr(args, 'max_waypoints_per_episode', 1)),
+            waypoint_bonus=float(getattr(args, 'waypoint_bonus', 10.0)),
         )
     )
 
@@ -217,11 +243,26 @@ def _flatten_rollout_batches(storage_batches: list[np.ndarray], *, dtype=np.floa
     return np.concatenate([np.asarray(batch, dtype=dtype) for batch in storage_batches], axis=0)
 
 
+def _scenario_index_map(scenarios: tuple[str, ...]) -> dict[str, int]:
+    return {str(scenario_name): index for index, scenario_name in enumerate(scenarios)}
+
+
+def _actor_forward(actor, obs_tensor, scenario_ids=None):
+    if scenario_ids is not None and (
+        bool(getattr(actor, 'scenario_residual_enabled', False))
+        or bool(getattr(actor, 'scenario_head_enabled', False))
+        or bool(getattr(actor, 'scenario_trunk_enabled', False))
+    ):
+        return actor(obs_tensor, scenario_ids=scenario_ids)
+    return actor(obs_tensor)
+
+
 def _collect_worker_rollout(
     *,
     env,
     observations,
     global_state,
+    scenario_to_index: dict[str, int],
     actor,
     critic,
     actor_log_std,
@@ -252,6 +293,7 @@ def _collect_worker_rollout(
     agent_steps = 0
     episode_count = 0
     current_scenario = env.current_scenario_name
+    current_scenario_id = int(scenario_to_index.get(current_scenario, -1))
 
     for _ in range(rollout_steps):
         agent_order = env.agent_ids
@@ -262,9 +304,12 @@ def _collect_worker_rollout(
         obs_tensor = torch.as_tensor(obs_batch_for_net, dtype=torch.float32)
         state_tensor = torch.as_tensor(state_batch, dtype=torch.float32)
         critic_input = torch.cat([obs_tensor, state_tensor], dim=-1)
+        scenario_id_tensor = None
+        if current_scenario_id >= 0:
+            scenario_id_tensor = torch.full((len(agent_order),), current_scenario_id, dtype=torch.long)
 
         with torch.no_grad():
-            action_mean = actor(obs_tensor)
+            action_mean = _actor_forward(actor, obs_tensor, scenario_id_tensor)
             if squash_actions:
                 _half = (action_high_tensor - action_low_tensor) / 2.0
                 _mid = (action_high_tensor + action_low_tensor) / 2.0
@@ -319,7 +364,7 @@ def _collect_worker_rollout(
         storage_values.append(value_tensor.detach().cpu().numpy())
         storage_rewards.append(reward_batch)
         storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
-        storage_scenario_ids.append(np.full(len(agent_order), hash(current_scenario) & 0x7FFFFFFF, dtype=np.int32))
+        storage_scenario_ids.append(np.full(len(agent_order), current_scenario_id, dtype=np.int32))
 
         agent_steps += len(agent_order)
         observations = next_observations
@@ -351,6 +396,7 @@ def _collect_worker_rollout(
                 consecutive_env_failures = 0
             global_state = info['global_state']
             current_scenario = env.current_scenario_name
+            current_scenario_id = int(scenario_to_index.get(current_scenario, -1))
 
     if not storage_obs:
         return {
@@ -397,7 +443,7 @@ def _collect_worker_rollout(
     return result, env, observations, global_state, consecutive_env_failures
 
 
-def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict: dict, agent_namespaces: tuple[str, ...], scenarios: tuple[str, ...], hidden_sizes: tuple[int, ...]):
+def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict: dict, agent_namespaces: tuple[str, ...], scenarios: tuple[str, ...], hidden_sizes: tuple[int, ...], model_scenarios: tuple[str, ...] | None = None):
     os.environ['ROS_DOMAIN_ID'] = str(domain_id)
 
     env = None
@@ -406,8 +452,10 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
         from torch import nn
 
         args = SimpleNamespace(**args_dict)
+        model_scenarios = tuple(model_scenarios or scenarios)
         reward_config = _build_reward_config(args)
         env_factory = lambda: _create_env(args, agent_namespaces, scenarios, reward_config)
+        scenario_to_index = _scenario_index_map(model_scenarios)
         max_env_recovery_attempts = 3
         max_consecutive_env_failures = 5
         consecutive_env_failures = 0
@@ -423,9 +471,7 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
         if use_neighbor_attention:
             from usv_rl.neighbor_attention import AttentionActor, AttentionCritic
             from usv_rl.multi_agent_types import ENCOUNTER_TYPE_COUNT
-            _nb_dim = 6
-            _ego_dim = 10
-            max_neighbors = (env.local_observation_size - _ego_dim - ENCOUNTER_TYPE_COUNT) // _nb_dim
+            max_neighbors = max(1, int(getattr(args, 'max_neighbors', 4)))
             embed_dim = int(getattr(args, 'attention_embed_dim', 32))
             num_heads = int(getattr(args, 'attention_num_heads', 1))
             actor = AttentionActor(
@@ -435,6 +481,11 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
                 action_dim=env.action_dim,
                 embed_dim=embed_dim,
                 num_heads=num_heads,
+                encounter_residual=bool(getattr(args, 'attention_encounter_residual', False)),
+                scenario_names=tuple(model_scenarios),
+                scenario_residual=bool(getattr(args, 'attention_scenario_residual', False)),
+                scenario_head=bool(getattr(args, 'attention_scenario_head', False)),
+                scenario_trunk=bool(getattr(args, 'attention_scenario_trunk', False)),
             ).to('cpu')
             critic = AttentionCritic(
                 max_neighbors=max_neighbors,
@@ -480,6 +531,7 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
                 env=env,
                 observations=observations,
                 global_state=global_state,
+                scenario_to_index=scenario_to_index,
                 actor=actor,
                 critic=critic,
                 actor_log_std=actor_log_std,
@@ -524,6 +576,7 @@ class ParallelRolloutSampler:
         hidden_sizes: tuple[int, ...],
         num_workers: int,
         base_ros_domain_id: int,
+        model_scenarios: tuple[str, ...] | None = None,
     ):
         self._agent_count = len(agent_namespaces)
         self._num_workers = int(num_workers)
@@ -543,6 +596,7 @@ class ParallelRolloutSampler:
                     tuple(agent_namespaces),
                     tuple(scenarios),
                     tuple(hidden_sizes),
+                    tuple(model_scenarios or scenarios),
                 ),
                 daemon=True,
             )

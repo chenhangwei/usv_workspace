@@ -315,6 +315,20 @@ class MultiAgentTrainingBridge(Node):
             bearing -= 2.0 * math.pi
         while bearing < -math.pi:
             bearing += 2.0 * math.pi
+        rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+        if rel_speed_sq > 1e-6:
+            tcpa_seconds = -((rel_x * rel_vx) + (rel_y * rel_vy)) / rel_speed_sq
+        else:
+            tcpa_seconds = 1e3
+        if tcpa_seconds <= 0.0:
+            tcpa_norm = 1.0
+            dcpa = distance
+        else:
+            cpa_x = rel_x + rel_vx * tcpa_seconds
+            cpa_y = rel_y + rel_vy * tcpa_seconds
+            dcpa = math.hypot(cpa_x, cpa_y)
+            tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
+        dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
         return AgentNeighborObservation(
             source_id=source_id,
             rel_x=rel_x,
@@ -323,6 +337,8 @@ class MultiAgentTrainingBridge(Node):
             rel_vy=rel_vy,
             distance=distance,
             bearing=bearing,
+            tcpa=tcpa_norm,
+            dcpa=dcpa_norm,
         )
 
     def get_global_state(

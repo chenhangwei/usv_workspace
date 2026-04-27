@@ -1,4 +1,5 @@
 import argparse
+import copy
 import json
 from contextlib import nullcontext
 import math
@@ -14,7 +15,7 @@ from .config import ActionBounds, RewardConfig
 from .mappo_parallel_sampler import ParallelRolloutSampler
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
-from .multi_agent_types import AgentLocalObservation, FleetGlobalState
+from .multi_agent_types import AgentLocalObservation, FleetGlobalState, ENCOUNTER_TYPE_COUNT, NEIGHBOR_FEATURE_COUNT
 from .observation_normalizer import ObservationNormalizer
 
 
@@ -41,6 +42,8 @@ def parse_args():
     parser.add_argument('--entropy-coef', type=float, default=0.01, help='Entropy bonus coefficient (initial value when --entropy-coef-end is set).')
     parser.add_argument('--entropy-coef-end', type=float, default=None, help='Final entropy coefficient for linear annealing. If unset, entropy-coef stays constant.')
     parser.add_argument('--value-coef', type=float, default=0.5, help='Value loss coefficient.')
+    parser.add_argument('--ppo-policy-loss-scale', type=float, default=1.0, help='Scale for PPO policy loss. Set to 0 for auxiliary-only repair updates.')
+    parser.add_argument('--ppo-value-loss-scale', type=float, default=1.0, help='Scale for PPO value loss. Set to 0 for auxiliary-only repair updates.')
     parser.add_argument('--max-grad-norm', type=float, default=0.5, help='Gradient clipping norm.')
     parser.add_argument('--device', default='auto', help='Torch device. Use auto to prefer CUDA when available.')
     parser.add_argument('--amp', choices=['auto', 'on', 'off'], default='auto', help='Mixed precision mode. Auto enables AMP on CUDA and keeps CPU training in full precision.')
@@ -49,6 +52,7 @@ def parse_args():
     parser.add_argument('--torch-num-threads', type=int, default=None, help='Optional torch CPU thread cap to reduce contention with ROS sampling on small CPU instances.')
     parser.add_argument('--hidden-size', action='append', dest='hidden_sizes', type=int, default=None, help='Hidden layer size. Repeatable.')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name. Repeatable.')
+    parser.add_argument('--curriculum-scenario', action='append', dest='curriculum_scenarios', default=None, help='Rollout scenario name. Repeatable and may include duplicates to oversample hard scenarios while --scenario remains the unique deployable branch set.')
     parser.add_argument('--scenario-set', choices=['auto', 'smoke', 'dense', 'all'], default='auto', help='Scenario curriculum preset used when --scenario is not provided.')
     parser.add_argument('--max-neighbors', type=int, default=4, help='Neighbor slots in local observation encoding.')
     parser.add_argument('--max-agents', type=int, default=3, help='Maximum agents encoded in global state.')
@@ -111,6 +115,13 @@ def parse_args():
     parser.add_argument('--head-on-phase-gate-strength', type=float, default=RewardConfig.head_on_phase_gate_strength, help='Strength of corridor-progress gating on forward reward in head-on encounters (0=disabled, 1=full gate).')
     parser.add_argument('--crossing-starboard-turn-reward-weight', type=float, default=RewardConfig.crossing_starboard_turn_reward_weight, help='Reward weight for starboard give-way turns in crossing encounters.')
     parser.add_argument('--crossing-forward-reward-weight', type=float, default=RewardConfig.crossing_forward_reward_weight, help='Reward weight for maintaining forward motion while committing to starboard give-way turns in crossing encounters.')
+    parser.add_argument('--crossing-slowdown-reward-weight', type=float, default=RewardConfig.crossing_slowdown_reward_weight, help='Reward weight for slowing to a yield speed while committing to a starboard crossing turn.')
+    parser.add_argument('--crossing-overspeed-penalty-weight', type=float, default=RewardConfig.crossing_overspeed_penalty_weight, help='Penalty weight for exceeding crossing-yield-speed during give-way crossing encounters.')
+    parser.add_argument('--crossing-close-forward-penalty-weight', type=float, default=RewardConfig.crossing_close_forward_penalty_weight, help='Penalty weight for continuing forward into a close crossing encounter before establishing a turn.')
+    parser.add_argument('--crossing-yield-speed', type=float, default=RewardConfig.crossing_yield_speed, help='Target forward speed (m/s) for crossing give-way slowdown shaping.')
+    parser.add_argument('--crossing-time-separation-reward-weight', type=float, default=RewardConfig.crossing_time_separation_reward_weight, help='Reward weight for respecting dynamic crossing ETA priority / yield roles.')
+    parser.add_argument('--crossing-time-separation-penalty-weight', type=float, default=RewardConfig.crossing_time_separation_penalty_weight, help='Penalty weight for violating crossing ETA-gap yield roles.')
+    parser.add_argument('--crossing-time-gap-target', type=float, default=RewardConfig.crossing_time_gap_target, help='Target ETA gap (s) between vessels at the shared crossing point.')
     parser.add_argument('--overtaking-starboard-turn-reward-weight', type=float, default=RewardConfig.overtaking_starboard_turn_reward_weight, help='Reward weight for starboard bias during overtaking.')
     parser.add_argument('--overtaking-forward-reward-weight', type=float, default=RewardConfig.overtaking_forward_reward_weight, help='Reward weight for maintaining forward motion while committing to starboard overtaking bias.')
     parser.add_argument('--overtaking-corridor-reward-weight', type=float, default=RewardConfig.overtaking_corridor_reward_weight, help='Reward weight for opening starboard lateral clearance before passing a slower vessel.')
@@ -147,9 +158,15 @@ def parse_args():
     parser.add_argument('--neighbor-attention', action='store_true', help='Replace fixed neighbor padding with attention-based neighbor aggregation. Learns to focus on the most relevant neighbor (nearest, highest TCPA, head-on, etc.).')
     parser.add_argument('--attention-embed-dim', type=int, default=32, help='Embedding dimension for neighbor attention encoder.')
     parser.add_argument('--attention-num-heads', type=int, default=1, help='Number of attention heads for neighbor attention encoder.')
+    parser.add_argument('--attention-encounter-residual', action='store_true', help='Add an encounter-conditioned residual action head on top of the shared attention actor. The residual head is zero-initialized so loading an old checkpoint preserves its initial policy.')
+    parser.add_argument('--attention-scenario-residual', action='store_true', help='Add scenario-specific residual action heads on top of the shared attention actor. Each scenario gets a separate zero-initialized branch selected by scenario id.')
+    parser.add_argument('--attention-scenario-head', action='store_true', help='Add scenario-specific action heads that replace the final actor slice for the active scenario while leaving the shared trunk untouched.')
+    parser.add_argument('--attention-scenario-trunk', action='store_true', help='Add scenario-specific post-attention actor trunks that replace the shared actor MLP for the active scenario while keeping the attention encoder shared.')
+    parser.add_argument('--freeze-actor-base', action='store_true', help='Freeze the shared actor weights and train only scenario-specific branches, heads, or trunks. Requires --attention-encounter-residual, --attention-scenario-residual, --attention-scenario-head, or --attention-scenario-trunk.')
     parser.add_argument('--squash-actions', action='store_true', help='Apply tanh squashing to actor output for smooth bounded actions.')
     parser.add_argument('--min-forward-speed', type=float, default=0.0, help='Minimum forward speed enforced via action bounds when squash-actions is enabled.')
     parser.add_argument('--normalize-observations', action='store_true', help='Enable running observation normalization for stable training across mixed feature scales.')
+    parser.add_argument('--freeze-observation-normalizer', action='store_true', help='Keep loaded observation-normalizer statistics fixed during training. Useful for branch-only scenario repair without shifting all deployed scenario inputs.')
     parser.add_argument('--domain-randomization', action='store_true', help='Enable domain randomization (sensor noise, current drift, actuator noise) for sim-to-real robustness.')
     parser.add_argument('--dr-position-noise-std', type=float, default=0.10, help='GPS observation noise standard deviation (m).')
     parser.add_argument('--dr-heading-noise-std', type=float, default=0.02, help='Compass observation noise standard deviation (rad).')
@@ -198,6 +215,51 @@ def parse_args():
     parser.add_argument('--base-ros-domain-id', type=int, default=100, help='Base ROS domain ID used when --num-sampler-workers > 1. Worker rank is added to this base.')
     parser.add_argument('--per-scenario-advantage-norm', action='store_true', help='Normalize advantages per-scenario instead of globally. Prevents reward-scale imbalance from causing gradient dominance by easier scenarios (anti-forgetting).')
     parser.add_argument('--scenario-balanced-loss', action='store_true', help='Weight PPO loss samples inversely to their scenario sample count. Equalizes per-scenario gradient contribution regardless of episode length (anti-forgetting).')
+    parser.add_argument('--crossing-imitation-weight', type=float, default=0.0, help='Auxiliary trainer-side action imitation weight for the three_usv_crossing scenario. The final checkpoint remains a single neural MAPPO policy.')
+    parser.add_argument('--crossing-imitation-weight-end', type=float, default=None, help='Final crossing imitation weight for linear annealing. If unset, crossing-imitation-weight stays constant.')
+    parser.add_argument('--crossing-imitation-pretrain-epochs', type=int, default=0, help='Extra actor-only imitation epochs after each rollout update. Trainer-side only; final artifact remains one neural MAPPO checkpoint.')
+    parser.add_argument('--crossing-imitation-clear-speed', type=float, default=0.32, help='Target forward speed for the highest-priority crossing vessel in the auxiliary imitation loss.')
+    parser.add_argument('--crossing-imitation-middle-speed', type=float, default=0.10, help='Target forward speed for the middle-priority crossing vessel in the auxiliary imitation loss.')
+    parser.add_argument('--crossing-imitation-yield-speed', type=float, default=0.0, help='Target forward speed for the yielding crossing vessel in the auxiliary imitation loss.')
+    parser.add_argument('--crossing-imitation-clear-omega', type=float, default=-0.10, help='Target yaw rate for the highest-priority crossing vessel in the auxiliary imitation loss. Negative is starboard.')
+    parser.add_argument('--crossing-imitation-middle-omega', type=float, default=-0.14, help='Target yaw rate for the middle-priority crossing vessel in the auxiliary imitation loss. Negative is starboard.')
+    parser.add_argument('--crossing-imitation-yield-omega', type=float, default=-0.18, help='Target yaw rate for the yielding crossing vessel in the auxiliary imitation loss. Negative is starboard.')
+    parser.add_argument('--crossing-imitation-eta-gate', type=float, default=0.95, help='Only apply crossing imitation while normalized conflict ETA is below this gate.')
+    parser.add_argument('--crossing-imitation-phase-min', type=float, default=-0.90, help='Minimum conflict_phase for crossing imitation activation.')
+    parser.add_argument('--crossing-imitation-phase-max', type=float, default=0.22, help='Maximum conflict_phase for crossing imitation activation.')
+    parser.add_argument('--near-goal-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary action loss weight for finishing the final near-goal meters. Final artifact remains one neural MAPPO policy.')
+    parser.add_argument('--near-goal-finish-weight-end', type=float, default=None, help='Final near-goal finish auxiliary weight for linear annealing. If unset, near-goal-finish-weight stays constant.')
+    parser.add_argument('--near-goal-finish-distance', type=float, default=2.2, help='Distance to goal below which the trainer-side finish auxiliary can activate.')
+    parser.add_argument('--near-goal-finish-goal-tolerance', type=float, default=0.8, help='Goal tolerance used by the trainer-side finish auxiliary to avoid pushing already-complete samples.')
+    parser.add_argument('--near-goal-finish-phase-min', type=float, default=0.0, help='Minimum conflict_phase for the finish auxiliary. Use >=0 to target post-conflict completion.')
+    parser.add_argument('--near-goal-finish-target-speed', type=float, default=0.18, help='Target forward speed for the trainer-side finish auxiliary near goal.')
+    parser.add_argument('--near-goal-finish-max-omega', type=float, default=0.18, help='Maximum heading-correction yaw target used by the finish auxiliary.')
+    parser.add_argument('--near-goal-finish-omega-weight', type=float, default=0.35, help='Relative loss weight for finish auxiliary yaw-rate target.')
+    parser.add_argument('--near-goal-finish-crossing-only', action='store_true', help='Apply the finish auxiliary only to three_usv_crossing samples.')
+    parser.add_argument('--lagging-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary loss weight that only activates after part of the team has reached the goal and pushes remaining near-goal crossing agents to finish.')
+    parser.add_argument('--lagging-finish-weight-end', type=float, default=None, help='Final lagging-finish auxiliary weight for linear annealing. If unset, lagging-finish-weight stays constant.')
+    parser.add_argument('--lagging-finish-distance', type=float, default=4.0, help='Distance-to-goal band for lagging agents once teammate completion is already high.')
+    parser.add_argument('--lagging-finish-goal-tolerance', type=float, default=0.8, help='Goal tolerance used by the lagging-finish auxiliary.')
+    parser.add_argument('--lagging-finish-phase-min', type=float, default=0.0, help='Minimum conflict_phase for lagging-finish activation.')
+    parser.add_argument('--lagging-finish-target-speed', type=float, default=0.14, help='Target forward speed for lagging agents after teammates have reached goals.')
+    parser.add_argument('--lagging-finish-min-speed-scale', type=float, default=0.25, help='Minimum fraction of lagging-finish-target-speed used before an agent enters the goal tolerance.')
+    parser.add_argument('--lagging-finish-raw-target', action='store_true', help='Use the stored raw navigation command as the lagging-finish trainer target when active, clipped by target-speed and max-omega.')
+    parser.add_argument('--lagging-finish-max-omega', type=float, default=0.10, help='Maximum yaw-rate correction target for lagging-finish auxiliary.')
+    parser.add_argument('--lagging-finish-omega-weight', type=float, default=0.25, help='Relative yaw-rate loss weight for lagging-finish auxiliary.')
+    parser.add_argument('--lagging-finish-hold-omega-only', action='store_true', help='Apply lagging-finish yaw-rate loss only to already-reached hold samples, while lagging samples receive linear-speed guidance only.')
+    parser.add_argument('--lagging-finish-hold-weight', type=float, default=1.0, help='Extra multiplier for already-reached hold samples inside the lagging-finish auxiliary.')
+    parser.add_argument('--lagging-finish-min-team-completion', type=float, default=0.60, help='Minimum global goal_completion_ratio before lagging-finish activates. For three agents, 0.60 targets the 2/3-complete state.')
+    parser.add_argument('--lagging-finish-max-team-completion', type=float, default=0.999, help='Maximum global goal_completion_ratio before lagging-finish deactivates.')
+    parser.add_argument('--lagging-finish-near-team-tolerance', type=float, default=0.0, help='Optional distance-to-goal tolerance used to treat teammates as near-complete for lagging-finish activation. 0 disables this trainer-only gate.')
+    parser.add_argument('--lagging-finish-min-team-separation', type=float, default=0.0, help='Optional minimum fleet separation required before lagging-finish activates. 0 disables this gate.')
+    parser.add_argument('--lagging-finish-safe-team-separation', type=float, default=0.0, help='Optional separation where lagging-finish reaches full target speed; below this, the trainer target speed is reduced toward zero. 0 disables this trainer-only scaling.')
+    parser.add_argument('--lagging-finish-crossing-only', action='store_true', help='Apply the lagging-finish auxiliary only to three_usv_crossing samples.')
+    parser.add_argument('--lagging-finish-hold-reached', action='store_true', help='Also train already-reached agents to hold still while lagging teammates finish.')
+    parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
+    parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
+    parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
+    parser.add_argument('--policy-anchor-exclude-lagging-finish', action='store_true', help='Exclude samples currently targeted by lagging-finish from policy-anchor loss.')
+    parser.add_argument('--separate-actor-critic-grad-clip', action='store_true', help='Clip actor/log-std and critic gradients separately so large value losses do not suppress trainer-side actor auxiliaries.')
     return parser.parse_args()
 
 
@@ -232,6 +294,658 @@ def _build_mlp(nn, input_dim: int, hidden_sizes: tuple[int, ...], output_dim: in
         current_dim = hidden_size
     layers.append(nn.Linear(current_dim, output_dim))
     return nn.Sequential(*layers)
+
+
+def _scenario_branch_indices_from_missing_keys(missing_keys, prefix: str) -> list[int]:
+    indices: set[int] = set()
+    for key in missing_keys:
+        if not key.startswith(prefix):
+            continue
+        remainder = key[len(prefix):]
+        index_text = remainder.split('.', 1)[0]
+        if index_text.isdigit():
+            indices.add(int(index_text))
+    return sorted(indices)
+
+
+def _copy_sequential_modules_from_base(target_modules, source_modules) -> None:
+    if len(target_modules) != len(source_modules):
+        raise RuntimeError(
+            'Scenario branch/base MLP module count mismatch: '
+            f'{len(target_modules)} != {len(source_modules)}'
+        )
+    for target_module, source_module in zip(target_modules, source_modules):
+        target_module.load_state_dict(source_module.state_dict())
+
+
+def _initialize_missing_scenario_branches_from_base(actor, missing_keys) -> list[str]:
+    """Warm-start newly added scenario action heads/trunks from the loaded base MLP.
+
+    Scenario heads/trunks are constructed before checkpoint loading. When a base checkpoint
+    predates those modules, strict=False leaves them at random initialization unless we copy
+    the now-loaded shared actor MLP into the missing per-scenario branches.
+    """
+    initialized: list[str] = []
+    missing_keys = tuple(missing_keys or ())
+
+    head_indices = _scenario_branch_indices_from_missing_keys(missing_keys, 'scenario_action_heads.')
+    scenario_action_heads = getattr(actor, 'scenario_action_heads', None)
+    if head_indices and scenario_action_heads is not None:
+        tail_start = int(getattr(actor, '_scenario_head_tail_start', max(0, len(actor.mlp) - 3)))
+        base_tail_modules = list(actor.mlp[tail_start:])
+        for scenario_index in head_indices:
+            if scenario_index < len(scenario_action_heads):
+                _copy_sequential_modules_from_base(list(scenario_action_heads[scenario_index]), base_tail_modules)
+        initialized.append(f'scenario_action_heads[{head_indices}]')
+
+    trunk_indices = _scenario_branch_indices_from_missing_keys(missing_keys, 'scenario_actor_trunks.')
+    scenario_actor_trunks = getattr(actor, 'scenario_actor_trunks', None)
+    if trunk_indices and scenario_actor_trunks is not None:
+        base_trunk_modules = list(actor.mlp)
+        for scenario_index in trunk_indices:
+            if scenario_index < len(scenario_actor_trunks):
+                _copy_sequential_modules_from_base(list(scenario_actor_trunks[scenario_index]), base_trunk_modules)
+        initialized.append(f'scenario_actor_trunks[{trunk_indices}]')
+
+    return initialized
+
+
+def _maybe_freeze_actor_base(actor, args):
+    if not bool(getattr(args, 'freeze_actor_base', False)):
+        return
+    has_encounter_residual = bool(getattr(args, 'attention_encounter_residual', False))
+    has_scenario_residual = bool(getattr(args, 'attention_scenario_residual', False))
+    has_scenario_head = bool(getattr(args, 'attention_scenario_head', False))
+    has_scenario_trunk = bool(getattr(args, 'attention_scenario_trunk', False))
+    if not (has_encounter_residual or has_scenario_residual or has_scenario_head or has_scenario_trunk):
+        raise ValueError('--freeze-actor-base requires --attention-encounter-residual, --attention-scenario-residual, --attention-scenario-head, or --attention-scenario-trunk.')
+    if not (
+        getattr(actor, 'encounter_residual_enabled', False)
+        or getattr(actor, 'scenario_residual_enabled', False)
+        or getattr(actor, 'scenario_head_enabled', False)
+        or getattr(actor, 'scenario_trunk_enabled', False)
+    ):
+        raise ValueError('--freeze-actor-base is only supported for attention actors with scenario-specific branches or heads enabled.')
+
+    trainable = []
+    frozen_count = 0
+    for name, parameter in actor.named_parameters():
+        if (
+            name.startswith('encounter_residual.')
+            or name.startswith('scenario_residual_heads.')
+            or name.startswith('scenario_action_heads.')
+            or name.startswith('scenario_actor_trunks.')
+        ):
+            parameter.requires_grad = True
+            trainable.append(name)
+        else:
+            parameter.requires_grad = False
+            frozen_count += 1
+
+    if not trainable:
+        raise RuntimeError('freeze_actor_base left no trainable actor parameters.')
+
+    print(
+        'Freezing shared actor base and training only scenario-specific actor branches: '
+        f'trainable={trainable}, frozen_count={frozen_count}',
+        flush=True,
+    )
+
+
+def _actor_forward(actor, obs_tensor, scenario_ids=None):
+    if scenario_ids is not None and (
+        bool(getattr(actor, 'scenario_residual_enabled', False))
+        or bool(getattr(actor, 'scenario_head_enabled', False))
+        or bool(getattr(actor, 'scenario_trunk_enabled', False))
+    ):
+        return actor(obs_tensor, scenario_ids=scenario_ids)
+    return actor(obs_tensor)
+
+
+def _clip_actor_critic_gradients(torch, actor, critic, actor_log_std, max_grad_norm: float, *, separate: bool):
+    actor_params = [parameter for parameter in actor.parameters() if parameter.grad is not None]
+    if actor_log_std.grad is not None:
+        actor_params.append(actor_log_std)
+    critic_params = [parameter for parameter in critic.parameters() if parameter.grad is not None]
+    if separate:
+        if actor_params:
+            torch.nn.utils.clip_grad_norm_(actor_params, max_grad_norm)
+        if critic_params:
+            torch.nn.utils.clip_grad_norm_(critic_params, max_grad_norm)
+    else:
+        clip_params = actor_params + critic_params
+        if clip_params:
+            torch.nn.utils.clip_grad_norm_(clip_params, max_grad_norm)
+
+
+def _crossing_imitation_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    """Auxiliary trainer-side role schedule for the symmetric 3-USV crossing.
+
+    This does not run during evaluation or deployment. It only biases the actor
+    mean during PPO updates so the final single checkpoint can learn an
+    asymmetric clear / yield timing pattern instead of all agents charging the
+    shared conflict point.
+    """
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    if raw_obs.numel() == 0 or raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return action_mean.new_zeros(())
+
+    crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+    if crossing_scenario_id is not None and scenario_ids is not None:
+        scenario_mask = scenario_ids == int(crossing_scenario_id)
+    else:
+        # Last three entries are encounter one-hot: [head_on, crossing, overtaking].
+        scenario_mask = raw_obs[:, -2] > 0.5
+
+    phase = raw_obs[:, 13]
+    eta = raw_obs[:, 14]
+    priority = torch.clamp(raw_obs[:, 15], -1.0, 1.0)
+    eta_gap = torch.clamp(raw_obs[:, 16], 0.0, 1.0)
+
+    eta_gate = max(1e-3, float(getattr(args, 'crossing_imitation_eta_gate', 0.95)))
+    phase_min = float(getattr(args, 'crossing_imitation_phase_min', -0.90))
+    phase_max = float(getattr(args, 'crossing_imitation_phase_max', 0.22))
+    active_mask = (
+        scenario_mask
+        & (phase >= phase_min)
+        & (phase <= phase_max)
+        & (eta <= eta_gate)
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    clear_role = torch.clamp((priority - 0.20) / 0.80, 0.0, 1.0)
+    yield_role = torch.clamp((-priority - 0.20) / 0.80, 0.0, 1.0)
+    middle_role = torch.clamp(1.0 - clear_role - yield_role, 0.0, 1.0)
+
+    clear_speed = float(getattr(args, 'crossing_imitation_clear_speed', 0.32))
+    middle_speed = float(getattr(args, 'crossing_imitation_middle_speed', 0.10))
+    yield_speed = float(getattr(args, 'crossing_imitation_yield_speed', 0.0))
+    target_linear = (
+        clear_role * clear_speed
+        + middle_role * middle_speed
+        + yield_role * yield_speed
+    )
+
+    clear_omega = float(getattr(args, 'crossing_imitation_clear_omega', -0.10))
+    middle_omega = float(getattr(args, 'crossing_imitation_middle_omega', -0.14))
+    yield_omega = float(getattr(args, 'crossing_imitation_yield_omega', -0.18))
+    target_omega = (
+        clear_role * clear_omega
+        + middle_role * middle_omega
+        + yield_role * yield_omega
+    )
+
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+
+    approach_gate = torch.clamp(1.0 - (eta / eta_gate), 0.0, 1.0)
+    gap_deficit = torch.clamp(1.0 - eta_gap, 0.0, 1.0)
+    urgency = (0.30 + 0.70 * approach_gate) * (0.45 + 0.55 * gap_deficit)
+    range_scale = torch.clamp(high - low, min=1e-3)
+    per_sample_loss = (((action_mean - target) / range_scale) ** 2).mean(dim=-1) * urgency.to(dtype=action_mean.dtype)
+
+    mask_f = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _near_goal_finish_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    if raw_obs.numel() == 0 or raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return action_mean.new_zeros(())
+
+    if bool(getattr(args, 'near_goal_finish_crossing_only', False)):
+        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+        if crossing_scenario_id is not None and scenario_ids is not None:
+            scenario_mask = scenario_ids == int(crossing_scenario_id)
+        else:
+            scenario_mask = raw_obs[:, -2] > 0.5
+    else:
+        scenario_mask = torch.ones(raw_obs.shape[0], dtype=torch.bool, device=raw_obs.device)
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    phase = raw_obs[:, 13]
+
+    finish_distance = max(0.1, float(getattr(args, 'near_goal_finish_distance', 2.2)))
+    goal_tolerance = max(0.05, float(getattr(args, 'near_goal_finish_goal_tolerance', 0.8)))
+    phase_min = float(getattr(args, 'near_goal_finish_phase_min', 0.0))
+    upper_distance = max(goal_tolerance + 0.05, finish_distance)
+    active_mask = (
+        scenario_mask
+        & (distance <= upper_distance)
+        & (phase >= phase_min)
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    target_speed = max(0.0, float(getattr(args, 'near_goal_finish_target_speed', 0.18)))
+    speed_scale = torch.clamp(
+        (distance - (0.50 * goal_tolerance)) / max(upper_distance - (0.50 * goal_tolerance), 1e-3),
+        0.25,
+        1.0,
+    )
+    hold_mask = distance <= goal_tolerance
+    target_linear = torch.where(
+        hold_mask,
+        torch.zeros_like(distance),
+        target_speed * speed_scale,
+    )
+
+    max_omega = max(0.0, float(getattr(args, 'near_goal_finish_max_omega', 0.18)))
+    target_omega = torch.where(
+        hold_mask,
+        torch.zeros_like(heading_error),
+        -torch.clamp(heading_error / 0.70, -1.0, 1.0) * max_omega,
+    )
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    omega_weight = max(0.0, float(getattr(args, 'near_goal_finish_omega_weight', 0.35)))
+    linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
+    closeness = torch.clamp((upper_distance - distance) / max(upper_distance, 1e-3), 0.0, 1.0)
+    hold_boost = torch.where(hold_mask, torch.full_like(closeness, 0.65), torch.zeros_like(closeness))
+    urgency = (0.45 + 0.55 * closeness + hold_boost).to(dtype=action_mean.dtype)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+
+    mask_f = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _lagging_finish_active_mask(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        return torch.zeros(0, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    if bool(getattr(args, 'lagging_finish_crossing_only', False)):
+        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+        if crossing_scenario_id is not None and scenario_ids is not None:
+            scenario_mask = scenario_ids == int(crossing_scenario_id)
+        else:
+            scenario_mask = raw_obs[:, -2] > 0.5
+    else:
+        scenario_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    phase = raw_obs[:, 13]
+    team_min_separation = global_state[:, -5]
+    team_completion = torch.clamp(global_state[:, -1], 0.0, 1.0)
+    completion_for_gate = team_completion
+
+    finish_distance = max(0.1, float(getattr(args, 'lagging_finish_distance', 4.0)))
+    goal_tolerance = max(0.05, float(getattr(args, 'lagging_finish_goal_tolerance', 0.8)))
+    phase_min = float(getattr(args, 'lagging_finish_phase_min', 0.0))
+    min_team_completion = max(0.0, float(getattr(args, 'lagging_finish_min_team_completion', 0.60)))
+    max_team_completion = min(1.0, float(getattr(args, 'lagging_finish_max_team_completion', 0.999)))
+    near_team_tolerance = max(0.0, float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)))
+    min_team_separation = max(0.0, float(getattr(args, 'lagging_finish_min_team_separation', 0.0)))
+    safe_team_separation = max(0.0, float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)))
+    upper_distance = max(goal_tolerance + 0.05, finish_distance)
+
+    if near_team_tolerance > 0.0:
+        local_size = int(raw_obs.shape[-1])
+        packed_size = int(global_state.shape[-1]) - 5
+        if local_size > 0 and packed_size >= local_size and packed_size % local_size == 0:
+            team_blocks = global_state[:, :packed_size].reshape(global_state.shape[0], packed_size // local_size, local_size)
+            valid_team_mask = team_blocks.abs().sum(dim=-1) > 1e-6
+            team_distances = torch.clamp(team_blocks[:, :, 4], min=0.0)
+            near_team_mask = valid_team_mask & (team_distances <= near_team_tolerance)
+            valid_count = torch.clamp(valid_team_mask.sum(dim=1).to(dtype=team_completion.dtype), min=1.0)
+            near_completion = near_team_mask.sum(dim=1).to(dtype=team_completion.dtype) / valid_count
+            completion_for_gate = torch.maximum(team_completion, torch.clamp(near_completion, 0.0, 1.0))
+
+    team_gate = (completion_for_gate >= min_team_completion) & (team_completion < max_team_completion)
+    if min_team_separation > 0.0:
+        team_gate = team_gate & (team_min_separation >= min_team_separation)
+
+    hold_mask = distance <= goal_tolerance
+    lagging_mask = (distance > goal_tolerance) & (distance <= upper_distance)
+    include_hold = bool(getattr(args, 'lagging_finish_hold_reached', False))
+    role_mask = lagging_mask | (hold_mask if include_hold else torch.zeros_like(hold_mask))
+    return scenario_mask & team_gate & (phase >= phase_min) & role_mask
+
+
+def _lagging_teammate_finish_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    if raw_obs.numel() == 0 or raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return action_mean.new_zeros(())
+    if global_state.numel() == 0 or global_state.shape[0] != raw_obs.shape[0] or global_state.shape[-1] < 5:
+        return action_mean.new_zeros(())
+
+    if bool(getattr(args, 'lagging_finish_crossing_only', False)):
+        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+        if crossing_scenario_id is not None and scenario_ids is not None:
+            scenario_mask = scenario_ids == int(crossing_scenario_id)
+        else:
+            scenario_mask = raw_obs[:, -2] > 0.5
+    else:
+        scenario_mask = torch.ones(raw_obs.shape[0], dtype=torch.bool, device=raw_obs.device)
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    phase = raw_obs[:, 13]
+
+    team_min_separation = global_state[:, -5]
+    team_completion = torch.clamp(global_state[:, -1], 0.0, 1.0)
+    completion_for_gate = team_completion
+
+    finish_distance = max(0.1, float(getattr(args, 'lagging_finish_distance', 4.0)))
+    goal_tolerance = max(0.05, float(getattr(args, 'lagging_finish_goal_tolerance', 0.8)))
+    phase_min = float(getattr(args, 'lagging_finish_phase_min', 0.0))
+    min_team_completion = max(0.0, float(getattr(args, 'lagging_finish_min_team_completion', 0.60)))
+    max_team_completion = min(1.0, float(getattr(args, 'lagging_finish_max_team_completion', 0.999)))
+    near_team_tolerance = max(0.0, float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)))
+    min_team_separation = max(0.0, float(getattr(args, 'lagging_finish_min_team_separation', 0.0)))
+    safe_team_separation = max(0.0, float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)))
+    upper_distance = max(goal_tolerance + 0.05, finish_distance)
+
+    if near_team_tolerance > 0.0:
+        local_size = int(raw_obs.shape[-1])
+        packed_size = int(global_state.shape[-1]) - 5
+        if local_size > 0 and packed_size >= local_size and packed_size % local_size == 0:
+            team_blocks = global_state[:, :packed_size].reshape(global_state.shape[0], packed_size // local_size, local_size)
+            valid_team_mask = team_blocks.abs().sum(dim=-1) > 1e-6
+            team_distances = torch.clamp(team_blocks[:, :, 4], min=0.0)
+            near_team_mask = valid_team_mask & (team_distances <= near_team_tolerance)
+            valid_count = torch.clamp(valid_team_mask.sum(dim=1).to(dtype=team_completion.dtype), min=1.0)
+            near_completion = near_team_mask.sum(dim=1).to(dtype=team_completion.dtype) / valid_count
+            completion_for_gate = torch.maximum(team_completion, torch.clamp(near_completion, 0.0, 1.0))
+
+    team_gate = (completion_for_gate >= min_team_completion) & (team_completion < max_team_completion)
+    if min_team_separation > 0.0:
+        team_gate = team_gate & (team_min_separation >= min_team_separation)
+
+    hold_mask = distance <= goal_tolerance
+    lagging_mask = (distance > goal_tolerance) & (distance <= upper_distance)
+    include_hold = bool(getattr(args, 'lagging_finish_hold_reached', False))
+    role_mask = lagging_mask | (hold_mask if include_hold else torch.zeros_like(hold_mask))
+    active_mask = scenario_mask & team_gate & (phase >= phase_min) & role_mask
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    target_speed = max(0.0, float(getattr(args, 'lagging_finish_target_speed', 0.14)))
+    min_speed_scale = min(1.0, max(0.0, float(getattr(args, 'lagging_finish_min_speed_scale', 0.25))))
+    speed_scale = torch.clamp(
+        (distance - (0.50 * goal_tolerance)) / max(upper_distance - (0.50 * goal_tolerance), 1e-3),
+        min_speed_scale,
+        1.0,
+    )
+
+    max_omega = max(0.0, float(getattr(args, 'lagging_finish_max_omega', 0.10)))
+    if bool(getattr(args, 'lagging_finish_raw_target', False)) and raw_obs.shape[-1] > 8:
+        raw_linear = torch.clamp(raw_obs[:, 7], min=0.0, max=target_speed)
+        min_linear = target_speed * min_speed_scale
+        target_linear = torch.where(
+            hold_mask,
+            torch.zeros_like(distance),
+            torch.maximum(raw_linear, torch.full_like(raw_linear, min_linear)),
+        )
+        raw_omega = torch.clamp(raw_obs[:, 8], -max_omega, max_omega)
+        target_omega = torch.where(hold_mask, torch.zeros_like(raw_omega), raw_omega)
+    else:
+        target_linear = torch.where(
+            hold_mask,
+            torch.zeros_like(distance),
+            target_speed * speed_scale,
+        )
+        target_omega = torch.where(
+            hold_mask,
+            torch.zeros_like(heading_error),
+            -torch.clamp(heading_error / 0.70, -1.0, 1.0) * max_omega,
+        )
+    if safe_team_separation > min_team_separation and safe_team_separation > 0.0:
+        separation_scale = torch.clamp(
+            (team_min_separation - min_team_separation) / max(safe_team_separation - min_team_separation, 1e-3),
+            0.0,
+            1.0,
+        )
+        target_linear = torch.where(hold_mask, target_linear, target_linear * separation_scale)
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    omega_weight = max(0.0, float(getattr(args, 'lagging_finish_omega_weight', 0.25)))
+    hold_omega_only = bool(getattr(args, 'lagging_finish_hold_omega_only', False))
+    hold_weight = max(0.0, float(getattr(args, 'lagging_finish_hold_weight', 1.0)))
+    linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
+    lagging_closeness = torch.clamp((upper_distance - distance) / max(upper_distance - goal_tolerance, 1e-3), 0.0, 1.0)
+    team_urgency = torch.clamp((completion_for_gate - min_team_completion) / max(max_team_completion - min_team_completion, 1e-3), 0.0, 1.0)
+    if safe_team_separation > min_team_separation and safe_team_separation > 0.0:
+        team_urgency = torch.maximum(
+            team_urgency,
+            torch.clamp((safe_team_separation - team_min_separation) / max(safe_team_separation - min_team_separation, 1e-3), 0.0, 1.0),
+        )
+    hold_boost = torch.where(hold_mask, torch.full_like(lagging_closeness, 0.50), torch.zeros_like(lagging_closeness))
+    urgency = (0.35 + 0.40 * lagging_closeness + 0.25 * team_urgency + hold_boost).to(dtype=action_mean.dtype)
+    if hold_omega_only:
+        omega_weight_tensor = torch.where(
+            hold_mask,
+            torch.full_like(omega_loss, omega_weight),
+            torch.zeros_like(omega_loss),
+        )
+        per_sample_loss = (linear_loss + omega_weight_tensor * omega_loss) * urgency
+    else:
+        per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+    if hold_weight != 1.0:
+        hold_scale = torch.where(
+            hold_mask,
+            torch.full_like(per_sample_loss, hold_weight),
+            torch.ones_like(per_sample_loss),
+        )
+        per_sample_loss = per_sample_loss * hold_scale
+
+    mask_f = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _policy_anchor_loss(
+    torch,
+    action_mean,
+    anchor_action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    if action_mean.shape != anchor_action_mean.shape:
+        return action_mean.new_zeros(())
+    sample_count = int(action_mean.shape[0])
+    if sample_count <= 0:
+        return action_mean.new_zeros(())
+
+    if bool(getattr(args, 'policy_anchor_crossing_only', False)):
+        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+        if crossing_scenario_id is not None and scenario_ids is not None:
+            anchor_mask = scenario_ids == int(crossing_scenario_id)
+        elif raw_obs.numel() > 0 and raw_obs.shape[-1] >= 2:
+            anchor_mask = raw_obs[:, -2] > 0.5
+        else:
+            anchor_mask = torch.zeros(sample_count, dtype=torch.bool, device=action_mean.device)
+    else:
+        anchor_mask = torch.ones(sample_count, dtype=torch.bool, device=action_mean.device)
+
+    if bool(getattr(args, 'policy_anchor_exclude_lagging_finish', False)):
+        lagging_mask = _lagging_finish_active_mask(
+            torch,
+            raw_obs,
+            global_state,
+            scenario_ids,
+            scenario_to_index,
+            args,
+        )
+        if lagging_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~lagging_mask)
+
+    if not bool(anchor_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+    per_sample_loss = (((action_mean - anchor_action_mean.detach().to(dtype=action_mean.dtype)) / range_scale) ** 2).mean(dim=-1)
+
+    mask_f = anchor_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _run_crossing_imitation_pretrain(
+    torch,
+    actor,
+    optimizer,
+    flat_obs,
+    flat_raw_obs,
+    flat_scenario_ids_np,
+    flat_scenario_weights,
+    scenario_to_index,
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    *,
+    sample_count: int,
+    minibatch_size: int,
+    device,
+    imitation_weight: float,
+) -> float:
+    """Run trainer-side actor-only crossing imitation updates.
+
+    These updates are deliberately applied after a rollout has already been
+    collected, so PPO ratios for that rollout are not computed against a policy
+    that was moved before the PPO step. The next rollout then sees the stronger
+    role-conditioned crossing behavior while the exported artifact remains a
+    single neural MAPPO policy.
+    """
+    pretrain_epochs = max(0, int(getattr(args, 'crossing_imitation_pretrain_epochs', 0)))
+    if pretrain_epochs <= 0 or imitation_weight <= 0.0 or sample_count <= 0:
+        return 0.0
+
+    actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not actor_parameters:
+        return 0.0
+
+    last_loss = 0.0
+    for _ in range(pretrain_epochs):
+        permutation = torch.randperm(sample_count, device=device)
+        for start in range(0, sample_count, minibatch_size):
+            batch_indices = permutation[start:start + minibatch_size]
+            batch_obs = flat_obs[batch_indices]
+            batch_raw_obs = flat_raw_obs[batch_indices]
+            batch_scenario_ids = None
+            if flat_scenario_ids_np is not None:
+                batch_scenario_ids = torch.as_tensor(
+                    flat_scenario_ids_np[batch_indices.detach().cpu().numpy()],
+                    dtype=torch.long,
+                    device=device,
+                )
+            batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
+
+            action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
+            if getattr(args, 'squash_actions', False):
+                action_mean = action_mean.clamp(-3.0, 3.0)
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
+
+            imitation_loss = _crossing_imitation_loss(
+                torch,
+                action_mean,
+                batch_raw_obs,
+                batch_scenario_ids,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_weights=batch_weights,
+            )
+            if not imitation_loss.requires_grad:
+                continue
+
+            optimizer.zero_grad(set_to_none=True)
+            (float(imitation_weight) * imitation_loss).backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, args.max_grad_norm)
+            optimizer.step()
+            last_loss = float(imitation_loss.detach().cpu().item())
+
+    return last_loss
+
+
+def _scenario_index_map(scenarios: tuple[str, ...]) -> dict[str, int]:
+    return {str(scenario_name): index for index, scenario_name in enumerate(scenarios)}
 
 
 def _cuda_device_support_status(torch, device) -> tuple[bool, str | None]:
@@ -337,6 +1051,33 @@ def _resolve_scenarios(args) -> tuple[str, ...]:
     return MultiAgentScenarioFactory.scenario_set(args.scenario_set, agent_count)
 
 
+def _resolve_curriculum_scenarios(args, model_scenarios: tuple[str, ...]) -> tuple[str, ...]:
+    requested = tuple(str(scenario) for scenario in (getattr(args, 'curriculum_scenarios', None) or ()))
+    if not requested:
+        return model_scenarios
+
+    agent_count = max(2, int(args.num_agents))
+    model_set = set(model_scenarios)
+    unknown = [scenario for scenario in requested if scenario not in model_set]
+    if unknown:
+        raise ValueError(
+            '--curriculum-scenario entries must also be present in --scenario so the actor has '
+            f'a stable scenario branch id. Missing from --scenario: {", ".join(unknown)}'
+        )
+
+    incompatible = [
+        scenario
+        for scenario in requested
+        if MultiAgentScenarioFactory.required_agent_count(scenario) > agent_count
+    ]
+    if incompatible:
+        raise ValueError(
+            f'Curriculum scenarios require more agents than configured (num_agents={agent_count}): '
+            f'{", ".join(incompatible)}'
+        )
+    return requested
+
+
 def _build_reward_config(args) -> RewardConfig:
     return RewardConfig(
         progress_weight=float(args.progress_weight),
@@ -370,6 +1111,13 @@ def _build_reward_config(args) -> RewardConfig:
         head_on_phase_gate_strength=float(args.head_on_phase_gate_strength),
         crossing_starboard_turn_reward_weight=float(args.crossing_starboard_turn_reward_weight),
         crossing_forward_reward_weight=float(args.crossing_forward_reward_weight),
+        crossing_slowdown_reward_weight=float(args.crossing_slowdown_reward_weight),
+        crossing_overspeed_penalty_weight=float(args.crossing_overspeed_penalty_weight),
+        crossing_close_forward_penalty_weight=float(args.crossing_close_forward_penalty_weight),
+        crossing_yield_speed=float(args.crossing_yield_speed),
+        crossing_time_separation_reward_weight=float(args.crossing_time_separation_reward_weight),
+        crossing_time_separation_penalty_weight=float(args.crossing_time_separation_penalty_weight),
+        crossing_time_gap_target=float(args.crossing_time_gap_target),
         overtaking_starboard_turn_reward_weight=float(args.overtaking_starboard_turn_reward_weight),
         overtaking_forward_reward_weight=float(args.overtaking_forward_reward_weight),
         overtaking_corridor_reward_weight=float(args.overtaking_corridor_reward_weight),
@@ -470,6 +1218,8 @@ def _checkpoint_payload(
         'global_state_size': model_metadata['global_state_size'],
         'action_dim': model_metadata['action_dim'],
         'hidden_sizes': hidden_sizes,
+        'ppo_policy_loss_scale': float(getattr(args, 'ppo_policy_loss_scale', 1.0)),
+        'ppo_value_loss_scale': float(getattr(args, 'ppo_value_loss_scale', 1.0)),
         'action_low': model_metadata['action_low'].tolist(),
         'action_high': model_metadata['action_high'].tolist(),
         'scenarios': scenarios,
@@ -516,10 +1266,74 @@ def _checkpoint_payload(
         'squash_actions': bool(getattr(args, 'squash_actions', False)),
         'min_forward_speed': float(getattr(args, 'min_forward_speed', 0.0)),
         'normalize_observations': bool(getattr(args, 'normalize_observations', False)),
+        'freeze_observation_normalizer': bool(getattr(args, 'freeze_observation_normalizer', False)),
         'neighbor_attention': bool(getattr(args, 'neighbor_attention', False)),
         'attention_embed_dim': int(getattr(args, 'attention_embed_dim', 32)),
         'attention_num_heads': int(getattr(args, 'attention_num_heads', 1)),
-        'ego_dim': 12,  # current ego feature count (sin/cos heading_error + cross_track_error)
+        'attention_encounter_residual': bool(getattr(args, 'attention_encounter_residual', False)),
+        'attention_scenario_residual': bool(getattr(args, 'attention_scenario_residual', False)),
+        'attention_scenario_head': bool(getattr(args, 'attention_scenario_head', False)),
+        'attention_scenario_trunk': bool(getattr(args, 'attention_scenario_trunk', False)),
+        'crossing_imitation_weight': float(getattr(args, 'crossing_imitation_weight', 0.0)),
+        'crossing_imitation_weight_end': (
+            float(getattr(args, 'crossing_imitation_weight_end'))
+            if getattr(args, 'crossing_imitation_weight_end', None) is not None
+            else None
+        ),
+        'crossing_imitation_pretrain_epochs': int(getattr(args, 'crossing_imitation_pretrain_epochs', 0)),
+        'crossing_imitation_clear_speed': float(getattr(args, 'crossing_imitation_clear_speed', 0.32)),
+        'crossing_imitation_middle_speed': float(getattr(args, 'crossing_imitation_middle_speed', 0.10)),
+        'crossing_imitation_yield_speed': float(getattr(args, 'crossing_imitation_yield_speed', 0.0)),
+        'crossing_imitation_clear_omega': float(getattr(args, 'crossing_imitation_clear_omega', -0.10)),
+        'crossing_imitation_middle_omega': float(getattr(args, 'crossing_imitation_middle_omega', -0.14)),
+        'crossing_imitation_yield_omega': float(getattr(args, 'crossing_imitation_yield_omega', -0.18)),
+        'near_goal_finish_weight': float(getattr(args, 'near_goal_finish_weight', 0.0)),
+        'near_goal_finish_weight_end': (
+            float(getattr(args, 'near_goal_finish_weight_end'))
+            if getattr(args, 'near_goal_finish_weight_end', None) is not None
+            else None
+        ),
+        'near_goal_finish_distance': float(getattr(args, 'near_goal_finish_distance', 2.2)),
+        'near_goal_finish_goal_tolerance': float(getattr(args, 'near_goal_finish_goal_tolerance', 0.8)),
+        'near_goal_finish_phase_min': float(getattr(args, 'near_goal_finish_phase_min', 0.0)),
+        'near_goal_finish_target_speed': float(getattr(args, 'near_goal_finish_target_speed', 0.18)),
+        'near_goal_finish_max_omega': float(getattr(args, 'near_goal_finish_max_omega', 0.18)),
+        'near_goal_finish_omega_weight': float(getattr(args, 'near_goal_finish_omega_weight', 0.35)),
+        'near_goal_finish_crossing_only': bool(getattr(args, 'near_goal_finish_crossing_only', False)),
+        'lagging_finish_weight': float(getattr(args, 'lagging_finish_weight', 0.0)),
+        'lagging_finish_weight_end': (
+            float(getattr(args, 'lagging_finish_weight_end'))
+            if getattr(args, 'lagging_finish_weight_end', None) is not None
+            else None
+        ),
+        'lagging_finish_distance': float(getattr(args, 'lagging_finish_distance', 4.0)),
+        'lagging_finish_goal_tolerance': float(getattr(args, 'lagging_finish_goal_tolerance', 0.8)),
+        'lagging_finish_phase_min': float(getattr(args, 'lagging_finish_phase_min', 0.0)),
+        'lagging_finish_target_speed': float(getattr(args, 'lagging_finish_target_speed', 0.14)),
+        'lagging_finish_min_speed_scale': float(getattr(args, 'lagging_finish_min_speed_scale', 0.25)),
+        'lagging_finish_raw_target': bool(getattr(args, 'lagging_finish_raw_target', False)),
+        'lagging_finish_max_omega': float(getattr(args, 'lagging_finish_max_omega', 0.10)),
+        'lagging_finish_omega_weight': float(getattr(args, 'lagging_finish_omega_weight', 0.25)),
+        'lagging_finish_hold_omega_only': bool(getattr(args, 'lagging_finish_hold_omega_only', False)),
+        'lagging_finish_hold_weight': float(getattr(args, 'lagging_finish_hold_weight', 1.0)),
+        'lagging_finish_min_team_completion': float(getattr(args, 'lagging_finish_min_team_completion', 0.60)),
+        'lagging_finish_max_team_completion': float(getattr(args, 'lagging_finish_max_team_completion', 0.999)),
+        'lagging_finish_near_team_tolerance': float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)),
+        'lagging_finish_min_team_separation': float(getattr(args, 'lagging_finish_min_team_separation', 0.0)),
+        'lagging_finish_safe_team_separation': float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)),
+        'lagging_finish_crossing_only': bool(getattr(args, 'lagging_finish_crossing_only', False)),
+        'lagging_finish_hold_reached': bool(getattr(args, 'lagging_finish_hold_reached', False)),
+        'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
+        'policy_anchor_weight_end': (
+            float(getattr(args, 'policy_anchor_weight_end'))
+            if getattr(args, 'policy_anchor_weight_end', None) is not None
+            else None
+        ),
+        'policy_anchor_crossing_only': bool(getattr(args, 'policy_anchor_crossing_only', False)),
+        'policy_anchor_exclude_lagging_finish': bool(getattr(args, 'policy_anchor_exclude_lagging_finish', False)),
+        'separate_actor_critic_grad_clip': bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
+        'ego_dim': AgentLocalObservation.ego_feature_size(),
+        'neighbor_feature_dim': NEIGHBOR_FEATURE_COUNT,
         'total_timesteps': max(0, args.total_timesteps),
         'completed_timesteps': int(total_steps),
         'update_index': int(update_index),
@@ -661,12 +1475,122 @@ def _migrate_normalizer_state(old_norm_state, old_obs_dim, new_obs_dim):
     if old_mean.shape[0] != old_obs_dim:
         return old_norm_state
     delta = new_obs_dim - old_obs_dim
-    new_mean = np.concatenate([old_mean, np.zeros(delta, dtype=np.float64)])
-    new_var = np.concatenate([old_var, np.ones(delta, dtype=np.float64)])
+    new_ego_dim = AgentLocalObservation.ego_feature_size()
+    old_neighbor_dim = 6
+    old_neighbor_width = old_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
+    new_neighbor_width = new_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
+    can_insert_in_neighbors = (
+        old_neighbor_width >= 0
+        and new_neighbor_width >= 0
+        and old_neighbor_width % old_neighbor_dim == 0
+    )
+    if can_insert_in_neighbors:
+        max_neighbors = old_neighbor_width // old_neighbor_dim
+        if new_neighbor_width == max_neighbors * NEIGHBOR_FEATURE_COUNT and NEIGHBOR_FEATURE_COUNT > old_neighbor_dim:
+            mean_parts = [old_mean[:new_ego_dim]]
+            var_parts = [old_var[:new_ego_dim]]
+            old_pos = new_ego_dim
+            for _ in range(max_neighbors):
+                mean_parts.append(old_mean[old_pos:old_pos + old_neighbor_dim])
+                var_parts.append(old_var[old_pos:old_pos + old_neighbor_dim])
+                mean_parts.append(np.zeros(NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                var_parts.append(np.ones(NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                old_pos += old_neighbor_dim
+            mean_parts.append(old_mean[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            var_parts.append(old_var[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            migrated = dict(old_norm_state)
+            migrated['mean'] = np.concatenate(mean_parts)
+            migrated['var'] = np.concatenate(var_parts)
+            return migrated
+    old_ego_dim = new_ego_dim - delta
+    can_insert_in_ego = (
+        delta > 0
+        and old_ego_dim > 0
+        and old_obs_dim >= old_ego_dim + ENCOUNTER_TYPE_COUNT
+        and (old_obs_dim - old_ego_dim - ENCOUNTER_TYPE_COUNT) % 6 == 0
+    )
+    if can_insert_in_ego:
+        new_mean = np.concatenate([
+            old_mean[:old_ego_dim],
+            np.zeros(delta, dtype=np.float64),
+            old_mean[old_ego_dim:],
+        ])
+        new_var = np.concatenate([
+            old_var[:old_ego_dim],
+            np.ones(delta, dtype=np.float64),
+            old_var[old_ego_dim:],
+        ])
+    else:
+        new_mean = np.concatenate([old_mean, np.zeros(delta, dtype=np.float64)])
+        new_var = np.concatenate([old_var, np.ones(delta, dtype=np.float64)])
     migrated = dict(old_norm_state)
     migrated['mean'] = new_mean
     migrated['var'] = new_var
     return migrated
+
+
+def _remap_scenario_branch_state_dict(actor_sd: dict, checkpoint_scenarios, actor) -> dict:
+    """Remap scenario-specific actor branch keys by scenario name, not by index.
+
+    Older single-scenario branch checkpoints store keys such as
+    ``scenario_actor_trunks.0.*`` where index 0 refers to that checkpoint's
+    only scenario. Loading those keys directly into a full-scenario actor would
+    incorrectly assign the branch to whatever scenario is index 0 in the new
+    curriculum.  Use the checkpoint's saved scenario names to move matching
+    branch tensors to the current actor's scenario index.
+    """
+    current_scenarios = tuple(str(name) for name in getattr(actor, 'scenario_names', ()) or ())
+    saved_scenarios = tuple(str(name) for name in (checkpoint_scenarios or ()))
+    if not current_scenarios or not saved_scenarios or current_scenarios == saved_scenarios:
+        return actor_sd
+
+    current_index_by_name = {scenario_name: index for index, scenario_name in enumerate(current_scenarios)}
+    prefixes = (
+        'scenario_residual_heads.',
+        'scenario_action_heads.',
+        'scenario_actor_trunks.',
+    )
+    remapped: dict = {}
+    moved: list[str] = []
+    dropped: list[str] = []
+
+    for key, value in actor_sd.items():
+        matched_prefix = None
+        for prefix in prefixes:
+            if key.startswith(prefix):
+                matched_prefix = prefix
+                break
+        if matched_prefix is None:
+            remapped[key] = value
+            continue
+
+        remainder = key[len(matched_prefix):]
+        index_text, separator, tail = remainder.partition('.')
+        if not separator or not index_text.isdigit():
+            remapped[key] = value
+            continue
+        saved_index = int(index_text)
+        if saved_index >= len(saved_scenarios):
+            dropped.append(key)
+            continue
+        scenario_name = saved_scenarios[saved_index]
+        current_index = current_index_by_name.get(scenario_name)
+        if current_index is None:
+            dropped.append(key)
+            continue
+        new_key = f'{matched_prefix}{current_index}.{tail}'
+        remapped[new_key] = value
+        if new_key != key:
+            moved.append(f'{key}->{new_key}')
+
+    if moved or dropped:
+        print(
+            'Remapped scenario-specific actor branch tensors by scenario name: '
+            f'saved={saved_scenarios}, current={current_scenarios}, '
+            f'moved={moved}, dropped={dropped}',
+            flush=True,
+        )
+    return remapped
 
 
 def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path: Path, obs_normalizer=None, *, max_agents: int = 5, neighbor_attention: bool = False):
@@ -683,39 +1607,114 @@ def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path
 
     old_is_attention = 'neighbor_attention.query_proj.weight' in actor_sd
     new_is_attention = neighbor_attention
+    if old_is_attention and new_is_attention:
+        actor_sd = _remap_scenario_branch_state_dict(actor_sd, payload.get('scenarios'), actor)
 
     if not old_is_attention and new_is_attention:
         # Flat MLP checkpoint → attention architecture: smart migration.
         from usv_rl.neighbor_attention import migrate_flat_actor_to_attention, migrate_flat_critic_to_attention
         migrate_flat_actor_to_attention(actor_sd, actor, torch)
         migrate_flat_critic_to_attention(critic_sd, critic, torch)
+        branch_missing = [
+            key for key in actor.state_dict().keys()
+            if key.startswith(('scenario_action_heads.', 'scenario_actor_trunks.'))
+            and key not in actor_sd
+        ]
+        initialized_branches = _initialize_missing_scenario_branches_from_base(actor, branch_missing)
         print(
             f'Migrated flat MLP weights to attention architecture from {weights_path}',
             flush=True,
         )
+        if initialized_branches:
+            print(
+                'Initialized missing scenario branches from loaded shared actor MLP: '
+                f'{initialized_branches}',
+                flush=True,
+            )
     elif old_is_attention and new_is_attention:
-        # Attention → attention: check for obs_dim mismatch (e.g. ego_dim change).
+        # Attention → attention: check for obs layout mismatch (ego_dim or neighbor_feature_dim change).
         old_q_shape = actor_sd['neighbor_attention.query_proj.weight'].shape  # [embed, old_ego]
         new_q_shape = actor.state_dict()['neighbor_attention.query_proj.weight'].shape
-        if old_q_shape != new_q_shape:
+        old_key_shape = actor_sd.get('neighbor_attention.key_proj.weight', actor_sd['neighbor_attention.value_proj.weight']).shape
+        new_key_shape = actor.state_dict()['neighbor_attention.key_proj.weight'].shape
+        critic_shape_changed = critic_sd['mlp.0.weight'].shape != critic.state_dict()['mlp.0.weight'].shape
+        if old_q_shape != new_q_shape or old_key_shape != new_key_shape or critic_shape_changed:
             from usv_rl.neighbor_attention import (
-                _migrate_attention_actor_ego_dim,
-                _migrate_attention_critic_ego_dim,
-                _OLD_EGO_DIM,
+                _migrate_attention_actor_layout,
+                _migrate_attention_critic_layout,
                 _EGO_DIM,
+                _NEIGHBOR_FEATURE_DIM,
             )
             old_ego = old_q_shape[1]
             new_ego = new_q_shape[1]
+            old_neighbor_dim = old_key_shape[1]
+            new_neighbor_dim = new_key_shape[1]
             print(
-                f'Attention ego_dim changed: {old_ego} -> {new_ego}. '
-                f'Migrating attention weights with zero-padding.',
+                f'Attention observation layout changed: ego {old_ego} -> {new_ego}, '
+                f'neighbor {old_neighbor_dim} -> {new_neighbor_dim}. Migrating attention weights.',
                 flush=True,
             )
-            _migrate_attention_actor_ego_dim(actor_sd, actor, torch, old_ego, new_ego)
-            _migrate_attention_critic_ego_dim(critic_sd, critic, torch, old_ego, new_ego, max_agents)
+            _migrate_attention_actor_layout(
+                actor_sd,
+                actor,
+                torch,
+                old_ego,
+                _EGO_DIM,
+                old_neighbor_dim,
+                _NEIGHBOR_FEATURE_DIM,
+            )
+            _migrate_attention_critic_layout(
+                critic_sd,
+                critic,
+                torch,
+                old_ego,
+                _EGO_DIM,
+                old_neighbor_dim,
+                _NEIGHBOR_FEATURE_DIM,
+                max_agents,
+            )
+            branch_missing = [
+                key for key in actor.state_dict().keys()
+                if key.startswith(('scenario_action_heads.', 'scenario_actor_trunks.'))
+                and key not in actor_sd
+            ]
+            initialized_branches = _initialize_missing_scenario_branches_from_base(actor, branch_missing)
+            if initialized_branches:
+                print(
+                    'Initialized missing scenario branches from loaded shared actor MLP: '
+                    f'{initialized_branches}',
+                    flush=True,
+                )
         else:
-            actor.load_state_dict(actor_sd)
+            actor_load_result = actor.load_state_dict(actor_sd, strict=False)
             critic.load_state_dict(critic_sd)
+            residual_prefixes = ('encounter_residual.', 'scenario_residual_heads.', 'scenario_action_heads.', 'scenario_actor_trunks.')
+            allowed_missing = {
+                key for key in actor_load_result.missing_keys
+                if key.startswith(residual_prefixes)
+            }
+            allowed_unexpected = {
+                key for key in actor_load_result.unexpected_keys
+                if key.startswith(residual_prefixes)
+            }
+            if len(allowed_missing) != len(actor_load_result.missing_keys) or len(allowed_unexpected) != len(actor_load_result.unexpected_keys):
+                raise RuntimeError(
+                    'Attention actor checkpoint compatibility failure. '
+                    f'Missing keys={actor_load_result.missing_keys}, unexpected keys={actor_load_result.unexpected_keys}'
+                )
+            if allowed_missing or allowed_unexpected:
+                print(
+                    'Attention actor loaded with residual-head compatibility mode: '
+                    f'missing={sorted(allowed_missing)}, unexpected={sorted(allowed_unexpected)}',
+                    flush=True,
+                )
+            initialized_branches = _initialize_missing_scenario_branches_from_base(actor, allowed_missing)
+            if initialized_branches:
+                print(
+                    'Initialized missing scenario branches from loaded shared actor MLP: '
+                    f'{initialized_branches}',
+                    flush=True,
+                )
     else:
         # Flat → flat (original migration path).
         new_actor_sd = actor.state_dict()
@@ -829,6 +1828,45 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'deadlock_penalty_weight',
         'squash_actions',
         'min_forward_speed',
+        'attention_encounter_residual',
+        'attention_scenario_residual',
+        'attention_scenario_head',
+        'attention_scenario_trunk',
+        'ppo_policy_loss_scale',
+        'ppo_value_loss_scale',
+        'near_goal_finish_weight',
+        'near_goal_finish_weight_end',
+        'near_goal_finish_distance',
+        'near_goal_finish_goal_tolerance',
+        'near_goal_finish_phase_min',
+        'near_goal_finish_target_speed',
+        'near_goal_finish_max_omega',
+        'near_goal_finish_omega_weight',
+        'near_goal_finish_crossing_only',
+        'lagging_finish_weight',
+        'lagging_finish_weight_end',
+        'lagging_finish_distance',
+        'lagging_finish_goal_tolerance',
+        'lagging_finish_phase_min',
+        'lagging_finish_target_speed',
+        'lagging_finish_min_speed_scale',
+        'lagging_finish_raw_target',
+        'lagging_finish_max_omega',
+        'lagging_finish_omega_weight',
+        'lagging_finish_hold_omega_only',
+        'lagging_finish_hold_weight',
+        'lagging_finish_min_team_completion',
+        'lagging_finish_max_team_completion',
+        'lagging_finish_near_team_tolerance',
+        'lagging_finish_min_team_separation',
+        'lagging_finish_safe_team_separation',
+        'lagging_finish_crossing_only',
+        'lagging_finish_hold_reached',
+        'policy_anchor_weight',
+        'policy_anchor_weight_end',
+        'policy_anchor_crossing_only',
+        'policy_anchor_exclude_lagging_finish',
+        'separate_actor_critic_grad_clip',
     )
     for field in simple_fields:
         if field in cli_overrides:
@@ -875,6 +1913,13 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'head_on_phase_gate_strength',
         'crossing_starboard_turn_reward_weight',
         'crossing_forward_reward_weight',
+        'crossing_slowdown_reward_weight',
+        'crossing_overspeed_penalty_weight',
+        'crossing_close_forward_penalty_weight',
+        'crossing_yield_speed',
+        'crossing_time_separation_reward_weight',
+        'crossing_time_separation_penalty_weight',
+        'crossing_time_gap_target',
         'overtaking_starboard_turn_reward_weight',
         'overtaking_forward_reward_weight',
         'overtaking_corridor_reward_weight',
@@ -1155,6 +2200,10 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             encounter_type_dropout=float(getattr(args, 'encounter_type_dropout', 0.0)),
             sim_tau_linear=float(getattr(args, 'sim_tau_linear', 0.45)),
             sim_tau_angular=float(getattr(args, 'sim_tau_angular', 0.25)),
+            dr_tau_linear_low=float(getattr(args, 'dr_tau_linear_low', 0.0)),
+            dr_tau_linear_high=float(getattr(args, 'dr_tau_linear_high', 0.0)),
+            dr_tau_angular_low=float(getattr(args, 'dr_tau_angular_low', 0.0)),
+            dr_tau_angular_high=float(getattr(args, 'dr_tau_angular_high', 0.0)),
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
             cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
@@ -1207,6 +2256,7 @@ def main():
     hidden_sizes = tuple(args.hidden_sizes or [128, 128])
     agent_namespaces = _build_agent_namespaces(max(2, args.num_agents))
     scenarios = _resolve_scenarios(args)
+    curriculum_scenarios = _resolve_curriculum_scenarios(args, scenarios)
     reward_config = _build_reward_config(args)
     model_metadata = _build_model_metadata(args, agent_namespaces)
     output_path = Path(args.output)
@@ -1221,8 +2271,10 @@ def main():
     checkpoint_interval = max(0, int(args.checkpoint_interval))
     if checkpoint_interval > 0:
         checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else output_path.with_name(f'{output_path.stem}_checkpoints')
-    print(f'Using MAPPO scenario curriculum: {scenarios}', flush=True)
-    env_factory = lambda: _create_env(args, agent_namespaces, scenarios, reward_config)
+    print(f'Using MAPPO scenario branches: {scenarios}', flush=True)
+    print(f'Using MAPPO rollout curriculum: {curriculum_scenarios}', flush=True)
+    env_factory = lambda: _create_env(args, agent_namespaces, curriculum_scenarios, reward_config)
+    scenario_to_index = _scenario_index_map(scenarios)
     max_env_recovery_attempts = 3
     max_consecutive_env_failures = 5
     consecutive_env_failures = 0
@@ -1257,7 +2309,8 @@ def main():
             sampler = ParallelRolloutSampler(
                 args_dict=vars(args).copy(),
                 agent_namespaces=agent_namespaces,
-                scenarios=scenarios,
+                scenarios=curriculum_scenarios,
+                model_scenarios=scenarios,
                 hidden_sizes=hidden_sizes,
                 num_workers=int(args.num_sampler_workers),
                 base_ros_domain_id=int(args.base_ros_domain_id),
@@ -1284,6 +2337,11 @@ def main():
                 action_dim=model_metadata['action_dim'],
                 embed_dim=int(args.attention_embed_dim),
                 num_heads=int(args.attention_num_heads),
+                encounter_residual=bool(getattr(args, 'attention_encounter_residual', False)),
+                scenario_names=tuple(scenarios),
+                scenario_residual=bool(getattr(args, 'attention_scenario_residual', False)),
+                scenario_head=bool(getattr(args, 'attention_scenario_head', False)),
+                scenario_trunk=bool(getattr(args, 'attention_scenario_trunk', False)),
             ).to(device)
             critic = AttentionCritic(
                 max_neighbors=int(args.max_neighbors),
@@ -1296,16 +2354,21 @@ def main():
         else:
             actor = _build_mlp(nn, model_metadata['local_observation_size'], hidden_sizes, model_metadata['action_dim']).to(device)
             critic = _build_mlp(nn, model_metadata['local_observation_size'] + model_metadata['global_state_size'], hidden_sizes, 1).to(device)
+        _maybe_freeze_actor_base(actor, args)
         _log_std_init = float(getattr(args, 'actor_log_std_init', 0.0))
         actor_log_std = nn.Parameter(torch.full((model_metadata['action_dim'],), _log_std_init, device=device))
-        optimizer = torch.optim.Adam(list(actor.parameters()) + list(critic.parameters()) + [actor_log_std], lr=args.learning_rate)
+        actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+        optimizer = torch.optim.Adam(actor_parameters + list(critic.parameters()) + [actor_log_std], lr=args.learning_rate)
         action_low_tensor = torch.as_tensor(model_metadata['action_low'], dtype=torch.float32, device=device)
         action_high_tensor = torch.as_tensor(model_metadata['action_high'], dtype=torch.float32, device=device)
 
         obs_normalizer = None
         use_obs_norm = bool(getattr(args, 'normalize_observations', False))
+        freeze_obs_norm = bool(getattr(args, 'freeze_observation_normalizer', False))
         if use_obs_norm:
             obs_normalizer = ObservationNormalizer(model_metadata['local_observation_size'])
+            if freeze_obs_norm:
+                print('Observation normalizer updates are frozen; loaded mean/variance will be reused.', flush=True)
 
         total_steps = 0
         rollout_steps = max(1, args.rollout_steps)
@@ -1361,6 +2424,20 @@ def main():
         if _force_log_std is not None:
             actor_log_std.data.fill_(float(_force_log_std))
             print(f'Forced actor_log_std to {_force_log_std} (σ={math.exp(_force_log_std):.4f}).', flush=True)
+
+        policy_anchor_start = float(getattr(args, 'policy_anchor_weight', 0.0))
+        policy_anchor_end = (
+            float(getattr(args, 'policy_anchor_weight_end'))
+            if getattr(args, 'policy_anchor_weight_end', None) is not None
+            else policy_anchor_start
+        )
+        policy_anchor_actor = None
+        if max(abs(policy_anchor_start), abs(policy_anchor_end)) > 0.0:
+            policy_anchor_actor = copy.deepcopy(actor).to(device)
+            policy_anchor_actor.eval()
+            for parameter in policy_anchor_actor.parameters():
+                parameter.requires_grad_(False)
+            print('Policy anchor actor captured from loaded weights.', flush=True)
 
         while total_steps < max(0, args.total_timesteps):
             rollout_wall_start = time.perf_counter()
@@ -1418,10 +2495,12 @@ def main():
                 total_steps += rollout_agent_steps
                 raw_flat_obs_np = np.concatenate(flat_obs_parts, axis=0)
                 if obs_normalizer is not None:
-                    obs_normalizer.update(raw_flat_obs_np)
+                    if not freeze_obs_norm:
+                        obs_normalizer.update(raw_flat_obs_np)
                     flat_obs_np = obs_normalizer.normalize(raw_flat_obs_np)
                 else:
                     flat_obs_np = raw_flat_obs_np
+                flat_raw_obs = torch.as_tensor(raw_flat_obs_np, dtype=torch.float32, device=device)
                 flat_obs = torch.as_tensor(flat_obs_np, dtype=torch.float32, device=device)
                 flat_states = torch.as_tensor(np.concatenate(flat_states_parts, axis=0), dtype=torch.float32, device=device)
                 flat_actions = torch.as_tensor(np.concatenate(flat_actions_parts, axis=0), dtype=torch.float32, device=device)
@@ -1440,6 +2519,7 @@ def main():
                 storage_scenario_ids = []
                 rollout_episode_count = 0
                 current_scenario = env.current_scenario_name
+                current_scenario_id = int(scenario_to_index.get(current_scenario, -1))
 
                 for _ in range(current_rollout_steps):
                     agent_order = env.agent_ids
@@ -1447,7 +2527,8 @@ def main():
                     state_batch = np.repeat(np.asarray(global_state, dtype=np.float32)[None, :], len(agent_order), axis=0)
 
                     if obs_normalizer is not None:
-                        obs_normalizer.update(obs_batch)
+                        if not freeze_obs_norm:
+                            obs_normalizer.update(obs_batch)
                         obs_batch_for_net = obs_normalizer.normalize(obs_batch)
                     else:
                         obs_batch_for_net = obs_batch
@@ -1455,9 +2536,12 @@ def main():
                     obs_tensor = torch.as_tensor(obs_batch_for_net, dtype=torch.float32, device=device)
                     state_tensor = torch.as_tensor(state_batch, dtype=torch.float32, device=device)
                     critic_input = torch.cat([obs_tensor, state_tensor], dim=-1)
+                    scenario_id_tensor = None
+                    if current_scenario_id >= 0:
+                        scenario_id_tensor = torch.full((len(agent_order),), current_scenario_id, dtype=torch.long, device=device)
 
                     with torch.no_grad():
-                        action_mean = actor(obs_tensor)
+                        action_mean = _actor_forward(actor, obs_tensor, scenario_id_tensor)
                         if getattr(args, 'squash_actions', False):
                             action_mean = action_mean.clamp(-3.0, 3.0)
                             _half = (action_high_tensor - action_low_tensor) / 2.0
@@ -1514,7 +2598,7 @@ def main():
                     storage_values.append(value_tensor.detach().cpu().numpy())
                     storage_rewards.append(reward_batch)
                     storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
-                    storage_scenario_ids.append(np.full(len(agent_order), hash(current_scenario) & 0x7FFFFFFF, dtype=np.int32))
+                    storage_scenario_ids.append(np.full(len(agent_order), current_scenario_id, dtype=np.int32))
 
                     total_steps += len(agent_order)
                     rollout_agent_steps += len(agent_order)
@@ -1548,6 +2632,7 @@ def main():
                             consecutive_env_failures = 0
                         global_state = info['global_state']
                         current_scenario = env.current_scenario_name
+                        current_scenario_id = int(scenario_to_index.get(current_scenario, -1))
                     if total_steps >= args.total_timesteps:
                         break
 
@@ -1583,6 +2668,7 @@ def main():
                     flat_obs_sw = obs_normalizer.normalize(raw_flat_obs_sw)
                 else:
                     flat_obs_sw = raw_flat_obs_sw
+                flat_raw_obs = torch.as_tensor(raw_flat_obs_sw, dtype=torch.float32, device=device)
                 flat_obs = torch.as_tensor(flat_obs_sw, dtype=torch.float32, device=device)
                 flat_states = torch.as_tensor(_flatten_rollout_batches(storage_states).reshape(-1, model_metadata['global_state_size']), dtype=torch.float32, device=device)
                 flat_actions = torch.as_tensor(_flatten_rollout_batches(storage_actions).reshape(-1, model_metadata['action_dim']), dtype=torch.float32, device=device)
@@ -1628,19 +2714,60 @@ def main():
             for param_group in optimizer.param_groups:
                 param_group['lr'] = current_lr
 
+            crossing_imitation_start = float(getattr(args, 'crossing_imitation_weight', 0.0))
+            crossing_imitation_end = (
+                float(getattr(args, 'crossing_imitation_weight_end'))
+                if getattr(args, 'crossing_imitation_weight_end', None) is not None
+                else crossing_imitation_start
+            )
+            current_crossing_imitation_weight = crossing_imitation_start + (crossing_imitation_end - crossing_imitation_start) * progress_fraction
+            last_crossing_imitation_loss = 0.0
+            last_crossing_pretrain_loss = 0.0
+            near_goal_finish_start = float(getattr(args, 'near_goal_finish_weight', 0.0))
+            near_goal_finish_end = (
+                float(getattr(args, 'near_goal_finish_weight_end'))
+                if getattr(args, 'near_goal_finish_weight_end', None) is not None
+                else near_goal_finish_start
+            )
+            current_near_goal_finish_weight = near_goal_finish_start + (near_goal_finish_end - near_goal_finish_start) * progress_fraction
+            last_near_goal_finish_loss = 0.0
+            ppo_policy_loss_scale = max(0.0, float(getattr(args, 'ppo_policy_loss_scale', 1.0)))
+            ppo_value_loss_scale = max(0.0, float(getattr(args, 'ppo_value_loss_scale', 1.0)))
+            lagging_finish_start = float(getattr(args, 'lagging_finish_weight', 0.0))
+            lagging_finish_end = (
+                float(getattr(args, 'lagging_finish_weight_end'))
+                if getattr(args, 'lagging_finish_weight_end', None) is not None
+                else lagging_finish_start
+            )
+            current_lagging_finish_weight = lagging_finish_start + (lagging_finish_end - lagging_finish_start) * progress_fraction
+            last_lagging_finish_loss = 0.0
+            lagging_finish_active_sum = 0
+            lagging_finish_active_seen = 0
+            current_policy_anchor_weight = policy_anchor_start + (policy_anchor_end - policy_anchor_start) * progress_fraction
+            last_policy_anchor_loss = 0.0
+
             for _ in range(max(1, args.update_epochs)):
                 permutation = torch.randperm(sample_count, device=device)
                 for start in range(0, sample_count, minibatch_size):
                     batch_indices = permutation[start:start + minibatch_size]
                     batch_obs = flat_obs[batch_indices]
+                    batch_raw_obs = flat_raw_obs[batch_indices]
                     batch_states = flat_states[batch_indices]
                     batch_actions = flat_actions[batch_indices]
                     batch_old_log_probs = flat_old_log_probs[batch_indices]
                     batch_advantages = flat_advantages[batch_indices]
                     batch_returns = flat_returns[batch_indices]
+                    batch_scenario_ids = None
+                    if flat_scenario_ids_np is not None:
+                        batch_scenario_ids = torch.as_tensor(
+                            flat_scenario_ids_np[batch_indices.detach().cpu().numpy()],
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
 
                     with autocast_context():
-                        action_mean = actor(batch_obs)
+                        action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
                         if getattr(args, 'squash_actions', False):
                             action_mean = action_mean.clamp(-3.0, 3.0)
                             _half = (action_high_tensor - action_low_tensor) / 2.0
@@ -1660,27 +2787,140 @@ def main():
                         critic_values = critic(torch.cat([batch_obs, batch_states], dim=-1)).squeeze(-1)
                         value_errors = (critic_values - batch_returns.to(dtype=critic_values.dtype)) ** 2
 
-                        if flat_scenario_weights is not None:
-                            batch_weights = flat_scenario_weights[batch_indices]
+                        if batch_weights is not None:
                             actor_loss = -(clipped_surrogate * batch_weights).mean()
                             critic_loss = (value_errors * batch_weights).mean()
                         else:
                             actor_loss = -clipped_surrogate.mean()
                             critic_loss = value_errors.mean()
 
-                        loss = actor_loss + args.value_coef * critic_loss - current_entropy_coef * entropy
+                        loss = (
+                            ppo_policy_loss_scale * actor_loss
+                            + ppo_value_loss_scale * args.value_coef * critic_loss
+                            - current_entropy_coef * entropy
+                        )
+                        if current_crossing_imitation_weight > 0.0:
+                            crossing_imitation_loss = _crossing_imitation_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_crossing_imitation_weight * crossing_imitation_loss
+                            last_crossing_imitation_loss = float(crossing_imitation_loss.detach().cpu().item())
+                        if current_near_goal_finish_weight > 0.0:
+                            near_goal_finish_loss = _near_goal_finish_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_near_goal_finish_weight * near_goal_finish_loss
+                            last_near_goal_finish_loss = float(near_goal_finish_loss.detach().cpu().item())
+                        if current_lagging_finish_weight > 0.0:
+                            with torch.no_grad():
+                                lagging_active_mask = _lagging_finish_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_states,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                )
+                                if lagging_active_mask.numel() > 0:
+                                    lagging_finish_active_sum += int(lagging_active_mask.sum().detach().cpu().item())
+                                    lagging_finish_active_seen += int(lagging_active_mask.numel())
+                            lagging_finish_loss = _lagging_teammate_finish_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_lagging_finish_weight * lagging_finish_loss
+                            last_lagging_finish_loss = float(lagging_finish_loss.detach().cpu().item())
+                        if policy_anchor_actor is not None and current_policy_anchor_weight > 0.0:
+                            with torch.no_grad():
+                                anchor_action_mean = _actor_forward(policy_anchor_actor, batch_obs, batch_scenario_ids)
+                                if getattr(args, 'squash_actions', False):
+                                    anchor_action_mean = anchor_action_mean.clamp(-3.0, 3.0)
+                                    _half = (action_high_tensor - action_low_tensor) / 2.0
+                                    _mid = (action_high_tensor + action_low_tensor) / 2.0
+                                    anchor_action_mean = torch.tanh(anchor_action_mean) * _half + _mid
+                            policy_anchor_loss = _policy_anchor_loss(
+                                torch,
+                                action_mean,
+                                anchor_action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_policy_anchor_weight * policy_anchor_loss
+                            last_policy_anchor_loss = float(policy_anchor_loss.detach().cpu().item())
 
                     optimizer.zero_grad(set_to_none=True)
                     if amp_enabled:
                         scaler.scale(loss).backward()
                         scaler.unscale_(optimizer)
-                        torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()) + [actor_log_std], args.max_grad_norm)
+                        _clip_actor_critic_gradients(
+                            torch,
+                            actor,
+                            critic,
+                            actor_log_std,
+                            args.max_grad_norm,
+                            separate=bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
+                        )
                         scaler.step(optimizer)
                         scaler.update()
                     else:
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(list(actor.parameters()) + list(critic.parameters()) + [actor_log_std], args.max_grad_norm)
+                        _clip_actor_critic_gradients(
+                            torch,
+                            actor,
+                            critic,
+                            actor_log_std,
+                            args.max_grad_norm,
+                            separate=bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
+                        )
                         optimizer.step()
+
+            last_crossing_pretrain_loss = _run_crossing_imitation_pretrain(
+                torch,
+                actor,
+                optimizer,
+                flat_obs,
+                flat_raw_obs,
+                flat_scenario_ids_np,
+                flat_scenario_weights,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_count=sample_count,
+                minibatch_size=minibatch_size,
+                device=device,
+                imitation_weight=current_crossing_imitation_weight,
+            )
 
             update_wall_time = max(1e-6, time.perf_counter() - update_wall_start)
             update_index += 1
@@ -1698,6 +2938,13 @@ def main():
                     f'update_share={update_share:.2%} loss={float(loss.detach().cpu().item()):.4f} '
                     f'mean_reward={rollout_mean_reward:.4f} episodes={rollout_episode_count} '
                     f'entropy_coef={current_entropy_coef:.4f} lr={current_lr:.2e} '
+                    f'ppo_pi={ppo_policy_loss_scale:.3f} ppo_v={ppo_value_loss_scale:.3f} '
+                    f'crossing_bc_w={current_crossing_imitation_weight:.3f} crossing_bc={last_crossing_imitation_loss:.4f} '
+                    f'finish_bc_w={current_near_goal_finish_weight:.3f} finish_bc={last_near_goal_finish_loss:.4f} '
+                    f'lag_finish_w={current_lagging_finish_weight:.3f} lag_finish={last_lagging_finish_loss:.4f} '
+                    f'lag_active={(lagging_finish_active_sum / max(lagging_finish_active_seen, 1)):.3f} '
+                    f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '
+                    f'crossing_bc_pre={last_crossing_pretrain_loss:.4f} '
                     f'{_gpu_runtime_stats(torch, device)}'
                     ,
                     flush=True,

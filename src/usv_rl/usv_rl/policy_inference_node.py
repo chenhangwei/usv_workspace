@@ -25,7 +25,7 @@ from .config import ActionBounds
 from .multi_agent_types import ENCOUNTER_TYPE_COUNT
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
-from .types import NeighborObservation, NeighborState, UsvObservation
+from .types import NeighborObservation, NeighborState, UsvObservation, USV_NEIGHBOR_FEATURE_COUNT
 
 _ENCOUNTER_TYPE_NAMES = {'head_on': 0, 'crossing': 1, 'overtaking': 2}
 
@@ -103,6 +103,50 @@ def _quat_to_yaw(msg: PoseStamped) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 
+def _migrate_runtime_normalizer_state(state: dict, new_obs_dim: int) -> dict:
+    mean = np.asarray(state.get('mean', ()), dtype=np.float64)
+    var = np.asarray(state.get('var', ()), dtype=np.float64)
+    if mean.ndim != 1 or var.ndim != 1 or mean.shape != var.shape:
+        return state
+    old_obs_dim = int(mean.shape[0])
+    new_obs_dim = int(new_obs_dim)
+    if old_obs_dim == new_obs_dim or old_obs_dim <= 0 or new_obs_dim <= old_obs_dim:
+        return state
+
+    ego_dim = UsvObservation.ego_feature_size()
+    old_neighbor_dim = 6
+    old_neighbor_width = old_obs_dim - ego_dim - ENCOUNTER_TYPE_COUNT
+    new_neighbor_width = new_obs_dim - ego_dim - ENCOUNTER_TYPE_COUNT
+    if (
+        old_neighbor_width >= 0
+        and new_neighbor_width >= 0
+        and old_neighbor_width % old_neighbor_dim == 0
+    ):
+        max_neighbors = old_neighbor_width // old_neighbor_dim
+        if new_neighbor_width == max_neighbors * USV_NEIGHBOR_FEATURE_COUNT:
+            new_mean_parts = [mean[:ego_dim]]
+            new_var_parts = [var[:ego_dim]]
+            old_pos = ego_dim
+            for _ in range(max_neighbors):
+                new_mean_parts.append(mean[old_pos:old_pos + old_neighbor_dim])
+                new_var_parts.append(var[old_pos:old_pos + old_neighbor_dim])
+                new_mean_parts.append(np.zeros(USV_NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                new_var_parts.append(np.ones(USV_NEIGHBOR_FEATURE_COUNT - old_neighbor_dim, dtype=np.float64))
+                old_pos += old_neighbor_dim
+            new_mean_parts.append(mean[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            new_var_parts.append(var[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+            migrated = dict(state)
+            migrated['mean'] = np.concatenate(new_mean_parts)
+            migrated['var'] = np.concatenate(new_var_parts)
+            return migrated
+
+    delta = new_obs_dim - old_obs_dim
+    migrated = dict(state)
+    migrated['mean'] = np.concatenate([mean, np.zeros(delta, dtype=np.float64)])
+    migrated['var'] = np.concatenate([var, np.ones(delta, dtype=np.float64)])
+    return migrated
+
+
 class ZeroPolicy:
     def predict(self, observation: np.ndarray) -> np.ndarray:
         return np.zeros(2, dtype=np.float32)
@@ -164,6 +208,7 @@ class MappoActorPolicyRuntime:
             self._actor = build_attention_actor_from_checkpoint(
                 checkpoint, nn, torch, self._device,
             )
+            self.obs_dim = int(getattr(self._actor, 'obs_dim', self.obs_dim))
         else:
             layers = []
             current_dim = self.obs_dim
@@ -186,7 +231,8 @@ class MappoActorPolicyRuntime:
         self._obs_normalizer = None
         if checkpoint.get('normalize_observations') and 'obs_normalizer' in checkpoint:
             self._obs_normalizer = ObservationNormalizer(self.obs_dim)
-            self._obs_normalizer.load_state_dict(checkpoint['obs_normalizer'])
+            norm_state = _migrate_runtime_normalizer_state(checkpoint['obs_normalizer'], self.obs_dim)
+            self._obs_normalizer.load_state_dict(norm_state)
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
         if self._obs_normalizer is not None:
@@ -342,18 +388,18 @@ class PolicyInferenceNode(Node):
         self._auto_encounter_candidate_since: float = 0.0
 
         if policy_obs_dim is not None:
-            _ego_dim = 12  # current ego dimension (sin/cos heading_error + cross_track_error)
-            # Check if dimension matches base layout: ego + N*6
-            if policy_obs_dim >= _ego_dim and (policy_obs_dim - _ego_dim) % 6 == 0:
-                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim) // 6)
+            _ego_dim = UsvObservation.ego_feature_size()
+            # Check if dimension matches base layout: ego + N*neighbor_dim
+            if policy_obs_dim >= _ego_dim and (policy_obs_dim - _ego_dim) % USV_NEIGHBOR_FEATURE_COUNT == 0:
+                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim) // USV_NEIGHBOR_FEATURE_COUNT)
                 if inferred_neighbors != self._max_neighbors:
                     self.get_logger().info(
                         f'Overriding max_neighbors from {self._max_neighbors} to {inferred_neighbors} based on model observation dimension {policy_obs_dim}.'
                     )
                     self._max_neighbors = inferred_neighbors
-            # Check if dimension matches encounter-type layout: ego + N*6 + ENCOUNTER_TYPE_COUNT
-            elif policy_obs_dim >= _ego_dim + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) % 6 == 0:
-                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) // 6)
+            # Check if dimension matches encounter-type layout: ego + N*neighbor_dim + ENCOUNTER_TYPE_COUNT
+            elif policy_obs_dim >= _ego_dim + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) % USV_NEIGHBOR_FEATURE_COUNT == 0:
+                inferred_neighbors = max(1, (policy_obs_dim - _ego_dim - ENCOUNTER_TYPE_COUNT) // USV_NEIGHBOR_FEATURE_COUNT)
                 self._encounter_type_enabled = True
                 if inferred_neighbors != self._max_neighbors:
                     self.get_logger().info(
@@ -375,13 +421,13 @@ class PolicyInferenceNode(Node):
                         f'Encounter-type conditioning enabled: {encounter_type} (index={self._encounter_type_index}).'
                     )
             else:
-                # Backwards compatibility: try old ego_dim=11 layouts (scalar heading_error).
-                _old_ego = 11
+                # Backwards compatibility: try old ego_dim=12/11 layouts.
+                _old_ego = 12
                 if policy_obs_dim >= _old_ego and (policy_obs_dim - _old_ego) % 6 == 0:
                     inferred_neighbors = max(1, (policy_obs_dim - _old_ego) // 6)
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=11 layout (obs_dim={policy_obs_dim}). '
-                        f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                        f'Model uses legacy ego_dim=12 layout (obs_dim={policy_obs_dim}). '
+                        f'fresh96 route/timing observations will be ignored by the model.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
@@ -389,19 +435,19 @@ class PolicyInferenceNode(Node):
                     inferred_neighbors = max(1, (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) // 6)
                     self._encounter_type_enabled = True
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=11 layout with encounter type (obs_dim={policy_obs_dim}). '
-                        f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                        f'Model uses legacy ego_dim=12 layout with encounter type (obs_dim={policy_obs_dim}). '
+                        f'fresh96 route/timing observations will be ignored by the model.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
                 else:
-                    # Try even older ego_dim=10 layouts.
-                    _oldest_ego = 10
+                    # Try older ego_dim=11 layouts (scalar heading_error).
+                    _oldest_ego = 11
                     if policy_obs_dim >= _oldest_ego and (policy_obs_dim - _oldest_ego) % 6 == 0:
                         inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego) // 6)
                         self.get_logger().warn(
-                            f'Model uses legacy ego_dim=10 layout (obs_dim={policy_obs_dim}). '
-                            f'CTE and sin/cos heading observations will be ignored by the model.'
+                            f'Model uses legacy ego_dim=11 layout (obs_dim={policy_obs_dim}). '
+                            f'sin/cos heading_error observation will be collapsed to scalar for this model.'
                         )
                         if inferred_neighbors != self._max_neighbors:
                             self._max_neighbors = inferred_neighbors
@@ -409,8 +455,8 @@ class PolicyInferenceNode(Node):
                         inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) // 6)
                         self._encounter_type_enabled = True
                         self.get_logger().warn(
-                            f'Model uses legacy ego_dim=10 layout with encounter type (obs_dim={policy_obs_dim}). '
-                            f'CTE and sin/cos heading observations will be ignored by the model.'
+                            f'Model uses legacy ego_dim=11 layout with encounter type (obs_dim={policy_obs_dim}). '
+                            f'sin/cos heading_error observation will be collapsed to scalar for this model.'
                         )
                         if inferred_neighbors != self._max_neighbors:
                             self._max_neighbors = inferred_neighbors
@@ -782,6 +828,20 @@ class PolicyInferenceNode(Node):
                 bearing -= 2.0 * math.pi
             while bearing < -math.pi:
                 bearing += 2.0 * math.pi
+            rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+            if rel_speed_sq > 1e-6:
+                tcpa_seconds = -((rel_x * rel_vx) + (rel_y * rel_vy)) / rel_speed_sq
+            else:
+                tcpa_seconds = 1e3
+            if tcpa_seconds <= 0.0:
+                tcpa_norm = 1.0
+                dcpa = distance
+            else:
+                cpa_x = rel_x + rel_vx * tcpa_seconds
+                cpa_y = rel_y + rel_vy * tcpa_seconds
+                dcpa = math.hypot(cpa_x, cpa_y)
+                tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
+            dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
             neighbors.append(
                 NeighborObservation(
                     usv_id=state.usv_id,
@@ -791,11 +851,18 @@ class PolicyInferenceNode(Node):
                     rel_vy=rel_vy,
                     distance=distance,
                     bearing=bearing,
+                    tcpa=tcpa_norm,
+                    dcpa=dcpa_norm,
                 )
             )
 
-        # Compute cross-track error from spawn→goal line.
+        # Compute route/timing features from spawn→goal line.
         cte = 0.0
+        route_progress = 0.0
+        conflict_phase = 0.0
+        conflict_eta = 1.0
+        crossing_priority = 0.0
+        crossing_eta_gap = 1.0
         if self._route_start is not None and self._route_goal is not None:
             sx, sy = self._route_start
             gx, gy = self._route_goal
@@ -803,10 +870,21 @@ class PolicyInferenceNode(Node):
             route_dy = gy - sy
             route_len = math.hypot(route_dx, route_dy)
             if route_len > 1e-6:
+                unit_x = route_dx / route_len
+                unit_y = route_dy / route_len
                 rel_x = own_x - sx
                 rel_y = own_y - sy
+                progress_s = rel_x * unit_x + rel_y * unit_y
                 cte = (rel_x * route_dy - rel_y * route_dx) / route_len
                 cte = max(-3.0, min(3.0, cte))
+                route_progress = max(0.0, min(1.0, progress_s / route_len))
+                conflict_s = route_len * 0.5
+                to_conflict = conflict_s - progress_s
+                conflict_phase = max(-1.0, min(1.0, (progress_s - conflict_s) / max(0.5 * route_len, 1e-3)))
+                along_speed = max(0.0, speed * math.cos(float(self._feedback_msg.heading_error)), final_linear_x)
+                eta_seconds = max(0.0, to_conflict) / max(along_speed, 0.03)
+                conflict_eta = max(0.0, min(1.0, eta_seconds / 25.0))
+                crossing_priority = {'usv_03': 1.0, 'usv_02': 0.0, 'usv_01': -1.0}.get(self._usv_id, 0.0)
 
         return UsvObservation(
             pose_x=own_x,
@@ -820,6 +898,11 @@ class PolicyInferenceNode(Node):
             final_linear_x=final_linear_x,
             final_angular_z=final_angular_z,
             cross_track_error=cte,
+            route_progress=route_progress,
+            conflict_phase=conflict_phase,
+            conflict_eta=conflict_eta,
+            crossing_priority=crossing_priority,
+            crossing_eta_gap=crossing_eta_gap,
             neighbors=neighbors,
         )
 
