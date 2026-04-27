@@ -253,12 +253,31 @@ def parse_args():
     parser.add_argument('--lagging-finish-near-team-tolerance', type=float, default=0.0, help='Optional distance-to-goal tolerance used to treat teammates as near-complete for lagging-finish activation. 0 disables this trainer-only gate.')
     parser.add_argument('--lagging-finish-min-team-separation', type=float, default=0.0, help='Optional minimum fleet separation required before lagging-finish activates. 0 disables this gate.')
     parser.add_argument('--lagging-finish-safe-team-separation', type=float, default=0.0, help='Optional separation where lagging-finish reaches full target speed; below this, the trainer target speed is reduced toward zero. 0 disables this trainer-only scaling.')
+    parser.add_argument('--lagging-finish-safe-team-separation-power', type=float, default=1.0, help='Power applied to lagging-finish safe-team-separation speed scaling. Values above 1 reduce target speed more aggressively near unsafe separation.')
     parser.add_argument('--lagging-finish-crossing-only', action='store_true', help='Apply the lagging-finish auxiliary only to three_usv_crossing samples.')
     parser.add_argument('--lagging-finish-hold-reached', action='store_true', help='Also train already-reached agents to hold still while lagging teammates finish.')
+    parser.add_argument('--team-safety-brake-weight', type=float, default=0.0, help='Trainer-side auxiliary loss weight that slows unfinished agents when part of the team has reached goals but fleet separation is still unsafe.')
+    parser.add_argument('--team-safety-brake-weight-end', type=float, default=None, help='Final team-safety-brake auxiliary weight for linear annealing. If unset, team-safety-brake-weight stays constant.')
+    parser.add_argument('--team-safety-brake-goal-tolerance', type=float, default=0.8, help='Goal tolerance used to exclude already-reached agents from team-safety-brake forward-speed targets.')
+    parser.add_argument('--team-safety-brake-max-distance', type=float, default=12.0, help='Maximum distance-to-goal for unfinished agents affected by team-safety-brake.')
+    parser.add_argument('--team-safety-brake-phase-min', type=float, default=-1.0, help='Minimum conflict_phase for team-safety-brake activation.')
+    parser.add_argument('--team-safety-brake-min-team-completion', type=float, default=0.30, help='Minimum global or near-team completion ratio before team-safety-brake activates.')
+    parser.add_argument('--team-safety-brake-max-team-completion', type=float, default=0.999, help='Maximum global team completion ratio before team-safety-brake deactivates.')
+    parser.add_argument('--team-safety-brake-near-team-tolerance', type=float, default=0.0, help='Optional distance-to-goal tolerance used to treat teammates as near-complete for team-safety-brake activation. 0 disables this gate.')
+    parser.add_argument('--team-safety-brake-safe-separation', type=float, default=1.2, help='Fleet separation where team-safety-brake applies full low-speed target.')
+    parser.add_argument('--team-safety-brake-release-separation', type=float, default=2.4, help='Fleet separation where team-safety-brake fades out completely.')
+    parser.add_argument('--team-safety-brake-target-speed', type=float, default=0.0, help='Maximum forward-speed target at the edge of team-safety-brake activation; target fades toward zero at unsafe separation.')
+    parser.add_argument('--team-safety-brake-omega-weight', type=float, default=0.0, help='Relative yaw-rate loss weight for nearest-neighbor escape turning inside team-safety-brake.')
+    parser.add_argument('--team-safety-brake-target-omega', type=float, default=0.0, help='Maximum yaw-rate target for nearest-neighbor escape turning inside team-safety-brake.')
+    parser.add_argument('--team-safety-brake-turn-mode', choices=('away', 'starboard'), default='away', help='Yaw-rate target direction inside team-safety-brake: nearest-neighbor escape or fixed starboard commitment.')
+    parser.add_argument('--team-safety-brake-require-neighbor', action='store_true', help='Require at least one encoded neighbor inside release separation before team-safety-brake activates.')
+    parser.add_argument('--team-safety-brake-power', type=float, default=1.0, help='Power applied to team-safety-brake danger weighting. Values above 1 focus the loss closer to unsafe separation.')
+    parser.add_argument('--team-safety-brake-crossing-only', action='store_true', help='Apply the team-safety-brake auxiliary only to three_usv_crossing samples.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
     parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
     parser.add_argument('--policy-anchor-exclude-lagging-finish', action='store_true', help='Exclude samples currently targeted by lagging-finish from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-team-safety-brake', action='store_true', help='Exclude samples currently targeted by team-safety-brake from policy-anchor loss.')
     parser.add_argument('--separate-actor-critic-grad-clip', action='store_true', help='Clip actor/log-std and critic gradients separately so large value losses do not suppress trainer-side actor auxiliaries.')
     return parser.parse_args()
 
@@ -628,6 +647,7 @@ def _lagging_finish_active_mask(
     near_team_tolerance = max(0.0, float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)))
     min_team_separation = max(0.0, float(getattr(args, 'lagging_finish_min_team_separation', 0.0)))
     safe_team_separation = max(0.0, float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)))
+    safe_team_separation_power = max(0.1, float(getattr(args, 'lagging_finish_safe_team_separation_power', 1.0)))
     upper_distance = max(goal_tolerance + 0.05, finish_distance)
 
     if near_team_tolerance > 0.0:
@@ -697,6 +717,7 @@ def _lagging_teammate_finish_loss(
     near_team_tolerance = max(0.0, float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)))
     min_team_separation = max(0.0, float(getattr(args, 'lagging_finish_min_team_separation', 0.0)))
     safe_team_separation = max(0.0, float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)))
+    safe_team_separation_power = max(0.1, float(getattr(args, 'lagging_finish_safe_team_separation_power', 1.0)))
     upper_distance = max(goal_tolerance + 0.05, finish_distance)
 
     if near_team_tolerance > 0.0:
@@ -759,6 +780,8 @@ def _lagging_teammate_finish_loss(
             0.0,
             1.0,
         )
+        if safe_team_separation_power != 1.0:
+            separation_scale = separation_scale.pow(safe_team_separation_power)
         target_linear = torch.where(hold_mask, target_linear, target_linear * separation_scale)
     target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
 
@@ -797,6 +820,183 @@ def _lagging_teammate_finish_loss(
             torch.ones_like(per_sample_loss),
         )
         per_sample_loss = per_sample_loss * hold_scale
+
+    mask_f = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _nearest_neighbor_features(torch, raw_obs):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        empty = torch.zeros(0, dtype=raw_obs.dtype, device=raw_obs.device)
+        return empty, empty, empty, empty
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0:
+        distance = torch.full((sample_count,), float('inf'), dtype=raw_obs.dtype, device=raw_obs.device)
+        zeros = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+        valid = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        return distance, zeros, zeros, valid
+
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+    masked_distances = torch.where(valid_slots, distances, torch.full_like(distances, float('inf')))
+    nearest_distance, nearest_index = masked_distances.min(dim=1)
+    row_index = torch.arange(sample_count, device=raw_obs.device)
+    nearest = neighbors[row_index, nearest_index]
+    valid = torch.isfinite(nearest_distance)
+
+    rel_x = nearest[:, 0]
+    rel_y = nearest[:, 1]
+    rel_vx = nearest[:, 2]
+    rel_vy = nearest[:, 3]
+    bearing = torch.where(valid, nearest[:, 5], torch.zeros_like(nearest[:, 5]))
+    closing_speed = -((rel_x * rel_vx) + (rel_y * rel_vy)) / torch.clamp(nearest_distance, min=1e-3)
+    closing_speed = torch.where(valid, closing_speed, torch.zeros_like(closing_speed))
+    return nearest_distance, bearing, closing_speed, valid
+
+
+def _team_safety_brake_active_mask(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        return torch.zeros(0, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    if bool(getattr(args, 'team_safety_brake_crossing_only', False)):
+        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+        if crossing_scenario_id is not None and scenario_ids is not None:
+            scenario_mask = scenario_ids == int(crossing_scenario_id)
+        else:
+            scenario_mask = raw_obs[:, -2] > 0.5
+    else:
+        scenario_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    phase = raw_obs[:, 13]
+    team_min_separation = global_state[:, -5]
+    team_completion = torch.clamp(global_state[:, -1], 0.0, 1.0)
+    completion_for_gate = team_completion
+
+    goal_tolerance = max(0.05, float(getattr(args, 'team_safety_brake_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'team_safety_brake_max_distance', 12.0)))
+    phase_min = float(getattr(args, 'team_safety_brake_phase_min', -1.0))
+    min_team_completion = max(0.0, float(getattr(args, 'team_safety_brake_min_team_completion', 0.30)))
+    max_team_completion = min(1.0, float(getattr(args, 'team_safety_brake_max_team_completion', 0.999)))
+    near_team_tolerance = max(0.0, float(getattr(args, 'team_safety_brake_near_team_tolerance', 0.0)))
+    release_separation = max(0.0, float(getattr(args, 'team_safety_brake_release_separation', 2.4)))
+
+    if near_team_tolerance > 0.0:
+        local_size = int(raw_obs.shape[-1])
+        packed_size = int(global_state.shape[-1]) - 5
+        if local_size > 0 and packed_size >= local_size and packed_size % local_size == 0:
+            team_blocks = global_state[:, :packed_size].reshape(global_state.shape[0], packed_size // local_size, local_size)
+            valid_team_mask = team_blocks.abs().sum(dim=-1) > 1e-6
+            team_distances = torch.clamp(team_blocks[:, :, 4], min=0.0)
+            near_team_mask = valid_team_mask & (team_distances <= near_team_tolerance)
+            valid_count = torch.clamp(valid_team_mask.sum(dim=1).to(dtype=team_completion.dtype), min=1.0)
+            near_completion = near_team_mask.sum(dim=1).to(dtype=team_completion.dtype) / valid_count
+            completion_for_gate = torch.maximum(team_completion, torch.clamp(near_completion, 0.0, 1.0))
+
+    team_gate = (completion_for_gate >= min_team_completion) & (team_completion < max_team_completion)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+    separation_mask = team_min_separation < release_separation
+    if bool(getattr(args, 'team_safety_brake_require_neighbor', False)):
+        nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        separation_mask = separation_mask & valid_neighbor & (nearest_distance < release_separation)
+    return scenario_mask & team_gate & separation_mask & (phase >= phase_min) & unfinished_mask
+
+
+def _team_safety_brake_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    if action_mean.shape[-1] < 1:
+        return action_mean.new_zeros(())
+    active_mask = _team_safety_brake_active_mask(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    team_min_separation = global_state[:, -5]
+    safe_separation = max(0.0, float(getattr(args, 'team_safety_brake_safe_separation', 1.2)))
+    release_separation = max(safe_separation + 0.05, float(getattr(args, 'team_safety_brake_release_separation', 2.4)))
+    brake_power = max(0.1, float(getattr(args, 'team_safety_brake_power', 1.0)))
+    target_speed = max(0.0, float(getattr(args, 'team_safety_brake_target_speed', 0.0)))
+    omega_weight = max(0.0, float(getattr(args, 'team_safety_brake_omega_weight', 0.0)))
+    target_omega_limit = max(0.0, float(getattr(args, 'team_safety_brake_target_omega', 0.0)))
+    turn_mode = str(getattr(args, 'team_safety_brake_turn_mode', 'away'))
+
+    danger = torch.clamp(
+        (release_separation - team_min_separation) / max(release_separation - safe_separation, 1e-3),
+        0.0,
+        1.0,
+    ).to(dtype=action_mean.dtype)
+    if brake_power != 1.0:
+        danger = danger.pow(brake_power)
+    target_linear = (target_speed * (1.0 - danger)).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    range_scale = torch.clamp(high - low, min=1e-3)
+    linear_range = range_scale[0]
+    linear_loss = ((action_mean[:, 0] - target_linear) / linear_range) ** 2
+    urgency = (0.25 + 0.75 * danger).to(dtype=linear_loss.dtype)
+    per_sample_loss = linear_loss * urgency
+    if action_mean.shape[-1] >= 2 and omega_weight > 0.0 and target_omega_limit > 0.0:
+        nearest_distance, bearing, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        neighbor_danger = torch.clamp(
+            (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3),
+            0.0,
+            1.0,
+        ).to(dtype=action_mean.dtype)
+        if brake_power != 1.0:
+            neighbor_danger = neighbor_danger.pow(brake_power)
+        closing_gate = torch.clamp((closing_speed.to(dtype=action_mean.dtype) + 0.05) / 0.35, 0.0, 1.0)
+        if turn_mode == 'starboard':
+            turn_sign = torch.full_like(bearing, -1.0, dtype=action_mean.dtype)
+        else:
+            turn_sign = torch.where(
+                bearing > 0.0,
+                torch.full_like(bearing, -1.0),
+                torch.where(bearing < 0.0, torch.ones_like(bearing), torch.zeros_like(bearing)),
+            ).to(dtype=action_mean.dtype)
+        turn_scale = torch.where(valid_neighbor, neighbor_danger * (0.35 + 0.65 * closing_gate), torch.zeros_like(neighbor_danger))
+        target_omega = torch.clamp(turn_sign * target_omega_limit * turn_scale, min=low[1], max=high[1])
+        omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+        per_sample_loss = per_sample_loss + omega_weight * omega_loss * turn_scale
 
     mask_f = active_mask.to(dtype=per_sample_loss.dtype)
     if sample_weights is not None:
@@ -847,6 +1047,18 @@ def _policy_anchor_loss(
         )
         if lagging_mask.shape[0] == sample_count:
             anchor_mask = anchor_mask & (~lagging_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_team_safety_brake', False)):
+        brake_mask = _team_safety_brake_active_mask(
+            torch,
+            raw_obs,
+            global_state,
+            scenario_ids,
+            scenario_to_index,
+            args,
+        )
+        if brake_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~brake_mask)
 
     if not bool(anchor_mask.any().detach().cpu()):
         return action_mean.new_zeros(())
@@ -1321,8 +1533,30 @@ def _checkpoint_payload(
         'lagging_finish_near_team_tolerance': float(getattr(args, 'lagging_finish_near_team_tolerance', 0.0)),
         'lagging_finish_min_team_separation': float(getattr(args, 'lagging_finish_min_team_separation', 0.0)),
         'lagging_finish_safe_team_separation': float(getattr(args, 'lagging_finish_safe_team_separation', 0.0)),
+        'lagging_finish_safe_team_separation_power': float(getattr(args, 'lagging_finish_safe_team_separation_power', 1.0)),
         'lagging_finish_crossing_only': bool(getattr(args, 'lagging_finish_crossing_only', False)),
         'lagging_finish_hold_reached': bool(getattr(args, 'lagging_finish_hold_reached', False)),
+        'team_safety_brake_weight': float(getattr(args, 'team_safety_brake_weight', 0.0)),
+        'team_safety_brake_weight_end': (
+            float(getattr(args, 'team_safety_brake_weight_end'))
+            if getattr(args, 'team_safety_brake_weight_end', None) is not None
+            else None
+        ),
+        'team_safety_brake_goal_tolerance': float(getattr(args, 'team_safety_brake_goal_tolerance', 0.8)),
+        'team_safety_brake_max_distance': float(getattr(args, 'team_safety_brake_max_distance', 12.0)),
+        'team_safety_brake_phase_min': float(getattr(args, 'team_safety_brake_phase_min', -1.0)),
+        'team_safety_brake_min_team_completion': float(getattr(args, 'team_safety_brake_min_team_completion', 0.30)),
+        'team_safety_brake_max_team_completion': float(getattr(args, 'team_safety_brake_max_team_completion', 0.999)),
+        'team_safety_brake_near_team_tolerance': float(getattr(args, 'team_safety_brake_near_team_tolerance', 0.0)),
+        'team_safety_brake_safe_separation': float(getattr(args, 'team_safety_brake_safe_separation', 1.2)),
+        'team_safety_brake_release_separation': float(getattr(args, 'team_safety_brake_release_separation', 2.4)),
+        'team_safety_brake_target_speed': float(getattr(args, 'team_safety_brake_target_speed', 0.0)),
+        'team_safety_brake_omega_weight': float(getattr(args, 'team_safety_brake_omega_weight', 0.0)),
+        'team_safety_brake_target_omega': float(getattr(args, 'team_safety_brake_target_omega', 0.0)),
+        'team_safety_brake_turn_mode': str(getattr(args, 'team_safety_brake_turn_mode', 'away')),
+        'team_safety_brake_require_neighbor': bool(getattr(args, 'team_safety_brake_require_neighbor', False)),
+        'team_safety_brake_power': float(getattr(args, 'team_safety_brake_power', 1.0)),
+        'team_safety_brake_crossing_only': bool(getattr(args, 'team_safety_brake_crossing_only', False)),
         'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
         'policy_anchor_weight_end': (
             float(getattr(args, 'policy_anchor_weight_end'))
@@ -1331,6 +1565,7 @@ def _checkpoint_payload(
         ),
         'policy_anchor_crossing_only': bool(getattr(args, 'policy_anchor_crossing_only', False)),
         'policy_anchor_exclude_lagging_finish': bool(getattr(args, 'policy_anchor_exclude_lagging_finish', False)),
+        'policy_anchor_exclude_team_safety_brake': bool(getattr(args, 'policy_anchor_exclude_team_safety_brake', False)),
         'separate_actor_critic_grad_clip': bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
         'ego_dim': AgentLocalObservation.ego_feature_size(),
         'neighbor_feature_dim': NEIGHBOR_FEATURE_COUNT,
@@ -1860,12 +2095,31 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'lagging_finish_near_team_tolerance',
         'lagging_finish_min_team_separation',
         'lagging_finish_safe_team_separation',
+        'lagging_finish_safe_team_separation_power',
         'lagging_finish_crossing_only',
         'lagging_finish_hold_reached',
+        'team_safety_brake_weight',
+        'team_safety_brake_weight_end',
+        'team_safety_brake_goal_tolerance',
+        'team_safety_brake_max_distance',
+        'team_safety_brake_phase_min',
+        'team_safety_brake_min_team_completion',
+        'team_safety_brake_max_team_completion',
+        'team_safety_brake_near_team_tolerance',
+        'team_safety_brake_safe_separation',
+        'team_safety_brake_release_separation',
+        'team_safety_brake_target_speed',
+        'team_safety_brake_omega_weight',
+        'team_safety_brake_target_omega',
+        'team_safety_brake_turn_mode',
+        'team_safety_brake_require_neighbor',
+        'team_safety_brake_power',
+        'team_safety_brake_crossing_only',
         'policy_anchor_weight',
         'policy_anchor_weight_end',
         'policy_anchor_crossing_only',
         'policy_anchor_exclude_lagging_finish',
+        'policy_anchor_exclude_team_safety_brake',
         'separate_actor_critic_grad_clip',
     )
     for field in simple_fields:
@@ -2743,6 +2997,16 @@ def main():
             last_lagging_finish_loss = 0.0
             lagging_finish_active_sum = 0
             lagging_finish_active_seen = 0
+            team_safety_brake_start = float(getattr(args, 'team_safety_brake_weight', 0.0))
+            team_safety_brake_end = (
+                float(getattr(args, 'team_safety_brake_weight_end'))
+                if getattr(args, 'team_safety_brake_weight_end', None) is not None
+                else team_safety_brake_start
+            )
+            current_team_safety_brake_weight = team_safety_brake_start + (team_safety_brake_end - team_safety_brake_start) * progress_fraction
+            last_team_safety_brake_loss = 0.0
+            team_safety_brake_active_sum = 0
+            team_safety_brake_active_seen = 0
             current_policy_anchor_weight = policy_anchor_start + (policy_anchor_end - policy_anchor_start) * progress_fraction
             last_policy_anchor_loss = 0.0
 
@@ -2854,6 +3118,33 @@ def main():
                             )
                             loss = loss + current_lagging_finish_weight * lagging_finish_loss
                             last_lagging_finish_loss = float(lagging_finish_loss.detach().cpu().item())
+                        if current_team_safety_brake_weight > 0.0:
+                            with torch.no_grad():
+                                team_safety_brake_mask = _team_safety_brake_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_states,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                )
+                                if team_safety_brake_mask.numel() > 0:
+                                    team_safety_brake_active_sum += int(team_safety_brake_mask.sum().detach().cpu().item())
+                                    team_safety_brake_active_seen += int(team_safety_brake_mask.numel())
+                            team_safety_brake_loss = _team_safety_brake_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_team_safety_brake_weight * team_safety_brake_loss
+                            last_team_safety_brake_loss = float(team_safety_brake_loss.detach().cpu().item())
                         if policy_anchor_actor is not None and current_policy_anchor_weight > 0.0:
                             with torch.no_grad():
                                 anchor_action_mean = _actor_forward(policy_anchor_actor, batch_obs, batch_scenario_ids)
@@ -2943,6 +3234,8 @@ def main():
                     f'finish_bc_w={current_near_goal_finish_weight:.3f} finish_bc={last_near_goal_finish_loss:.4f} '
                     f'lag_finish_w={current_lagging_finish_weight:.3f} lag_finish={last_lagging_finish_loss:.4f} '
                     f'lag_active={(lagging_finish_active_sum / max(lagging_finish_active_seen, 1)):.3f} '
+                    f'team_brake_w={current_team_safety_brake_weight:.3f} team_brake={last_team_safety_brake_loss:.4f} '
+                    f'team_brake_active={(team_safety_brake_active_sum / max(team_safety_brake_active_seen, 1)):.3f} '
                     f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '
                     f'crossing_bc_pre={last_crossing_pretrain_loss:.4f} '
                     f'{_gpu_runtime_stats(torch, device)}'
