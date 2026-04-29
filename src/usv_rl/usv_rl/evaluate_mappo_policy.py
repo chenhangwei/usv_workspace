@@ -1,6 +1,7 @@
 import argparse
 import json
 from pathlib import Path
+import random
 
 import numpy as np
 
@@ -91,6 +92,7 @@ def parse_args():
     parser.add_argument('--max-agents', type=int, help='Maximum agents encoded in the global state for BC/zero evaluation.')
     parser.add_argument('--episode-timeout', type=float, help='Optional override for environment episode timeout.')
     parser.add_argument('--no-progress-timeout', type=float, help='Optional override for no-progress timeout.')
+    parser.add_argument('--seed', type=int, help='Optional base seed for paired/reproducible evaluation episodes.')
     parser.add_argument('--output-json', help='Optional JSON output path.')
     return parser.parse_args()
 
@@ -624,8 +626,17 @@ def evaluate_policy(
     max_agents: int | None = None,
     episode_timeout: float | None = None,
     no_progress_timeout: float | None = None,
+    seed: int | None = None,
 ) -> dict:
     max_episode_attempts = 3
+    if seed is not None:
+        random.seed(int(seed))
+        np.random.seed(int(seed))
+        try:
+            import torch
+            torch.manual_seed(int(seed))
+        except ImportError:
+            pass
     policy_kind = _detect_policy_kind(policy, model_path)
     policy_impl, env_kwargs, resolved_scenarios = _load_policy_bundle(
         policy_kind,
@@ -650,7 +661,8 @@ def evaluate_policy(
             last_error = None
             for attempt in range(max_episode_attempts):
                 try:
-                    observations, info = env.reset(options={'scenario_kind': scenario_name})
+                    reset_seed = None if seed is None else int(seed) + episode * max_episode_attempts + attempt
+                    observations, info = env.reset(seed=reset_seed, options={'scenario_kind': scenario_name})
                     last_info = info
                     initial_team_mean_goal_distance = _scenario_initial_team_mean_goal_distance(env)
                     if initial_team_mean_goal_distance is None:
@@ -909,6 +921,7 @@ def evaluate_policy(
     return {
         'policy': policy_kind,
         'model': model_path,
+        'seed': seed,
         'episodes': len(episode_metrics),
         'agent_namespaces': list(env.agent_ids),
         'action_mode': env.config.action_mode,
@@ -958,6 +971,7 @@ def evaluate_checkpoint(
     scenarios: tuple[str, ...] | None = None,
     episode_timeout: float | None = None,
     no_progress_timeout: float | None = None,
+    seed: int | None = None,
 ) -> dict:
     return evaluate_policy(
         model_path,
@@ -968,6 +982,7 @@ def evaluate_checkpoint(
         scenarios=scenarios,
         episode_timeout=episode_timeout,
         no_progress_timeout=no_progress_timeout,
+        seed=seed,
     )
 
 
@@ -991,6 +1006,7 @@ def main():
         max_agents=args.max_agents,
         episode_timeout=args.episode_timeout,
         no_progress_timeout=args.no_progress_timeout,
+        seed=args.seed,
     )
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))

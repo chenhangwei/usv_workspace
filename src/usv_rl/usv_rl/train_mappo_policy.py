@@ -271,6 +271,7 @@ def parse_args():
     parser.add_argument('--team-safety-brake-target-omega', type=float, default=0.0, help='Maximum yaw-rate target for nearest-neighbor escape turning inside team-safety-brake.')
     parser.add_argument('--team-safety-brake-turn-mode', choices=('away', 'starboard'), default='away', help='Yaw-rate target direction inside team-safety-brake: nearest-neighbor escape or fixed starboard commitment.')
     parser.add_argument('--team-safety-brake-require-neighbor', action='store_true', help='Require at least one encoded neighbor inside release separation before team-safety-brake activates.')
+    parser.add_argument('--team-safety-brake-local-danger', action='store_true', help='Use the active agent nearest-neighbor distance, rather than global team-min separation, to scale team-safety-brake linear-speed danger.')
     parser.add_argument('--team-safety-brake-power', type=float, default=1.0, help='Power applied to team-safety-brake danger weighting. Values above 1 focus the loss closer to unsafe separation.')
     parser.add_argument('--team-safety-brake-crossing-only', action='store_true', help='Apply the team-safety-brake auxiliary only to three_usv_crossing samples.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
@@ -957,9 +958,14 @@ def _team_safety_brake_loss(
     omega_weight = max(0.0, float(getattr(args, 'team_safety_brake_omega_weight', 0.0)))
     target_omega_limit = max(0.0, float(getattr(args, 'team_safety_brake_target_omega', 0.0)))
     turn_mode = str(getattr(args, 'team_safety_brake_turn_mode', 'away'))
+    nearest_distance = bearing = closing_speed = valid_neighbor = None
+    danger_distance = team_min_separation
+    if bool(getattr(args, 'team_safety_brake_local_danger', False)):
+        nearest_distance, bearing, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        danger_distance = torch.where(valid_neighbor, nearest_distance, team_min_separation)
 
     danger = torch.clamp(
-        (release_separation - team_min_separation) / max(release_separation - safe_separation, 1e-3),
+        (release_separation - danger_distance) / max(release_separation - safe_separation, 1e-3),
         0.0,
         1.0,
     ).to(dtype=action_mean.dtype)
@@ -976,7 +982,8 @@ def _team_safety_brake_loss(
     urgency = (0.25 + 0.75 * danger).to(dtype=linear_loss.dtype)
     per_sample_loss = linear_loss * urgency
     if action_mean.shape[-1] >= 2 and omega_weight > 0.0 and target_omega_limit > 0.0:
-        nearest_distance, bearing, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        if nearest_distance is None:
+            nearest_distance, bearing, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
         neighbor_danger = torch.clamp(
             (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3),
             0.0,
@@ -1555,6 +1562,7 @@ def _checkpoint_payload(
         'team_safety_brake_target_omega': float(getattr(args, 'team_safety_brake_target_omega', 0.0)),
         'team_safety_brake_turn_mode': str(getattr(args, 'team_safety_brake_turn_mode', 'away')),
         'team_safety_brake_require_neighbor': bool(getattr(args, 'team_safety_brake_require_neighbor', False)),
+        'team_safety_brake_local_danger': bool(getattr(args, 'team_safety_brake_local_danger', False)),
         'team_safety_brake_power': float(getattr(args, 'team_safety_brake_power', 1.0)),
         'team_safety_brake_crossing_only': bool(getattr(args, 'team_safety_brake_crossing_only', False)),
         'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
@@ -2113,6 +2121,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'team_safety_brake_target_omega',
         'team_safety_brake_turn_mode',
         'team_safety_brake_require_neighbor',
+        'team_safety_brake_local_danger',
         'team_safety_brake_power',
         'team_safety_brake_crossing_only',
         'policy_anchor_weight',
