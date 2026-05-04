@@ -19,6 +19,7 @@ class RewardConfig:
     conflict_distance: float = 5.0
     anticipation_distance: float = 5.0
     conflict_risk_weight: float = 1.5
+    conflict_bearing_floor: float = 0.3
     conflict_brake_weight: float = 1.2
     conflict_progress_scale: float = 0.6
     conflict_resolution_reward_weight: float = 0.9
@@ -99,10 +100,33 @@ class RewardConfig:
     # -sign(heading_error)).  Provides explicit directional guidance
     # that the scalar heading_error penalty alone cannot convey.
     heading_correction_reward_weight: float = 0.0
+    # Clear-ahead route discipline: when no neighbour is close in the forward
+    # cone, strongly prefer low CTE, low heading error, and low yaw rate.
+    clear_ahead_distance: float = 0.0
+    clear_ahead_bearing_deg: float = 35.0
+    clear_ahead_cte_weight: float = 0.0
+    clear_ahead_heading_weight: float = 0.0
+    clear_ahead_omega_weight: float = 0.0
     # Avoidance turn reward: positive reward for turning *away* from the
     # nearest neighbour when inside the near-miss zone.  Helps break
     # COLREGs-vs-physics conflict where the agent turns into a neighbour.
     avoidance_turn_reward_weight: float = 0.0
+    # Anticipatory version of the avoidance-turn signal.  It activates before
+    # the near-miss band for closing neighbours, giving random encounters a
+    # directional escape gradient before collision range.
+    anticipatory_avoidance_turn_reward_weight: float = 0.0
+    anticipatory_avoidance_turn_penalty_weight: float = 0.0
+    anticipatory_avoidance_turn_distance: float = 0.0
+    # Anticipatory CPA margin shaping: rewards measurable improvement in
+    # predicted closest approach / closing rate before the near-miss band.
+    anticipatory_cpa_distance: float = 0.0
+    anticipatory_cpa_time_horizon: float = 8.0
+    anticipatory_dcpa_target: float = 1.15
+    anticipatory_dcpa_deficit_penalty_weight: float = 0.0
+    anticipatory_dcpa_improvement_reward_weight: float = 0.0
+    anticipatory_closing_reduction_reward_weight: float = 0.0
+    anticipatory_yield_speed: float = 0.10
+    anticipatory_yield_speed_penalty_weight: float = 0.0
     # Dense per-step penalty for near-zero speed when close to (but not
     # at) the goal.  Prevents the "hover near goal" exploit where agents
     # collect goal_proximity reward without actually arriving.

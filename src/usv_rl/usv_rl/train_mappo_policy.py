@@ -93,6 +93,7 @@ def parse_args():
     parser.add_argument('--conflict-distance', type=float, default=RewardConfig.conflict_distance, help='Distance threshold used for conflict-specific shaping.')
     parser.add_argument('--anticipation-distance', type=float, default=RewardConfig.anticipation_distance, help='Lookahead distance used for anticipatory conflict shaping.')
     parser.add_argument('--conflict-risk-weight', type=float, default=RewardConfig.conflict_risk_weight, help='Conflict-risk penalty weight.')
+    parser.add_argument('--conflict-bearing-floor', type=float, default=RewardConfig.conflict_bearing_floor, help='Minimum bearing factor for closing neighbours in conflict-risk shaping.')
     parser.add_argument('--conflict-brake-weight', type=float, default=RewardConfig.conflict_brake_weight, help='Conflict braking penalty weight.')
     parser.add_argument('--conflict-progress-scale', type=float, default=RewardConfig.conflict_progress_scale, help='Reduction applied to positive progress reward during unresolved conflict.')
     parser.add_argument('--conflict-resolution-reward-weight', type=float, default=RewardConfig.conflict_resolution_reward_weight, help='Reward weight for reducing conflict risk across consecutive steps.')
@@ -152,7 +153,23 @@ def parse_args():
     parser.add_argument('--heading-convergence-threshold-deg', type=float, default=RewardConfig.heading_convergence_threshold_deg, help='Heading error threshold (degrees) for convergence bonus.')
     parser.add_argument('--heading-correction-reward-weight', type=float, default=RewardConfig.heading_correction_reward_weight, help='Positive reward for turning in the direction that reduces heading error.')
     parser.add_argument('--straight-line-omega-cte-gate', type=float, default=RewardConfig.straight_line_omega_cte_gate, help='CTE threshold (m) above which straight-line omega penalty is progressively reduced for path recovery. 0=disabled.')
+    parser.add_argument('--clear-ahead-distance', type=float, default=RewardConfig.clear_ahead_distance, help='Forward-cone distance (m) for clear-ahead route discipline. 0 disables.')
+    parser.add_argument('--clear-ahead-bearing-deg', type=float, default=RewardConfig.clear_ahead_bearing_deg, help='Half-angle of the forward cone used by clear-ahead route discipline.')
+    parser.add_argument('--clear-ahead-cte-weight', type=float, default=RewardConfig.clear_ahead_cte_weight, help='Extra CTE penalty weight applied only when the forward cone is clear.')
+    parser.add_argument('--clear-ahead-heading-weight', type=float, default=RewardConfig.clear_ahead_heading_weight, help='Extra heading-error penalty weight applied only when the forward cone is clear.')
+    parser.add_argument('--clear-ahead-omega-weight', type=float, default=RewardConfig.clear_ahead_omega_weight, help='Extra yaw-rate penalty weight applied only when the forward cone is clear.')
     parser.add_argument('--avoidance-turn-reward-weight', type=float, default=RewardConfig.avoidance_turn_reward_weight, help='Positive reward weight for turning away from nearest neighbour inside near-miss zone.')
+    parser.add_argument('--anticipatory-avoidance-turn-reward-weight', type=float, default=RewardConfig.anticipatory_avoidance_turn_reward_weight, help='Positive reward weight for early away-turning against closing neighbours.')
+    parser.add_argument('--anticipatory-avoidance-turn-penalty-weight', type=float, default=RewardConfig.anticipatory_avoidance_turn_penalty_weight, help='Penalty weight for weak or wrong-way turning against closing neighbours before near miss.')
+    parser.add_argument('--anticipatory-avoidance-turn-distance', type=float, default=RewardConfig.anticipatory_avoidance_turn_distance, help='Distance (m) where anticipatory avoidance-turn shaping activates. 0 disables unless reward/penalty weights stay zero.')
+    parser.add_argument('--anticipatory-cpa-distance', type=float, default=RewardConfig.anticipatory_cpa_distance, help='Distance (m) where anticipatory CPA margin shaping activates. 0 disables while all CPA weights are zero.')
+    parser.add_argument('--anticipatory-cpa-time-horizon', type=float, default=RewardConfig.anticipatory_cpa_time_horizon, help='TCPA horizon (s) for anticipatory CPA margin shaping.')
+    parser.add_argument('--anticipatory-dcpa-target', type=float, default=RewardConfig.anticipatory_dcpa_target, help='Predicted DCPA target (m) used by anticipatory CPA margin shaping.')
+    parser.add_argument('--anticipatory-dcpa-deficit-penalty-weight', type=float, default=RewardConfig.anticipatory_dcpa_deficit_penalty_weight, help='Penalty weight for low predicted DCPA before near miss.')
+    parser.add_argument('--anticipatory-dcpa-improvement-reward-weight', type=float, default=RewardConfig.anticipatory_dcpa_improvement_reward_weight, help='Reward weight for increasing predicted DCPA across consecutive steps.')
+    parser.add_argument('--anticipatory-closing-reduction-reward-weight', type=float, default=RewardConfig.anticipatory_closing_reduction_reward_weight, help='Reward weight for reducing range-closing speed across consecutive steps.')
+    parser.add_argument('--anticipatory-yield-speed', type=float, default=RewardConfig.anticipatory_yield_speed, help='Target give-way speed (m/s) for deterministic random-encounter CPA yield roles.')
+    parser.add_argument('--anticipatory-yield-speed-penalty-weight', type=float, default=RewardConfig.anticipatory_yield_speed_penalty_weight, help='Penalty weight for give-way agents exceeding anticipatory-yield-speed in low-DCPA random encounters.')
     parser.add_argument('--near-goal-idle-penalty-weight', type=float, default=RewardConfig.near_goal_idle_penalty_weight, help='Dense per-step penalty for near-zero speed when close to (but not at) the goal. Prevents hover-near-goal exploit.')
     parser.add_argument('--cte-clip-range', type=float, default=3.0, help='Symmetric clip range (m) for signed cross-track error observation. Default 3.0.')
     parser.add_argument('--neighbor-attention', action='store_true', help='Replace fixed neighbor padding with attention-based neighbor aggregation. Learns to focus on the most relevant neighbor (nearest, highest TCPA, head-on, etc.).')
@@ -274,6 +291,7 @@ def parse_args():
     parser.add_argument('--team-safety-brake-local-danger', action='store_true', help='Use the active agent nearest-neighbor distance, rather than global team-min separation, to scale team-safety-brake linear-speed danger.')
     parser.add_argument('--team-safety-brake-power', type=float, default=1.0, help='Power applied to team-safety-brake danger weighting. Values above 1 focus the loss closer to unsafe separation.')
     parser.add_argument('--team-safety-brake-crossing-only', action='store_true', help='Apply the team-safety-brake auxiliary only to three_usv_crossing samples.')
+    parser.add_argument('--team-safety-brake-random-only', action='store_true', help='Apply the team-safety-brake auxiliary only to random encounter samples.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
     parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
@@ -420,6 +438,23 @@ def _actor_forward(actor, obs_tensor, scenario_ids=None):
     ):
         return actor(obs_tensor, scenario_ids=scenario_ids)
     return actor(obs_tensor)
+
+
+def _scenario_mix_label(flat_scenario_ids_np, scenarios: tuple[str, ...]) -> str:
+    if flat_scenario_ids_np is None:
+        return 'none'
+    scenario_ids = np.asarray(flat_scenario_ids_np, dtype=np.int32).reshape(-1)
+    if scenario_ids.size == 0:
+        return 'empty'
+    unique_ids, counts = np.unique(scenario_ids, return_counts=True)
+    parts = []
+    for scenario_id, count in zip(unique_ids.tolist(), counts.tolist()):
+        if 0 <= int(scenario_id) < len(scenarios):
+            name = str(scenarios[int(scenario_id)])
+        else:
+            name = f'id{int(scenario_id)}'
+        parts.append(f'{name}:{int(count)}')
+    return ','.join(parts)
 
 
 def _clip_actor_critic_gradients(torch, actor, critic, actor_log_std, max_grad_norm: float, *, separate: bool):
@@ -881,12 +916,21 @@ def _team_safety_brake_active_mask(
     if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
         return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
 
-    if bool(getattr(args, 'team_safety_brake_crossing_only', False)):
-        crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
-        if crossing_scenario_id is not None and scenario_ids is not None:
-            scenario_mask = scenario_ids == int(crossing_scenario_id)
-        else:
-            scenario_mask = raw_obs[:, -2] > 0.5
+    crossing_only = bool(getattr(args, 'team_safety_brake_crossing_only', False))
+    random_only = bool(getattr(args, 'team_safety_brake_random_only', False))
+    if crossing_only or random_only:
+        scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        if crossing_only:
+            crossing_scenario_id = scenario_to_index.get('three_usv_crossing')
+            if crossing_scenario_id is not None and scenario_ids is not None:
+                scenario_mask = scenario_mask | (scenario_ids == int(crossing_scenario_id))
+            elif not random_only:
+                scenario_mask = raw_obs[:, -2] > 0.5
+        if random_only and scenario_ids is not None:
+            for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+                scenario_id = scenario_to_index.get(scenario_name)
+                if scenario_id is not None:
+                    scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
     else:
         scenario_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
 
@@ -1308,6 +1352,7 @@ def _build_reward_config(args) -> RewardConfig:
         conflict_distance=float(args.conflict_distance),
         anticipation_distance=float(args.anticipation_distance),
         conflict_risk_weight=float(args.conflict_risk_weight),
+        conflict_bearing_floor=float(args.conflict_bearing_floor),
         conflict_brake_weight=float(args.conflict_brake_weight),
         conflict_progress_scale=float(args.conflict_progress_scale),
         conflict_resolution_reward_weight=float(args.conflict_resolution_reward_weight),
@@ -1367,7 +1412,23 @@ def _build_reward_config(args) -> RewardConfig:
         heading_convergence_threshold_deg=float(args.heading_convergence_threshold_deg),
         heading_correction_reward_weight=float(args.heading_correction_reward_weight),
         straight_line_omega_cte_gate=float(args.straight_line_omega_cte_gate),
+        clear_ahead_distance=float(args.clear_ahead_distance),
+        clear_ahead_bearing_deg=float(args.clear_ahead_bearing_deg),
+        clear_ahead_cte_weight=float(args.clear_ahead_cte_weight),
+        clear_ahead_heading_weight=float(args.clear_ahead_heading_weight),
+        clear_ahead_omega_weight=float(args.clear_ahead_omega_weight),
         avoidance_turn_reward_weight=float(args.avoidance_turn_reward_weight),
+        anticipatory_avoidance_turn_reward_weight=float(args.anticipatory_avoidance_turn_reward_weight),
+        anticipatory_avoidance_turn_penalty_weight=float(args.anticipatory_avoidance_turn_penalty_weight),
+        anticipatory_avoidance_turn_distance=float(args.anticipatory_avoidance_turn_distance),
+        anticipatory_cpa_distance=float(args.anticipatory_cpa_distance),
+        anticipatory_cpa_time_horizon=float(args.anticipatory_cpa_time_horizon),
+        anticipatory_dcpa_target=float(args.anticipatory_dcpa_target),
+        anticipatory_dcpa_deficit_penalty_weight=float(args.anticipatory_dcpa_deficit_penalty_weight),
+        anticipatory_dcpa_improvement_reward_weight=float(args.anticipatory_dcpa_improvement_reward_weight),
+        anticipatory_closing_reduction_reward_weight=float(args.anticipatory_closing_reduction_reward_weight),
+        anticipatory_yield_speed=float(args.anticipatory_yield_speed),
+        anticipatory_yield_speed_penalty_weight=float(args.anticipatory_yield_speed_penalty_weight),
         near_goal_idle_penalty_weight=float(args.near_goal_idle_penalty_weight),
     )
 
@@ -1565,6 +1626,7 @@ def _checkpoint_payload(
         'team_safety_brake_local_danger': bool(getattr(args, 'team_safety_brake_local_danger', False)),
         'team_safety_brake_power': float(getattr(args, 'team_safety_brake_power', 1.0)),
         'team_safety_brake_crossing_only': bool(getattr(args, 'team_safety_brake_crossing_only', False)),
+        'team_safety_brake_random_only': bool(getattr(args, 'team_safety_brake_random_only', False)),
         'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
         'policy_anchor_weight_end': (
             float(getattr(args, 'policy_anchor_weight_end'))
@@ -2124,6 +2186,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'team_safety_brake_local_danger',
         'team_safety_brake_power',
         'team_safety_brake_crossing_only',
+        'team_safety_brake_random_only',
         'policy_anchor_weight',
         'policy_anchor_weight_end',
         'policy_anchor_crossing_only',
@@ -2154,6 +2217,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'conflict_distance',
         'anticipation_distance',
         'conflict_risk_weight',
+        'conflict_bearing_floor',
         'conflict_brake_weight',
         'conflict_progress_scale',
         'conflict_resolution_reward_weight',
@@ -2204,6 +2268,22 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'forward_speed_change_penalty_weight',
         'omega_flip_saturation_threshold',
         'straight_line_omega_conflict_floor',
+        'clear_ahead_distance',
+        'clear_ahead_bearing_deg',
+        'clear_ahead_cte_weight',
+        'clear_ahead_heading_weight',
+        'clear_ahead_omega_weight',
+        'anticipatory_avoidance_turn_reward_weight',
+        'anticipatory_avoidance_turn_penalty_weight',
+        'anticipatory_avoidance_turn_distance',
+        'anticipatory_cpa_distance',
+        'anticipatory_cpa_time_horizon',
+        'anticipatory_dcpa_target',
+        'anticipatory_dcpa_deficit_penalty_weight',
+        'anticipatory_dcpa_improvement_reward_weight',
+        'anticipatory_closing_reduction_reward_weight',
+        'anticipatory_yield_speed',
+        'anticipatory_yield_speed_penalty_weight',
     )
     for field in reward_fields:
         if field in cli_overrides:
@@ -3230,9 +3310,11 @@ def main():
                 optimizer_sps = optimizer_samples / update_wall_time
                 loop_time = rollout_wall_time + update_wall_time
                 update_share = update_wall_time / max(loop_time, 1e-6)
+                scenario_mix = _scenario_mix_label(flat_scenario_ids_np, tuple(scenarios))
                 print(
                     f'[MAPPO][update={update_index}] total_steps={total_steps} '
                     f'rollout_steps={rollout_steps_collected} sample_count={sample_count} '
+                    f'scenarios={scenario_mix} '
                     f'rollout_time={rollout_wall_time:.2f}s rollout_sps={rollout_sps:.1f} '
                     f'update_time={update_wall_time:.2f}s update_sps={optimizer_sps:.1f} '
                     f'update_share={update_share:.2%} loss={float(loss.detach().cpu().item()):.4f} '

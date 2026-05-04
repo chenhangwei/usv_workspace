@@ -157,6 +157,7 @@ class MultiAgentEnv(gym.Env):
         self._previous_actions: Dict[str, np.ndarray] = {}
         self._previous_forward_speeds: Dict[str, float] = {}
         self._previous_conflict_risks: Dict[str, float] = {}
+        self._previous_cpa_metrics: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._latest_observations: Dict[str, AgentLocalObservation] = {}
         self._best_team_mean_distance = float('inf')
         self._initial_team_mean_separation = float('inf')
@@ -689,9 +690,8 @@ class MultiAgentEnv(gym.Env):
             if range_rate <= 0.0:
                 continue
 
-            # Use a floor of 0.3 so side-approaching neighbours (crossing
-            # scenarios with bearing ~60-90°) still register conflict risk.
-            forward_factor = max(0.0, 0.3 + 0.7 * float(np.cos(neighbor.bearing)))
+            bearing_floor = max(0.0, min(1.0, float(self.config.reward.conflict_bearing_floor)))
+            forward_factor = max(0.0, bearing_floor + (1.0 - bearing_floor) * float(np.cos(neighbor.bearing)))
             if forward_factor <= 0.0:
                 continue
 
@@ -700,6 +700,158 @@ class MultiAgentEnv(gym.Env):
             max_risk = max(max_risk, neighbor_risk)
 
         return max_risk
+
+    def _compute_clear_ahead_gate(self, observation: AgentLocalObservation) -> float:
+        clear_distance = max(0.0, float(self.config.reward.clear_ahead_distance))
+        if clear_distance <= 0.0:
+            return 0.0
+
+        half_angle = math.radians(max(1.0, min(179.0, float(self.config.reward.clear_ahead_bearing_deg))))
+        closest_front_blocker = float('inf')
+        closest_neighbor = float('inf')
+        for neighbor in observation.neighbors:
+            if neighbor.distance <= 1e-3:
+                continue
+            closest_neighbor = min(closest_neighbor, float(neighbor.distance))
+            if abs(float(neighbor.bearing)) <= half_angle:
+                closest_front_blocker = min(closest_front_blocker, float(neighbor.distance))
+
+        if closest_front_blocker < clear_distance or closest_neighbor < clear_distance:
+            return 0.0
+
+        front_margin = clear_distance if not np.isfinite(closest_front_blocker) else closest_front_blocker - clear_distance
+        neighbor_margin = clear_distance if not np.isfinite(closest_neighbor) else closest_neighbor - clear_distance
+        front_gate = min(1.0, max(0.0, front_margin / max(0.5 * clear_distance, 1e-3)))
+        neighbor_gate = min(1.0, max(0.0, neighbor_margin / max(0.75 * clear_distance, 1e-3)))
+
+        return min(front_gate, neighbor_gate)
+
+    @staticmethod
+    def _neighbor_cpa_metrics(neighbor) -> Dict[str, float]:
+        rel_x = float(neighbor.rel_x)
+        rel_y = float(neighbor.rel_y)
+        rel_vx = float(neighbor.rel_vx)
+        rel_vy = float(neighbor.rel_vy)
+        distance = max(float(neighbor.distance), math.hypot(rel_x, rel_y), 1e-3)
+        dot = (rel_x * rel_vx) + (rel_y * rel_vy)
+        range_rate = -dot / distance
+        rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+        if rel_speed_sq <= 1e-6:
+            return {
+                'distance': distance,
+                'range_rate': range_rate,
+                'tcpa': float('inf'),
+                'dcpa': distance,
+            }
+
+        tcpa = -dot / rel_speed_sq
+        if tcpa <= 0.0:
+            dcpa = distance
+        else:
+            cpa_x = rel_x + rel_vx * tcpa
+            cpa_y = rel_y + rel_vy * tcpa
+            dcpa = math.hypot(cpa_x, cpa_y)
+        return {
+            'distance': distance,
+            'range_rate': range_rate,
+            'tcpa': tcpa,
+            'dcpa': dcpa,
+        }
+
+    def _collect_cpa_metrics(self, observation: AgentLocalObservation) -> Dict[str, Dict[str, float]]:
+        return {
+            neighbor.source_id: self._neighbor_cpa_metrics(neighbor)
+            for neighbor in observation.neighbors
+        }
+
+    @staticmethod
+    def _agent_priority_key(agent_id: str) -> tuple[int, str]:
+        text = str(agent_id)
+        try:
+            return int(text.rsplit('_', 1)[-1]), text
+        except (TypeError, ValueError):
+            return 1000, text
+
+    def _agent_has_random_yield_role(self, agent_id: str, neighbor_id: str) -> bool:
+        if self._scenario is None or 'random_encounter' not in self._scenario.name:
+            return False
+        return self._agent_priority_key(agent_id) > self._agent_priority_key(neighbor_id)
+
+    def _compute_anticipatory_cpa_reward(
+        self,
+        agent_id: str,
+        observation: AgentLocalObservation,
+        current_forward_speed: float,
+    ) -> float:
+        reward_cfg = self.config.reward
+        active_weights = (
+            reward_cfg.anticipatory_dcpa_deficit_penalty_weight,
+            reward_cfg.anticipatory_dcpa_improvement_reward_weight,
+            reward_cfg.anticipatory_closing_reduction_reward_weight,
+            reward_cfg.anticipatory_yield_speed_penalty_weight,
+        )
+        if not observation.neighbors or max(active_weights) <= 0.0:
+            return 0.0
+
+        lookahead_distance = max(
+            float(reward_cfg.anticipatory_cpa_distance),
+            self.config.near_miss_distance,
+            self.config.collision_distance + 1e-3,
+        )
+        if lookahead_distance <= self.config.collision_distance + 1e-3:
+            return 0.0
+
+        horizon = max(1.0, float(reward_cfg.anticipatory_cpa_time_horizon))
+        dcpa_target = max(self.config.collision_distance + 0.05, float(reward_cfg.anticipatory_dcpa_target))
+        previous_metrics_by_neighbor = self._previous_cpa_metrics.get(agent_id, {})
+        closing_reference = max(0.35 * self.config.cruise_speed, 0.05)
+        dcpa_reference = max(0.20 * dcpa_target, 0.05)
+        cruise_reference = max(0.18, self._pure_linear_speed_limit())
+        yield_speed = max(0.02, min(float(reward_cfg.anticipatory_yield_speed), cruise_reference))
+        cpa_reward = 0.0
+
+        for neighbor in observation.neighbors:
+            metrics = self._neighbor_cpa_metrics(neighbor)
+            distance = metrics['distance']
+            if distance <= self.config.collision_distance or distance >= lookahead_distance:
+                continue
+            range_rate = metrics['range_rate']
+            tcpa = metrics['tcpa']
+            dcpa = metrics['dcpa']
+            if range_rate <= 0.02 or not np.isfinite(tcpa) or tcpa <= 0.0 or tcpa > horizon:
+                continue
+
+            dcpa_deficit = max(0.0, dcpa_target - dcpa) / max(dcpa_target, 1e-3)
+            if dcpa_deficit <= 0.0:
+                continue
+
+            distance_gate = (lookahead_distance - distance) / max(lookahead_distance - self.config.collision_distance, 1e-3)
+            time_gate = (horizon - tcpa) / horizon
+            closing_gate = min(1.0, range_rate / closing_reference)
+            threat_gate = max(distance_gate, time_gate) * closing_gate * (0.35 + 0.65 * dcpa_deficit)
+
+            cpa_reward -= reward_cfg.anticipatory_dcpa_deficit_penalty_weight * threat_gate * (dcpa_deficit ** 2)
+
+            previous_metrics = previous_metrics_by_neighbor.get(neighbor.source_id)
+            if previous_metrics is not None:
+                dcpa_delta = dcpa - previous_metrics.get('dcpa', dcpa)
+                if dcpa_delta > 0.0:
+                    dcpa_improvement = min(1.0, dcpa_delta / dcpa_reference)
+                    cpa_reward += reward_cfg.anticipatory_dcpa_improvement_reward_weight * threat_gate * dcpa_improvement
+
+                closing_delta = previous_metrics.get('range_rate', range_rate) - range_rate
+                if closing_delta > 0.0:
+                    closing_reduction = min(1.0, closing_delta / closing_reference)
+                    cpa_reward += reward_cfg.anticipatory_closing_reduction_reward_weight * threat_gate * closing_reduction
+
+            if reward_cfg.anticipatory_yield_speed_penalty_weight > 0.0 and self._agent_has_random_yield_role(agent_id, neighbor.source_id):
+                speed_excess_ratio = max(
+                    0.0,
+                    min(1.0, (current_forward_speed - yield_speed) / max(cruise_reference - yield_speed, 1e-3)),
+                )
+                cpa_reward -= reward_cfg.anticipatory_yield_speed_penalty_weight * threat_gate * speed_excess_ratio
+
+        return cpa_reward
 
     def _compute_route_cross_track_error(
         self,
@@ -1063,6 +1215,10 @@ class MultiAgentEnv(gym.Env):
             namespace: self._compute_conflict_risk(observations[namespace])
             for namespace in self._active_agent_ids
         }
+        self._previous_cpa_metrics = {
+            namespace: self._collect_cpa_metrics(observations[namespace])
+            for namespace in self._active_agent_ids
+        }
         self._previous_pair_min: float = float('inf')
         self._entanglement_steps: int = 0
         self._episode_start = time.monotonic()
@@ -1163,6 +1319,36 @@ class MultiAgentEnv(gym.Env):
                 # Saturate at ω=0.25 (not 0.15) to encourage stronger evasive turns.
                 avoidance_turn = self.config.reward.avoidance_turn_reward_weight * proximity * max(0.0, min(1.0, turn_alignment / 0.25))
 
+        anticipatory_reward_weight = self.config.reward.anticipatory_avoidance_turn_reward_weight
+        anticipatory_penalty_weight = self.config.reward.anticipatory_avoidance_turn_penalty_weight
+        if (anticipatory_reward_weight > 0.0 or anticipatory_penalty_weight > 0.0) and observation.neighbors:
+            turn_distance = max(near_miss_distance, self.config.reward.anticipatory_avoidance_turn_distance)
+            best_gate = 0.0
+            best_turn_sign = 0.0
+            for neighbor in observation.neighbors:
+                if neighbor.distance <= self.config.collision_distance or neighbor.distance >= turn_distance:
+                    continue
+                range_rate = -(
+                    (neighbor.rel_x * neighbor.rel_vx) + (neighbor.rel_y * neighbor.rel_vy)
+                ) / max(neighbor.distance, 1e-3)
+                if range_rate <= 0.0:
+                    continue
+                distance_gate = (turn_distance - neighbor.distance) / max(turn_distance - self.config.collision_distance, 1e-3)
+                closing_gate = min(1.0, range_rate / max(0.35 * self.config.cruise_speed, 0.05))
+                time_to_collision = (neighbor.distance - self.config.collision_distance) / max(range_rate, 1e-3)
+                time_gate = max(0.0, min(1.0, (7.0 - time_to_collision) / 7.0))
+                urgency_gate = max(distance_gate * closing_gate, time_gate * closing_gate)
+                if urgency_gate > best_gate:
+                    best_gate = urgency_gate
+                    best_turn_sign = -1.0 if neighbor.bearing >= 0.0 else 1.0
+            if best_gate > 0.0 and best_turn_sign != 0.0:
+                current_omega = float(action[1])
+                turn_alignment = best_turn_sign * current_omega
+                normalized_alignment = max(-1.0, min(1.0, turn_alignment / 0.25))
+                avoidance_turn += anticipatory_reward_weight * best_gate * max(0.0, normalized_alignment)
+                turn_shortfall = max(0.0, 0.14 - turn_alignment) / 0.14
+                avoidance_turn -= anticipatory_penalty_weight * best_gate * min(1.5, turn_shortfall)
+
         braking = -self.config.reward.conflict_brake_weight * conflict_level * speed_deficit
         braking -= self.config.reward.stop_go_penalty_weight * conflict_level * speed_drop
         braking += self.config.reward.conflict_resolution_reward_weight * conflict_active * risk_drop
@@ -1204,6 +1390,23 @@ class MultiAgentEnv(gym.Env):
         if path_deviation_excess > 0.0:
             progress -= self.config.reward.path_deviation_penalty_weight * path_deviation_excess
 
+        front_clear_gate = self._compute_clear_ahead_gate(observation)
+        low_conflict_gate = max(0.0, 1.0 - (min(conflict_risk, 1.0) / 0.45))
+        clear_ahead_gate = front_clear_gate * low_conflict_gate
+        clear_ahead_route_gate = clear_ahead_gate * max(0.0, 1.0 - 0.65 * goal_proximity)
+        clear_ahead_heading_penalty = 0.0
+        if clear_ahead_route_gate > 0.0:
+            abs_cte = abs(cross_track_error)
+            abs_heading_error = abs(observation.heading_error)
+            if self.config.reward.clear_ahead_cte_weight > 0.0:
+                progress -= self.config.reward.clear_ahead_cte_weight * clear_ahead_route_gate * abs_cte
+            if self.config.reward.clear_ahead_heading_weight > 0.0:
+                heading_scale = max(
+                    0.1,
+                    1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)) - (self.config.goal_proximity_heading_relief * goal_proximity),
+                )
+                clear_ahead_heading_penalty = self.config.reward.clear_ahead_heading_weight * clear_ahead_route_gate * heading_scale * abs_heading_error
+
         smoothness_scale = max(0.1, 1.0 - (self.config.goal_proximity_smoothness_relief * goal_proximity))
         smoothness = -(self.config.reward.action_smoothness_weight * smoothness_scale) * float(
             np.linalg.norm(action - self._previous_actions[agent_id])
@@ -1243,6 +1446,25 @@ class MultiAgentEnv(gym.Env):
                 * abs_omega
             )
 
+        if self.config.reward.clear_ahead_omega_weight > 0.0 and clear_ahead_route_gate > 0.0:
+            abs_cte = abs(cross_track_error)
+            abs_omega = abs(float(action[1]))
+            alignment = max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+            cte_recovery_gate = 1.0
+            if self.config.reward.straight_line_omega_cte_gate > 0.0:
+                cte_recovery_gate = max(
+                    0.0,
+                    1.0 - abs_cte / (self.config.reward.straight_line_omega_cte_gate * 3.0),
+                )
+            smoothness -= (
+                self.config.reward.clear_ahead_omega_weight
+                * smoothness_scale
+                * clear_ahead_route_gate
+                * (0.35 + 0.65 * alignment)
+                * cte_recovery_gate
+                * abs_omega
+            )
+
         if self.config.reward.saturated_omega_flip_penalty_weight > 0.0:
             previous_omega = float(self._previous_actions[agent_id][1])
             current_omega = float(action[1])
@@ -1267,6 +1489,7 @@ class MultiAgentEnv(gym.Env):
             1.0 - (self.config.reward.heading_relief_factor * min(conflict_risk, 1.0)) - (self.config.goal_proximity_heading_relief * goal_proximity),
         )
         heading = -((self.config.reward.heading_error_weight * heading_scale) * abs(observation.heading_error))
+        heading -= clear_ahead_heading_penalty
         team = -self.config.team_reward_weight * max(0.0, near_miss_distance - pair_min)
 
         # Separation recovery: positive reward when pair_min increases while
@@ -1309,6 +1532,12 @@ class MultiAgentEnv(gym.Env):
                 speed_excess = max(0.0, current_forward_speed - self.config.reward.desired_conflict_speed)
                 proximity_factor = (sd_thresh - pair_min) / max(sd_thresh, 1e-3)
                 safety -= self.config.reward.speed_distance_coupling_penalty_weight * speed_excess * proximity_factor
+
+        safety += self._compute_anticipatory_cpa_reward(
+            agent_id,
+            observation,
+            current_forward_speed,
+        )
 
         # Heading convergence reward: positive reward for aligning closely with
         # the goal direction, encouraging straight-line tracking.
@@ -1460,6 +1689,7 @@ class MultiAgentEnv(gym.Env):
             self._previous_actions[namespace] = projected_actions[namespace]
             self._previous_forward_speeds[namespace] = max(0.0, observation.final_linear_x)
             self._previous_conflict_risks[namespace] = self._compute_conflict_risk(observation)
+            self._previous_cpa_metrics[namespace] = self._collect_cpa_metrics(observation)
 
         self._previous_pair_min = pair_min
 
