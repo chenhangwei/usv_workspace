@@ -293,11 +293,53 @@ def parse_args(argv=None):
                         help='Encounter type for models trained with scenario conditioning (fresh54+). '
                              '"auto" classifies dynamically from neighbour geometry each step; '
                              'a fixed name uses a static one-hot; "none" sends all-zeros.')
+    parser.add_argument('--clear-ahead-route-gate', action='store_true',
+                        help='When the goal-direction forward cone is clear and no close neighbour exists, blend pure-RL output back toward raw route navigation.')
+    parser.add_argument('--clear-ahead-route-distance', type=float, default=5.0,
+                        help='Forward-cone blocker distance for online clear-ahead route gate.')
+    parser.add_argument('--clear-ahead-route-bearing-deg', type=float, default=35.0,
+                        help='Half-angle of the goal-direction forward cone for online clear-ahead route gate.')
+    parser.add_argument('--clear-ahead-route-min-neighbor-separation', type=float, default=3.0,
+                        help='All-around nearest-neighbor separation required before online clear-ahead route gate can activate.')
+    parser.add_argument('--clear-ahead-route-max-conflict-level', type=float, default=0.05,
+                        help='Maximum projection conflict level allowed before online clear-ahead route gate is disabled.')
+    parser.add_argument('--clear-ahead-route-linear-blend', type=float, default=0.35,
+                        help='Blend factor from RL linear speed toward raw clear-ahead route speed.')
+    parser.add_argument('--clear-ahead-route-omega-blend', type=float, default=0.85,
+                        help='Blend factor from RL yaw rate toward raw/heading clear-ahead yaw rate.')
+    parser.add_argument('--clear-ahead-route-min-speed', type=float, default=0.18,
+                        help='Minimum forward speed target used by online clear-ahead route gate.')
+    parser.add_argument('--clear-ahead-route-max-omega', type=float, default=0.18,
+                        help='Absolute yaw-rate cap used by online clear-ahead route gate.')
+    parser.add_argument('--clear-ahead-route-heading-reference', type=float, default=0.55,
+                        help='Heading-error magnitude mapped to max omega when raw yaw is unavailable.')
     return parser.parse_args(argv)
 
 
 class PolicyInferenceNode(Node):
-    def __init__(self, *, namespace: str, model_path: str, policy_kind: str, rl_control_mode: str, device: str, publish_rate: float, max_neighbors: int, enable_controller_param: bool, encounter_type: str = 'none'):
+    def __init__(
+        self,
+        *,
+        namespace: str,
+        model_path: str,
+        policy_kind: str,
+        rl_control_mode: str,
+        device: str,
+        publish_rate: float,
+        max_neighbors: int,
+        enable_controller_param: bool,
+        encounter_type: str = 'none',
+        clear_ahead_route_gate: bool = False,
+        clear_ahead_route_distance: float = 5.0,
+        clear_ahead_route_bearing_deg: float = 35.0,
+        clear_ahead_route_min_neighbor_separation: float = 3.0,
+        clear_ahead_route_max_conflict_level: float = 0.05,
+        clear_ahead_route_linear_blend: float = 0.35,
+        clear_ahead_route_omega_blend: float = 0.85,
+        clear_ahead_route_min_speed: float = 0.18,
+        clear_ahead_route_max_omega: float = 0.18,
+        clear_ahead_route_heading_reference: float = 0.55,
+    ):
         resolved_namespace = namespace if namespace.startswith('/') else f'/{namespace}'
         super().__init__('policy_inference_node', namespace=resolved_namespace)
         self._namespace = resolved_namespace
@@ -369,6 +411,17 @@ class PolicyInferenceNode(Node):
         self._head_on_guard_turn_floor = 0.0
         self._head_on_guard_hold_until = 0.0
         self._head_on_guard_last_update = self._startup_monotonic
+        self._clear_ahead_route_gate = bool(clear_ahead_route_gate)
+        self._clear_ahead_route_distance = max(0.0, float(clear_ahead_route_distance))
+        self._clear_ahead_route_bearing = math.radians(max(1.0, min(179.0, float(clear_ahead_route_bearing_deg))))
+        self._clear_ahead_route_min_neighbor_separation = max(0.0, float(clear_ahead_route_min_neighbor_separation))
+        self._clear_ahead_route_max_conflict_level = max(0.0, float(clear_ahead_route_max_conflict_level))
+        self._clear_ahead_route_linear_blend = max(0.0, min(1.0, float(clear_ahead_route_linear_blend)))
+        self._clear_ahead_route_omega_blend = max(0.0, min(1.0, float(clear_ahead_route_omega_blend)))
+        self._clear_ahead_route_min_speed = max(0.0, float(clear_ahead_route_min_speed))
+        self._clear_ahead_route_max_omega = max(0.0, float(clear_ahead_route_max_omega))
+        self._clear_ahead_route_heading_reference = max(0.05, float(clear_ahead_route_heading_reference))
+        self._clear_ahead_route_logged = False
 
         policy_obs_dim = None
         if hasattr(self._policy, 'obs_dim'):
@@ -542,6 +595,29 @@ class PolicyInferenceNode(Node):
                 separation_relief = min(1.0, abs(range_rate) / 0.15)
                 raw_level *= max(0.25, 1.0 - 0.6 * separation_relief)
         return raw_level
+
+    def _clear_ahead_route_gate_active(self, observation) -> bool:
+        if not self._clear_ahead_route_gate or observation is None:
+            return False
+        if self._clear_ahead_route_distance <= 0.0:
+            return False
+        if observation.distance_to_goal <= 1.0:
+            return False
+        if observation.min_neighbor_distance() < self._clear_ahead_route_min_neighbor_separation:
+            return False
+        if self._projection_conflict_level(observation) > self._clear_ahead_route_max_conflict_level:
+            return False
+
+        # Neighbor bearings are ego-yaw-relative.  The route/goal direction is
+        # heading_error radians away from ego heading, so subtract it to measure
+        # whether a neighbor blocks the goal-direction forward cone.
+        for neighbor in observation.neighbors:
+            if neighbor.distance <= 1e-3 or neighbor.distance >= self._clear_ahead_route_distance:
+                continue
+            relative_to_goal = self._wrap_angle(float(neighbor.bearing) - float(observation.heading_error))
+            if abs(relative_to_goal) <= self._clear_ahead_route_bearing:
+                return False
+        return True
 
     def _reset_head_on_guard_state(self):
         self._head_on_guard_logged = False
@@ -811,8 +887,8 @@ class PolicyInferenceNode(Node):
         own_vy = float(self._velocity_msg.twist.linear.y)
         speed = math.hypot(own_vx, own_vy)
 
-        raw_linear_x = 0.0
-        raw_angular_z = 0.0
+        raw_linear_x = float(self._raw_cmd_msg.twist.linear.x) if self._raw_cmd_msg is not None else 0.0
+        raw_angular_z = float(self._raw_cmd_msg.twist.angular.z) if self._raw_cmd_msg is not None else 0.0
         final_linear_x = float(self._final_cmd_msg.velocity.x) if self._final_cmd_msg is not None else 0.0
         final_angular_z = float(self._final_cmd_msg.yaw_rate) if self._final_cmd_msg is not None else 0.0
 
@@ -1057,6 +1133,28 @@ class PolicyInferenceNode(Node):
             )
             linear_x *= speed_scale
 
+        if self._clear_ahead_route_gate_active(observation):
+            raw_linear = max(self._clear_ahead_route_min_speed, float(observation.raw_linear_x))
+            raw_linear = min(raw_linear, float(self._action_bounds.linear_delta))
+            if abs(float(observation.raw_angular_z)) > 1e-4:
+                route_omega = float(observation.raw_angular_z)
+            else:
+                route_omega = -max(-1.0, min(1.0, float(observation.heading_error) / self._clear_ahead_route_heading_reference)) * self._clear_ahead_route_max_omega
+            route_omega = max(-self._clear_ahead_route_max_omega, min(self._clear_ahead_route_max_omega, route_omega))
+            linear_x = (
+                (1.0 - self._clear_ahead_route_linear_blend) * linear_x
+                + self._clear_ahead_route_linear_blend * raw_linear
+            )
+            angular_z = (
+                (1.0 - self._clear_ahead_route_omega_blend) * angular_z
+                + self._clear_ahead_route_omega_blend * route_omega
+            )
+            if not self._clear_ahead_route_logged:
+                self.get_logger().info(
+                    'Online clear-ahead route gate active: blending pure RL output toward raw route command.'
+                )
+                self._clear_ahead_route_logged = True
+
         if not self._first_action_logged:
             self.get_logger().info(
                 f'Publishing first pure RL action: linear_x={linear_x:.3f}, angular_z={angular_z:.3f}'
@@ -1087,6 +1185,16 @@ def main(argv=None):
             max_neighbors=args.max_neighbors,
             enable_controller_param=not args.disable_controller_param,
             encounter_type=args.encounter_type,
+            clear_ahead_route_gate=args.clear_ahead_route_gate,
+            clear_ahead_route_distance=args.clear_ahead_route_distance,
+            clear_ahead_route_bearing_deg=args.clear_ahead_route_bearing_deg,
+            clear_ahead_route_min_neighbor_separation=args.clear_ahead_route_min_neighbor_separation,
+            clear_ahead_route_max_conflict_level=args.clear_ahead_route_max_conflict_level,
+            clear_ahead_route_linear_blend=args.clear_ahead_route_linear_blend,
+            clear_ahead_route_omega_blend=args.clear_ahead_route_omega_blend,
+            clear_ahead_route_min_speed=args.clear_ahead_route_min_speed,
+            clear_ahead_route_max_omega=args.clear_ahead_route_max_omega,
+            clear_ahead_route_heading_reference=args.clear_ahead_route_heading_reference,
         )
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

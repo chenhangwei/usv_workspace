@@ -39,6 +39,7 @@ def _launch_setup(context, *args, **kwargs):
 
     user_fcu = LaunchConfiguration('fcu_url').perform(context)
     fcu_url_final = fcu_url_auto if user_fcu == '__auto__' else user_fcu
+    enable_log_collector = LaunchConfiguration('enable_log_collector').perform(context)
 
     return [
         LogInfo(msg=f'Starting USV: namespace={namespace}, instance={instance}, '
@@ -57,6 +58,7 @@ def _launch_setup(context, *args, **kwargs):
                 'gcs_url': '',
                 'simulation_mode': 'sitl',
                 'target_system_id': str(sysid),
+                'enable_log_collector': enable_log_collector,
             }.items()
         ),
     ]
@@ -102,6 +104,11 @@ def generate_launch_description():
             'fcu_url',
             default_value='__auto__',
             description='自定义 FCU URL (默认自动计算)'
+        ),
+        DeclareLaunchArgument(
+            'enable_log_collector',
+            default_value='true',
+            description='是否启动每艘 USV 的导航日志收集节点'
         ),
         OpaqueFunction(function=_launch_setup),
     ])

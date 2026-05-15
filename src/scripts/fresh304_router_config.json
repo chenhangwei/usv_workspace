@@ -1,0 +1,8 @@
+{
+  "policy_type": "mappo_router",
+  "env_template": "/mnt/data/checkpoints/usv_rl/fresh301_two_vessel_stageC_from_fresh300.pt",
+  "default_model": "/mnt/data/checkpoints/usv_rl/fresh301_two_vessel_stageC_from_fresh300.pt",
+  "scenario_models": {
+    "two_usv_overtaking": "/mnt/data/checkpoints/usv_rl/fresh303_overtaking_imitation_from_fresh301.pt"
+  }
+}

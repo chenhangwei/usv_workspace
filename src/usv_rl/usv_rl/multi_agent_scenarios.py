@@ -95,8 +95,12 @@ class FleetScenario:
 class MultiAgentScenarioFactory:
     _REQUIRED_AGENT_COUNTS = {
         'solo_navigation': 1,
+        'single_usv_overtaking': 1,
         'two_usv_head_on': 2,
+        'two_usv_crossing': 2,
+        'two_usv_overtaking': 2,
         'three_usv_crossing': 3,
+        'three_usv_clear_route': 3,
         'three_usv_overtaking': 3,
         'two_usv_random_encounter': 2,
         'three_usv_random_encounter': 3,
@@ -122,7 +126,18 @@ class MultiAgentScenarioFactory:
 
     @staticmethod
     def available() -> tuple[str, ...]:
-        return ('solo_navigation', 'two_usv_head_on', 'three_usv_crossing', 'three_usv_overtaking', 'two_usv_random_encounter', 'three_usv_random_encounter')
+        return (
+            'solo_navigation',
+            'single_usv_overtaking',
+            'three_usv_clear_route',
+            'two_usv_head_on',
+            'two_usv_crossing',
+            'two_usv_overtaking',
+            'three_usv_crossing',
+            'three_usv_overtaking',
+            'two_usv_random_encounter',
+            'three_usv_random_encounter',
+        )
 
     @staticmethod
     def cluster_available() -> tuple[str, ...]:
@@ -216,6 +231,35 @@ class MultiAgentScenarioFactory:
                 active_agent_ids=(first,),
             )
 
+        if kind == 'single_usv_overtaking':
+            first = agent_ids[0]
+            lead_speed = max(0.08, min(0.18, neighbor_speed * 0.42))
+            agent_spawns = {
+                # Active agent is the rear/overtaking vessel.
+                first: AgentSpawnConfig(x=0.0, y=-0.6, yaw=0.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance + 1.5, y=-0.6),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=45.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first,),
+                background_tracks=[
+                    BackgroundTrack(
+                        track_id='scripted_slow_lead',
+                        start_x=3.0,
+                        start_y=0.0,
+                        vx=lead_speed,
+                        vy=0.0,
+                        yaw=0.0,
+                    ),
+                ],
+            )
+
         if kind == 'two_usv_head_on':
             if len(agent_ids) < 2:
                 raise ValueError('two_usv_head_on requires at least 2 agents.')
@@ -235,6 +279,80 @@ class MultiAgentScenarioFactory:
                 agent_spawns=agent_spawns,
                 agent_goals=agent_goals,
                 active_agent_ids=(first, second),
+            )
+
+        if kind == 'two_usv_crossing':
+            if len(agent_ids) < 2:
+                raise ValueError('two_usv_crossing requires at least 2 agents.')
+            first, second = agent_ids[:2]
+            agent_spawns = {
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+                # Starboard crossing for the first agent: second approaches
+                # from negative Y and crosses the first agent's route near x=5.
+                second: AgentSpawnConfig(x=5.0, y=-5.0, yaw=math.pi / 2.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance, y=0.0),
+                second: AgentGoalConfig(x=5.0, y=7.0),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=45.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first, second),
+            )
+
+        if kind == 'two_usv_overtaking':
+            if len(agent_ids) < 2:
+                raise ValueError('two_usv_overtaking requires at least 2 agents.')
+            first, second = agent_ids[:2]
+            agent_spawns = {
+                # First agent is ahead in-lane; second starts astern and
+                # slightly to port, forcing a controlled pass rather than
+                # rear-end following.
+                first: AgentSpawnConfig(x=3.0, y=0.0, yaw=0.0),
+                second: AgentSpawnConfig(x=0.0, y=-0.6, yaw=0.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance + 3.0, y=0.0),
+                second: AgentGoalConfig(x=goal_distance + 1.5, y=-0.6),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=45.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first, second),
+            )
+
+        if kind == 'three_usv_clear_route':
+            if len(agent_ids) < 3:
+                raise ValueError('three_usv_clear_route requires at least 3 agents.')
+            first, second, third = agent_ids[:3]
+            agent_spawns = {
+                # Three non-conflicting routes with side/rear neighbors present.
+                # All agents travel generally east; lateral offsets keep the
+                # goal-direction forward cones clear while neighbors remain
+                # visible in observation.
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+                second: AgentSpawnConfig(x=-3.0, y=-3.5, yaw=0.0),
+                third: AgentSpawnConfig(x=3.0, y=3.5, yaw=0.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=goal_distance, y=0.0),
+                second: AgentGoalConfig(x=goal_distance - 3.0, y=-3.5),
+                third: AgentGoalConfig(x=goal_distance + 3.0, y=3.5),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=45.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first, second, third),
             )
 
         if kind == 'three_usv_crossing':

@@ -188,19 +188,20 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
             cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
+            random_encounter_route_priority=bool(getattr(args, 'random_encounter_route_priority', False)),
             max_waypoints_per_episode=int(getattr(args, 'max_waypoints_per_episode', 1)),
             waypoint_bonus=float(getattr(args, 'waypoint_bonus', 10.0)),
         )
     )
 
 
-def _recover_env(env_factory, *, context: str, max_attempts: int = 3, worker_rank: int = 0):
+def _recover_env(env_factory, *, context: str, max_attempts: int = 3, worker_rank: int = 0, reset_seed: int | None = None, reset_options: dict | None = None):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         env = None
         try:
             env = env_factory()
-            observations, info = env.reset()
+            observations, info = env.reset(seed=reset_seed, options=reset_options)
             return env, observations, info
         except RuntimeError as exc:
             last_error = exc
@@ -220,6 +221,19 @@ def _split_rollout_steps(rollout_steps: int, remaining_agent_steps: int, agent_c
     total_env_steps = min(rollout_steps, int(math.ceil(remaining_agent_steps / agent_count)))
     base_steps, remainder = divmod(total_env_steps, num_workers)
     return [base_steps + (1 if worker_rank < remainder else 0) for worker_rank in range(num_workers)]
+
+
+class _CurriculumSeedScheduler:
+    def __init__(self, seeds, *, start_index: int = 0):
+        self._seeds = tuple(int(seed) for seed in (seeds or ()))
+        self._index = int(start_index)
+
+    def next(self) -> int | None:
+        if not self._seeds:
+            return None
+        seed = self._seeds[self._index % len(self._seeds)]
+        self._index += 1
+        return int(seed)
 
 
 def _cpu_state_dict(module) -> dict:
@@ -295,6 +309,7 @@ def _collect_worker_rollout(
     worker_rank: int,
     squash_actions: bool = False,
     obs_normalizer: ObservationNormalizer = None,
+    seed_scheduler=None,
 ):
     import torch
     from torch.distributions import Normal
@@ -307,6 +322,7 @@ def _collect_worker_rollout(
     storage_rewards = []
     storage_dones = []
     storage_scenario_ids = []
+    storage_agent_indices = []
     agent_steps = 0
     episode_count = 0
     current_scenario = env.current_scenario_name
@@ -366,6 +382,7 @@ def _collect_worker_rollout(
                 context='parallel MAPPO rollout step recovery',
                 max_attempts=max_env_recovery_attempts,
                 worker_rank=worker_rank,
+                reset_seed=seed_scheduler.next() if seed_scheduler is not None else None,
             )
             global_state = info['global_state']
             break
@@ -382,6 +399,7 @@ def _collect_worker_rollout(
         storage_rewards.append(reward_batch)
         storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
         storage_scenario_ids.append(np.full(len(agent_order), current_scenario_id, dtype=np.int32))
+        storage_agent_indices.append(np.arange(len(agent_order), dtype=np.int32))
 
         agent_steps += len(agent_order)
         observations = next_observations
@@ -389,8 +407,9 @@ def _collect_worker_rollout(
 
         if done:
             episode_count += 1
+            reset_seed = seed_scheduler.next() if seed_scheduler is not None else None
             try:
-                observations, info = env.reset()
+                observations, info = env.reset(seed=reset_seed)
             except RuntimeError as exc:
                 consecutive_env_failures += 1
                 print(
@@ -408,6 +427,7 @@ def _collect_worker_rollout(
                     context='parallel MAPPO episode reset recovery',
                     max_attempts=max_env_recovery_attempts,
                     worker_rank=worker_rank,
+                    reset_seed=reset_seed,
                 )
             else:
                 consecutive_env_failures = 0
@@ -453,6 +473,7 @@ def _collect_worker_rollout(
         'advantages': advantages,
         'returns': returns,
         'scenario_ids': _flatten_rollout_batches(storage_scenario_ids),
+        'agent_indices': _flatten_rollout_batches(storage_agent_indices),
         'agent_steps': int(agent_steps),
         'rollout_steps_collected': int(len(storage_obs)),
         'episode_count': int(episode_count),
@@ -473,6 +494,7 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
         reward_config = _build_reward_config(args)
         env_factory = lambda: _create_env(args, agent_namespaces, scenarios, reward_config)
         scenario_to_index = _scenario_index_map(model_scenarios)
+        seed_scheduler = _CurriculumSeedScheduler(getattr(args, 'curriculum_seeds', None), start_index=worker_rank)
         max_env_recovery_attempts = 3
         max_consecutive_env_failures = 5
         consecutive_env_failures = 0
@@ -482,8 +504,10 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
             context='parallel MAPPO environment setup',
             max_attempts=max_env_recovery_attempts,
             worker_rank=worker_rank,
+            reset_seed=seed_scheduler.next(),
         )
         global_state = info['global_state']
+        collect_count = 0
         use_neighbor_attention = bool(getattr(args, 'neighbor_attention', False))
         if use_neighbor_attention:
             from usv_rl.neighbor_attention import AttentionActor, AttentionCritic
@@ -544,6 +568,33 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
             if use_obs_norm and norm_state is not None and worker_normalizer is not None:
                 worker_normalizer.load_state_dict(norm_state)
 
+            if bool(getattr(args, 'reset_sampler_each_rollout', False)) and collect_count > 0:
+                reset_seed = seed_scheduler.next()
+                try:
+                    observations, info = env.reset(seed=reset_seed)
+                except RuntimeError as exc:
+                    consecutive_env_failures += 1
+                    print(
+                        f'[SamplerWorker {worker_rank}] Warning: rollout-start reset failed with {exc}. '
+                        f'Recovering environment ({consecutive_env_failures}/{max_consecutive_env_failures}).',
+                        flush=True,
+                    )
+                    if consecutive_env_failures >= max_consecutive_env_failures:
+                        raise RuntimeError(
+                            f'Sampler worker {worker_rank} aborted after {consecutive_env_failures} consecutive environment failures.'
+                        ) from exc
+                    env.close()
+                    env, observations, info = _recover_env(
+                        env_factory,
+                        context='parallel MAPPO rollout-start reset recovery',
+                        max_attempts=max_env_recovery_attempts,
+                        worker_rank=worker_rank,
+                        reset_seed=reset_seed,
+                    )
+                else:
+                    consecutive_env_failures = 0
+                global_state = info['global_state']
+
             result, env, observations, global_state, consecutive_env_failures = _collect_worker_rollout(
                 env=env,
                 observations=observations,
@@ -564,7 +615,9 @@ def _rollout_worker_main(connection, worker_rank: int, domain_id: int, args_dict
                 worker_rank=worker_rank,
                 squash_actions=squash_actions,
                 obs_normalizer=worker_normalizer,
+                seed_scheduler=seed_scheduler,
             )
+            collect_count += 1
             connection.send(result)
     except EOFError:
         pass

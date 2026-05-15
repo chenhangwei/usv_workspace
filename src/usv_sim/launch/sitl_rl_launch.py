@@ -17,6 +17,7 @@ def _launch_policy_node(context, *args, **kwargs):
     rl_max_neighbors = LaunchConfiguration('rl_max_neighbors').perform(context)
     disable_controller_param = LaunchConfiguration('disable_controller_param').perform(context)
     rl_encounter_type = LaunchConfiguration('rl_encounter_type').perform(context)
+    clear_ahead_route_gate = LaunchConfiguration('clear_ahead_route_gate').perform(context)
 
     node_args = [
         '--namespace', namespace,
@@ -30,6 +31,8 @@ def _launch_policy_node(context, *args, **kwargs):
     ]
     if disable_controller_param.lower() in ('1', 'true', 'yes', 'on'):
         node_args.append('--disable-controller-param')
+    if clear_ahead_route_gate.lower() in ('1', 'true', 'yes', 'on'):
+        node_args.append('--clear-ahead-route-gate')
 
     return [
         Node(
@@ -49,6 +52,7 @@ def generate_launch_description():
     instance = LaunchConfiguration('instance')
     fcu_url = LaunchConfiguration('fcu_url')
     inference_delay = LaunchConfiguration('rl_inference_delay')
+    enable_log_collector = LaunchConfiguration('enable_log_collector')
 
     sitl_stack = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([
@@ -62,6 +66,7 @@ def generate_launch_description():
             'instance': instance,
             'namespace': namespace,
             'fcu_url': fcu_url,
+            'enable_log_collector': enable_log_collector,
         }.items(),
     )
 
@@ -128,6 +133,11 @@ def generate_launch_description():
             description='Pass through to policy_inference_node to avoid toggling controller parameters.',
         ),
         DeclareLaunchArgument(
+            'enable_log_collector',
+            default_value='true',
+            description='Whether to launch the per-USV navigation log collector.',
+        ),
+        DeclareLaunchArgument(
             'rl_inference_delay',
             default_value='7.0',
             description='Delay before starting the policy node so the SITL control stack is up.',
@@ -136,6 +146,11 @@ def generate_launch_description():
             'rl_encounter_type',
             default_value='auto',
             description='Encounter type for scenario-conditioned models (auto, none, head_on, crossing, overtaking).',
+        ),
+        DeclareLaunchArgument(
+            'clear_ahead_route_gate',
+            default_value='false',
+            description='Enable online clear-ahead route gate in policy_inference_node.',
         ),
         sitl_stack,
         delayed_policy_node,

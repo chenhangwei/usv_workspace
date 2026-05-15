@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 from pathlib import Path
 import random
 
@@ -94,6 +95,12 @@ def parse_args():
     parser.add_argument('--no-progress-timeout', type=float, help='Optional override for no-progress timeout.')
     parser.add_argument('--seed', type=int, help='Optional base seed for paired/reproducible evaluation episodes.')
     parser.add_argument('--output-json', help='Optional JSON output path.')
+    parser.add_argument('--trace-stride', type=int, default=0, help='If >0, store per-agent trajectory diagnostics every N steps in episode_metrics.')
+    parser.add_argument('--trace-raw-observation', action='store_true', help='When tracing, include each agent raw observation vector for offline active-slice fitting.')
+    parser.add_argument('--trace-event-separation', type=float, default=0.0, help='If >0, record a short diagnostic trace when pairwise separation is at or below this value.')
+    parser.add_argument('--trace-event-window', type=int, default=12, help='Number of post-trigger steps to keep for event-triggered traces.')
+    parser.add_argument('--trace-event-raw-observation', action='store_true', help='When event tracing, include raw observation vectors only in event-triggered trace samples.')
+    parser.add_argument('--trace-collision-raw-observation', action='store_true', help='On collision, store one raw-observation diagnostic sample at the collision step.')
     return parser.parse_args()
 
 
@@ -320,6 +327,27 @@ def _require_supported_action_dim(action_dim: int | None, *, model_path: str | N
         )
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return bool(default)
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value == '':
+        return float(default)
+    return float(value)
+
+
+def _env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None or value == '':
+        return str(default)
+    return str(value)
+
+
 def _detect_policy_kind(policy_kind: str, model_path: str | None) -> str:
     if policy_kind != 'auto':
         return policy_kind
@@ -432,6 +460,11 @@ def _build_env_kwargs_from_checkpoint(
         'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
         'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
         'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
+        'cte_clip_range': float(checkpoint.get('cte_clip_range', 3.0)),
+        'route_progress_cte_gate_start': float(checkpoint.get('route_progress_cte_gate_start', 0.0)),
+        'route_progress_cte_gate_width': float(checkpoint.get('route_progress_cte_gate_width', 0.0)),
+        'route_progress_cte_gate_floor': float(checkpoint.get('route_progress_cte_gate_floor', 0.25)),
+        'random_encounter_route_priority': bool(checkpoint.get('random_encounter_route_priority', False)),
         'default_scenarios': resolved_scenarios,
         'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
         'goal_proximity_reward_weight': float(checkpoint.get('goal_proximity_reward_weight', 0.0)),
@@ -449,6 +482,20 @@ def _build_env_kwargs_from_checkpoint(
         'coordination_reward_weight': float(checkpoint.get('coordination_reward_weight', 0.20)),
         'team_completion_bonus': float(checkpoint.get('team_completion_bonus', 18.0)),
         'deadlock_penalty_weight': float(checkpoint.get('deadlock_penalty_weight', 4.0)),
+        'pairwise_shield_enabled': _env_bool('PAIRWISE_SHIELD_ENABLED', bool(checkpoint.get('pairwise_shield_enabled', False))),
+        'pairwise_shield_release_separation': _env_float('PAIRWISE_SHIELD_RELEASE_SEPARATION', float(checkpoint.get('pairwise_shield_release_separation', 1.05))),
+        'pairwise_shield_critical_separation': _env_float('PAIRWISE_SHIELD_CRITICAL_SEPARATION', float(checkpoint.get('random_deconflict_critical_separation', 0.92))),
+        'pairwise_shield_min_closing_speed': _env_float('PAIRWISE_SHIELD_MIN_CLOSING_SPEED', float(checkpoint.get('random_deconflict_closing_speed_min', 0.004))),
+        'pairwise_shield_yield_speed': _env_float('PAIRWISE_SHIELD_YIELD_SPEED', float(checkpoint.get('random_deconflict_yield_speed', 0.02))),
+        'pairwise_shield_standon_speed': _env_float('PAIRWISE_SHIELD_STANDON_SPEED', float(checkpoint.get('random_deconflict_standon_speed', 0.24))),
+        'pairwise_shield_yield_omega': _env_float('PAIRWISE_SHIELD_YIELD_OMEGA', float(checkpoint.get('random_deconflict_yield_omega', 0.44))),
+        'pairwise_shield_standon_omega': _env_float('PAIRWISE_SHIELD_STANDON_OMEGA', float(checkpoint.get('random_deconflict_standon_omega', 0.04))),
+        'pairwise_shield_yield_danger_scale': _env_float('PAIRWISE_SHIELD_YIELD_DANGER_SCALE', float(checkpoint.get('random_deconflict_yield_danger_scale', 1.0))),
+        'pairwise_shield_blend': _env_float('PAIRWISE_SHIELD_BLEND', float(checkpoint.get('pairwise_shield_blend', 1.0))),
+        'pairwise_shield_turn_mode': _env_str('PAIRWISE_SHIELD_TURN_MODE', str(checkpoint.get('random_deconflict_turn_mode', 'away'))),
+        'pairwise_shield_role_mode': _env_str('PAIRWISE_SHIELD_ROLE_MODE', str(checkpoint.get('random_deconflict_role_mode', 'priority-delta'))),
+        'pairwise_shield_priority_delta_yield_threshold': _env_float('PAIRWISE_SHIELD_PRIORITY_DELTA_YIELD_THRESHOLD', float(checkpoint.get('random_deconflict_priority_delta_yield_threshold', -0.01))),
+        'pairwise_shield_route_eta_yield_threshold': _env_float('PAIRWISE_SHIELD_ROUTE_ETA_YIELD_THRESHOLD', float(checkpoint.get('random_deconflict_route_eta_yield_threshold', 0.02))),
     }
     return env_kwargs, resolved_scenarios
 
@@ -484,6 +531,7 @@ def _load_policy_bundle(
         if model_path is None:
             raise RuntimeError('MAPPO evaluation requires --model.')
         checkpoint, policy = _load_mappo_checkpoint(model_path, device)
+        setattr(policy, 'trace_mask_config', checkpoint)
         env_kwargs, resolved_scenarios = _build_env_kwargs_from_checkpoint(
             checkpoint,
             policy,
@@ -498,6 +546,7 @@ def _load_policy_bundle(
         if model_path is None:
             raise RuntimeError('MAPPO router evaluation requires --model.')
         checkpoint, policy, router_config = _load_mappo_router_policy(model_path, device)
+        setattr(policy, 'trace_mask_config', checkpoint)
         configured_scenarios = tuple(router_config.get('scenarios', ())) or None
         env_kwargs, resolved_scenarios = _build_env_kwargs_from_checkpoint(
             checkpoint,
@@ -607,8 +656,749 @@ def _scenario_initial_team_mean_goal_distance(env: MultiAgentEnv) -> float | Non
     return float(np.mean(distances))
 
 
+def _scenario_geometry_snapshot(env: MultiAgentEnv) -> dict | None:
+    scenario = getattr(env, '_scenario', None)
+    if scenario is None:
+        return None
+
+    agents = {}
+    for agent_id in sorted(getattr(env, 'runtime_agent_ids', ())):
+        spawn = scenario.agent_spawns.get(agent_id)
+        goal = scenario.agent_goals.get(agent_id)
+        if spawn is None and goal is None:
+            continue
+        agents[agent_id] = {
+            'spawn': None if spawn is None else {
+                'x': float(spawn.x),
+                'y': float(spawn.y),
+                'yaw': float(spawn.yaw),
+            },
+            'goal': None if goal is None else {
+                'x': float(goal.x),
+                'y': float(goal.y),
+            },
+        }
+
+    background_tracks = []
+    for track in getattr(scenario, 'background_tracks', ()):
+        background_tracks.append({
+            'track_id': str(track.track_id),
+            'start_x': float(track.start_x),
+            'start_y': float(track.start_y),
+            'vx': float(track.vx),
+            'vy': float(track.vy),
+            'yaw': float(track.yaw),
+        })
+
+    return {
+        'scenario': str(scenario.name),
+        'active_agent_ids': list(getattr(env, 'agent_ids', ())),
+        'runtime_agent_ids': list(getattr(env, 'runtime_agent_ids', ())),
+        'agents': agents,
+        'background_tracks': background_tracks,
+    }
+
+
 def _create_env(env_kwargs: dict) -> MultiAgentEnv:
     return MultiAgentEnv(MultiAgentEnvConfig(**env_kwargs))
+
+
+def _trace_episode_sample(
+    env: MultiAgentEnv,
+    observations: dict,
+    *,
+    scenario_name: str,
+    step: int,
+    pairwise_min_separation: float,
+    team_mean_goal_distance: float,
+    goal_completion_ratio: float,
+    trace_mask_config: dict,
+    include_raw_observation: bool = False,
+    trace_kind: str | None = None,
+) -> dict:
+    trace_agents = {}
+    for trace_agent_id in env.agent_ids:
+        obs_obj = env._latest_observations.get(trace_agent_id)
+        if obs_obj is None:
+            continue
+        nearest_neighbor = min(
+            obs_obj.neighbors,
+            key=lambda item: float(item.distance),
+            default=None,
+        )
+        trace_agent = {
+            'distance_to_goal': float(obs_obj.distance_to_goal),
+            'route_progress': float(obs_obj.route_progress),
+            'cross_track_error': float(obs_obj.cross_track_error),
+            'heading_error': float(obs_obj.heading_error),
+            'crossing_priority': float(obs_obj.crossing_priority),
+            'final_linear_x': float(obs_obj.final_linear_x),
+            'final_angular_z': float(obs_obj.final_angular_z),
+            'nearest_id': str(nearest_neighbor.source_id) if nearest_neighbor is not None else None,
+            'nearest_distance': float(nearest_neighbor.distance) if nearest_neighbor is not None else None,
+            'nearest_rel_x': float(nearest_neighbor.rel_x) if nearest_neighbor is not None else None,
+            'nearest_rel_y': float(nearest_neighbor.rel_y) if nearest_neighbor is not None else None,
+            'mask_diagnostics': _trace_random_mask_diagnostics(
+                obs_obj,
+                scenario_name=scenario_name,
+                team_min_separation=pairwise_min_separation,
+                config=trace_mask_config,
+            ),
+        }
+        if bool(include_raw_observation) and trace_agent_id in observations:
+            trace_agent['raw_observation'] = np.asarray(observations[trace_agent_id], dtype=np.float32).tolist()
+        trace_agents[trace_agent_id] = trace_agent
+
+    sample = {
+        'step': int(step),
+        'pairwise_min_separation': float(pairwise_min_separation),
+        'team_mean_goal_distance': float(team_mean_goal_distance),
+        'goal_completion_ratio': float(goal_completion_ratio),
+        'agents': trace_agents,
+    }
+    if trace_kind is not None:
+        sample['trace_kind'] = str(trace_kind)
+    return sample
+
+
+def _trace_float(config: dict, key: str, default: float) -> float:
+    try:
+        return float(config.get(key, default)) if isinstance(config, dict) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _trace_bool(config: dict, key: str, default: bool = False) -> bool:
+    value = config.get(key, default) if isinstance(config, dict) else default
+    if isinstance(value, str):
+        return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+    return bool(value)
+
+
+def _trace_str(config: dict, key: str, default: str) -> str:
+    value = config.get(key, default) if isinstance(config, dict) else default
+    return str(value)
+
+
+def _trace_agent_index(agent_id: str) -> int:
+    suffix = str(agent_id).rsplit('_', 1)[-1]
+    digits = ''.join(ch for ch in suffix if ch.isdigit())
+    if not digits:
+        return 0
+    return max(0, int(digits) - 1)
+
+
+def _trace_nearest_neighbor(obs_obj: AgentLocalObservation) -> tuple[object | None, dict]:
+    nearest = min(obs_obj.neighbors, key=lambda item: float(item.distance), default=None)
+    if nearest is None or float(nearest.distance) <= 1e-6:
+        return None, {
+            'valid': False,
+            'id': None,
+            'distance': None,
+            'bearing': 0.0,
+            'closing_speed': 0.0,
+            'rel_x': None,
+            'rel_y': None,
+            'priority_delta': 0.0,
+            'route_eta_delta': 0.0,
+        }
+    distance = max(float(nearest.distance), 1e-3)
+    rel_x = float(nearest.rel_x)
+    rel_y = float(nearest.rel_y)
+    rel_vx = float(nearest.rel_vx)
+    rel_vy = float(nearest.rel_vy)
+    closing_speed = -((rel_x * rel_vx) + (rel_y * rel_vy)) / distance
+    return nearest, {
+        'valid': True,
+        'id': str(nearest.source_id),
+        'distance': float(nearest.distance),
+        'bearing': float(nearest.bearing),
+        'closing_speed': float(closing_speed),
+        'rel_x': rel_x,
+        'rel_y': rel_y,
+        'priority_delta': float(getattr(nearest, 'route_priority_delta', 0.0)),
+        'route_eta_delta': float(getattr(nearest, 'route_eta_delta', 0.0)),
+    }
+
+
+def _trace_cpa_threat(obs_obj: AgentLocalObservation, config: dict) -> dict:
+    lookahead = max(0.0, _trace_float(config, 'random_deconflict_lookahead_distance', 10.8))
+    horizon = max(0.0, _trace_float(config, 'random_deconflict_time_horizon', 30.0))
+    dcpa_target = max(0.0, _trace_float(config, 'random_deconflict_dcpa_target', 1.45))
+    closing_min = max(0.0, _trace_float(config, 'random_deconflict_closing_speed_min', 0.004))
+    best = {
+        'valid_cpa': False,
+        'cpa_id': None,
+        'cpa_distance': None,
+        'cpa_bearing': 0.0,
+        'cpa_closing_speed': 0.0,
+        'cpa_dcpa': 0.0,
+        'cpa_tcpa': 0.0,
+        'cpa_score': 0.0,
+        'cpa_priority_delta': 0.0,
+        'cpa_route_eta_delta': 0.0,
+    }
+    if lookahead <= 0.0 or horizon <= 0.0 or dcpa_target <= 0.0:
+        return best
+
+    for neighbor in obs_obj.neighbors:
+        distance = max(0.0, float(neighbor.distance))
+        if distance <= 1e-6:
+            continue
+        rel_x = float(neighbor.rel_x)
+        rel_y = float(neighbor.rel_y)
+        rel_vx = float(neighbor.rel_vx)
+        rel_vy = float(neighbor.rel_vy)
+        dot = (rel_x * rel_vx) + (rel_y * rel_vy)
+        rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+        closing_speed = -dot / max(distance, 1e-3)
+        tcpa = -dot / max(rel_speed_sq, 1e-6) if rel_speed_sq > 1e-6 else 0.0
+        positive_tcpa = tcpa > 0.0
+        cpa_x = rel_x + rel_vx * (tcpa if positive_tcpa else 0.0)
+        cpa_y = rel_y + rel_vy * (tcpa if positive_tcpa else 0.0)
+        dcpa = float(np.hypot(cpa_x, cpa_y)) if positive_tcpa else distance
+
+        distance_gate = min(1.0, max(0.0, (lookahead - distance) / max(lookahead, 1e-3)))
+        time_gate = min(1.0, max(0.0, (horizon - tcpa) / max(horizon, 1e-3)))
+        dcpa_deficit = min(1.0, max(0.0, (dcpa_target - dcpa) / max(dcpa_target, 1e-3)))
+        closing_gate = min(1.0, max(0.0, (closing_speed - closing_min) / max(0.35 - closing_min, 1e-3)))
+        threat_mask = (
+            distance <= lookahead
+            and closing_speed >= closing_min
+            and positive_tcpa
+            and tcpa <= horizon
+            and dcpa < dcpa_target
+        )
+        score = max(distance_gate, time_gate) * dcpa_deficit * (0.25 + 0.75 * closing_gate) if threat_mask else 0.0
+        if score > float(best['cpa_score']):
+            best = {
+                'valid_cpa': score > 0.0,
+                'cpa_id': str(neighbor.source_id),
+                'cpa_distance': distance,
+                'cpa_bearing': float(neighbor.bearing),
+                'cpa_closing_speed': float(closing_speed),
+                'cpa_dcpa': float(dcpa),
+                'cpa_tcpa': float(tcpa),
+                'cpa_score': float(score),
+                'cpa_priority_delta': float(getattr(neighbor, 'route_priority_delta', 0.0)),
+                'cpa_route_eta_delta': float(getattr(neighbor, 'route_eta_delta', 0.0)),
+            }
+    return best
+
+
+def _trace_local_threat(config: dict, nearest: dict) -> dict:
+    if not _trace_bool(config, 'random_deconflict_local_danger', False) or not bool(nearest['valid']):
+        return {'valid_local': False, 'local_score': 0.0}
+    safe_separation = max(0.0, _trace_float(config, 'random_deconflict_safe_separation', 1.30))
+    release_separation = max(
+        safe_separation + 0.05,
+        _trace_float(config, 'random_deconflict_release_separation', 2.40),
+    )
+    nearest_distance = float(nearest['distance'])
+    closing_speed = float(nearest['closing_speed'])
+    score = min(1.0, max(0.0, (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3)))
+    closing_gate = min(1.0, max(0.0, (closing_speed + 0.04) / 0.34))
+    score *= 0.35 + 0.65 * closing_gate
+    critical_separation = max(0.0, _trace_float(config, 'random_deconflict_critical_separation', 0.0))
+    if critical_separation > 0.0 and nearest_distance <= critical_separation:
+        score = 1.0
+    valid = nearest_distance <= release_separation and score > 0.0
+    return {'valid_local': bool(valid), 'local_score': float(score if valid else 0.0)}
+
+
+def _trace_is_yield(obs_obj: AgentLocalObservation, config: dict, nearest: dict | None = None, cpa: dict | None = None, local: dict | None = None) -> bool:
+    role_mode = _trace_str(config, 'random_deconflict_role_mode', 'agent-index').strip().lower()
+    if role_mode == 'priority-delta':
+        nearest = nearest or {}
+        cpa = cpa or {}
+        local = local or {}
+        valid_cpa = bool(cpa.get('valid_cpa', False))
+        valid_local = bool(local.get('valid_local', False))
+        cpa_score = float(cpa.get('cpa_score', 0.0))
+        local_score = float(local.get('local_score', 0.0))
+        if valid_cpa and (not valid_local or cpa_score >= local_score):
+            selected_delta = float(cpa.get('cpa_priority_delta', 0.0))
+            selected_valid = True
+        else:
+            selected_delta = float(nearest.get('priority_delta', 0.0))
+            selected_valid = valid_local and bool(nearest.get('valid', False))
+        threshold = _trace_float(config, 'random_deconflict_priority_delta_yield_threshold', -0.01)
+        return bool(selected_valid and selected_delta <= threshold)
+    if role_mode == 'route-eta-delta':
+        nearest = nearest or {}
+        cpa = cpa or {}
+        local = local or {}
+        valid_cpa = bool(cpa.get('valid_cpa', False))
+        valid_local = bool(local.get('valid_local', False))
+        cpa_score = float(cpa.get('cpa_score', 0.0))
+        local_score = float(local.get('local_score', 0.0))
+        if valid_cpa and (not valid_local or cpa_score >= local_score):
+            selected_eta = float(cpa.get('cpa_route_eta_delta', 0.0))
+            selected_valid = True
+        else:
+            selected_eta = float(nearest.get('route_eta_delta', 0.0))
+            selected_valid = valid_local and bool(nearest.get('valid', False))
+        threshold = _trace_float(config, 'random_deconflict_route_eta_yield_threshold', 0.02)
+        return bool(selected_valid and selected_eta > threshold)
+    if role_mode == 'priority':
+        threshold = _trace_float(config, 'random_deconflict_priority_yield_threshold', -0.10)
+        return float(obs_obj.crossing_priority) <= threshold
+    return _trace_agent_index(obs_obj.agent_id) >= 1
+
+
+def _trace_release_overlap(obs_obj: AgentLocalObservation, nearest: dict, config: dict, *, low_priority: bool) -> bool:
+    release_min_separation = max(0.0, _trace_float(config, 'random_safe_finish_yield_release_min_separation', 0.0))
+    if release_min_separation <= 0.0 or not bool(nearest['valid']):
+        return False
+    release_max_closing = _trace_float(config, 'random_safe_finish_yield_release_max_closing_speed', 0.02)
+    release_min_route_progress = max(0.0, _trace_float(config, 'random_safe_finish_yield_release_min_route_progress', 0.0))
+    return bool(
+        low_priority
+        and float(nearest['distance']) >= release_min_separation
+        and float(nearest['closing_speed']) <= release_max_closing
+        and float(obs_obj.route_progress) >= release_min_route_progress
+    )
+
+
+def _trace_weight(config: dict, key: str) -> float:
+    weight = max(0.0, _trace_float(config, key, 0.0))
+    end_key = f'{key}_end'
+    if isinstance(config, dict) and config.get(end_key) is not None:
+        weight = max(weight, max(0.0, _trace_float(config, end_key, 0.0)))
+    return float(weight)
+
+
+def _trace_action_bounds(config: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    default_high = [
+        max(0.05, _trace_float(config, 'cruise_speed', 0.4)),
+        max(0.05, _trace_float(config, 'max_angular_velocity', 0.5)),
+    ]
+    default_low = [0.0, -default_high[1]]
+    raw_low = config.get('action_low', default_low) if isinstance(config, dict) else default_low
+    raw_high = config.get('action_high', default_high) if isinstance(config, dict) else default_high
+    try:
+        low = (float(raw_low[0]), float(raw_low[1]))
+        high = (float(raw_high[0]), float(raw_high[1]))
+    except (TypeError, ValueError, IndexError):
+        low = (float(default_low[0]), float(default_low[1]))
+        high = (float(default_high[0]), float(default_high[1]))
+    if high[0] <= low[0]:
+        high = (low[0] + 1e-3, high[1])
+    if high[1] <= low[1]:
+        high = (high[0], low[1] + 1e-3)
+    return low, high
+
+
+def _trace_clamp(value: float, low: float, high: float) -> float:
+    return min(float(high), max(float(low), float(value)))
+
+
+def _trace_action_target(
+    obs_obj: AgentLocalObservation,
+    target_linear: float,
+    target_omega: float,
+    config: dict,
+    *,
+    active: bool,
+    weighted_active: bool,
+    **extra,
+) -> dict:
+    low, high = _trace_action_bounds(config)
+    target_linear = _trace_clamp(target_linear, low[0], high[0])
+    target_omega = _trace_clamp(target_omega, low[1], high[1])
+    actual_linear = float(obs_obj.final_linear_x)
+    actual_omega = float(obs_obj.final_angular_z)
+    linear_range = max(high[0] - low[0], 1e-3)
+    omega_range = max(high[1] - low[1], 1e-3)
+    linear_error_norm = (actual_linear - target_linear) / linear_range
+    omega_error_norm = (actual_omega - target_omega) / omega_range
+    result = {
+        'active': bool(active),
+        'weighted_active': bool(weighted_active),
+        'target_linear': float(target_linear),
+        'target_omega': float(target_omega),
+        'actual_linear': actual_linear,
+        'actual_omega': actual_omega,
+        'linear_error': float(actual_linear - target_linear),
+        'omega_error': float(actual_omega - target_omega),
+        'linear_error_norm': float(linear_error_norm),
+        'omega_error_norm': float(omega_error_norm),
+        'l2_error_norm': float(np.hypot(linear_error_norm, omega_error_norm)),
+    }
+    result.update(extra)
+    return result
+
+
+def _trace_deconflict_target(
+    obs_obj: AgentLocalObservation,
+    config: dict,
+    *,
+    active: bool,
+    weighted_active: bool,
+    threat_score: float,
+    is_yield: bool,
+    nearest: dict | None = None,
+) -> dict:
+    danger = _trace_clamp(threat_score, 0.0, 1.0)
+    danger_power = max(0.1, _trace_float(config, 'random_deconflict_power', 1.0))
+    if danger_power != 1.0:
+        danger = danger ** danger_power
+    standon_speed = max(0.0, _trace_float(config, 'random_deconflict_standon_speed', 0.30))
+    yield_speed = max(0.0, _trace_float(config, 'random_deconflict_yield_speed', 0.04))
+    yield_danger_scale = min(1.0, max(0.0, _trace_float(config, 'random_deconflict_yield_danger_scale', 1.0)))
+    standon_omega = max(0.0, _trace_float(config, 'random_deconflict_standon_omega', 0.12))
+    yield_omega = max(0.0, _trace_float(config, 'random_deconflict_yield_omega', 0.50))
+    target_linear = yield_speed * _trace_clamp(1.0 - yield_danger_scale * danger, 0.0, 1.0) if is_yield else standon_speed
+    target_omega_mag = yield_omega if is_yield else standon_omega
+    turn_mode = str(config.get('random_deconflict_turn_mode', 'starboard')).strip().lower()
+    turn_sign = -1.0
+    if turn_mode == 'away' and nearest is not None:
+        rel_y = nearest.get('rel_y')
+        if rel_y is not None:
+            rel_y_value = float(rel_y)
+            if rel_y_value > 0.0:
+                turn_sign = -1.0
+            elif rel_y_value < 0.0:
+                turn_sign = 1.0
+    target_omega = turn_sign * target_omega_mag * danger
+    return _trace_action_target(
+        obs_obj,
+        target_linear,
+        target_omega,
+        config,
+        active=active,
+        weighted_active=weighted_active,
+        danger=float(danger),
+    )
+
+
+def _trace_safe_finish_target(
+    obs_obj: AgentLocalObservation,
+    nearest: dict,
+    config: dict,
+    *,
+    team_min_separation: float,
+    active: bool,
+    weighted_active: bool,
+) -> dict:
+    distance = max(0.0, float(obs_obj.distance_to_goal))
+    goal_tolerance = max(0.05, _trace_float(config, 'random_safe_finish_goal_tolerance', 0.8))
+    max_distance = max(goal_tolerance + 0.05, _trace_float(config, 'random_safe_finish_max_distance', 13.0))
+    hold_distance = max(0.0, _trace_float(config, 'random_safe_finish_hold_distance', 0.0))
+    min_team_separation = max(0.0, _trace_float(config, 'random_safe_finish_min_team_separation', 2.7))
+    full_team_separation = max(
+        min_team_separation + 0.05,
+        _trace_float(config, 'random_safe_finish_full_team_separation', 4.0),
+    )
+    min_neighbor_separation = max(0.0, _trace_float(config, 'random_safe_finish_min_neighbor_separation', 2.7))
+    target_speed = max(0.0, _trace_float(config, 'random_safe_finish_target_speed', 0.18))
+    min_speed_scale = min(1.0, max(0.0, _trace_float(config, 'random_safe_finish_min_speed_scale', 0.35)))
+    low_priority_threshold = _trace_float(config, 'random_safe_finish_low_priority_threshold', -0.5)
+    low_priority_multiplier = max(0.0, _trace_float(config, 'random_safe_finish_low_priority_speed_multiplier', 1.0))
+    max_omega = max(0.0, _trace_float(config, 'random_safe_finish_max_omega', 0.10))
+    speed_scale = _trace_clamp(
+        (distance - (0.50 * goal_tolerance)) / max(max_distance - (0.50 * goal_tolerance), 1e-3),
+        min_speed_scale,
+        1.0,
+    )
+    separation_source = float(team_min_separation)
+    scale_min_separation = min_team_separation
+    if _trace_bool(config, 'random_safe_finish_local_separation_scale', False):
+        separation_source = float(nearest['distance']) if bool(nearest['valid']) else full_team_separation
+        scale_min_separation = min_neighbor_separation
+    full_scale_separation = max(scale_min_separation + 0.05, full_team_separation)
+    separation_scale = _trace_clamp(
+        (separation_source - scale_min_separation) / max(full_scale_separation - scale_min_separation, 1e-3),
+        0.0,
+        1.0,
+    )
+    target_linear = target_speed * speed_scale * separation_scale
+    low_priority = float(obs_obj.crossing_priority) <= low_priority_threshold
+    if low_priority:
+        target_linear *= low_priority_multiplier
+    hold = hold_distance > 0.0 and distance <= hold_distance
+    heading_error = float(obs_obj.heading_error)
+    target_omega = -_trace_clamp(heading_error / 0.85, -1.0, 1.0) * max_omega
+    if hold:
+        target_linear = 0.0
+        target_omega = 0.0
+    return _trace_action_target(
+        obs_obj,
+        target_linear,
+        target_omega,
+        config,
+        active=active,
+        weighted_active=weighted_active,
+        speed_scale=float(speed_scale),
+        separation_scale=float(separation_scale),
+        separation_source=float(separation_source),
+        low_priority=bool(low_priority),
+        hold=bool(hold),
+    )
+
+
+def _trace_offroute_target(
+    obs_obj: AgentLocalObservation,
+    config: dict,
+    *,
+    active: bool,
+    weighted_active: bool,
+) -> dict:
+    abs_cte = abs(float(obs_obj.cross_track_error))
+    min_abs_cte = max(0.0, _trace_float(config, 'random_offroute_finish_min_abs_cte', 1.20))
+    full_abs_cte = max(min_abs_cte + 0.05, _trace_float(config, 'random_offroute_finish_full_abs_cte', 3.00))
+    cte_urgency = _trace_clamp((abs_cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0)
+    target_speed = max(0.0, _trace_float(config, 'random_offroute_finish_target_speed', 0.14))
+    min_speed = max(0.0, _trace_float(config, 'random_offroute_finish_min_speed', 0.06))
+    max_omega = max(0.0, _trace_float(config, 'random_offroute_finish_max_omega', 0.18))
+    omega_reference = max(0.05, _trace_float(config, 'random_offroute_finish_omega_reference', 0.65))
+    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
+    target_omega = -_trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
+    return _trace_action_target(
+        obs_obj,
+        target_linear,
+        target_omega,
+        config,
+        active=active,
+        weighted_active=weighted_active,
+        cte_urgency=float(cte_urgency),
+    )
+
+
+def _trace_cte_recovery_target(
+    obs_obj: AgentLocalObservation,
+    config: dict,
+    *,
+    active: bool,
+    weighted_active: bool,
+) -> dict:
+    abs_cte = abs(float(obs_obj.cross_track_error))
+    min_abs_cte = max(0.0, _trace_float(config, 'random_cte_recovery_min_abs_cte', 1.10))
+    full_abs_cte = max(min_abs_cte + 0.05, _trace_float(config, 'random_cte_recovery_full_abs_cte', 3.00))
+    cte_urgency = _trace_clamp((abs_cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0)
+    target_speed = max(0.0, _trace_float(config, 'random_cte_recovery_target_speed', 0.18))
+    min_speed = max(0.0, _trace_float(config, 'random_cte_recovery_min_speed', 0.07))
+    max_omega = max(0.0, _trace_float(config, 'random_cte_recovery_max_omega', 0.30))
+    omega_reference = max(0.05, _trace_float(config, 'random_cte_recovery_omega_reference', 0.55))
+    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
+    target_omega = -_trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega
+    return _trace_action_target(
+        obs_obj,
+        target_linear,
+        target_omega,
+        config,
+        active=active,
+        weighted_active=weighted_active,
+        cte_urgency=float(cte_urgency),
+    )
+
+
+def _trace_random_mask_diagnostics(
+    obs_obj: AgentLocalObservation,
+    *,
+    scenario_name: str,
+    team_min_separation: float,
+    config: dict,
+) -> dict:
+    _, nearest = _trace_nearest_neighbor(obs_obj)
+    cpa = _trace_cpa_threat(obs_obj, config)
+    local = _trace_local_threat(config, nearest)
+    scenario_mask = str(scenario_name) in {'two_usv_random_encounter', 'three_usv_random_encounter'}
+    distance = max(0.0, float(obs_obj.distance_to_goal))
+    route_progress = float(obs_obj.route_progress)
+    abs_cte = abs(float(obs_obj.cross_track_error))
+    phase = float(obs_obj.conflict_phase)
+    team_min = float(team_min_separation) if np.isfinite(team_min_separation) else 1e3
+    valid_cpa = bool(cpa['valid_cpa'])
+    valid_local = bool(local['valid_local'])
+    cpa_score = float(cpa['cpa_score'])
+    local_score = float(local['local_score'])
+    threat_score = max(cpa_score, local_score)
+    valid_threat = valid_cpa or valid_local
+
+    deconf_goal_tolerance = max(0.05, _trace_float(config, 'random_deconflict_goal_tolerance', 0.8))
+    deconf_max_distance = max(deconf_goal_tolerance + 0.05, _trace_float(config, 'random_deconflict_max_distance', 13.0))
+    deconf_unfinished = distance > deconf_goal_tolerance and distance <= deconf_max_distance
+    is_yield = _trace_is_yield(obs_obj, config, nearest=nearest, cpa=cpa, local=local)
+    role_weight = max(
+        0.0,
+        _trace_float(config, 'random_deconflict_yield_weight' if is_yield else 'random_deconflict_standon_weight', 1.0 if is_yield else 0.35),
+    )
+    deconf_release_overlap = _trace_release_overlap(obs_obj, nearest, config, low_priority=is_yield)
+    deconf_weight = _trace_weight(config, 'random_deconflict_weight')
+    deconf_active = bool(
+        scenario_mask
+        and deconf_unfinished
+        and valid_threat
+        and threat_score > 0.0
+        and role_weight > 0.0
+        and not deconf_release_overlap
+    )
+    deconf_weighted_active = deconf_active and deconf_weight > 0.0
+
+    finish_goal_tolerance = max(0.05, _trace_float(config, 'random_safe_finish_goal_tolerance', 0.8))
+    finish_max_distance = max(finish_goal_tolerance + 0.05, _trace_float(config, 'random_safe_finish_max_distance', 13.0))
+    hold_distance = max(0.0, _trace_float(config, 'random_safe_finish_hold_distance', 0.0))
+    finish_phase_min = _trace_float(config, 'random_safe_finish_phase_min', -1.0)
+    finish_min_team_sep = max(0.0, _trace_float(config, 'random_safe_finish_min_team_separation', 2.7))
+    finish_min_neighbor_sep = max(0.0, _trace_float(config, 'random_safe_finish_min_neighbor_separation', 2.7))
+    finish_max_abs_cte = max(0.0, _trace_float(config, 'random_safe_finish_max_abs_cte', 0.0))
+    finish_max_cpa = max(0.0, _trace_float(config, 'random_safe_finish_max_cpa_score', 0.0))
+    finish_max_local = max(0.0, _trace_float(config, 'random_safe_finish_max_local_score', 0.0))
+    low_priority_threshold = _trace_float(config, 'random_safe_finish_low_priority_threshold', -0.5)
+    finish_unfinished = distance > finish_goal_tolerance and distance <= finish_max_distance
+    finish_hold = hold_distance > 0.0 and distance <= hold_distance
+    finish_phase = phase >= finish_phase_min
+    finish_team_clear = team_min >= finish_min_team_sep
+    finish_neighbor_clear = (not bool(nearest['valid'])) or float(nearest['distance']) >= finish_min_neighbor_sep
+    finish_cte_clear = finish_max_abs_cte <= 0.0 or abs_cte <= finish_max_abs_cte
+    finish_cpa_clear = (not valid_cpa) or cpa_score <= finish_max_cpa
+    finish_local_clear = (not valid_local) or local_score <= finish_max_local
+    low_priority = float(obs_obj.crossing_priority) <= low_priority_threshold
+    finish_release_overlap = _trace_release_overlap(obs_obj, nearest, config, low_priority=low_priority)
+    finish_weight = _trace_weight(config, 'random_safe_finish_weight')
+    finish_base_candidate = finish_unfinished and finish_team_clear and finish_neighbor_clear and finish_cte_clear
+    finish_mask = finish_base_candidate and ((finish_cpa_clear and finish_local_clear) or finish_release_overlap)
+    finish_block = bool(
+        deconf_active
+        and finish_base_candidate
+        and ((valid_cpa and cpa_score > finish_max_cpa) or (valid_local and local_score > finish_max_local))
+        and not finish_release_overlap
+    )
+    safe_finish_active = bool(scenario_mask and finish_phase and ((finish_mask and not finish_block) or finish_hold))
+    safe_finish_weighted_active = safe_finish_active and finish_weight > 0.0
+
+    off_goal_tolerance = max(0.05, _trace_float(config, 'random_offroute_finish_goal_tolerance', 0.8))
+    off_max_distance = max(off_goal_tolerance + 0.05, _trace_float(config, 'random_offroute_finish_max_distance', 13.0))
+    off_min_distance = max(off_goal_tolerance + 0.05, _trace_float(config, 'random_offroute_finish_min_distance', 1.60))
+    off_min_route_progress = min(1.0, max(0.0, _trace_float(config, 'random_offroute_finish_route_progress_min', 0.82)))
+    off_min_abs_cte = max(0.0, _trace_float(config, 'random_offroute_finish_min_abs_cte', 1.20))
+    off_phase_min = _trace_float(config, 'random_offroute_finish_phase_min', -1.0)
+    off_min_team_sep = max(0.0, _trace_float(config, 'random_offroute_finish_min_team_separation', 2.75))
+    off_min_neighbor_sep = max(0.0, _trace_float(config, 'random_offroute_finish_min_neighbor_separation', 2.90))
+    off_max_cpa = max(0.0, _trace_float(config, 'random_offroute_finish_max_cpa_score', 0.0))
+    off_max_local = max(0.0, _trace_float(config, 'random_offroute_finish_max_local_score', 0.0))
+    off_unfinished = distance > off_goal_tolerance and distance <= off_max_distance and distance >= off_min_distance
+    offroute_gate = route_progress >= off_min_route_progress and abs_cte >= off_min_abs_cte
+    off_team_clear = team_min >= off_min_team_sep
+    off_neighbor_clear = (not bool(nearest['valid'])) or float(nearest['distance']) >= off_min_neighbor_sep
+    off_cpa_clear = (not valid_cpa) or cpa_score <= off_max_cpa
+    off_local_clear = (not valid_local) or local_score <= off_max_local
+    off_threat_clear = off_cpa_clear and off_local_clear and not deconf_active
+    if _trace_bool(config, 'random_offroute_finish_allow_threat_overlap', False):
+        off_threat_clear = True
+    offroute_weight = _trace_weight(config, 'random_offroute_finish_weight')
+    offroute_active = bool(
+        scenario_mask
+        and off_unfinished
+        and offroute_gate
+        and phase >= off_phase_min
+        and off_team_clear
+        and off_neighbor_clear
+        and off_threat_clear
+    )
+    offroute_weighted_active = offroute_active and offroute_weight > 0.0
+
+    cte_goal_tolerance = max(0.05, _trace_float(config, 'random_cte_recovery_goal_tolerance', 0.8))
+    cte_max_distance = max(cte_goal_tolerance + 0.05, _trace_float(config, 'random_cte_recovery_max_distance', 13.0))
+    cte_min_abs = max(0.0, _trace_float(config, 'random_cte_recovery_min_abs_cte', 1.10))
+    cte_min_neighbor_sep = max(0.0, _trace_float(config, 'random_cte_recovery_min_neighbor_separation', 0.85))
+    cte_unfinished = distance > cte_goal_tolerance and distance <= cte_max_distance
+    cte_gate = abs_cte >= cte_min_abs
+    cte_neighbor_clear = (not bool(nearest['valid'])) or float(nearest['distance']) >= cte_min_neighbor_sep
+    cte_threat_clear = True
+    if not _trace_bool(config, 'random_cte_recovery_allow_threat_overlap', False):
+        cte_threat_clear = ((not valid_cpa) or cpa_score <= 0.0) and ((not valid_local) or local_score <= 0.0) and not deconf_active
+    cte_weight = _trace_weight(config, 'random_cte_recovery_weight')
+    cte_active = bool(scenario_mask and cte_unfinished and cte_gate and cte_neighbor_clear and cte_threat_clear)
+    cte_weighted_active = cte_active and cte_weight > 0.0
+
+    return {
+        'random_scenario': bool(scenario_mask),
+        'team_min_separation': team_min,
+        'nearest_closing_speed': float(nearest['closing_speed']),
+        'valid_cpa': valid_cpa,
+        'cpa_id': cpa['cpa_id'],
+        'cpa_distance': cpa['cpa_distance'],
+        'cpa_closing_speed': float(cpa['cpa_closing_speed']),
+        'cpa_dcpa': float(cpa['cpa_dcpa']),
+        'cpa_tcpa': float(cpa['cpa_tcpa']),
+        'cpa_priority_delta': float(cpa['cpa_priority_delta']),
+        'cpa_route_eta_delta': float(cpa['cpa_route_eta_delta']),
+        'cpa_score': cpa_score,
+        'nearest_priority_delta': float(nearest['priority_delta']),
+        'nearest_route_eta_delta': float(nearest['route_eta_delta']),
+        'valid_local': valid_local,
+        'local_score': local_score,
+        'threat_score': threat_score,
+        'deconf_is_yield': bool(is_yield),
+        'deconf_role_weight': role_weight,
+        'deconf_weight': deconf_weight,
+        'deconf_unfinished': bool(deconf_unfinished),
+        'deconf_release_overlap': bool(deconf_release_overlap),
+        'random_deconflict_active': deconf_active,
+        'random_deconflict_weighted_active': bool(deconf_weighted_active),
+        'deconf_target': _trace_deconflict_target(
+            obs_obj,
+            config,
+            active=deconf_active,
+            weighted_active=deconf_weighted_active,
+            threat_score=threat_score,
+            is_yield=is_yield,
+            nearest=nearest,
+        ),
+        'finish_unfinished': bool(finish_unfinished),
+        'finish_phase': bool(finish_phase),
+        'finish_team_clear': bool(finish_team_clear),
+        'finish_neighbor_clear': bool(finish_neighbor_clear),
+        'finish_cte_clear': bool(finish_cte_clear),
+        'finish_cpa_clear': bool(finish_cpa_clear),
+        'finish_local_clear': bool(finish_local_clear),
+        'finish_base_candidate': bool(finish_base_candidate),
+        'finish_release_overlap': bool(finish_release_overlap),
+        'finish_weight': finish_weight,
+        'random_safe_finish_candidate': bool(scenario_mask and finish_phase and finish_unfinished),
+        'random_safe_finish_finish': bool(scenario_mask and finish_phase and finish_mask and not finish_block),
+        'random_safe_finish_hold': bool(scenario_mask and finish_phase and finish_hold),
+        'random_safe_finish_blocked': finish_block,
+        'random_safe_finish_active': safe_finish_active,
+        'random_safe_finish_weighted_active': bool(safe_finish_weighted_active),
+        'safe_finish_target': _trace_safe_finish_target(
+            obs_obj,
+            nearest,
+            config,
+            team_min_separation=team_min,
+            active=safe_finish_active,
+            weighted_active=safe_finish_weighted_active,
+        ),
+        'offroute_unfinished': bool(off_unfinished),
+        'offroute_gate': bool(offroute_gate),
+        'offroute_team_clear': bool(off_team_clear),
+        'offroute_neighbor_clear': bool(off_neighbor_clear),
+        'offroute_threat_clear': bool(off_threat_clear),
+        'offroute_weight': offroute_weight,
+        'random_offroute_finish_active': offroute_active,
+        'random_offroute_finish_weighted_active': bool(offroute_weighted_active),
+        'offroute_target': _trace_offroute_target(
+            obs_obj,
+            config,
+            active=offroute_active,
+            weighted_active=offroute_weighted_active,
+        ),
+        'cte_recovery_unfinished': bool(cte_unfinished),
+        'cte_recovery_gate': bool(cte_gate),
+        'cte_recovery_neighbor_clear': bool(cte_neighbor_clear),
+        'cte_recovery_threat_clear': bool(cte_threat_clear),
+        'cte_recovery_weight': cte_weight,
+        'random_cte_recovery_active': cte_active,
+        'random_cte_recovery_weighted_active': bool(cte_weighted_active),
+        'cte_recovery_target': _trace_cte_recovery_target(
+            obs_obj,
+            config,
+            active=cte_active,
+            weighted_active=cte_weighted_active,
+        ),
+    }
 
 
 def evaluate_policy(
@@ -627,6 +1417,12 @@ def evaluate_policy(
     episode_timeout: float | None = None,
     no_progress_timeout: float | None = None,
     seed: int | None = None,
+    trace_stride: int = 0,
+    trace_raw_observation: bool = False,
+    trace_event_separation: float = 0.0,
+    trace_event_window: int = 12,
+    trace_event_raw_observation: bool = False,
+    trace_collision_raw_observation: bool = False,
 ) -> dict:
     max_episode_attempts = 3
     if seed is not None:
@@ -651,6 +1447,7 @@ def evaluate_policy(
         max_neighbors=max_neighbors,
         max_agents=max_agents,
     )
+    trace_mask_config = getattr(policy_impl, 'trace_mask_config', {})
 
     env = _create_env(env_kwargs)
 
@@ -665,6 +1462,7 @@ def evaluate_policy(
                     observations, info = env.reset(seed=reset_seed, options={'scenario_kind': scenario_name})
                     last_info = info
                     initial_team_mean_goal_distance = _scenario_initial_team_mean_goal_distance(env)
+                    scenario_geometry = _scenario_geometry_snapshot(env)
                     if initial_team_mean_goal_distance is None:
                         initial_team_mean_goal_distance = float(info['global_state'][-3])
                     exhausted_horizon = True
@@ -701,6 +1499,12 @@ def evaluate_policy(
                     prev_team_goal_dist = initial_team_mean_goal_distance
                     positive_progress_steps = 0  # steps where distance decreased
                     stall_steps = 0              # steps where distance didn't change or increased
+                    trace_samples = []
+                    trace_stride_value = max(0, int(trace_stride))
+                    trace_event_threshold = max(0.0, float(trace_event_separation))
+                    trace_event_window_value = max(0, int(trace_event_window))
+                    trace_event_remaining = 0
+                    trace_collision_recorded = False
 
                     if hasattr(policy_impl, 'set_active_scenario'):
                         policy_impl.set_active_scenario(last_info.get('scenario', scenario_name))
@@ -726,6 +1530,54 @@ def evaluate_policy(
                             running_pairwise_min = min(running_pairwise_min, step_pair_min)
                             if step_pair_min < entanglement_distance:
                                 entanglement_steps += 1
+
+                        active_scenario_name = str(last_info.get('scenario', scenario_name))
+                        stride_trace_step = trace_stride_value > 0 and (step == 0 or (step + 1) % trace_stride_value == 0)
+                        event_triggered = trace_event_threshold > 0.0 and step_pair_min <= trace_event_threshold
+                        if event_triggered:
+                            trace_event_remaining = max(trace_event_remaining, trace_event_window_value + 1)
+                        event_trace_step = trace_stride_value <= 0 and trace_event_remaining > 0
+                        if stride_trace_step or event_trace_step:
+                            trace_samples.append(
+                                _trace_episode_sample(
+                                    env,
+                                    observations,
+                                    scenario_name=active_scenario_name,
+                                    step=steps,
+                                    pairwise_min_separation=step_pair_min,
+                                    team_mean_goal_distance=step_team_goal_dist,
+                                    goal_completion_ratio=float(last_info.get('goal_completion_ratio', 0.0)),
+                                    trace_mask_config=trace_mask_config,
+                                    include_raw_observation=(
+                                        (bool(trace_raw_observation) and stride_trace_step)
+                                        or (bool(trace_event_raw_observation) and event_trace_step)
+                                    ),
+                                    trace_kind='stride' if stride_trace_step else ('event_trigger' if event_triggered else 'event_window'),
+                                )
+                            )
+                        if event_trace_step:
+                            trace_event_remaining = max(0, trace_event_remaining - 1)
+                        collision_trace_step = (
+                            bool(trace_collision_raw_observation)
+                            and not trace_collision_recorded
+                            and step_pair_min < float(env.config.collision_distance)
+                        )
+                        if collision_trace_step:
+                            trace_samples.append(
+                                _trace_episode_sample(
+                                    env,
+                                    observations,
+                                    scenario_name=active_scenario_name,
+                                    step=steps,
+                                    pairwise_min_separation=step_pair_min,
+                                    team_mean_goal_distance=step_team_goal_dist,
+                                    goal_completion_ratio=float(last_info.get('goal_completion_ratio', 0.0)),
+                                    trace_mask_config=trace_mask_config,
+                                    include_raw_observation=True,
+                                    trace_kind='collision',
+                                )
+                            )
+                            trace_collision_recorded = True
 
                         # Collect smoothness data from actual vehicle state
                         for agent_id in env.agent_ids:
@@ -854,10 +1706,26 @@ def evaluate_policy(
                     cpa_encounters = [v for v in pair_cpa.values() if v['encounter'] != 'none']
                     cpa_starboard_passes = sum(1 for v in cpa_encounters if v['body_y'] > 0)
                     cpa_starboard_ratio = cpa_starboard_passes / max(1, len(cpa_encounters))
-                    episode_metrics.append(
-                        {
+                    final_agent_metrics = {}
+                    for agent_id in env.agent_ids:
+                        obs_obj = env._latest_observations.get(agent_id)
+                        if obs_obj is None:
+                            continue
+                        final_agent_metrics[agent_id] = {
+                            'distance_to_goal': float(obs_obj.distance_to_goal),
+                            'route_progress': float(obs_obj.route_progress),
+                            'cross_track_error': float(obs_obj.cross_track_error),
+                            'heading_error': float(obs_obj.heading_error),
+                            'crossing_priority': float(obs_obj.crossing_priority),
+                            'final_linear_x': float(obs_obj.final_linear_x),
+                            'final_angular_z': float(obs_obj.final_angular_z),
+                            'reached_goal': bool(obs_obj.distance_to_goal <= env.config.goal_tolerance),
+                        }
+                    episode_metric = {
                             'episode': episode,
                             'scenario': scenario_name,
+                            'reset_seed': reset_seed,
+                            'scenario_geometry': scenario_geometry,
                             'active_agent_ids': list(last_info.get('active_agent_ids', [])),
                             'inactive_agent_ids': list(last_info.get('inactive_agent_ids', [])),
                             'runtime_agent_ids': list(last_info.get('runtime_agent_ids', [])),
@@ -871,6 +1739,7 @@ def evaluate_policy(
                             'goal_completion_ratio': goal_completion_ratio,
                             'initial_team_mean_goal_distance': initial_team_mean_goal_distance,
                             'team_mean_goal_distance': final_team_mean_goal_distance,
+                            'final_agent_metrics': final_agent_metrics,
                             'team_goal_distance_delta': team_goal_distance_delta,
                             'team_goal_progress_ratio': team_goal_progress_ratio,
                             # Progress rate metrics (step-independent)
@@ -900,7 +1769,9 @@ def evaluate_policy(
                             'cpa_starboard_pass_ratio': cpa_starboard_ratio,
                             'cpa_encounter_count': len(cpa_encounters),
                         }
-                    )
+                    if trace_stride_value > 0 or trace_event_threshold > 0.0 or bool(trace_collision_raw_observation):
+                        episode_metric['trace_samples'] = trace_samples
+                    episode_metrics.append(episode_metric)
                     break
                 except RuntimeError as exc:
                     last_error = exc
@@ -1007,6 +1878,12 @@ def main():
         episode_timeout=args.episode_timeout,
         no_progress_timeout=args.no_progress_timeout,
         seed=args.seed,
+        trace_stride=args.trace_stride,
+        trace_raw_observation=args.trace_raw_observation,
+        trace_event_separation=args.trace_event_separation,
+        trace_event_window=args.trace_event_window,
+        trace_event_raw_observation=args.trace_event_raw_observation,
+        trace_collision_raw_observation=args.trace_collision_raw_observation,
     )
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))

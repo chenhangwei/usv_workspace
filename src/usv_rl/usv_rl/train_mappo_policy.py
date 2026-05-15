@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument('--num-agents', type=int, default=3, help='Number of controlled agents.')
     parser.add_argument('--total-timesteps', type=int, default=4096, help='Total training timesteps across all agents.')
     parser.add_argument('--rollout-steps', type=int, default=128, help='Rollout horizon before each update.')
+    parser.add_argument('--reset-sampler-each-rollout', action='store_true', help='For parallel MAPPO sampling, reset each worker before every rollout collection after the first one so short repair runs advance the scenario curriculum even when episodes do not finish naturally.')
     parser.add_argument('--update-epochs', type=int, default=4, help='Number of PPO update epochs per rollout.')
     parser.add_argument('--minibatch-size', type=int, default=128, help='Mini-batch size for PPO updates.')
     parser.add_argument('--learning-rate', type=float, default=3e-4, help='Optimizer learning rate (initial value when --learning-rate-end is set).')
@@ -53,6 +54,8 @@ def parse_args():
     parser.add_argument('--hidden-size', action='append', dest='hidden_sizes', type=int, default=None, help='Hidden layer size. Repeatable.')
     parser.add_argument('--scenario', action='append', dest='scenarios', default=None, help='Scenario name. Repeatable.')
     parser.add_argument('--curriculum-scenario', action='append', dest='curriculum_scenarios', default=None, help='Rollout scenario name. Repeatable and may include duplicates to oversample hard scenarios while --scenario remains the unique deployable branch set.')
+    parser.add_argument('--curriculum-seed', action='append', dest='curriculum_seeds', type=int, default=None, help='Fixed environment reset seed used by rollout training. Repeatable; seeds are cycled across episode resets to replay hard random-encounter geometries.')
+    parser.add_argument('--random-encounter-route-priority', action='store_true', help='Use active route midpoint ETA ordering for random encounter priority features instead of fixed agent-id ordering.')
     parser.add_argument('--scenario-set', choices=['auto', 'smoke', 'dense', 'all'], default='auto', help='Scenario curriculum preset used when --scenario is not provided.')
     parser.add_argument('--max-neighbors', type=int, default=4, help='Neighbor slots in local observation encoding.')
     parser.add_argument('--max-agents', type=int, default=3, help='Maximum agents encoded in global state.')
@@ -172,6 +175,9 @@ def parse_args():
     parser.add_argument('--anticipatory-yield-speed-penalty-weight', type=float, default=RewardConfig.anticipatory_yield_speed_penalty_weight, help='Penalty weight for give-way agents exceeding anticipatory-yield-speed in low-DCPA random encounters.')
     parser.add_argument('--near-goal-idle-penalty-weight', type=float, default=RewardConfig.near_goal_idle_penalty_weight, help='Dense per-step penalty for near-zero speed when close to (but not at) the goal. Prevents hover-near-goal exploit.')
     parser.add_argument('--cte-clip-range', type=float, default=3.0, help='Symmetric clip range (m) for signed cross-track error observation. Default 3.0.')
+    parser.add_argument('--route-progress-cte-gate-start', type=float, default=0.0, help='CTE magnitude where observation route_progress gating starts. 0 disables unless width > 0.')
+    parser.add_argument('--route-progress-cte-gate-width', type=float, default=0.0, help='CTE magnitude where observation route_progress reaches its floor. 0 disables gating.')
+    parser.add_argument('--route-progress-cte-gate-floor', type=float, default=0.25, help='Minimum multiplier for CTE-gated observation route_progress.')
     parser.add_argument('--neighbor-attention', action='store_true', help='Replace fixed neighbor padding with attention-based neighbor aggregation. Learns to focus on the most relevant neighbor (nearest, highest TCPA, head-on, etc.).')
     parser.add_argument('--attention-embed-dim', type=int, default=32, help='Embedding dimension for neighbor attention encoder.')
     parser.add_argument('--attention-num-heads', type=int, default=1, help='Number of attention heads for neighbor attention encoder.')
@@ -244,6 +250,29 @@ def parse_args():
     parser.add_argument('--crossing-imitation-eta-gate', type=float, default=0.95, help='Only apply crossing imitation while normalized conflict ETA is below this gate.')
     parser.add_argument('--crossing-imitation-phase-min', type=float, default=-0.90, help='Minimum conflict_phase for crossing imitation activation.')
     parser.add_argument('--crossing-imitation-phase-max', type=float, default=0.22, help='Maximum conflict_phase for crossing imitation activation.')
+    parser.add_argument('--overtaking-imitation-weight', type=float, default=0.0, help='Trainer-side action target for overtaking scenarios: front keeps route, rear opens starboard corridor.')
+    parser.add_argument('--overtaking-imitation-weight-end', type=float, default=None, help='Final overtaking-imitation auxiliary weight for linear annealing.')
+    parser.add_argument('--overtaking-imitation-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for overtaking-imitation samples.')
+    parser.add_argument('--overtaking-imitation-front-min-speed', type=float, default=0.24, help='Minimum forward target for front/stand-on vessel.')
+    parser.add_argument('--overtaking-imitation-front-max-omega', type=float, default=0.10, help='Raw yaw cap for front/stand-on vessel.')
+    parser.add_argument('--overtaking-imitation-rear-approach-speed', type=float, default=0.12, help='Rear vessel target speed before corridor is opened.')
+    parser.add_argument('--overtaking-imitation-rear-close-speed', type=float, default=0.055, help='Rear vessel target speed when too close and not offset.')
+    parser.add_argument('--overtaking-imitation-rear-pass-speed', type=float, default=0.22, help='Rear vessel target speed once starboard corridor is opened.')
+    parser.add_argument('--overtaking-imitation-close-separation', type=float, default=2.30, help='Separation below which rear vessel slows strongly unless offset.')
+    parser.add_argument('--overtaking-imitation-release-separation', type=float, default=5.80, help='Nearest-neighbor distance where overtaking-imitation fades out.')
+    parser.add_argument('--overtaking-imitation-target-starboard-offset', type=float, default=1.05, help='Starboard lateral offset target for rear vessel.')
+    parser.add_argument('--overtaking-imitation-rear-omega', type=float, default=0.26, help='Starboard yaw target magnitude for rear vessel; negative omega is starboard.')
+    parser.add_argument('--overtaking-imitation-omega-weight', type=float, default=1.0, help='Relative yaw loss weight for overtaking-imitation.')
+    parser.add_argument('--overtaking-imitation-single-return-progress', type=float, default=0.70, help='Route-progress gate where single_usv_overtaking imitation starts preferring return-to-route targets after opening the pass corridor.')
+    parser.add_argument('--overtaking-imitation-single-return-rel-x', type=float, default=-0.20, help='Nearest-lead relative x threshold for considering the single overtaker past the lead vessel.')
+    parser.add_argument('--overtaking-imitation-single-return-min-separation', type=float, default=2.70, help='Minimum nearest-neighbor separation before single_usv_overtaking imitation may switch from pass corridor to return-to-route.')
+    parser.add_argument('--overtaking-imitation-single-return-cte-start', type=float, default=0.70, help='Absolute CTE where single_usv_overtaking return-to-route yaw target begins.')
+    parser.add_argument('--overtaking-imitation-single-return-cte-full', type=float, default=3.00, help='Absolute CTE where single_usv_overtaking return-to-route yaw target reaches full magnitude.')
+    parser.add_argument('--overtaking-imitation-single-return-speed', type=float, default=0.32, help='Forward target while returning to route after a single_usv_overtaking pass.')
+    parser.add_argument('--overtaking-imitation-single-return-omega', type=float, default=0.30, help='Maximum yaw target magnitude while returning to route after a single_usv_overtaking pass.')
+    parser.add_argument('--overtaking-imitation-single-finish-distance', type=float, default=3.50, help='Distance-to-goal gate where single_usv_overtaking imitation switches to a straight finish target when CTE is controlled.')
+    parser.add_argument('--overtaking-imitation-single-finish-speed', type=float, default=0.34, help='Forward target for the final single_usv_overtaking finish phase.')
+    parser.add_argument('--overtaking-imitation-single-finish-max-omega', type=float, default=0.10, help='Yaw cap for the final single_usv_overtaking finish phase when CTE is controlled.')
     parser.add_argument('--near-goal-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary action loss weight for finishing the final near-goal meters. Final artifact remains one neural MAPPO policy.')
     parser.add_argument('--near-goal-finish-weight-end', type=float, default=None, help='Final near-goal finish auxiliary weight for linear annealing. If unset, near-goal-finish-weight stays constant.')
     parser.add_argument('--near-goal-finish-distance', type=float, default=2.2, help='Distance to goal below which the trainer-side finish auxiliary can activate.')
@@ -287,16 +316,168 @@ def parse_args():
     parser.add_argument('--team-safety-brake-omega-weight', type=float, default=0.0, help='Relative yaw-rate loss weight for nearest-neighbor escape turning inside team-safety-brake.')
     parser.add_argument('--team-safety-brake-target-omega', type=float, default=0.0, help='Maximum yaw-rate target for nearest-neighbor escape turning inside team-safety-brake.')
     parser.add_argument('--team-safety-brake-turn-mode', choices=('away', 'starboard'), default='away', help='Yaw-rate target direction inside team-safety-brake: nearest-neighbor escape or fixed starboard commitment.')
+    parser.add_argument('--team-safety-brake-head-on-starboard-threshold', type=float, default=0.0, help='When turn mode is away, use a starboard yaw target if the nearest-neighbor bearing is within this absolute radian threshold.')
     parser.add_argument('--team-safety-brake-require-neighbor', action='store_true', help='Require at least one encoded neighbor inside release separation before team-safety-brake activates.')
     parser.add_argument('--team-safety-brake-local-danger', action='store_true', help='Use the active agent nearest-neighbor distance, rather than global team-min separation, to scale team-safety-brake linear-speed danger.')
     parser.add_argument('--team-safety-brake-power', type=float, default=1.0, help='Power applied to team-safety-brake danger weighting. Values above 1 focus the loss closer to unsafe separation.')
+    parser.add_argument('--team-safety-brake-cpa-danger', action='store_true', help='Also activate team-safety-brake from predicted low-DCPA closing encounters before nearest-neighbor distance is small.')
+    parser.add_argument('--team-safety-brake-cpa-lookahead-distance', type=float, default=0.0, help='Maximum neighbor distance for CPA-based team-safety-brake activation. 0 disables the CPA lookahead distance gate.')
+    parser.add_argument('--team-safety-brake-cpa-time-horizon', type=float, default=0.0, help='Maximum TCPA seconds for CPA-based team-safety-brake activation. 0 disables the CPA lookahead time gate.')
+    parser.add_argument('--team-safety-brake-cpa-dcpa-target', type=float, default=0.0, help='Predicted DCPA target in meters for CPA-based team-safety-brake activation. 0 disables the CPA lookahead DCPA gate.')
+    parser.add_argument('--team-safety-brake-cpa-closing-speed-min', type=float, default=0.02, help='Minimum positive range-closing speed for CPA-based team-safety-brake activation.')
     parser.add_argument('--team-safety-brake-crossing-only', action='store_true', help='Apply the team-safety-brake auxiliary only to three_usv_crossing samples.')
     parser.add_argument('--team-safety-brake-random-only', action='store_true', help='Apply the team-safety-brake auxiliary only to random encounter samples.')
+    parser.add_argument('--team-safety-brake-random-yield-agents-only', action='store_true', help='When team-safety-brake is random-only, train only higher-index give-way agents so lower-index stand-on agents keep route progress.')
+    parser.add_argument('--team-safety-brake-random-yield-agent-weight', type=float, default=1.0, help='Role multiplier for higher-index give-way agents when random-yield-agents-only is enabled.')
+    parser.add_argument('--team-safety-brake-random-standon-agent-weight', type=float, default=0.0, help='Role multiplier for lower-index stand-on agents when random-yield-agents-only is enabled. 0 preserves hard yield-only gating.')
+    parser.add_argument('--random-deconflict-weight', type=float, default=0.0, help='Trainer-side auxiliary action loss that role-staggers random encounters under CPA threat.')
+    parser.add_argument('--random-deconflict-weight-end', type=float, default=None, help='Final random-deconflict auxiliary weight for linear annealing. If unset, random-deconflict-weight stays constant.')
+    parser.add_argument('--random-deconflict-pretrain-epochs', type=int, default=0, help='Extra actor-only epochs per rollout for fitting random-deconflict action targets after PPO updates.')
+    parser.add_argument('--random-deconflict-pretrain-learning-rate', type=float, default=0.0, help='Optional separate actor-only learning rate for random-deconflict pretrain; <=0 reuses the main optimizer.')
+    parser.add_argument('--random-deconflict-pretrain-max-grad-norm', type=float, default=0.0, help='Optional separate grad norm for random-deconflict pretrain; <=0 uses --max-grad-norm.')
+    parser.add_argument('--random-deconflict-role-mode', choices=['agent-index', 'priority', 'priority-delta', 'route-eta-delta'], default='agent-index', help='Role signal used for random-deconflict targets. priority uses ego crossing_priority; priority-delta uses route_priority_delta on the active neighbor; route-eta-delta yields when ego arrives later at the shared conflict point (positive neighbor route_eta_delta), typically with --random-encounter-route-priority.')
+    parser.add_argument('--random-deconflict-priority-yield-threshold', type=float, default=-0.10, help='In priority role mode, samples with crossing_priority at or below this value are treated as give-way.')
+    parser.add_argument('--random-deconflict-priority-delta-yield-threshold', type=float, default=-0.01, help='In priority-delta role mode, yield when own-minus-neighbor priority delta is at or below this value.')
+    parser.add_argument('--random-deconflict-route-eta-yield-threshold', type=float, default=0.02, help='In route-eta-delta role mode, yield when normalized (own_eta-neighbor_eta) exceeds this positive threshold.')
+    parser.add_argument('--random-deconflict-goal-tolerance', type=float, default=0.8, help='Goal tolerance used to ignore completed random-deconflict samples.')
+    parser.add_argument('--random-deconflict-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-deconflict samples.')
+    parser.add_argument('--random-deconflict-lookahead-distance', type=float, default=10.8, help='Maximum neighbor distance for random-deconflict CPA activation.')
+    parser.add_argument('--random-deconflict-time-horizon', type=float, default=30.0, help='Maximum TCPA seconds for random-deconflict CPA activation.')
+    parser.add_argument('--random-deconflict-dcpa-target', type=float, default=1.45, help='Predicted DCPA target in meters for random-deconflict activation.')
+    parser.add_argument('--random-deconflict-closing-speed-min', type=float, default=0.004, help='Minimum positive range-closing speed for random-deconflict activation.')
+    parser.add_argument('--random-deconflict-local-danger', action='store_true', help='Also activate random-deconflict from nearest-neighbor local proximity, even if CPA score is weak.')
+    parser.add_argument('--random-deconflict-safe-separation', type=float, default=1.30, help='Nearest-neighbor separation where random-deconflict local danger is full strength.')
+    parser.add_argument('--random-deconflict-release-separation', type=float, default=2.40, help='Nearest-neighbor separation where random-deconflict local danger fades to zero.')
+    parser.add_argument('--random-deconflict-critical-separation', type=float, default=0.0, help='If >0, force local random-deconflict danger to 1.0 below this nearest-neighbor separation instead of fading it by closing speed.')
+    parser.add_argument('--random-deconflict-power', type=float, default=1.0, help='Power applied to random-deconflict CPA danger weighting.')
+    parser.add_argument('--random-deconflict-standon-speed', type=float, default=0.30, help='Forward speed target for the lower-index stand-on agent in random encounters.')
+    parser.add_argument('--random-deconflict-standon-close-separation', type=float, default=0.0, help='If >0, cap stand-on random-deconflict speed when nearest-neighbor distance is below this separation.')
+    parser.add_argument('--random-deconflict-standon-close-speed', type=float, default=0.08, help='Stand-on random-deconflict speed cap used inside random-deconflict-standon-close-separation.')
+    parser.add_argument('--random-deconflict-yield-speed', type=float, default=0.04, help='Maximum forward speed target for higher-index give-way agents under random-deconflict danger.')
+    parser.add_argument('--random-deconflict-yield-danger-scale', type=float, default=1.0, help='Fraction of random-deconflict danger used to fade give-way speed. 1.0 preserves a full stop at danger=1; lower values keep residual progress.')
+    parser.add_argument('--random-deconflict-standon-omega', type=float, default=0.12, help='Starboard yaw-rate target magnitude for the stand-on agent in random encounters.')
+    parser.add_argument('--random-deconflict-yield-omega', type=float, default=0.50, help='Starboard yaw-rate target magnitude for give-way agents in random encounters.')
+    parser.add_argument('--random-deconflict-turn-mode', choices=['starboard', 'away'], default='starboard', help='Yaw target direction for random-deconflict. starboard preserves legacy fixed-right targets; away turns away from the active neighbour bearing.')
+    parser.add_argument('--random-deconflict-omega-weight', type=float, default=1.0, help='Relative yaw-rate loss weight for random-deconflict starboard commitment.')
+    parser.add_argument('--random-deconflict-standon-weight', type=float, default=0.35, help='Loss multiplier for lower-index stand-on random-deconflict samples.')
+    parser.add_argument('--random-deconflict-yield-weight', type=float, default=1.0, help='Loss multiplier for higher-index give-way random-deconflict samples.')
+    parser.add_argument('--random-role-balance-weight', type=float, default=0.0, help='Hinge-style random encounter role-balance loss. Stand-on is only pushed above a minimum speed while yield agents are only capped below a maximum speed.')
+    parser.add_argument('--random-role-balance-weight-end', type=float, default=None, help='Final role-balance loss weight for linear annealing. If unset, random-role-balance-weight stays constant.')
+    parser.add_argument('--random-role-balance-pretrain-epochs', type=int, default=0, help='Extra actor-only epochs per rollout for role-balance hinge constraints after PPO updates.')
+    parser.add_argument('--random-role-balance-pretrain-learning-rate', type=float, default=0.0, help='Optional separate actor-only learning rate for role-balance pretrain; <=0 reuses the main optimizer.')
+    parser.add_argument('--random-role-balance-pretrain-max-grad-norm', type=float, default=0.0, help='Optional separate grad norm for role-balance pretrain; <=0 uses --max-grad-norm.')
+    parser.add_argument('--random-role-balance-min-danger', type=float, default=0.05, help='Minimum random-deconflict danger score for role-balance hinge constraints.')
+    parser.add_argument('--random-role-balance-standon-min-speed', type=float, default=0.28, help='Minimum action linear speed for stand-on agents under random role-balance constraints.')
+    parser.add_argument('--random-role-balance-standon-close-separation', type=float, default=0.0, help='If >0, disables the stand-on speed floor when nearest-neighbor distance is below this separation.')
+    parser.add_argument('--random-role-balance-yield-max-speed', type=float, default=0.10, help='Maximum action linear speed for yield agents under random role-balance constraints.')
+    parser.add_argument('--random-role-balance-yield-min-starboard-omega', type=float, default=0.22, help='Minimum starboard yaw-rate magnitude for yield agents under random role-balance constraints.')
+    parser.add_argument('--random-role-balance-standon-weight', type=float, default=1.0, help='Loss multiplier for stand-on speed-floor violations in role-balance constraints.')
+    parser.add_argument('--random-role-balance-yield-weight', type=float, default=1.0, help='Loss multiplier for yield speed-cap violations in role-balance constraints.')
+    parser.add_argument('--random-role-balance-omega-weight', type=float, default=0.6, help='Loss multiplier for yield starboard-omega hinge violations in role-balance constraints.')
+    parser.add_argument('--random-pairwise-role-guard-weight', type=float, default=0.0, help='Local nearest-pair guard loss for random encounters. Enforces pair-relative yield/stand-on behavior near collision distance.')
+    parser.add_argument('--random-pairwise-role-guard-weight-end', type=float, default=None, help='Final pairwise role guard weight for linear annealing. If unset, random-pairwise-role-guard-weight stays constant.')
+    parser.add_argument('--random-pairwise-role-guard-safe-separation', type=float, default=0.82, help='Nearest-neighbor separation where pairwise guard danger reaches full strength.')
+    parser.add_argument('--random-pairwise-role-guard-release-separation', type=float, default=1.45, help='Nearest-neighbor separation where pairwise guard fades out.')
+    parser.add_argument('--random-pairwise-role-guard-min-danger', type=float, default=0.10, help='Minimum local pair danger required for pairwise role guard samples.')
+    parser.add_argument('--random-pairwise-role-guard-yield-speed', type=float, default=0.015, help='Maximum forward speed target for yield agents under pairwise guard.')
+    parser.add_argument('--random-pairwise-role-guard-standon-close-speed', type=float, default=0.12, help='Forward speed cap for stand-on agents inside pairwise guard release distance.')
+    parser.add_argument('--random-pairwise-role-guard-yield-omega', type=float, default=0.42, help='Pair-relative away-turn yaw magnitude for yield agents under pairwise guard.')
+    parser.add_argument('--random-pairwise-role-guard-standon-omega', type=float, default=0.14, help='Pair-relative away-turn yaw magnitude for stand-on agents under pairwise guard.')
+    parser.add_argument('--random-pairwise-role-guard-linear-weight', type=float, default=1.0, help='Relative speed-cap loss weight for pairwise role guard.')
+    parser.add_argument('--random-pairwise-role-guard-omega-weight', type=float, default=2.0, help='Relative away-turn yaw loss weight for pairwise role guard.')
+    parser.add_argument('--random-pairwise-role-guard-yield-weight', type=float, default=2.0, help='Sample multiplier for yield agents under pairwise role guard.')
+    parser.add_argument('--random-pairwise-role-guard-standon-weight', type=float, default=0.55, help='Sample multiplier for stand-on agents under pairwise role guard.')
+    parser.add_argument('--random-safe-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that restores forward progress in random encounters only after CPA/local deconflict danger has cleared.')
+    parser.add_argument('--random-safe-finish-weight-end', type=float, default=None, help='Final random-safe-finish auxiliary weight for linear annealing. If unset, random-safe-finish-weight stays constant.')
+    parser.add_argument('--random-safe-finish-goal-tolerance', type=float, default=0.8, help='Goal tolerance used to ignore completed random-safe-finish samples.')
+    parser.add_argument('--random-safe-finish-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for unfinished random-safe-finish samples.')
+    parser.add_argument('--random-safe-finish-phase-min', type=float, default=-1.0, help='Minimum conflict_phase for random-safe-finish activation.')
+    parser.add_argument('--random-safe-finish-min-team-separation', type=float, default=2.7, help='Minimum fleet separation required before random-safe-finish can activate.')
+    parser.add_argument('--random-safe-finish-full-team-separation', type=float, default=4.0, help='Fleet separation where random-safe-finish reaches full target speed.')
+    parser.add_argument('--random-safe-finish-min-neighbor-separation', type=float, default=2.7, help='Minimum active-agent nearest-neighbor distance required before random-safe-finish can activate.')
+    parser.add_argument('--random-safe-finish-local-separation-scale', action='store_true', help='Use each agent nearest-neighbor distance, rather than fleet minimum separation, to scale random-safe-finish target speed.')
+    parser.add_argument('--random-safe-finish-max-abs-cte', type=float, default=0.0, help='If >0, block random-safe-finish acceleration when absolute CTE exceeds this value so off-route recovery can take over.')
+    parser.add_argument('--random-safe-finish-yield-release-min-separation', type=float, default=0.0, help='If >0, low-priority random agents at or above this nearest-neighbor distance can enter safe-finish even when CPA threat remains.')
+    parser.add_argument('--random-safe-finish-yield-release-max-closing-speed', type=float, default=0.02, help='Maximum nearest-neighbor closing speed for low-priority safe-finish release overlap.')
+    parser.add_argument('--random-safe-finish-yield-release-min-route-progress', type=float, default=0.0, help='Minimum route progress for low-priority safe-finish release overlap.')
+    parser.add_argument('--random-safe-finish-max-cpa-score', type=float, default=0.0, help='Maximum CPA threat score allowed for random-safe-finish activation.')
+    parser.add_argument('--random-safe-finish-max-local-score', type=float, default=0.0, help='Maximum local proximity threat score allowed for random-safe-finish activation.')
+    parser.add_argument('--random-safe-finish-target-speed', type=float, default=0.18, help='Target forward speed for random-safe-finish samples after deconflict danger has cleared.')
+    parser.add_argument('--random-safe-finish-min-speed-scale', type=float, default=0.35, help='Minimum fraction of random-safe-finish-target-speed used for unfinished samples.')
+    parser.add_argument('--random-safe-finish-hold-distance', type=float, default=0.0, help='Distance-to-goal band where random-safe-finish holds reached agents at zero speed. 0 disables hold samples.')
+    parser.add_argument('--random-safe-finish-hold-weight', type=float, default=1.0, help='Per-sample loss multiplier for random-safe-finish hold samples.')
+    parser.add_argument('--random-safe-finish-low-priority-threshold', type=float, default=-0.5, help='crossing_priority value at or below which random-safe-finish applies the low-priority speed multiplier.')
+    parser.add_argument('--random-safe-finish-low-priority-speed-multiplier', type=float, default=1.0, help='Forward target multiplier for low-priority random-safe-finish samples after danger has cleared.')
+    parser.add_argument('--random-safe-finish-max-omega', type=float, default=0.10, help='Maximum heading-correction yaw target used by random-safe-finish.')
+    parser.add_argument('--random-safe-finish-omega-weight', type=float, default=0.12, help='Relative yaw-rate loss weight for random-safe-finish heading correction.')
+    parser.add_argument('--random-goal-hold-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that holds random-encounter agents still once they are inside the goal band.')
+    parser.add_argument('--random-goal-hold-weight-end', type=float, default=None, help='Final random-goal-hold auxiliary weight for linear annealing. If unset, random-goal-hold-weight stays constant.')
+    parser.add_argument('--random-goal-hold-distance', type=float, default=0.0, help='Distance-to-goal band where random-goal-hold trains zero forward speed. 0 disables the auxiliary.')
+    parser.add_argument('--random-goal-hold-phase-min', type=float, default=-1.0, help='Minimum conflict_phase for random-goal-hold activation.')
+    parser.add_argument('--random-goal-hold-target-speed', type=float, default=0.0, help='Forward speed target for random-goal-hold samples.')
+    parser.add_argument('--random-goal-hold-target-omega', type=float, default=0.0, help='Yaw-rate target for random-goal-hold samples.')
+    parser.add_argument('--random-goal-hold-omega-weight', type=float, default=1.0, help='Relative yaw-rate loss weight for random-goal-hold samples.')
+    parser.add_argument('--random-offroute-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that recovers random-encounter agents that have high route progress but remain far from goal with large CTE.')
+    parser.add_argument('--random-offroute-finish-weight-end', type=float, default=None, help='Final random-offroute-finish auxiliary weight for linear annealing. If unset, random-offroute-finish-weight stays constant.')
+    parser.add_argument('--random-offroute-finish-goal-tolerance', type=float, default=0.8, help='Goal tolerance used to ignore completed random-offroute-finish samples.')
+    parser.add_argument('--random-offroute-finish-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-offroute-finish samples.')
+    parser.add_argument('--random-offroute-finish-min-distance', type=float, default=1.60, help='Minimum distance-to-goal for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-route-progress-min', type=float, default=0.82, help='Minimum route_progress required for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-min-abs-cte', type=float, default=1.20, help='Minimum absolute cross-track error required for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-full-abs-cte', type=float, default=3.00, help='Absolute CTE where random-offroute-finish reaches full correction urgency.')
+    parser.add_argument('--random-offroute-finish-phase-min', type=float, default=-1.0, help='Minimum conflict_phase for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-min-team-separation', type=float, default=2.75, help='Minimum fleet separation required before random-offroute-finish can activate.')
+    parser.add_argument('--random-offroute-finish-min-neighbor-separation', type=float, default=2.90, help='Minimum active-agent nearest-neighbor distance required before random-offroute-finish can activate.')
+    parser.add_argument('--random-offroute-finish-max-cpa-score', type=float, default=0.0, help='Maximum CPA threat score allowed for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-max-local-score', type=float, default=0.0, help='Maximum local proximity threat score allowed for random-offroute-finish activation.')
+    parser.add_argument('--random-offroute-finish-allow-threat-overlap', action='store_true', help='Allow random-offroute-finish to overlap with CPA/local deconflict threats once its route-progress and CTE gates are met.')
+    parser.add_argument('--random-offroute-finish-target-speed', type=float, default=0.14, help='Forward speed target for random-offroute-finish samples before CTE slowdown.')
+    parser.add_argument('--random-offroute-finish-min-speed', type=float, default=0.06, help='Minimum forward speed target retained at full random-offroute-finish CTE urgency.')
+    parser.add_argument('--random-offroute-finish-max-omega', type=float, default=0.18, help='Maximum heading-correction yaw target used by random-offroute-finish.')
+    parser.add_argument('--random-offroute-finish-omega-reference', type=float, default=0.65, help='Heading-error magnitude where random-offroute-finish reaches full yaw target.')
+    parser.add_argument('--random-offroute-finish-omega-weight', type=float, default=0.55, help='Relative yaw-rate loss weight for random-offroute-finish heading correction.')
+    parser.add_argument('--random-cte-recovery-weight', type=float, default=0.0, help='Trainer-side auxiliary that recovers high-CTE random encounter agents without relying on route_progress.')
+    parser.add_argument('--random-cte-recovery-weight-end', type=float, default=None, help='Final random-cte-recovery auxiliary weight for linear annealing.')
+    parser.add_argument('--random-cte-recovery-goal-tolerance', type=float, default=0.8, help='Goal tolerance used to ignore completed random-cte-recovery samples.')
+    parser.add_argument('--random-cte-recovery-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-cte-recovery samples.')
+    parser.add_argument('--random-cte-recovery-min-abs-cte', type=float, default=1.10, help='Minimum absolute CTE for random-cte-recovery activation.')
+    parser.add_argument('--random-cte-recovery-full-abs-cte', type=float, default=3.00, help='Absolute CTE where random-cte-recovery reaches full slowdown urgency.')
+    parser.add_argument('--random-cte-recovery-min-neighbor-separation', type=float, default=0.85, help='Minimum nearest-neighbor distance required for random-cte-recovery activation.')
+    parser.add_argument('--random-cte-recovery-allow-threat-overlap', action='store_true', help='Allow random-cte-recovery to overlap with CPA/local deconflict threats when the nearest-neighbor gate is satisfied.')
+    parser.add_argument('--random-cte-recovery-target-speed', type=float, default=0.18, help='Forward target speed at the random-cte-recovery activation threshold.')
+    parser.add_argument('--random-cte-recovery-min-speed', type=float, default=0.07, help='Forward target speed at full random-cte-recovery urgency.')
+    parser.add_argument('--random-cte-recovery-max-omega', type=float, default=0.30, help='Maximum goal-heading yaw-rate target for random-cte-recovery.')
+    parser.add_argument('--random-cte-recovery-omega-reference', type=float, default=0.55, help='Heading error magnitude mapped to max omega for random-cte-recovery.')
+    parser.add_argument('--random-cte-recovery-omega-weight', type=float, default=1.00, help='Relative yaw-rate loss weight for random-cte-recovery.')
+    parser.add_argument('--random-clear-ahead-weight', type=float, default=0.0, help='Trainer-side action loss for random encounters when the forward route cone is clear.')
+    parser.add_argument('--random-clear-ahead-weight-end', type=float, default=None, help='Final random-clear-ahead auxiliary weight for linear annealing.')
+    parser.add_argument('--random-clear-ahead-scenario', action='append', dest='random_clear_ahead_scenarios', default=None, help='Scenario name where random-clear-ahead may activate. Repeatable. Defaults to random encounter scenarios.')
+    parser.add_argument('--random-clear-ahead-distance', type=float, default=5.0, help='Forward-cone blocker distance for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-bearing-deg', type=float, default=35.0, help='Half-angle of the forward cone for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-cone-mode', choices=['heading', 'goal'], default='goal', help='Forward cone reference. heading uses ego yaw; goal uses the current target/route heading from heading_error.')
+    parser.add_argument('--random-clear-ahead-goal-tolerance', type=float, default=1.0, help='Goal tolerance used to ignore completed random-clear-ahead samples.')
+    parser.add_argument('--random-clear-ahead-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-clear-ahead samples.')
+    parser.add_argument('--random-clear-ahead-min-neighbor-separation', type=float, default=0.0, help='If >0, require all-around nearest-neighbor separation at least this large before random-clear-ahead activates.')
+    parser.add_argument('--random-clear-ahead-max-cpa-score', type=float, default=0.0, help='Maximum CPA score allowed for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-max-local-score', type=float, default=0.0, help='Maximum local random-deconflict danger score allowed for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-exclude-deconflict', action='store_true', help='Disable random-clear-ahead on samples where random-deconflict is active.')
+    parser.add_argument('--random-clear-ahead-target-source', choices=['raw', 'constant'], default='raw', help='Linear/yaw target source for random-clear-ahead. raw imitates base navigation; constant uses configured speed and heading-error yaw.')
+    parser.add_argument('--random-clear-ahead-target-speed', type=float, default=0.30, help='Forward speed target when random-clear-ahead-target-source=constant or raw speed is below min speed.')
+    parser.add_argument('--random-clear-ahead-min-speed', type=float, default=0.18, help='Minimum target forward speed retained for clear-ahead route discipline.')
+    parser.add_argument('--random-clear-ahead-max-omega', type=float, default=0.18, help='Absolute yaw-rate cap for random-clear-ahead target omega.')
+    parser.add_argument('--random-clear-ahead-omega-reference', type=float, default=0.55, help='Heading error magnitude mapped to max omega when target-source=constant.')
+    parser.add_argument('--random-clear-ahead-omega-weight', type=float, default=1.0, help='Relative yaw-rate loss weight for random-clear-ahead.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
     parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
     parser.add_argument('--policy-anchor-exclude-lagging-finish', action='store_true', help='Exclude samples currently targeted by lagging-finish from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-team-safety-brake', action='store_true', help='Exclude samples currently targeted by team-safety-brake from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-deconflict', action='store_true', help='Exclude samples currently targeted by random-deconflict from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-safe-finish', action='store_true', help='Exclude samples currently targeted by random-safe-finish from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-goal-hold', action='store_true', help='Exclude samples currently targeted by random-goal-hold from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-offroute-finish', action='store_true', help='Exclude samples currently targeted by random-offroute-finish from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-cte-recovery', action='store_true', help='Exclude samples currently targeted by random-cte-recovery from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-pairwise-role-guard', action='store_true', help='Exclude samples currently targeted by random-pairwise-role-guard from policy-anchor loss.')
     parser.add_argument('--separate-actor-critic-grad-clip', action='store_true', help='Clip actor/log-std and critic gradients separately so large value losses do not suppress trainer-side actor auxiliaries.')
     return parser.parse_args()
 
@@ -561,6 +742,179 @@ def _crossing_imitation_loss(
     return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
 
 
+def _overtaking_imitation_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2 or scenario_ids is None or agent_indices is None:
+        return action_mean.new_zeros(())
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return action_mean.new_zeros(())
+
+    two_scenario_id = scenario_to_index.get('two_usv_overtaking')
+    single_scenario_id = scenario_to_index.get('single_usv_overtaking')
+    if two_scenario_id is None and single_scenario_id is None:
+        return action_mean.new_zeros(())
+    scenario_mask = torch.zeros_like(scenario_ids, dtype=torch.bool, device=scenario_ids.device)
+    two_scenario_mask = torch.zeros_like(scenario_mask)
+    single_scenario_mask = torch.zeros_like(scenario_mask)
+    if two_scenario_id is not None:
+        two_scenario_mask = scenario_ids == int(two_scenario_id)
+        scenario_mask = scenario_mask | two_scenario_mask
+    if single_scenario_id is not None:
+        single_scenario_mask = scenario_ids == int(single_scenario_id)
+        scenario_mask = scenario_mask | single_scenario_mask
+    if not bool(scenario_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    max_distance = max(1.0, float(getattr(args, 'overtaking_imitation_max_distance', 13.0)))
+    distance_to_goal = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished = (distance_to_goal > 0.8) & (distance_to_goal <= max_distance)
+    nearest_distance, nearest_bearing, nearest_closing, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0:
+        return action_mean.new_zeros(())
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+    masked_distances = torch.where(valid_slots, distances, torch.full_like(distances, float('inf')))
+    nearest_index = masked_distances.argmin(dim=1)
+    row_index = torch.arange(sample_count, device=raw_obs.device)
+    nearest = neighbors[row_index, nearest_index]
+    rel_x = nearest[:, 0].to(dtype=action_mean.dtype)
+    rel_y = nearest[:, 1].to(dtype=action_mean.dtype)
+
+    agent_index_tensor = agent_indices.to(device=action_mean.device)
+    front_role = agent_index_tensor == 0
+    rear_role = agent_index_tensor == 1
+    visible_ahead = nearest_distance.to(device=action_mean.device) <= max_distance
+    same_lane_ahead = valid_neighbor.to(device=action_mean.device) & visible_ahead & (rel_x > 0.3) & (torch.abs(rel_y) <= 2.5)
+    rear_active = (two_scenario_mask & rear_role & same_lane_ahead) | (single_scenario_mask & front_role)
+    front_active = two_scenario_mask & front_role & valid_neighbor.to(device=action_mean.device) & (rel_x < 0.8)
+    active_mask = unfinished & (front_active | rear_active)
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    raw_linear = raw_obs[:, 7].to(dtype=action_mean.dtype)
+    raw_omega = raw_obs[:, 8].to(dtype=action_mean.dtype)
+    cross_track_error = raw_obs[:, 11].to(dtype=action_mean.dtype) if raw_obs.shape[-1] > 11 else torch.zeros_like(raw_linear)
+    route_progress = raw_obs[:, 12].to(dtype=action_mean.dtype) if raw_obs.shape[-1] > 12 else torch.zeros_like(raw_linear)
+    front_min_speed = max(0.0, float(getattr(args, 'overtaking_imitation_front_min_speed', 0.24)))
+    front_max_omega = max(0.0, float(getattr(args, 'overtaking_imitation_front_max_omega', 0.10)))
+    rear_approach_speed = max(0.0, float(getattr(args, 'overtaking_imitation_rear_approach_speed', 0.12)))
+    rear_close_speed = max(0.0, float(getattr(args, 'overtaking_imitation_rear_close_speed', 0.055)))
+    rear_pass_speed = max(rear_approach_speed, float(getattr(args, 'overtaking_imitation_rear_pass_speed', 0.22)))
+    close_sep = max(0.1, float(getattr(args, 'overtaking_imitation_close_separation', 2.30)))
+    release_sep = max(close_sep + 0.1, float(getattr(args, 'overtaking_imitation_release_separation', 5.80)))
+    target_offset = max(0.1, float(getattr(args, 'overtaking_imitation_target_starboard_offset', 1.05)))
+    rear_omega_mag = max(0.0, float(getattr(args, 'overtaking_imitation_rear_omega', 0.26)))
+    omega_weight = max(0.0, float(getattr(args, 'overtaking_imitation_omega_weight', 1.0)))
+    single_return_progress = min(1.0, max(0.0, float(getattr(args, 'overtaking_imitation_single_return_progress', 0.70))))
+    single_return_rel_x = float(getattr(args, 'overtaking_imitation_single_return_rel_x', -0.20))
+    single_return_min_sep = max(0.1, float(getattr(args, 'overtaking_imitation_single_return_min_separation', 2.70)))
+    single_return_cte_start = max(0.0, float(getattr(args, 'overtaking_imitation_single_return_cte_start', 0.70)))
+    single_return_cte_full = max(single_return_cte_start + 1e-3, float(getattr(args, 'overtaking_imitation_single_return_cte_full', 3.00)))
+    single_return_speed = max(0.0, float(getattr(args, 'overtaking_imitation_single_return_speed', 0.32)))
+    single_return_omega_mag = max(0.0, float(getattr(args, 'overtaking_imitation_single_return_omega', 0.30)))
+    single_finish_distance = max(0.8, float(getattr(args, 'overtaking_imitation_single_finish_distance', 3.50)))
+    single_finish_speed = max(0.0, float(getattr(args, 'overtaking_imitation_single_finish_speed', 0.34)))
+    single_finish_max_omega = max(0.0, float(getattr(args, 'overtaking_imitation_single_finish_max_omega', 0.10)))
+
+    starboard_offset = torch.clamp(-rel_y, min=0.0)
+    corridor = torch.clamp(starboard_offset / target_offset, 0.0, 1.0).to(dtype=action_mean.dtype)
+    close = nearest_distance.to(device=action_mean.device) < close_sep
+    rear_linear = rear_approach_speed + (rear_pass_speed - rear_approach_speed) * corridor
+    rear_linear = torch.where(close & (corridor < 0.8), torch.minimum(rear_linear, torch.full_like(rear_linear, rear_close_speed)), rear_linear)
+    rear_omega = -rear_omega_mag * torch.clamp(1.0 - corridor, 0.0, 1.0)
+
+    abs_cte = torch.abs(cross_track_error)
+    valid_neighbor_on_device = valid_neighbor.to(device=action_mean.device)
+    single_safe_to_return = (~valid_neighbor_on_device) | (nearest_distance.to(device=action_mean.device) >= single_return_min_sep)
+    single_past_lead = valid_neighbor_on_device & (rel_x <= single_return_rel_x)
+    single_late_route = route_progress >= single_return_progress
+    single_near_finish = distance_to_goal.to(device=action_mean.device) <= single_finish_distance
+    single_return_active = single_scenario_mask & front_role & single_safe_to_return & (single_past_lead | single_late_route | single_near_finish)
+    return_strength = torch.clamp((abs_cte - single_return_cte_start) / (single_return_cte_full - single_return_cte_start), 0.0, 1.0)
+    return_omega = -torch.sign(cross_track_error) * single_return_omega_mag * return_strength
+    finish_straight = single_near_finish & (abs_cte <= single_return_cte_start)
+    return_linear = torch.where(single_near_finish, torch.full_like(raw_linear, single_finish_speed), torch.full_like(raw_linear, single_return_speed))
+    return_omega = torch.where(finish_straight, torch.clamp(raw_omega, min=-single_finish_max_omega, max=single_finish_max_omega), return_omega)
+
+    front_linear = torch.clamp(raw_linear, min=front_min_speed, max=max(front_min_speed, float(high[0].detach().cpu().item())))
+    front_omega = torch.clamp(raw_omega, min=-front_max_omega, max=front_max_omega)
+    target_linear = torch.where(single_return_active, return_linear, torch.where(rear_active, rear_linear, front_linear))
+    target_omega = torch.where(single_return_active, return_omega, torch.where(rear_active, rear_omega, front_omega))
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    target_omega = torch.clamp(target_omega, min=low[1], max=high[1])
+
+    danger = torch.clamp((release_sep - nearest_distance.to(device=action_mean.device)) / max(release_sep - close_sep, 1e-3), 0.0, 1.0).to(dtype=action_mean.dtype)
+    urgency = torch.where(single_return_active, torch.full_like(danger, 0.85), torch.where(rear_active, 0.45 + 0.55 * danger, torch.full_like(danger, 0.65)))
+    linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _overtaking_imitation_active_mask(torch, raw_obs, scenario_ids, scenario_to_index: dict[str, int], args, agent_indices=None):
+    if scenario_ids is None or agent_indices is None or raw_obs.ndim == 0:
+        return torch.zeros(0, dtype=torch.bool, device=raw_obs.device)
+    two_scenario_id = scenario_to_index.get('two_usv_overtaking')
+    single_scenario_id = scenario_to_index.get('single_usv_overtaking')
+    sample_count = int(raw_obs.shape[0])
+    if (two_scenario_id is None and single_scenario_id is None) or sample_count <= 0:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    scenario_mask = torch.zeros_like(scenario_ids, dtype=torch.bool, device=scenario_ids.device)
+    if two_scenario_id is not None:
+        scenario_mask = scenario_mask | (scenario_ids == int(two_scenario_id))
+    if single_scenario_id is not None:
+        scenario_mask = scenario_mask | (scenario_ids == int(single_scenario_id))
+    distance_to_goal = torch.clamp(raw_obs[:, 4], min=0.0)
+    nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    max_distance = max(
+        float(getattr(args, 'overtaking_imitation_release_separation', 5.80)),
+        float(getattr(args, 'overtaking_imitation_max_distance', 13.0)),
+    )
+    eligible_agent = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if agent_indices is not None:
+        agent_index_tensor = agent_indices.to(device=raw_obs.device)
+        eligible_agent = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        if two_scenario_id is not None:
+            two_scenario_mask = scenario_ids.to(device=raw_obs.device) == int(two_scenario_id)
+            eligible_agent = eligible_agent | (two_scenario_mask & ((agent_index_tensor == 0) | (agent_index_tensor == 1)))
+        if single_scenario_id is not None:
+            single_scenario_mask = scenario_ids.to(device=raw_obs.device) == int(single_scenario_id)
+            eligible_agent = eligible_agent | (single_scenario_mask & (agent_index_tensor == 0))
+    two_active = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if two_scenario_id is not None:
+        two_scenario_mask = scenario_ids.to(device=raw_obs.device) == int(two_scenario_id)
+        two_active = two_scenario_mask & valid_neighbor & (nearest_distance <= max_distance)
+    single_active = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if single_scenario_id is not None:
+        single_active = scenario_ids.to(device=raw_obs.device) == int(single_scenario_id)
+    return eligible_agent & (distance_to_goal > 0.8) & (two_active | single_active)
+
+
 def _near_goal_finish_loss(
     torch,
     action_mean,
@@ -651,6 +1005,7 @@ def _lagging_finish_active_mask(
     scenario_ids,
     scenario_to_index: dict[str, int],
     args,
+    agent_indices=None,
 ):
     sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
     if sample_count <= 0:
@@ -720,6 +1075,7 @@ def _lagging_teammate_finish_loss(
     action_low_tensor,
     action_high_tensor,
     sample_weights=None,
+    agent_indices=None,
 ):
     if action_mean.shape[-1] < 2:
         return action_mean.new_zeros(())
@@ -900,6 +1256,261 @@ def _nearest_neighbor_features(torch, raw_obs):
     return nearest_distance, bearing, closing_speed, valid
 
 
+def _neighbor_cpa_threat_features(
+    torch,
+    raw_obs,
+    lookahead_distance: float,
+    tcpa_horizon: float,
+    dcpa_target: float,
+    closing_speed_min: float,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        empty = torch.zeros(0, dtype=raw_obs.dtype, device=raw_obs.device)
+        valid_empty = torch.zeros(0, dtype=torch.bool, device=raw_obs.device)
+        return empty, empty, empty, empty, empty, valid_empty
+
+    zeros = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    invalid_distance = torch.full((sample_count,), float('inf'), dtype=raw_obs.dtype, device=raw_obs.device)
+    if lookahead_distance <= 0.0 or tcpa_horizon <= 0.0 or dcpa_target <= 0.0:
+        return invalid_distance, zeros, zeros, zeros, zeros, torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0:
+        return invalid_distance, zeros, zeros, zeros, zeros, torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+
+    rel_x = neighbors[:, :, 0]
+    rel_y = neighbors[:, :, 1]
+    rel_vx = neighbors[:, :, 2]
+    rel_vy = neighbors[:, :, 3]
+    dot = (rel_x * rel_vx) + (rel_y * rel_vy)
+    rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+    closing_speed = -dot / torch.clamp(distances, min=1e-3)
+    tcpa = torch.where(rel_speed_sq > 1e-6, -dot / torch.clamp(rel_speed_sq, min=1e-6), torch.zeros_like(dot))
+    positive_tcpa = tcpa > 0.0
+    cpa_x = rel_x + rel_vx * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+    cpa_y = rel_y + rel_vy * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+    dcpa = torch.where(
+        positive_tcpa,
+        torch.sqrt(torch.clamp(cpa_x * cpa_x + cpa_y * cpa_y, min=0.0)),
+        distances,
+    )
+
+    distance_gate = torch.clamp((lookahead_distance - distances) / max(lookahead_distance, 1e-3), 0.0, 1.0)
+    time_gate = torch.clamp((tcpa_horizon - tcpa) / max(tcpa_horizon, 1e-3), 0.0, 1.0)
+    dcpa_deficit = torch.clamp((dcpa_target - dcpa) / max(dcpa_target, 1e-3), 0.0, 1.0)
+    closing_gate = torch.clamp((closing_speed - closing_speed_min) / max(0.35 - closing_speed_min, 1e-3), 0.0, 1.0)
+    threat_mask = (
+        valid_slots
+        & (distances <= lookahead_distance)
+        & (closing_speed >= closing_speed_min)
+        & positive_tcpa
+        & (tcpa <= tcpa_horizon)
+        & (dcpa < dcpa_target)
+    )
+    threat_score = torch.where(
+        threat_mask,
+        torch.maximum(distance_gate, time_gate) * dcpa_deficit * (0.25 + 0.75 * closing_gate),
+        torch.zeros_like(distances),
+    )
+    best_score, best_index = threat_score.max(dim=1)
+    row_index = torch.arange(sample_count, device=raw_obs.device)
+    best_distance = distances[row_index, best_index]
+    best_bearing = neighbors[row_index, best_index, 5]
+    best_closing = closing_speed[row_index, best_index]
+    best_dcpa = dcpa[row_index, best_index]
+    valid_threat = best_score > 0.0
+    best_distance = torch.where(valid_threat, best_distance, invalid_distance)
+    best_bearing = torch.where(valid_threat, best_bearing, zeros)
+    best_closing = torch.where(valid_threat, best_closing, zeros)
+    best_dcpa = torch.where(valid_threat, best_dcpa, zeros)
+    return best_distance, best_bearing, best_closing, best_dcpa, best_score, valid_threat
+
+
+def _random_deconflict_pairwise_priority_delta(torch, raw_obs, args):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    zeros = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    valid_empty = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if sample_count <= 0:
+        return zeros, valid_empty
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0 or NEIGHBOR_FEATURE_COUNT <= 9:
+        return zeros, valid_empty
+
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+    priority_delta = neighbors[:, :, 9]
+
+    masked_distances = torch.where(valid_slots, distances, torch.full_like(distances, float('inf')))
+    nearest_distance, nearest_index = masked_distances.min(dim=1)
+    row_index = torch.arange(sample_count, device=raw_obs.device)
+    nearest_delta = priority_delta[row_index, nearest_index]
+    valid_nearest = torch.isfinite(nearest_distance)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    cpa_score = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    cpa_delta = zeros
+    valid_cpa = valid_empty
+    if lookahead > 0.0 and horizon > 0.0 and dcpa_target > 0.0:
+        rel_x = neighbors[:, :, 0]
+        rel_y = neighbors[:, :, 1]
+        rel_vx = neighbors[:, :, 2]
+        rel_vy = neighbors[:, :, 3]
+        dot = (rel_x * rel_vx) + (rel_y * rel_vy)
+        rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+        closing_speed = -dot / torch.clamp(distances, min=1e-3)
+        tcpa = torch.where(rel_speed_sq > 1e-6, -dot / torch.clamp(rel_speed_sq, min=1e-6), torch.zeros_like(dot))
+        positive_tcpa = tcpa > 0.0
+        cpa_x = rel_x + rel_vx * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+        cpa_y = rel_y + rel_vy * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+        dcpa = torch.where(
+            positive_tcpa,
+            torch.sqrt(torch.clamp(cpa_x * cpa_x + cpa_y * cpa_y, min=0.0)),
+            distances,
+        )
+        distance_gate = torch.clamp((lookahead - distances) / max(lookahead, 1e-3), 0.0, 1.0)
+        time_gate = torch.clamp((horizon - tcpa) / max(horizon, 1e-3), 0.0, 1.0)
+        dcpa_deficit = torch.clamp((dcpa_target - dcpa) / max(dcpa_target, 1e-3), 0.0, 1.0)
+        closing_gate = torch.clamp((closing_speed - closing_min) / max(0.35 - closing_min, 1e-3), 0.0, 1.0)
+        threat_mask = (
+            valid_slots
+            & (distances <= lookahead)
+            & (closing_speed >= closing_min)
+            & positive_tcpa
+            & (tcpa <= horizon)
+            & (dcpa < dcpa_target)
+        )
+        threat_score = torch.where(
+            threat_mask,
+            torch.maximum(distance_gate, time_gate) * dcpa_deficit * (0.25 + 0.75 * closing_gate),
+            torch.zeros_like(distances),
+        )
+        cpa_score, cpa_index = threat_score.max(dim=1)
+        cpa_delta = priority_delta[row_index, cpa_index]
+        valid_cpa = cpa_score > 0.0
+
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    use_cpa = valid_cpa & ((~valid_local) | (cpa_score >= local_score))
+    selected_delta = torch.where(use_cpa, cpa_delta, nearest_delta)
+    valid = use_cpa | (valid_local & valid_nearest)
+    return torch.where(valid, selected_delta, zeros), valid
+
+
+def _random_deconflict_pairwise_route_eta_delta(torch, raw_obs, args):
+    """Pairwise route ETA gap for the same neighbor selection as priority-delta (CPA vs local/nearest)."""
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    zeros = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    valid_empty = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if sample_count <= 0:
+        return zeros, valid_empty
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0 or NEIGHBOR_FEATURE_COUNT < 9:
+        return zeros, valid_empty
+
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+    route_eta_delta = neighbors[:, :, 8]
+
+    masked_distances = torch.where(valid_slots, distances, torch.full_like(distances, float('inf')))
+    nearest_distance, nearest_index = masked_distances.min(dim=1)
+    row_index = torch.arange(sample_count, device=raw_obs.device)
+    nearest_eta = route_eta_delta[row_index, nearest_index]
+    valid_nearest = torch.isfinite(nearest_distance)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    cpa_score = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    cpa_eta = zeros
+    valid_cpa = valid_empty
+    if lookahead > 0.0 and horizon > 0.0 and dcpa_target > 0.0:
+        rel_x = neighbors[:, :, 0]
+        rel_y = neighbors[:, :, 1]
+        rel_vx = neighbors[:, :, 2]
+        rel_vy = neighbors[:, :, 3]
+        dot = (rel_x * rel_vx) + (rel_y * rel_vy)
+        rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
+        closing_speed = -dot / torch.clamp(distances, min=1e-3)
+        tcpa = torch.where(rel_speed_sq > 1e-6, -dot / torch.clamp(rel_speed_sq, min=1e-6), torch.zeros_like(dot))
+        positive_tcpa = tcpa > 0.0
+        cpa_x = rel_x + rel_vx * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+        cpa_y = rel_y + rel_vy * torch.where(positive_tcpa, tcpa, torch.zeros_like(tcpa))
+        dcpa = torch.where(
+            positive_tcpa,
+            torch.sqrt(torch.clamp(cpa_x * cpa_x + cpa_y * cpa_y, min=0.0)),
+            distances,
+        )
+        distance_gate = torch.clamp((lookahead - distances) / max(lookahead, 1e-3), 0.0, 1.0)
+        time_gate = torch.clamp((horizon - tcpa) / max(horizon, 1e-3), 0.0, 1.0)
+        dcpa_deficit = torch.clamp((dcpa_target - dcpa) / max(dcpa_target, 1e-3), 0.0, 1.0)
+        closing_gate = torch.clamp((closing_speed - closing_min) / max(0.35 - closing_min, 1e-3), 0.0, 1.0)
+        threat_mask = (
+            valid_slots
+            & (distances <= lookahead)
+            & (closing_speed >= closing_min)
+            & positive_tcpa
+            & (tcpa <= horizon)
+            & (dcpa < dcpa_target)
+        )
+        threat_score = torch.where(
+            threat_mask,
+            torch.maximum(distance_gate, time_gate) * dcpa_deficit * (0.25 + 0.75 * closing_gate),
+            torch.zeros_like(distances),
+        )
+        cpa_score, cpa_index = threat_score.max(dim=1)
+        cpa_eta = route_eta_delta[row_index, cpa_index]
+        valid_cpa = cpa_score > 0.0
+
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    use_cpa = valid_cpa & ((~valid_local) | (cpa_score >= local_score))
+    selected_eta = torch.where(use_cpa, cpa_eta, nearest_eta)
+    valid = use_cpa | (valid_local & valid_nearest)
+    return torch.where(valid, selected_eta, zeros), valid
+
+
+def _team_safety_brake_role_weights(torch, raw_obs, args, agent_indices=None):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    weights = torch.ones(sample_count, dtype=torch.float32, device=raw_obs.device)
+    if sample_count <= 0:
+        return weights
+    if not (
+        bool(getattr(args, 'team_safety_brake_random_only', False))
+        and bool(getattr(args, 'team_safety_brake_random_yield_agents_only', False))
+    ):
+        return weights
+    if agent_indices is None:
+        return torch.zeros(sample_count, dtype=torch.float32, device=raw_obs.device)
+    agent_index_tensor = agent_indices.to(device=raw_obs.device)
+    yield_weight = max(0.0, float(getattr(args, 'team_safety_brake_random_yield_agent_weight', 1.0)))
+    standon_weight = max(0.0, float(getattr(args, 'team_safety_brake_random_standon_agent_weight', 0.0)))
+    return torch.where(
+        agent_index_tensor >= 1,
+        torch.full_like(weights, yield_weight),
+        torch.full_like(weights, standon_weight),
+    )
+
+
 def _team_safety_brake_active_mask(
     torch,
     raw_obs,
@@ -907,6 +1518,7 @@ def _team_safety_brake_active_mask(
     scenario_ids,
     scenario_to_index: dict[str, int],
     args,
+    agent_indices=None,
 ):
     sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
     if sample_count <= 0:
@@ -934,6 +1546,10 @@ def _team_safety_brake_active_mask(
     else:
         scenario_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
 
+    role_weights = _team_safety_brake_role_weights(torch, raw_obs, args, agent_indices)
+    if random_only and bool(getattr(args, 'team_safety_brake_random_yield_agents_only', False)):
+        scenario_mask = scenario_mask & (role_weights > 0.0)
+
     distance = torch.clamp(raw_obs[:, 4], min=0.0)
     phase = raw_obs[:, 13]
     team_min_separation = global_state[:, -5]
@@ -947,6 +1563,22 @@ def _team_safety_brake_active_mask(
     max_team_completion = min(1.0, float(getattr(args, 'team_safety_brake_max_team_completion', 0.999)))
     near_team_tolerance = max(0.0, float(getattr(args, 'team_safety_brake_near_team_tolerance', 0.0)))
     release_separation = max(0.0, float(getattr(args, 'team_safety_brake_release_separation', 2.4)))
+
+    cpa_separation_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if bool(getattr(args, 'team_safety_brake_cpa_danger', False)):
+        cpa_lookahead = max(release_separation, float(getattr(args, 'team_safety_brake_cpa_lookahead_distance', 0.0)))
+        cpa_horizon = max(0.0, float(getattr(args, 'team_safety_brake_cpa_time_horizon', 0.0)))
+        cpa_target = max(0.0, float(getattr(args, 'team_safety_brake_cpa_dcpa_target', 0.0)))
+        cpa_closing_min = max(0.0, float(getattr(args, 'team_safety_brake_cpa_closing_speed_min', 0.02)))
+        _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+            torch,
+            raw_obs,
+            cpa_lookahead,
+            cpa_horizon,
+            cpa_target,
+            cpa_closing_min,
+        )
+        cpa_separation_mask = valid_cpa & (cpa_score > 0.0)
 
     if near_team_tolerance > 0.0:
         local_size = int(raw_obs.shape[-1])
@@ -966,6 +1598,8 @@ def _team_safety_brake_active_mask(
     if bool(getattr(args, 'team_safety_brake_require_neighbor', False)):
         nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
         separation_mask = separation_mask & valid_neighbor & (nearest_distance < release_separation)
+    if bool(cpa_separation_mask.any().detach().cpu()):
+        separation_mask = separation_mask | cpa_separation_mask
     return scenario_mask & team_gate & separation_mask & (phase >= phase_min) & unfinished_mask
 
 
@@ -980,6 +1614,7 @@ def _team_safety_brake_loss(
     action_low_tensor,
     action_high_tensor,
     sample_weights=None,
+    agent_indices=None,
 ):
     if action_mean.shape[-1] < 1:
         return action_mean.new_zeros(())
@@ -990,6 +1625,7 @@ def _team_safety_brake_loss(
         scenario_ids,
         scenario_to_index,
         args,
+        agent_indices=agent_indices,
     )
     if not bool(active_mask.any().detach().cpu()):
         return action_mean.new_zeros(())
@@ -1002,7 +1638,25 @@ def _team_safety_brake_loss(
     omega_weight = max(0.0, float(getattr(args, 'team_safety_brake_omega_weight', 0.0)))
     target_omega_limit = max(0.0, float(getattr(args, 'team_safety_brake_target_omega', 0.0)))
     turn_mode = str(getattr(args, 'team_safety_brake_turn_mode', 'away'))
+    head_on_starboard_threshold = max(
+        0.0,
+        float(getattr(args, 'team_safety_brake_head_on_starboard_threshold', 0.0)),
+    )
     nearest_distance = bearing = closing_speed = valid_neighbor = None
+    cpa_distance = cpa_bearing = cpa_closing = cpa_score = valid_cpa = None
+    if bool(getattr(args, 'team_safety_brake_cpa_danger', False)):
+        cpa_lookahead = max(release_separation, float(getattr(args, 'team_safety_brake_cpa_lookahead_distance', 0.0)))
+        cpa_horizon = max(0.0, float(getattr(args, 'team_safety_brake_cpa_time_horizon', 0.0)))
+        cpa_target = max(0.0, float(getattr(args, 'team_safety_brake_cpa_dcpa_target', 0.0)))
+        cpa_closing_min = max(0.0, float(getattr(args, 'team_safety_brake_cpa_closing_speed_min', 0.02)))
+        cpa_distance, cpa_bearing, cpa_closing, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+            torch,
+            raw_obs,
+            cpa_lookahead,
+            cpa_horizon,
+            cpa_target,
+            cpa_closing_min,
+        )
     danger_distance = team_min_separation
     if bool(getattr(args, 'team_safety_brake_local_danger', False)):
         nearest_distance, bearing, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
@@ -1013,6 +1667,8 @@ def _team_safety_brake_loss(
         0.0,
         1.0,
     ).to(dtype=action_mean.dtype)
+    if cpa_score is not None:
+        danger = torch.maximum(danger, cpa_score.to(dtype=action_mean.dtype))
     if brake_power != 1.0:
         danger = danger.pow(brake_power)
     target_linear = (target_speed * (1.0 - danger)).to(dtype=action_mean.dtype)
@@ -1033,17 +1689,33 @@ def _team_safety_brake_loss(
             0.0,
             1.0,
         ).to(dtype=action_mean.dtype)
+        if cpa_score is not None:
+            cpa_score_cast = cpa_score.to(dtype=action_mean.dtype)
+            use_cpa = (valid_cpa & (cpa_score_cast > neighbor_danger)).to(device=action_mean.device)
+            nearest_distance = torch.where(use_cpa, cpa_distance, nearest_distance)
+            bearing = torch.where(use_cpa, cpa_bearing, bearing)
+            closing_speed = torch.where(use_cpa, cpa_closing, closing_speed)
+            valid_neighbor = valid_neighbor | valid_cpa
+            neighbor_danger = torch.maximum(neighbor_danger, cpa_score_cast)
         if brake_power != 1.0:
             neighbor_danger = neighbor_danger.pow(brake_power)
         closing_gate = torch.clamp((closing_speed.to(dtype=action_mean.dtype) + 0.05) / 0.35, 0.0, 1.0)
         if turn_mode == 'starboard':
             turn_sign = torch.full_like(bearing, -1.0, dtype=action_mean.dtype)
         else:
-            turn_sign = torch.where(
+            away_turn_sign = torch.where(
                 bearing > 0.0,
                 torch.full_like(bearing, -1.0),
                 torch.where(bearing < 0.0, torch.ones_like(bearing), torch.zeros_like(bearing)),
-            ).to(dtype=action_mean.dtype)
+            )
+            if head_on_starboard_threshold > 0.0:
+                starboard_turn_sign = torch.full_like(bearing, -1.0)
+                away_turn_sign = torch.where(
+                    torch.abs(bearing) <= head_on_starboard_threshold,
+                    starboard_turn_sign,
+                    away_turn_sign,
+                )
+            turn_sign = away_turn_sign.to(dtype=action_mean.dtype)
         turn_scale = torch.where(valid_neighbor, neighbor_danger * (0.35 + 0.65 * closing_gate), torch.zeros_like(neighbor_danger))
         target_omega = torch.clamp(turn_sign * target_omega_limit * turn_scale, min=low[1], max=high[1])
         omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
@@ -1054,6 +1726,1262 @@ def _team_safety_brake_loss(
         weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     else:
         weights = mask_f
+    weights = weights * _team_safety_brake_role_weights(torch, raw_obs, args, agent_indices).to(
+        dtype=per_sample_loss.dtype,
+        device=per_sample_loss.device,
+    )
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_deconflict_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None or agent_indices is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_deconflict_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_deconflict_max_distance', 13.0)))
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, cpa_bearing, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    threat_score = torch.maximum(cpa_score.to(dtype=raw_obs.dtype), local_score.to(dtype=raw_obs.dtype))
+    valid_threat = valid_cpa | valid_local
+    is_yield = _random_deconflict_yield_mask(torch, raw_obs, args, agent_indices)
+    role_weight = torch.where(
+        is_yield,
+        torch.full((sample_count,), max(0.0, float(getattr(args, 'random_deconflict_yield_weight', 1.0))), device=raw_obs.device),
+        torch.full((sample_count,), max(0.0, float(getattr(args, 'random_deconflict_standon_weight', 0.35))), device=raw_obs.device),
+    )
+    release_overlap = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    release_min_separation = max(0.0, float(getattr(args, 'random_safe_finish_yield_release_min_separation', 0.0)))
+    if release_min_separation > 0.0:
+        nearest_distance, _, nearest_closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        release_max_closing = float(getattr(args, 'random_safe_finish_yield_release_max_closing_speed', 0.02))
+        release_min_route_progress = max(0.0, float(getattr(args, 'random_safe_finish_yield_release_min_route_progress', 0.0)))
+        release_route_mask = raw_obs[:, 12] >= release_min_route_progress if raw_obs.shape[-1] > 12 else torch.ones_like(unfinished_mask)
+        release_overlap = (
+            is_yield
+            & valid_neighbor
+            & (nearest_distance >= release_min_separation)
+            & (nearest_closing_speed <= release_max_closing)
+            & release_route_mask
+        )
+    return scenario_mask & unfinished_mask & valid_threat & (threat_score > 0.0) & (role_weight > 0.0) & (~release_overlap)
+
+
+def _random_deconflict_yield_mask(torch, raw_obs, args, agent_indices=None):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    role_mode = str(getattr(args, 'random_deconflict_role_mode', 'agent-index')).strip().lower()
+    if role_mode == 'priority-delta':
+        delta, valid_delta = _random_deconflict_pairwise_priority_delta(torch, raw_obs, args)
+        threshold = float(getattr(args, 'random_deconflict_priority_delta_yield_threshold', -0.01))
+        return valid_delta & (delta <= threshold)
+    if role_mode == 'route-eta-delta':
+        eta_delta, valid_eta = _random_deconflict_pairwise_route_eta_delta(torch, raw_obs, args)
+        threshold = float(getattr(args, 'random_deconflict_route_eta_yield_threshold', 0.02))
+        return valid_eta & (eta_delta > threshold)
+    if role_mode == 'priority' and raw_obs.shape[-1] > 15:
+        priority = raw_obs[:, 15]
+        threshold = float(getattr(args, 'random_deconflict_priority_yield_threshold', -0.10))
+        return priority <= threshold
+    if agent_indices is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    return agent_indices.to(device=raw_obs.device) >= 1
+
+
+def _random_deconflict_local_threat_score(torch, raw_obs, args):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    score = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    valid = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if sample_count <= 0 or not bool(getattr(args, 'random_deconflict_local_danger', False)):
+        return score, valid
+
+    nearest_distance, _, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    safe_separation = max(0.0, float(getattr(args, 'random_deconflict_safe_separation', 1.30)))
+    release_separation = max(
+        safe_separation + 0.05,
+        float(getattr(args, 'random_deconflict_release_separation', 2.40)),
+    )
+    local_score = torch.clamp(
+        (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3),
+        0.0,
+        1.0,
+    ).to(dtype=raw_obs.dtype)
+    closing_gate = torch.clamp((closing_speed.to(dtype=raw_obs.dtype) + 0.04) / 0.34, 0.0, 1.0)
+    local_score = local_score * (0.35 + 0.65 * closing_gate)
+    critical_separation = max(0.0, float(getattr(args, 'random_deconflict_critical_separation', 0.0)))
+    if critical_separation > 0.0:
+        critical_mask = valid_neighbor & (nearest_distance <= critical_separation)
+        local_score = torch.where(critical_mask, torch.ones_like(local_score), local_score)
+    valid = valid_neighbor & (nearest_distance <= release_separation) & (local_score > 0.0)
+    return torch.where(valid, local_score, score), valid
+
+
+def _random_deconflict_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 1:
+        return action_mean.new_zeros(())
+    active_mask = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, cpa_bearing, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    threat_score = torch.maximum(cpa_score.to(dtype=action_mean.dtype), local_score.to(dtype=action_mean.dtype))
+    valid_threat = valid_cpa | valid_local
+
+    danger_power = max(0.1, float(getattr(args, 'random_deconflict_power', 1.0)))
+    danger = torch.clamp(threat_score, 0.0, 1.0)
+    if danger_power != 1.0:
+        danger = danger.pow(danger_power)
+
+    is_yield = _random_deconflict_yield_mask(torch, raw_obs, args, agent_indices).to(device=action_mean.device)
+    standon_speed = max(0.0, float(getattr(args, 'random_deconflict_standon_speed', 0.30)))
+    yield_speed = max(0.0, float(getattr(args, 'random_deconflict_yield_speed', 0.04)))
+    yield_danger_scale = min(1.0, max(0.0, float(getattr(args, 'random_deconflict_yield_danger_scale', 1.0))))
+    standon_omega = max(0.0, float(getattr(args, 'random_deconflict_standon_omega', 0.12)))
+    yield_omega = max(0.0, float(getattr(args, 'random_deconflict_yield_omega', 0.50)))
+    omega_weight = max(0.0, float(getattr(args, 'random_deconflict_omega_weight', 1.0)))
+    standon_weight = max(0.0, float(getattr(args, 'random_deconflict_standon_weight', 0.35)))
+    yield_weight = max(0.0, float(getattr(args, 'random_deconflict_yield_weight', 1.0)))
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    standon_speed_tensor = torch.full_like(danger, standon_speed)
+    standon_close_separation = max(0.0, float(getattr(args, 'random_deconflict_standon_close_separation', 0.0)))
+    if standon_close_separation > 0.0:
+        standon_close_speed = max(0.0, float(getattr(args, 'random_deconflict_standon_close_speed', 0.08)))
+        nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        close_standon = valid_neighbor.to(device=action_mean.device) & (nearest_distance.to(device=action_mean.device) < standon_close_separation)
+        standon_speed_tensor = torch.where(
+            close_standon,
+            torch.minimum(standon_speed_tensor, torch.full_like(standon_speed_tensor, standon_close_speed)),
+            standon_speed_tensor,
+        )
+    yield_speed_tensor = torch.full_like(danger, yield_speed) * torch.clamp(1.0 - yield_danger_scale * danger, min=0.0, max=1.0)
+    target_linear = torch.where(is_yield, yield_speed_tensor, standon_speed_tensor)
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+    urgency = (0.25 + 0.75 * danger).to(dtype=linear_loss.dtype)
+    per_sample_loss = linear_loss * urgency
+
+    if action_mean.shape[-1] >= 2 and omega_weight > 0.0:
+        target_omega_mag = torch.where(
+            is_yield,
+            torch.full_like(danger, yield_omega),
+            torch.full_like(danger, standon_omega),
+        )
+        turn_mode = str(getattr(args, 'random_deconflict_turn_mode', 'starboard')).strip().lower()
+        if turn_mode == 'away':
+            _, nearest_bearing, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+            use_cpa_bearing = valid_cpa.to(device=action_mean.device) & (
+                cpa_score.to(dtype=action_mean.dtype, device=action_mean.device)
+                >= local_score.to(dtype=action_mean.dtype, device=action_mean.device)
+            )
+            active_bearing = torch.where(use_cpa_bearing, cpa_bearing.to(device=action_mean.device), nearest_bearing.to(device=action_mean.device))
+            valid_bearing = use_cpa_bearing | valid_neighbor.to(device=action_mean.device)
+            turn_sign = torch.where(
+                active_bearing > 0.0,
+                torch.full_like(active_bearing, -1.0),
+                torch.where(active_bearing < 0.0, torch.ones_like(active_bearing), torch.full_like(active_bearing, -1.0)),
+            )
+            turn_sign = torch.where(valid_bearing, turn_sign, torch.full_like(turn_sign, -1.0))
+        else:
+            turn_sign = torch.full_like(danger, -1.0)
+        target_omega = torch.clamp(turn_sign.to(dtype=action_mean.dtype) * target_omega_mag * danger, min=low[1], max=high[1])
+        omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+        per_sample_loss = per_sample_loss + omega_weight * omega_loss * danger
+
+    role_weight = torch.where(
+        is_yield,
+        torch.full_like(danger, yield_weight),
+        torch.full_like(danger, standon_weight),
+    )
+    weights = active_mask.to(dtype=per_sample_loss.dtype) * role_weight.to(dtype=per_sample_loss.dtype)
+    weights = weights * valid_threat.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_role_balance_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 1:
+        return action_mean.new_zeros(())
+    active_mask = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    threat_score = torch.maximum(cpa_score.to(dtype=action_mean.dtype), local_score.to(dtype=action_mean.dtype))
+    valid_threat = valid_cpa | valid_local
+
+    danger_power = max(0.1, float(getattr(args, 'random_deconflict_power', 1.0)))
+    danger = torch.clamp(threat_score, 0.0, 1.0)
+    if danger_power != 1.0:
+        danger = danger.pow(danger_power)
+    min_danger = max(0.0, float(getattr(args, 'random_role_balance_min_danger', 0.05)))
+
+    is_yield = _random_deconflict_yield_mask(torch, raw_obs, args, agent_indices).to(device=action_mean.device)
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+    linear_range = range_scale[0]
+
+    standon_min_speed = max(0.0, float(getattr(args, 'random_role_balance_standon_min_speed', 0.28)))
+    yield_max_speed = max(0.0, float(getattr(args, 'random_role_balance_yield_max_speed', 0.10)))
+    standon_min_speed = min(standon_min_speed, float(high[0].detach().cpu().item()))
+    yield_max_speed = min(yield_max_speed, float(high[0].detach().cpu().item()))
+
+    standon_violation = torch.relu((standon_min_speed - action_mean[:, 0]) / linear_range) ** 2
+    standon_close_separation = max(0.0, float(getattr(args, 'random_role_balance_standon_close_separation', 0.0)))
+    if standon_close_separation > 0.0:
+        nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        close_standon = valid_neighbor.to(device=action_mean.device) & (nearest_distance.to(device=action_mean.device) < standon_close_separation)
+        standon_violation = torch.where(close_standon, torch.zeros_like(standon_violation), standon_violation)
+    yield_violation = torch.relu((action_mean[:, 0] - yield_max_speed) / linear_range) ** 2
+    standon_weight = max(0.0, float(getattr(args, 'random_role_balance_standon_weight', 1.0)))
+    yield_weight = max(0.0, float(getattr(args, 'random_role_balance_yield_weight', 1.0)))
+    per_sample_loss = torch.where(
+        is_yield,
+        torch.full_like(yield_violation, yield_weight) * yield_violation,
+        torch.full_like(standon_violation, standon_weight) * standon_violation,
+    )
+
+    omega_weight = max(0.0, float(getattr(args, 'random_role_balance_omega_weight', 0.6)))
+    yield_min_starboard_omega = max(0.0, float(getattr(args, 'random_role_balance_yield_min_starboard_omega', 0.22)))
+    if action_mean.shape[-1] >= 2 and omega_weight > 0.0 and yield_min_starboard_omega > 0.0:
+        turn_mode = str(getattr(args, 'random_deconflict_turn_mode', 'starboard')).strip().lower()
+        if turn_mode == 'away':
+            _, cpa_bearing, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+                torch,
+                raw_obs,
+                lookahead,
+                horizon,
+                dcpa_target,
+                closing_min,
+            )
+            local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+            _, nearest_bearing, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+            use_cpa_bearing = valid_cpa.to(device=action_mean.device) & (
+                cpa_score.to(dtype=action_mean.dtype, device=action_mean.device)
+                >= local_score.to(dtype=action_mean.dtype, device=action_mean.device)
+            )
+            active_bearing = torch.where(use_cpa_bearing, cpa_bearing.to(device=action_mean.device), nearest_bearing.to(device=action_mean.device))
+            valid_bearing = use_cpa_bearing | valid_neighbor.to(device=action_mean.device)
+            turn_sign = torch.where(
+                active_bearing > 0.0,
+                torch.full_like(active_bearing, -1.0),
+                torch.where(active_bearing < 0.0, torch.ones_like(active_bearing), torch.full_like(active_bearing, -1.0)),
+            )
+            turn_sign = torch.where(valid_bearing, turn_sign, torch.full_like(turn_sign, -1.0))
+        else:
+            turn_sign = torch.full_like(danger, -1.0)
+        target_omega = torch.clamp(
+            turn_sign.to(dtype=action_mean.dtype) * yield_min_starboard_omega * torch.clamp(danger, 0.0, 1.0),
+            min=low[1],
+            max=high[1],
+        )
+        omega_diff = (action_mean[:, 1] - target_omega) / range_scale[1]
+        omega_violation = torch.where(
+            target_omega >= 0.0,
+            torch.relu(-omega_diff),
+            torch.relu(omega_diff),
+        )
+        per_sample_loss = per_sample_loss + is_yield.to(dtype=per_sample_loss.dtype) * omega_weight * (omega_violation ** 2)
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    weights = weights * valid_threat.to(dtype=per_sample_loss.dtype)
+    weights = weights * (danger >= min_danger).to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_pairwise_role_guard_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None or agent_indices is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_deconflict_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_deconflict_max_distance', 13.0)))
+    distance_to_goal = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished_mask = (distance_to_goal > goal_tolerance) & (distance_to_goal <= max_distance)
+
+    nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    safe_separation = max(0.0, float(getattr(args, 'random_pairwise_role_guard_safe_separation', 0.82)))
+    release_separation = max(
+        safe_separation + 0.05,
+        float(getattr(args, 'random_pairwise_role_guard_release_separation', 1.45)),
+    )
+    min_danger = max(0.0, float(getattr(args, 'random_pairwise_role_guard_min_danger', 0.10)))
+    near_danger = torch.clamp(
+        (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3),
+        0.0,
+        1.0,
+    )
+    danger = torch.maximum(torch.maximum(cpa_score.to(dtype=raw_obs.dtype), local_score.to(dtype=raw_obs.dtype)), near_danger.to(dtype=raw_obs.dtype))
+    valid_threat = valid_cpa | valid_local | valid_neighbor
+    return scenario_mask & unfinished_mask & valid_threat & (danger >= min_danger)
+
+
+def _random_pairwise_role_guard_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_pairwise_role_guard_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    nearest_distance, nearest_bearing, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, cpa_bearing, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    safe_separation = max(0.0, float(getattr(args, 'random_pairwise_role_guard_safe_separation', 0.82)))
+    release_separation = max(
+        safe_separation + 0.05,
+        float(getattr(args, 'random_pairwise_role_guard_release_separation', 1.45)),
+    )
+    near_danger = torch.clamp(
+        (release_separation - nearest_distance) / max(release_separation - safe_separation, 1e-3),
+        0.0,
+        1.0,
+    ).to(dtype=raw_obs.dtype)
+    threat_score = torch.maximum(torch.maximum(cpa_score.to(dtype=raw_obs.dtype), local_score.to(dtype=raw_obs.dtype)), near_danger)
+    danger = torch.clamp(threat_score, 0.0, 1.0).to(dtype=action_mean.dtype, device=action_mean.device)
+
+    is_yield = _random_deconflict_yield_mask(torch, raw_obs, args, agent_indices).to(device=action_mean.device)
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    yield_speed = max(0.0, float(getattr(args, 'random_pairwise_role_guard_yield_speed', 0.015)))
+    standon_close_speed = max(0.0, float(getattr(args, 'random_pairwise_role_guard_standon_close_speed', 0.12)))
+    target_linear = torch.where(
+        is_yield,
+        torch.full_like(danger, yield_speed),
+        torch.full_like(danger, standon_close_speed),
+    )
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    linear_excess = torch.relu((action_mean[:, 0] - target_linear) / range_scale[0])
+    linear_weight = max(0.0, float(getattr(args, 'random_pairwise_role_guard_linear_weight', 1.0)))
+    per_sample_loss = linear_weight * (linear_excess ** 2) * (0.25 + 0.75 * danger)
+
+    yield_omega = max(0.0, float(getattr(args, 'random_pairwise_role_guard_yield_omega', 0.42)))
+    standon_omega = max(0.0, float(getattr(args, 'random_pairwise_role_guard_standon_omega', 0.14)))
+    omega_weight = max(0.0, float(getattr(args, 'random_pairwise_role_guard_omega_weight', 2.0)))
+    if omega_weight > 0.0:
+        use_cpa_bearing = valid_cpa.to(device=action_mean.device) & (
+            cpa_score.to(dtype=action_mean.dtype, device=action_mean.device)
+            >= torch.maximum(local_score.to(dtype=action_mean.dtype, device=action_mean.device), near_danger.to(dtype=action_mean.dtype, device=action_mean.device))
+        )
+        active_bearing = torch.where(use_cpa_bearing, cpa_bearing.to(device=action_mean.device), nearest_bearing.to(device=action_mean.device))
+        valid_bearing = use_cpa_bearing | valid_neighbor.to(device=action_mean.device) | valid_local.to(device=action_mean.device)
+        turn_sign = torch.where(
+            active_bearing > 0.0,
+            torch.full_like(danger, -1.0),
+            torch.where(active_bearing < 0.0, torch.ones_like(danger), torch.full_like(danger, -1.0)),
+        )
+        turn_sign = torch.where(valid_bearing, turn_sign, torch.full_like(turn_sign, -1.0))
+        omega_mag = torch.where(is_yield, torch.full_like(danger, yield_omega), torch.full_like(danger, standon_omega))
+        target_omega = torch.clamp(turn_sign * omega_mag * danger, min=low[1], max=high[1])
+        omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+        per_sample_loss = per_sample_loss + omega_weight * omega_loss * danger
+
+    yield_weight = max(0.0, float(getattr(args, 'random_pairwise_role_guard_yield_weight', 2.0)))
+    standon_weight = max(0.0, float(getattr(args, 'random_pairwise_role_guard_standon_weight', 0.55)))
+    role_weight = torch.where(is_yield, torch.full_like(danger, yield_weight), torch.full_like(danger, standon_weight))
+    weights = active_mask.to(dtype=per_sample_loss.dtype) * role_weight
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_safe_finish_empty_components(torch, raw_obs, sample_count: int):
+    zeros = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    return {
+        'active': zeros,
+        'finish': zeros,
+        'hold': zeros,
+        'low_priority_active': zeros,
+        'deconflict_block': zeros,
+        'release_overlap': zeros,
+        'candidate': zeros,
+    }
+
+
+def _random_safe_finish_components(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return _random_safe_finish_empty_components(torch, raw_obs, sample_count)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return _random_safe_finish_empty_components(torch, raw_obs, sample_count)
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
+        return _random_safe_finish_empty_components(torch, raw_obs, sample_count)
+
+    scenario_names = tuple(getattr(args, 'random_clear_ahead_scenarios', None) or ('two_usv_random_encounter', 'three_usv_random_encounter'))
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in scenario_names:
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_safe_finish_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_safe_finish_max_distance', 13.0)))
+    hold_distance = max(0.0, float(getattr(args, 'random_safe_finish_hold_distance', 0.0)))
+    phase_min = float(getattr(args, 'random_safe_finish_phase_min', -1.0))
+    min_team_separation = max(0.0, float(getattr(args, 'random_safe_finish_min_team_separation', 2.7)))
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_safe_finish_min_neighbor_separation', 2.7)))
+    max_abs_cte = max(0.0, float(getattr(args, 'random_safe_finish_max_abs_cte', 0.0)))
+    max_cpa_score = max(0.0, float(getattr(args, 'random_safe_finish_max_cpa_score', 0.0)))
+    max_local_score = max(0.0, float(getattr(args, 'random_safe_finish_max_local_score', 0.0)))
+    low_priority_threshold = float(getattr(args, 'random_safe_finish_low_priority_threshold', -0.5))
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+    hold_mask = (distance <= hold_distance) if hold_distance > 0.0 else torch.zeros_like(unfinished_mask)
+    phase_mask = raw_obs[:, 13] >= phase_min
+    cte_clear = torch.ones_like(unfinished_mask)
+    if max_abs_cte > 0.0 and raw_obs.shape[-1] > 11:
+        cte_clear = torch.abs(raw_obs[:, 11]) <= max_abs_cte
+    team_min_separation = global_state[:, -5]
+    team_clear = team_min_separation >= min_team_separation
+
+    nearest_distance, _, nearest_closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    cpa_clear = (~valid_cpa) | (cpa_score <= max_cpa_score)
+    local_clear = (~valid_local) | (local_score <= max_local_score)
+
+    active_deconflict = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    low_priority_mask = raw_obs[:, 15] <= low_priority_threshold if raw_obs.shape[-1] > 15 else torch.zeros_like(unfinished_mask)
+    release_min_separation = max(0.0, float(getattr(args, 'random_safe_finish_yield_release_min_separation', 0.0)))
+    release_max_closing = float(getattr(args, 'random_safe_finish_yield_release_max_closing_speed', 0.02))
+    release_min_route_progress = max(0.0, float(getattr(args, 'random_safe_finish_yield_release_min_route_progress', 0.0)))
+    release_route_mask = raw_obs[:, 12] >= release_min_route_progress if raw_obs.shape[-1] > 12 else torch.ones_like(unfinished_mask)
+    release_overlap = torch.zeros_like(unfinished_mask)
+    if release_min_separation > 0.0:
+        release_overlap = (
+            low_priority_mask
+            & valid_neighbor
+            & (nearest_distance >= release_min_separation)
+            & (nearest_closing_speed <= release_max_closing)
+            & release_route_mask
+        )
+
+    base_finish_candidate = unfinished_mask & team_clear & neighbor_clear & cte_clear
+    finish_mask = base_finish_candidate & ((cpa_clear & local_clear) | release_overlap)
+    deconflict_block = active_deconflict & base_finish_candidate & (
+        (valid_cpa & (cpa_score > max_cpa_score))
+        | (valid_local & (local_score > max_local_score))
+    ) & (~release_overlap)
+    active_mask = scenario_mask & phase_mask & ((finish_mask & (~deconflict_block)) | hold_mask)
+    return {
+        'active': active_mask,
+        'finish': scenario_mask & phase_mask & finish_mask & (~deconflict_block),
+        'hold': scenario_mask & phase_mask & hold_mask,
+        'low_priority_active': active_mask & low_priority_mask & (~hold_mask),
+        'deconflict_block': scenario_mask & phase_mask & deconflict_block,
+        'release_overlap': scenario_mask & phase_mask & base_finish_candidate & release_overlap,
+        'candidate': scenario_mask & phase_mask & unfinished_mask,
+    }
+
+
+def _random_safe_finish_active_mask(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    return _random_safe_finish_components(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )['active']
+
+
+def _random_safe_finish_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_safe_finish_active_mask(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    team_min_separation = global_state[:, -5]
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_safe_finish_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_safe_finish_max_distance', 13.0)))
+    hold_distance = max(0.0, float(getattr(args, 'random_safe_finish_hold_distance', 0.0)))
+    min_team_separation = max(0.0, float(getattr(args, 'random_safe_finish_min_team_separation', 2.7)))
+    full_team_separation = max(
+        min_team_separation + 0.05,
+        float(getattr(args, 'random_safe_finish_full_team_separation', 4.0)),
+    )
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_safe_finish_min_neighbor_separation', 2.7)))
+    target_speed = max(0.0, float(getattr(args, 'random_safe_finish_target_speed', 0.18)))
+    min_speed_scale = min(1.0, max(0.0, float(getattr(args, 'random_safe_finish_min_speed_scale', 0.35))))
+    hold_weight = max(0.0, float(getattr(args, 'random_safe_finish_hold_weight', 1.0)))
+    low_priority_threshold = float(getattr(args, 'random_safe_finish_low_priority_threshold', -0.5))
+    low_priority_multiplier = max(0.0, float(getattr(args, 'random_safe_finish_low_priority_speed_multiplier', 1.0)))
+    max_omega = max(0.0, float(getattr(args, 'random_safe_finish_max_omega', 0.10)))
+
+    speed_scale = torch.clamp(
+        (distance - (0.50 * goal_tolerance)) / max(max_distance - (0.50 * goal_tolerance), 1e-3),
+        min_speed_scale,
+        1.0,
+    )
+    separation_source = team_min_separation
+    scale_min_separation = min_team_separation
+    if bool(getattr(args, 'random_safe_finish_local_separation_scale', False)):
+        nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        separation_source = torch.where(
+            valid_neighbor,
+            nearest_distance,
+            torch.full_like(nearest_distance, full_team_separation),
+        )
+        scale_min_separation = min_neighbor_separation
+    full_scale_separation = max(scale_min_separation + 0.05, full_team_separation)
+    separation_scale = torch.clamp(
+        (separation_source - scale_min_separation) / max(full_scale_separation - scale_min_separation, 1e-3),
+        0.0,
+        1.0,
+    )
+    target_linear = target_speed * speed_scale * separation_scale
+    if raw_obs.shape[-1] > 15 and low_priority_multiplier != 1.0:
+        priority = raw_obs[:, 15]
+        low_priority_mask = priority <= low_priority_threshold
+        multiplier = torch.where(
+            low_priority_mask,
+            torch.full_like(target_linear, low_priority_multiplier),
+            torch.ones_like(target_linear),
+        )
+        target_linear = target_linear * multiplier
+
+    hold_mask = (distance <= hold_distance) if hold_distance > 0.0 else torch.zeros_like(active_mask)
+    target_linear = torch.where(hold_mask, torch.zeros_like(target_linear), target_linear)
+    target_omega = torch.where(
+        hold_mask,
+        torch.zeros_like(heading_error),
+        -torch.clamp(heading_error / 0.85, -1.0, 1.0) * max_omega,
+    )
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    omega_weight = max(0.0, float(getattr(args, 'random_safe_finish_omega_weight', 0.12)))
+    linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
+    progress_urgency = torch.clamp(distance / max(max_distance, 1e-3), 0.0, 1.0)
+    clearance_urgency = torch.clamp(1.0 - separation_scale, 0.0, 1.0)
+    hold_boost = torch.where(hold_mask, torch.full_like(progress_urgency, 0.45), torch.zeros_like(progress_urgency))
+    urgency = (0.45 + 0.35 * progress_urgency + 0.20 * clearance_urgency).to(dtype=action_mean.dtype)
+    urgency = urgency + hold_boost.to(dtype=action_mean.dtype)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+    if hold_weight != 1.0:
+        per_sample_loss = per_sample_loss * torch.where(
+            hold_mask,
+            torch.full_like(per_sample_loss, hold_weight),
+            torch.ones_like(per_sample_loss),
+        )
+
+    mask_f = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = mask_f * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    else:
+        weights = mask_f
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_goal_hold_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    hold_distance = max(0.0, float(getattr(args, 'random_goal_hold_distance', 0.0)))
+    if hold_distance <= 0.0:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    phase_min = float(getattr(args, 'random_goal_hold_phase_min', -1.0))
+    phase_mask = raw_obs[:, 13] >= phase_min
+    return scenario_mask & phase_mask & (distance <= hold_distance)
+
+
+def _random_goal_hold_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+):
+    if action_mean.shape[-1] < 1:
+        return action_mean.new_zeros(())
+    active_mask = _random_goal_hold_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+    target_speed = max(0.0, float(getattr(args, 'random_goal_hold_target_speed', 0.0)))
+    target_linear = torch.full_like(action_mean[:, 0], target_speed).clamp(min=low[0], max=high[0])
+    per_sample_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+
+    if action_mean.shape[-1] >= 2:
+        target_omega = float(getattr(args, 'random_goal_hold_target_omega', 0.0))
+        target_omega_tensor = torch.full_like(action_mean[:, 1], target_omega).clamp(min=low[1], max=high[1])
+        omega_weight = max(0.0, float(getattr(args, 'random_goal_hold_omega_weight', 1.0)))
+        omega_loss = ((action_mean[:, 1] - target_omega_tensor) / range_scale[1]) ** 2
+        per_sample_loss = per_sample_loss + omega_weight * omega_loss
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_offroute_finish_active_mask(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_offroute_finish_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_offroute_finish_max_distance', 13.0)))
+    min_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_offroute_finish_min_distance', 1.60)))
+    min_route_progress = min(1.0, max(0.0, float(getattr(args, 'random_offroute_finish_route_progress_min', 0.82))))
+    min_abs_cte = max(0.0, float(getattr(args, 'random_offroute_finish_min_abs_cte', 1.20)))
+    phase_min = float(getattr(args, 'random_offroute_finish_phase_min', -1.0))
+    min_team_separation = max(0.0, float(getattr(args, 'random_offroute_finish_min_team_separation', 2.75)))
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_offroute_finish_min_neighbor_separation', 2.90)))
+    max_cpa_score = max(0.0, float(getattr(args, 'random_offroute_finish_max_cpa_score', 0.0)))
+    max_local_score = max(0.0, float(getattr(args, 'random_offroute_finish_max_local_score', 0.0)))
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    abs_cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    route_progress = raw_obs[:, 12] if raw_obs.shape[-1] > 12 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    phase = raw_obs[:, 13] if raw_obs.shape[-1] > 13 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    offroute_mask = (route_progress >= min_route_progress) & (abs_cte >= min_abs_cte)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance) & (distance >= min_distance)
+    phase_mask = phase >= phase_min
+
+    team_min_separation = global_state[:, -5]
+    team_clear = team_min_separation >= min_team_separation
+    nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    cpa_clear = (~valid_cpa) | (cpa_score <= max_cpa_score)
+    local_clear = (~valid_local) | (local_score <= max_local_score)
+    active_deconflict = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    threat_clear = cpa_clear & local_clear & (~active_deconflict)
+    if bool(getattr(args, 'random_offroute_finish_allow_threat_overlap', False)):
+        threat_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    return (
+        scenario_mask
+        & unfinished_mask
+        & offroute_mask
+        & phase_mask
+        & team_clear
+        & neighbor_clear
+        & threat_clear
+    )
+
+
+def _random_offroute_finish_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_offroute_finish_active_mask(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    abs_cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(action_mean.shape[0], dtype=action_mean.dtype, device=action_mean.device)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    min_abs_cte = max(0.0, float(getattr(args, 'random_offroute_finish_min_abs_cte', 1.20)))
+    full_abs_cte = max(min_abs_cte + 0.05, float(getattr(args, 'random_offroute_finish_full_abs_cte', 3.00)))
+    cte_urgency = torch.clamp((abs_cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0).to(dtype=action_mean.dtype)
+
+    target_speed = max(0.0, float(getattr(args, 'random_offroute_finish_target_speed', 0.14)))
+    min_speed = max(0.0, float(getattr(args, 'random_offroute_finish_min_speed', 0.06)))
+    max_omega = max(0.0, float(getattr(args, 'random_offroute_finish_max_omega', 0.18)))
+    omega_reference = max(0.05, float(getattr(args, 'random_offroute_finish_omega_reference', 0.65)))
+    omega_weight = max(0.0, float(getattr(args, 'random_offroute_finish_omega_weight', 0.55)))
+
+    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
+    target_omega = -torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
+    urgency = (0.45 + 0.55 * cte_urgency).to(dtype=action_mean.dtype)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss * urgency) * urgency
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_cte_recovery_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_cte_recovery_goal_tolerance', 0.8)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_cte_recovery_max_distance', 13.0)))
+    min_abs_cte = max(0.0, float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)))
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_cte_recovery_min_neighbor_separation', 0.85)))
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    cte = raw_obs[:, 11] if raw_obs.shape[-1] > 11 else torch.zeros_like(distance)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+    cte_mask = torch.abs(cte) >= min_abs_cte
+    nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
+
+    threat_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if not bool(getattr(args, 'random_cte_recovery_allow_threat_overlap', False)):
+        lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+        horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+        dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+        closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+        _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+            torch,
+            raw_obs,
+            lookahead,
+            horizon,
+            dcpa_target,
+            closing_min,
+        )
+        local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+        active_deconflict = _random_deconflict_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        threat_clear = ((~valid_cpa) | (cpa_score <= 0.0)) & ((~valid_local) | (local_score <= 0.0)) & (~active_deconflict)
+
+    return scenario_mask & unfinished_mask & cte_mask & neighbor_clear & threat_clear
+
+
+def _random_cte_recovery_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_cte_recovery_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(action_mean.shape[0], dtype=action_mean.dtype, device=action_mean.device)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    min_abs_cte = max(0.0, float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)))
+    full_abs_cte = max(min_abs_cte + 0.05, float(getattr(args, 'random_cte_recovery_full_abs_cte', 3.00)))
+    cte_urgency = torch.clamp((cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0).to(dtype=action_mean.dtype)
+
+    target_speed = max(0.0, float(getattr(args, 'random_cte_recovery_target_speed', 0.18)))
+    min_speed = max(0.0, float(getattr(args, 'random_cte_recovery_min_speed', 0.07)))
+    max_omega = max(0.0, float(getattr(args, 'random_cte_recovery_max_omega', 0.30)))
+    omega_reference = max(0.05, float(getattr(args, 'random_cte_recovery_omega_reference', 0.55)))
+    omega_weight = max(0.0, float(getattr(args, 'random_cte_recovery_omega_weight', 1.0)))
+
+    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
+    target_omega = -torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega
+    target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    target = torch.max(low, torch.min(high, target))
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
+    urgency = (0.55 + 0.45 * cte_urgency).to(dtype=action_mean.dtype)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _random_clear_ahead_front_clear_mask(torch, raw_obs, args):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0:
+        return torch.zeros(0, dtype=torch.bool, device=raw_obs.device)
+
+    neighbor_start = AgentLocalObservation.ego_feature_size()
+    available = int(raw_obs.shape[-1]) - neighbor_start - ENCOUNTER_TYPE_COUNT
+    neighbor_slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+    if neighbor_slots <= 0:
+        return torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    neighbor_end = neighbor_start + neighbor_slots * NEIGHBOR_FEATURE_COUNT
+    neighbors = raw_obs[:, neighbor_start:neighbor_end].reshape(sample_count, neighbor_slots, NEIGHBOR_FEATURE_COUNT)
+    distances = torch.clamp(neighbors[:, :, 4], min=0.0)
+    valid_slots = distances > 1e-6
+    bearings = neighbors[:, :, 5]
+
+    cone_mode = str(getattr(args, 'random_clear_ahead_cone_mode', 'goal')).strip().lower()
+    if cone_mode == 'goal':
+        heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6]).unsqueeze(1)
+        bearings = torch.atan2(torch.sin(bearings - heading_error), torch.cos(bearings - heading_error))
+
+    half_angle = math.radians(max(1.0, min(179.0, float(getattr(args, 'random_clear_ahead_bearing_deg', 35.0)))))
+    clear_distance = max(0.0, float(getattr(args, 'random_clear_ahead_distance', 5.0)))
+    front_blocker = valid_slots & (torch.abs(bearings) <= half_angle) & (distances < clear_distance)
+    return ~front_blocker.any(dim=1)
+
+
+def _random_clear_ahead_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_names = tuple(getattr(args, 'random_clear_ahead_scenarios', None) or ('two_usv_random_encounter', 'three_usv_random_encounter'))
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in scenario_names:
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_clear_ahead_goal_tolerance', 1.0)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_clear_ahead_max_distance', 13.0)))
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+    front_clear = _random_clear_ahead_front_clear_mask(torch, raw_obs, args)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    max_cpa_score = max(0.0, float(getattr(args, 'random_clear_ahead_max_cpa_score', 0.0)))
+    cpa_clear = (~valid_cpa) | (cpa_score <= max_cpa_score)
+
+    max_local_score = max(0.0, float(getattr(args, 'random_clear_ahead_max_local_score', 0.0)))
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    local_clear = (~valid_local) | (local_score <= max_local_score)
+
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_clear_ahead_min_neighbor_separation', 0.0)))
+    neighbor_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if min_neighbor_separation > 0.0:
+        nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+        neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
+
+    deconflict_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if bool(getattr(args, 'random_clear_ahead_exclude_deconflict', False)):
+        deconflict_clear = ~_random_deconflict_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+
+    return scenario_mask & unfinished_mask & front_clear & cpa_clear & local_clear & neighbor_clear & deconflict_clear
+
+
+def _random_clear_ahead_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_clear_ahead_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    target_source = str(getattr(args, 'random_clear_ahead_target_source', 'raw')).strip().lower()
+    target_speed = max(0.0, float(getattr(args, 'random_clear_ahead_target_speed', 0.30)))
+    min_speed = max(0.0, float(getattr(args, 'random_clear_ahead_min_speed', 0.18)))
+    max_omega = max(0.0, float(getattr(args, 'random_clear_ahead_max_omega', 0.18)))
+    omega_reference = max(0.05, float(getattr(args, 'random_clear_ahead_omega_reference', 0.55)))
+    omega_weight = max(0.0, float(getattr(args, 'random_clear_ahead_omega_weight', 1.0)))
+
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    if target_source == 'raw':
+        raw_linear = raw_obs[:, 7].to(dtype=action_mean.dtype)
+        raw_omega = raw_obs[:, 8].to(dtype=action_mean.dtype)
+        target_linear = torch.clamp(raw_linear, min=min_speed, max=max(target_speed, min_speed))
+        target_omega = torch.clamp(raw_omega, min=-max_omega, max=max_omega)
+    else:
+        target_linear = torch.full_like(action_mean[:, 0], target_speed)
+        target_omega = -torch.clamp(heading_error.to(dtype=action_mean.dtype) / omega_reference, -1.0, 1.0) * max_omega
+
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    target_omega = torch.clamp(target_omega, min=low[1], max=high[1])
+    linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+
+    abs_cte = torch.abs(raw_obs[:, 11]).to(dtype=action_mean.dtype) if raw_obs.shape[-1] > 11 else torch.zeros_like(action_mean[:, 0])
+    heading_urgency = torch.clamp(torch.abs(heading_error).to(dtype=action_mean.dtype) / omega_reference, 0.0, 1.0)
+    cte_urgency = torch.clamp(abs_cte / 1.5, 0.0, 1.0)
+    urgency = 0.45 + 0.55 * torch.maximum(heading_urgency, cte_urgency)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
 
 
@@ -1069,6 +2997,7 @@ def _policy_anchor_loss(
     action_low_tensor,
     action_high_tensor,
     sample_weights=None,
+    agent_indices=None,
 ):
     if action_mean.shape != anchor_action_mean.shape:
         return action_mean.new_zeros(())
@@ -1095,6 +3024,7 @@ def _policy_anchor_loss(
             scenario_ids,
             scenario_to_index,
             args,
+            agent_indices=agent_indices,
         )
         if lagging_mask.shape[0] == sample_count:
             anchor_mask = anchor_mask & (~lagging_mask)
@@ -1107,9 +3037,83 @@ def _policy_anchor_loss(
             scenario_ids,
             scenario_to_index,
             args,
+            agent_indices=agent_indices,
         )
         if brake_mask.shape[0] == sample_count:
             anchor_mask = anchor_mask & (~brake_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_deconflict', False)):
+        random_deconflict_mask = _random_deconflict_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_deconflict_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_deconflict_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_safe_finish', False)):
+        random_safe_finish_mask = _random_safe_finish_active_mask(
+            torch,
+            raw_obs,
+            global_state,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_safe_finish_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_safe_finish_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_goal_hold', False)):
+        random_goal_hold_mask = _random_goal_hold_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+        )
+        if random_goal_hold_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_goal_hold_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_offroute_finish', False)):
+        random_offroute_finish_mask = _random_offroute_finish_active_mask(
+            torch,
+            raw_obs,
+            global_state,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_offroute_finish_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_offroute_finish_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_cte_recovery', False)):
+        random_cte_recovery_mask = _random_cte_recovery_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_cte_recovery_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_cte_recovery_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_pairwise_role_guard', False)):
+        pairwise_guard_mask = _random_pairwise_role_guard_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if pairwise_guard_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~pairwise_guard_mask)
 
     if not bool(anchor_mask.any().detach().cpu()):
         return action_mean.new_zeros(())
@@ -1203,6 +3207,180 @@ def _run_crossing_imitation_pretrain(
             torch.nn.utils.clip_grad_norm_(actor_parameters, args.max_grad_norm)
             optimizer.step()
             last_loss = float(imitation_loss.detach().cpu().item())
+
+    return last_loss
+
+
+def _run_random_deconflict_pretrain(
+    torch,
+    actor,
+    optimizer,
+    flat_obs,
+    flat_raw_obs,
+    flat_scenario_ids_np,
+    flat_scenario_weights,
+    flat_agent_indices_np,
+    scenario_to_index,
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    *,
+    sample_count: int,
+    minibatch_size: int,
+    device,
+    deconflict_weight: float,
+) -> float:
+    pretrain_epochs = max(0, int(getattr(args, 'random_deconflict_pretrain_epochs', 0)))
+    if pretrain_epochs <= 0 or deconflict_weight <= 0.0 or sample_count <= 0 or flat_agent_indices_np is None:
+        return 0.0
+
+    actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not actor_parameters:
+        return 0.0
+    pretrain_lr = float(getattr(args, 'random_deconflict_pretrain_learning_rate', 0.0))
+    pretrain_optimizer = optimizer
+    if pretrain_lr > 0.0:
+        pretrain_optimizer = torch.optim.Adam(actor_parameters, lr=pretrain_lr)
+    pretrain_max_grad_norm = float(getattr(args, 'random_deconflict_pretrain_max_grad_norm', 0.0))
+    if pretrain_max_grad_norm <= 0.0:
+        pretrain_max_grad_norm = float(getattr(args, 'max_grad_norm', 0.5))
+
+    last_loss = 0.0
+    for _ in range(pretrain_epochs):
+        permutation = torch.randperm(sample_count, device=device)
+        for start in range(0, sample_count, minibatch_size):
+            batch_indices = permutation[start:start + minibatch_size]
+            batch_np_indices = batch_indices.detach().cpu().numpy()
+            batch_obs = flat_obs[batch_indices]
+            batch_raw_obs = flat_raw_obs[batch_indices]
+            batch_scenario_ids = None
+            if flat_scenario_ids_np is not None:
+                batch_scenario_ids = torch.as_tensor(
+                    flat_scenario_ids_np[batch_np_indices],
+                    dtype=torch.long,
+                    device=device,
+                )
+            batch_agent_indices = torch.as_tensor(
+                flat_agent_indices_np[batch_np_indices],
+                dtype=torch.long,
+                device=device,
+            )
+            batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
+
+            action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
+            if getattr(args, 'squash_actions', False):
+                action_mean = action_mean.clamp(-3.0, 3.0)
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
+
+            deconflict_loss = _random_deconflict_loss(
+                torch,
+                action_mean,
+                batch_raw_obs,
+                batch_scenario_ids,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_weights=batch_weights,
+                agent_indices=batch_agent_indices,
+            )
+            if not deconflict_loss.requires_grad:
+                continue
+
+            pretrain_optimizer.zero_grad(set_to_none=True)
+            (float(deconflict_weight) * deconflict_loss).backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, pretrain_max_grad_norm)
+            pretrain_optimizer.step()
+            last_loss = float(deconflict_loss.detach().cpu().item())
+
+    return last_loss
+
+
+def _run_random_role_balance_pretrain(
+    torch,
+    actor,
+    optimizer,
+    flat_obs,
+    flat_raw_obs,
+    flat_scenario_ids_np,
+    flat_scenario_weights,
+    flat_agent_indices_np,
+    scenario_to_index,
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    *,
+    sample_count: int,
+    minibatch_size: int,
+    device,
+    role_balance_weight: float,
+) -> float:
+    pretrain_epochs = max(0, int(getattr(args, 'random_role_balance_pretrain_epochs', 0)))
+    if pretrain_epochs <= 0 or role_balance_weight <= 0.0 or sample_count <= 0 or flat_agent_indices_np is None:
+        return 0.0
+
+    actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not actor_parameters:
+        return 0.0
+    pretrain_lr = float(getattr(args, 'random_role_balance_pretrain_learning_rate', 0.0))
+    pretrain_optimizer = optimizer
+    if pretrain_lr > 0.0:
+        pretrain_optimizer = torch.optim.Adam(actor_parameters, lr=pretrain_lr)
+    pretrain_max_grad_norm = float(getattr(args, 'random_role_balance_pretrain_max_grad_norm', 0.0))
+    if pretrain_max_grad_norm <= 0.0:
+        pretrain_max_grad_norm = float(getattr(args, 'max_grad_norm', 0.5))
+
+    last_loss = 0.0
+    for _ in range(pretrain_epochs):
+        permutation = torch.randperm(sample_count, device=device)
+        for start in range(0, sample_count, minibatch_size):
+            batch_indices = permutation[start:start + minibatch_size]
+            batch_np_indices = batch_indices.detach().cpu().numpy()
+            batch_obs = flat_obs[batch_indices]
+            batch_raw_obs = flat_raw_obs[batch_indices]
+            batch_scenario_ids = None
+            if flat_scenario_ids_np is not None:
+                batch_scenario_ids = torch.as_tensor(
+                    flat_scenario_ids_np[batch_np_indices],
+                    dtype=torch.long,
+                    device=device,
+                )
+            batch_agent_indices = torch.as_tensor(
+                flat_agent_indices_np[batch_np_indices],
+                dtype=torch.long,
+                device=device,
+            )
+            batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
+
+            action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
+            if getattr(args, 'squash_actions', False):
+                action_mean = action_mean.clamp(-3.0, 3.0)
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
+
+            role_balance_loss = _random_role_balance_loss(
+                torch,
+                action_mean,
+                batch_raw_obs,
+                batch_scenario_ids,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_weights=batch_weights,
+                agent_indices=batch_agent_indices,
+            )
+            if not role_balance_loss.requires_grad:
+                continue
+
+            pretrain_optimizer.zero_grad(set_to_none=True)
+            (float(role_balance_weight) * role_balance_loss).backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, pretrain_max_grad_norm)
+            pretrain_optimizer.step()
+            last_loss = float(role_balance_loss.detach().cpu().item())
 
     return last_loss
 
@@ -1339,6 +3517,27 @@ def _resolve_curriculum_scenarios(args, model_scenarios: tuple[str, ...]) -> tup
             f'{", ".join(incompatible)}'
         )
     return requested
+
+
+class _CurriculumSeedScheduler:
+    def __init__(self, seeds, *, start_index: int = 0):
+        self._seeds = tuple(int(seed) for seed in (seeds or ()))
+        self._index = int(start_index)
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self._seeds)
+
+    @property
+    def seeds(self) -> tuple[int, ...]:
+        return self._seeds
+
+    def next(self) -> int | None:
+        if not self._seeds:
+            return None
+        seed = self._seeds[self._index % len(self._seeds)]
+        self._index += 1
+        return int(seed)
 
 
 def _build_reward_config(args) -> RewardConfig:
@@ -1520,6 +3719,11 @@ def _checkpoint_payload(
         'collision_distance': float(args.collision_distance),
         'near_miss_distance': float(args.near_miss_distance),
         'scenario_neighbor_speed': float(args.scenario_neighbor_speed),
+        'cte_clip_range': float(getattr(args, 'cte_clip_range', 3.0)),
+        'route_progress_cte_gate_start': float(getattr(args, 'route_progress_cte_gate_start', 0.0)),
+        'route_progress_cte_gate_width': float(getattr(args, 'route_progress_cte_gate_width', 0.0)),
+        'route_progress_cte_gate_floor': float(getattr(args, 'route_progress_cte_gate_floor', 0.25)),
+        'random_encounter_route_priority': bool(getattr(args, 'random_encounter_route_priority', False)),
         'cruise_speed': float(args.cruise_speed),
         'max_angular_velocity': float(args.max_angular_velocity),
         'heading_omega_deadband': float(args.heading_omega_deadband),
@@ -1567,6 +3771,33 @@ def _checkpoint_payload(
         'crossing_imitation_clear_omega': float(getattr(args, 'crossing_imitation_clear_omega', -0.10)),
         'crossing_imitation_middle_omega': float(getattr(args, 'crossing_imitation_middle_omega', -0.14)),
         'crossing_imitation_yield_omega': float(getattr(args, 'crossing_imitation_yield_omega', -0.18)),
+        'overtaking_imitation_weight': float(getattr(args, 'overtaking_imitation_weight', 0.0)),
+        'overtaking_imitation_weight_end': (
+            float(getattr(args, 'overtaking_imitation_weight_end'))
+            if getattr(args, 'overtaking_imitation_weight_end', None) is not None
+            else None
+        ),
+        'overtaking_imitation_max_distance': float(getattr(args, 'overtaking_imitation_max_distance', 13.0)),
+        'overtaking_imitation_front_min_speed': float(getattr(args, 'overtaking_imitation_front_min_speed', 0.24)),
+        'overtaking_imitation_front_max_omega': float(getattr(args, 'overtaking_imitation_front_max_omega', 0.10)),
+        'overtaking_imitation_rear_approach_speed': float(getattr(args, 'overtaking_imitation_rear_approach_speed', 0.12)),
+        'overtaking_imitation_rear_close_speed': float(getattr(args, 'overtaking_imitation_rear_close_speed', 0.055)),
+        'overtaking_imitation_rear_pass_speed': float(getattr(args, 'overtaking_imitation_rear_pass_speed', 0.22)),
+        'overtaking_imitation_close_separation': float(getattr(args, 'overtaking_imitation_close_separation', 2.30)),
+        'overtaking_imitation_release_separation': float(getattr(args, 'overtaking_imitation_release_separation', 5.80)),
+        'overtaking_imitation_target_starboard_offset': float(getattr(args, 'overtaking_imitation_target_starboard_offset', 1.05)),
+        'overtaking_imitation_rear_omega': float(getattr(args, 'overtaking_imitation_rear_omega', 0.26)),
+        'overtaking_imitation_omega_weight': float(getattr(args, 'overtaking_imitation_omega_weight', 1.0)),
+        'overtaking_imitation_single_return_progress': float(getattr(args, 'overtaking_imitation_single_return_progress', 0.70)),
+        'overtaking_imitation_single_return_rel_x': float(getattr(args, 'overtaking_imitation_single_return_rel_x', -0.20)),
+        'overtaking_imitation_single_return_min_separation': float(getattr(args, 'overtaking_imitation_single_return_min_separation', 2.70)),
+        'overtaking_imitation_single_return_cte_start': float(getattr(args, 'overtaking_imitation_single_return_cte_start', 0.70)),
+        'overtaking_imitation_single_return_cte_full': float(getattr(args, 'overtaking_imitation_single_return_cte_full', 3.00)),
+        'overtaking_imitation_single_return_speed': float(getattr(args, 'overtaking_imitation_single_return_speed', 0.32)),
+        'overtaking_imitation_single_return_omega': float(getattr(args, 'overtaking_imitation_single_return_omega', 0.30)),
+        'overtaking_imitation_single_finish_distance': float(getattr(args, 'overtaking_imitation_single_finish_distance', 3.50)),
+        'overtaking_imitation_single_finish_speed': float(getattr(args, 'overtaking_imitation_single_finish_speed', 0.34)),
+        'overtaking_imitation_single_finish_max_omega': float(getattr(args, 'overtaking_imitation_single_finish_max_omega', 0.10)),
         'near_goal_finish_weight': float(getattr(args, 'near_goal_finish_weight', 0.0)),
         'near_goal_finish_weight_end': (
             float(getattr(args, 'near_goal_finish_weight_end'))
@@ -1622,11 +3853,189 @@ def _checkpoint_payload(
         'team_safety_brake_omega_weight': float(getattr(args, 'team_safety_brake_omega_weight', 0.0)),
         'team_safety_brake_target_omega': float(getattr(args, 'team_safety_brake_target_omega', 0.0)),
         'team_safety_brake_turn_mode': str(getattr(args, 'team_safety_brake_turn_mode', 'away')),
+        'team_safety_brake_head_on_starboard_threshold': float(getattr(args, 'team_safety_brake_head_on_starboard_threshold', 0.0)),
         'team_safety_brake_require_neighbor': bool(getattr(args, 'team_safety_brake_require_neighbor', False)),
         'team_safety_brake_local_danger': bool(getattr(args, 'team_safety_brake_local_danger', False)),
         'team_safety_brake_power': float(getattr(args, 'team_safety_brake_power', 1.0)),
+        'team_safety_brake_cpa_danger': bool(getattr(args, 'team_safety_brake_cpa_danger', False)),
+        'team_safety_brake_cpa_lookahead_distance': float(getattr(args, 'team_safety_brake_cpa_lookahead_distance', 0.0)),
+        'team_safety_brake_cpa_time_horizon': float(getattr(args, 'team_safety_brake_cpa_time_horizon', 0.0)),
+        'team_safety_brake_cpa_dcpa_target': float(getattr(args, 'team_safety_brake_cpa_dcpa_target', 0.0)),
+        'team_safety_brake_cpa_closing_speed_min': float(getattr(args, 'team_safety_brake_cpa_closing_speed_min', 0.02)),
         'team_safety_brake_crossing_only': bool(getattr(args, 'team_safety_brake_crossing_only', False)),
         'team_safety_brake_random_only': bool(getattr(args, 'team_safety_brake_random_only', False)),
+        'team_safety_brake_random_yield_agents_only': bool(getattr(args, 'team_safety_brake_random_yield_agents_only', False)),
+        'team_safety_brake_random_yield_agent_weight': float(getattr(args, 'team_safety_brake_random_yield_agent_weight', 1.0)),
+        'team_safety_brake_random_standon_agent_weight': float(getattr(args, 'team_safety_brake_random_standon_agent_weight', 0.0)),
+        'random_deconflict_weight': float(getattr(args, 'random_deconflict_weight', 0.0)),
+        'random_deconflict_weight_end': (
+            float(getattr(args, 'random_deconflict_weight_end'))
+            if getattr(args, 'random_deconflict_weight_end', None) is not None
+            else None
+        ),
+        'random_deconflict_pretrain_epochs': int(getattr(args, 'random_deconflict_pretrain_epochs', 0)),
+        'random_deconflict_pretrain_learning_rate': float(getattr(args, 'random_deconflict_pretrain_learning_rate', 0.0)),
+        'random_deconflict_pretrain_max_grad_norm': float(getattr(args, 'random_deconflict_pretrain_max_grad_norm', 0.0)),
+        'random_deconflict_role_mode': str(getattr(args, 'random_deconflict_role_mode', 'agent-index')),
+        'random_deconflict_priority_yield_threshold': float(getattr(args, 'random_deconflict_priority_yield_threshold', -0.10)),
+        'random_deconflict_priority_delta_yield_threshold': float(getattr(args, 'random_deconflict_priority_delta_yield_threshold', -0.01)),
+        'random_deconflict_route_eta_yield_threshold': float(getattr(args, 'random_deconflict_route_eta_yield_threshold', 0.02)),
+        'random_deconflict_goal_tolerance': float(getattr(args, 'random_deconflict_goal_tolerance', 0.8)),
+        'random_deconflict_max_distance': float(getattr(args, 'random_deconflict_max_distance', 13.0)),
+        'random_deconflict_lookahead_distance': float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)),
+        'random_deconflict_time_horizon': float(getattr(args, 'random_deconflict_time_horizon', 30.0)),
+        'random_deconflict_dcpa_target': float(getattr(args, 'random_deconflict_dcpa_target', 1.45)),
+        'random_deconflict_closing_speed_min': float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)),
+        'random_deconflict_local_danger': bool(getattr(args, 'random_deconflict_local_danger', False)),
+        'random_deconflict_safe_separation': float(getattr(args, 'random_deconflict_safe_separation', 1.30)),
+        'random_deconflict_release_separation': float(getattr(args, 'random_deconflict_release_separation', 2.40)),
+        'random_deconflict_critical_separation': float(getattr(args, 'random_deconflict_critical_separation', 0.0)),
+        'random_deconflict_power': float(getattr(args, 'random_deconflict_power', 1.0)),
+        'random_deconflict_standon_speed': float(getattr(args, 'random_deconflict_standon_speed', 0.30)),
+        'random_deconflict_standon_close_separation': float(getattr(args, 'random_deconflict_standon_close_separation', 0.0)),
+        'random_deconflict_standon_close_speed': float(getattr(args, 'random_deconflict_standon_close_speed', 0.08)),
+        'random_deconflict_yield_speed': float(getattr(args, 'random_deconflict_yield_speed', 0.04)),
+        'random_deconflict_yield_danger_scale': float(getattr(args, 'random_deconflict_yield_danger_scale', 1.0)),
+        'random_deconflict_standon_omega': float(getattr(args, 'random_deconflict_standon_omega', 0.12)),
+        'random_deconflict_yield_omega': float(getattr(args, 'random_deconflict_yield_omega', 0.50)),
+        'random_deconflict_turn_mode': str(getattr(args, 'random_deconflict_turn_mode', 'starboard')),
+        'random_deconflict_omega_weight': float(getattr(args, 'random_deconflict_omega_weight', 1.0)),
+        'random_deconflict_standon_weight': float(getattr(args, 'random_deconflict_standon_weight', 0.35)),
+        'random_deconflict_yield_weight': float(getattr(args, 'random_deconflict_yield_weight', 1.0)),
+        'random_role_balance_weight': float(getattr(args, 'random_role_balance_weight', 0.0)),
+        'random_role_balance_weight_end': (
+            float(getattr(args, 'random_role_balance_weight_end'))
+            if getattr(args, 'random_role_balance_weight_end', None) is not None
+            else None
+        ),
+        'random_role_balance_pretrain_epochs': int(getattr(args, 'random_role_balance_pretrain_epochs', 0)),
+        'random_role_balance_pretrain_learning_rate': float(getattr(args, 'random_role_balance_pretrain_learning_rate', 0.0)),
+        'random_role_balance_pretrain_max_grad_norm': float(getattr(args, 'random_role_balance_pretrain_max_grad_norm', 0.0)),
+        'random_role_balance_min_danger': float(getattr(args, 'random_role_balance_min_danger', 0.05)),
+        'random_role_balance_standon_min_speed': float(getattr(args, 'random_role_balance_standon_min_speed', 0.28)),
+        'random_role_balance_standon_close_separation': float(getattr(args, 'random_role_balance_standon_close_separation', 0.0)),
+        'random_role_balance_yield_max_speed': float(getattr(args, 'random_role_balance_yield_max_speed', 0.10)),
+        'random_role_balance_yield_min_starboard_omega': float(getattr(args, 'random_role_balance_yield_min_starboard_omega', 0.22)),
+        'random_role_balance_standon_weight': float(getattr(args, 'random_role_balance_standon_weight', 1.0)),
+        'random_role_balance_yield_weight': float(getattr(args, 'random_role_balance_yield_weight', 1.0)),
+        'random_role_balance_omega_weight': float(getattr(args, 'random_role_balance_omega_weight', 0.6)),
+        'random_pairwise_role_guard_weight': float(getattr(args, 'random_pairwise_role_guard_weight', 0.0)),
+        'random_pairwise_role_guard_weight_end': (
+            float(getattr(args, 'random_pairwise_role_guard_weight_end'))
+            if getattr(args, 'random_pairwise_role_guard_weight_end', None) is not None
+            else None
+        ),
+        'random_pairwise_role_guard_safe_separation': float(getattr(args, 'random_pairwise_role_guard_safe_separation', 0.82)),
+        'random_pairwise_role_guard_release_separation': float(getattr(args, 'random_pairwise_role_guard_release_separation', 1.45)),
+        'random_pairwise_role_guard_min_danger': float(getattr(args, 'random_pairwise_role_guard_min_danger', 0.10)),
+        'random_pairwise_role_guard_yield_speed': float(getattr(args, 'random_pairwise_role_guard_yield_speed', 0.015)),
+        'random_pairwise_role_guard_standon_close_speed': float(getattr(args, 'random_pairwise_role_guard_standon_close_speed', 0.12)),
+        'random_pairwise_role_guard_yield_omega': float(getattr(args, 'random_pairwise_role_guard_yield_omega', 0.42)),
+        'random_pairwise_role_guard_standon_omega': float(getattr(args, 'random_pairwise_role_guard_standon_omega', 0.14)),
+        'random_pairwise_role_guard_linear_weight': float(getattr(args, 'random_pairwise_role_guard_linear_weight', 1.0)),
+        'random_pairwise_role_guard_omega_weight': float(getattr(args, 'random_pairwise_role_guard_omega_weight', 2.0)),
+        'random_pairwise_role_guard_yield_weight': float(getattr(args, 'random_pairwise_role_guard_yield_weight', 2.0)),
+        'random_pairwise_role_guard_standon_weight': float(getattr(args, 'random_pairwise_role_guard_standon_weight', 0.55)),
+        'random_safe_finish_weight': float(getattr(args, 'random_safe_finish_weight', 0.0)),
+        'random_safe_finish_weight_end': (
+            float(getattr(args, 'random_safe_finish_weight_end'))
+            if getattr(args, 'random_safe_finish_weight_end', None) is not None
+            else None
+        ),
+        'random_safe_finish_goal_tolerance': float(getattr(args, 'random_safe_finish_goal_tolerance', 0.8)),
+        'random_safe_finish_max_distance': float(getattr(args, 'random_safe_finish_max_distance', 13.0)),
+        'random_safe_finish_phase_min': float(getattr(args, 'random_safe_finish_phase_min', -1.0)),
+        'random_safe_finish_min_team_separation': float(getattr(args, 'random_safe_finish_min_team_separation', 2.7)),
+        'random_safe_finish_full_team_separation': float(getattr(args, 'random_safe_finish_full_team_separation', 4.0)),
+        'random_safe_finish_min_neighbor_separation': float(getattr(args, 'random_safe_finish_min_neighbor_separation', 2.7)),
+        'random_safe_finish_local_separation_scale': bool(getattr(args, 'random_safe_finish_local_separation_scale', False)),
+        'random_safe_finish_max_abs_cte': float(getattr(args, 'random_safe_finish_max_abs_cte', 0.0)),
+        'random_safe_finish_yield_release_min_separation': float(getattr(args, 'random_safe_finish_yield_release_min_separation', 0.0)),
+        'random_safe_finish_yield_release_max_closing_speed': float(getattr(args, 'random_safe_finish_yield_release_max_closing_speed', 0.02)),
+        'random_safe_finish_yield_release_min_route_progress': float(getattr(args, 'random_safe_finish_yield_release_min_route_progress', 0.0)),
+        'random_safe_finish_max_cpa_score': float(getattr(args, 'random_safe_finish_max_cpa_score', 0.0)),
+        'random_safe_finish_max_local_score': float(getattr(args, 'random_safe_finish_max_local_score', 0.0)),
+        'random_safe_finish_target_speed': float(getattr(args, 'random_safe_finish_target_speed', 0.18)),
+        'random_safe_finish_min_speed_scale': float(getattr(args, 'random_safe_finish_min_speed_scale', 0.35)),
+        'random_safe_finish_hold_distance': float(getattr(args, 'random_safe_finish_hold_distance', 0.0)),
+        'random_safe_finish_hold_weight': float(getattr(args, 'random_safe_finish_hold_weight', 1.0)),
+        'random_safe_finish_low_priority_threshold': float(getattr(args, 'random_safe_finish_low_priority_threshold', -0.5)),
+        'random_safe_finish_low_priority_speed_multiplier': float(getattr(args, 'random_safe_finish_low_priority_speed_multiplier', 1.0)),
+        'random_safe_finish_max_omega': float(getattr(args, 'random_safe_finish_max_omega', 0.10)),
+        'random_safe_finish_omega_weight': float(getattr(args, 'random_safe_finish_omega_weight', 0.12)),
+        'random_goal_hold_weight': float(getattr(args, 'random_goal_hold_weight', 0.0)),
+        'random_goal_hold_weight_end': (
+            float(getattr(args, 'random_goal_hold_weight_end'))
+            if getattr(args, 'random_goal_hold_weight_end', None) is not None
+            else None
+        ),
+        'random_goal_hold_distance': float(getattr(args, 'random_goal_hold_distance', 0.0)),
+        'random_goal_hold_phase_min': float(getattr(args, 'random_goal_hold_phase_min', -1.0)),
+        'random_goal_hold_target_speed': float(getattr(args, 'random_goal_hold_target_speed', 0.0)),
+        'random_goal_hold_target_omega': float(getattr(args, 'random_goal_hold_target_omega', 0.0)),
+        'random_goal_hold_omega_weight': float(getattr(args, 'random_goal_hold_omega_weight', 1.0)),
+        'random_offroute_finish_weight': float(getattr(args, 'random_offroute_finish_weight', 0.0)),
+        'random_offroute_finish_weight_end': (
+            float(getattr(args, 'random_offroute_finish_weight_end'))
+            if getattr(args, 'random_offroute_finish_weight_end', None) is not None
+            else None
+        ),
+        'random_offroute_finish_goal_tolerance': float(getattr(args, 'random_offroute_finish_goal_tolerance', 0.8)),
+        'random_offroute_finish_max_distance': float(getattr(args, 'random_offroute_finish_max_distance', 13.0)),
+        'random_offroute_finish_min_distance': float(getattr(args, 'random_offroute_finish_min_distance', 1.60)),
+        'random_offroute_finish_route_progress_min': float(getattr(args, 'random_offroute_finish_route_progress_min', 0.82)),
+        'random_offroute_finish_min_abs_cte': float(getattr(args, 'random_offroute_finish_min_abs_cte', 1.20)),
+        'random_offroute_finish_full_abs_cte': float(getattr(args, 'random_offroute_finish_full_abs_cte', 3.00)),
+        'random_offroute_finish_phase_min': float(getattr(args, 'random_offroute_finish_phase_min', -1.0)),
+        'random_offroute_finish_min_team_separation': float(getattr(args, 'random_offroute_finish_min_team_separation', 2.75)),
+        'random_offroute_finish_min_neighbor_separation': float(getattr(args, 'random_offroute_finish_min_neighbor_separation', 2.90)),
+        'random_offroute_finish_max_cpa_score': float(getattr(args, 'random_offroute_finish_max_cpa_score', 0.0)),
+        'random_offroute_finish_max_local_score': float(getattr(args, 'random_offroute_finish_max_local_score', 0.0)),
+        'random_offroute_finish_allow_threat_overlap': bool(getattr(args, 'random_offroute_finish_allow_threat_overlap', False)),
+        'random_offroute_finish_target_speed': float(getattr(args, 'random_offroute_finish_target_speed', 0.14)),
+        'random_offroute_finish_min_speed': float(getattr(args, 'random_offroute_finish_min_speed', 0.06)),
+        'random_offroute_finish_max_omega': float(getattr(args, 'random_offroute_finish_max_omega', 0.18)),
+        'random_offroute_finish_omega_reference': float(getattr(args, 'random_offroute_finish_omega_reference', 0.65)),
+        'random_offroute_finish_omega_weight': float(getattr(args, 'random_offroute_finish_omega_weight', 0.55)),
+        'random_cte_recovery_weight': float(getattr(args, 'random_cte_recovery_weight', 0.0)),
+        'random_cte_recovery_weight_end': (
+            float(getattr(args, 'random_cte_recovery_weight_end'))
+            if getattr(args, 'random_cte_recovery_weight_end', None) is not None
+            else None
+        ),
+        'random_cte_recovery_goal_tolerance': float(getattr(args, 'random_cte_recovery_goal_tolerance', 0.8)),
+        'random_cte_recovery_max_distance': float(getattr(args, 'random_cte_recovery_max_distance', 13.0)),
+        'random_cte_recovery_min_abs_cte': float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)),
+        'random_cte_recovery_full_abs_cte': float(getattr(args, 'random_cte_recovery_full_abs_cte', 3.00)),
+        'random_cte_recovery_min_neighbor_separation': float(getattr(args, 'random_cte_recovery_min_neighbor_separation', 0.85)),
+        'random_cte_recovery_allow_threat_overlap': bool(getattr(args, 'random_cte_recovery_allow_threat_overlap', False)),
+        'random_cte_recovery_target_speed': float(getattr(args, 'random_cte_recovery_target_speed', 0.18)),
+        'random_cte_recovery_min_speed': float(getattr(args, 'random_cte_recovery_min_speed', 0.07)),
+        'random_cte_recovery_max_omega': float(getattr(args, 'random_cte_recovery_max_omega', 0.30)),
+        'random_cte_recovery_omega_reference': float(getattr(args, 'random_cte_recovery_omega_reference', 0.55)),
+        'random_cte_recovery_omega_weight': float(getattr(args, 'random_cte_recovery_omega_weight', 1.0)),
+        'random_clear_ahead_weight': float(getattr(args, 'random_clear_ahead_weight', 0.0)),
+        'random_clear_ahead_weight_end': (
+            float(getattr(args, 'random_clear_ahead_weight_end'))
+            if getattr(args, 'random_clear_ahead_weight_end', None) is not None
+            else None
+        ),
+        'random_clear_ahead_scenarios': tuple(str(value) for value in (getattr(args, 'random_clear_ahead_scenarios', None) or ())),
+        'random_clear_ahead_distance': float(getattr(args, 'random_clear_ahead_distance', 5.0)),
+        'random_clear_ahead_bearing_deg': float(getattr(args, 'random_clear_ahead_bearing_deg', 35.0)),
+        'random_clear_ahead_cone_mode': str(getattr(args, 'random_clear_ahead_cone_mode', 'goal')),
+        'random_clear_ahead_goal_tolerance': float(getattr(args, 'random_clear_ahead_goal_tolerance', 1.0)),
+        'random_clear_ahead_max_distance': float(getattr(args, 'random_clear_ahead_max_distance', 13.0)),
+        'random_clear_ahead_min_neighbor_separation': float(getattr(args, 'random_clear_ahead_min_neighbor_separation', 0.0)),
+        'random_clear_ahead_max_cpa_score': float(getattr(args, 'random_clear_ahead_max_cpa_score', 0.0)),
+        'random_clear_ahead_max_local_score': float(getattr(args, 'random_clear_ahead_max_local_score', 0.0)),
+        'random_clear_ahead_exclude_deconflict': bool(getattr(args, 'random_clear_ahead_exclude_deconflict', False)),
+        'random_clear_ahead_target_source': str(getattr(args, 'random_clear_ahead_target_source', 'raw')),
+        'random_clear_ahead_target_speed': float(getattr(args, 'random_clear_ahead_target_speed', 0.30)),
+        'random_clear_ahead_min_speed': float(getattr(args, 'random_clear_ahead_min_speed', 0.18)),
+        'random_clear_ahead_max_omega': float(getattr(args, 'random_clear_ahead_max_omega', 0.18)),
+        'random_clear_ahead_omega_reference': float(getattr(args, 'random_clear_ahead_omega_reference', 0.55)),
+        'random_clear_ahead_omega_weight': float(getattr(args, 'random_clear_ahead_omega_weight', 1.0)),
         'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
         'policy_anchor_weight_end': (
             float(getattr(args, 'policy_anchor_weight_end'))
@@ -1636,6 +4045,11 @@ def _checkpoint_payload(
         'policy_anchor_crossing_only': bool(getattr(args, 'policy_anchor_crossing_only', False)),
         'policy_anchor_exclude_lagging_finish': bool(getattr(args, 'policy_anchor_exclude_lagging_finish', False)),
         'policy_anchor_exclude_team_safety_brake': bool(getattr(args, 'policy_anchor_exclude_team_safety_brake', False)),
+        'policy_anchor_exclude_random_deconflict': bool(getattr(args, 'policy_anchor_exclude_random_deconflict', False)),
+        'policy_anchor_exclude_random_safe_finish': bool(getattr(args, 'policy_anchor_exclude_random_safe_finish', False)),
+        'policy_anchor_exclude_random_goal_hold': bool(getattr(args, 'policy_anchor_exclude_random_goal_hold', False)),
+        'policy_anchor_exclude_random_offroute_finish': bool(getattr(args, 'policy_anchor_exclude_random_offroute_finish', False)),
+        'policy_anchor_exclude_random_cte_recovery': bool(getattr(args, 'policy_anchor_exclude_random_cte_recovery', False)),
         'separate_actor_critic_grad_clip': bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
         'ego_dim': AgentLocalObservation.ego_feature_size(),
         'neighbor_feature_dim': NEIGHBOR_FEATURE_COUNT,
@@ -2112,6 +4526,10 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'collision_distance',
         'near_miss_distance',
         'scenario_neighbor_speed',
+        'cte_clip_range',
+        'route_progress_cte_gate_start',
+        'route_progress_cte_gate_width',
+        'route_progress_cte_gate_floor',
         'cruise_speed',
         'max_angular_velocity',
         'heading_omega_deadband',
@@ -2182,16 +4600,169 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'team_safety_brake_omega_weight',
         'team_safety_brake_target_omega',
         'team_safety_brake_turn_mode',
+        'team_safety_brake_head_on_starboard_threshold',
         'team_safety_brake_require_neighbor',
         'team_safety_brake_local_danger',
         'team_safety_brake_power',
+        'team_safety_brake_cpa_danger',
+        'team_safety_brake_cpa_lookahead_distance',
+        'team_safety_brake_cpa_time_horizon',
+        'team_safety_brake_cpa_dcpa_target',
+        'team_safety_brake_cpa_closing_speed_min',
         'team_safety_brake_crossing_only',
         'team_safety_brake_random_only',
+        'team_safety_brake_random_yield_agents_only',
+        'team_safety_brake_random_yield_agent_weight',
+        'team_safety_brake_random_standon_agent_weight',
+        'random_deconflict_weight',
+        'random_deconflict_weight_end',
+        'random_deconflict_pretrain_epochs',
+        'random_deconflict_pretrain_learning_rate',
+        'random_deconflict_pretrain_max_grad_norm',
+        'random_deconflict_role_mode',
+        'random_deconflict_priority_yield_threshold',
+        'random_deconflict_priority_delta_yield_threshold',
+        'random_deconflict_route_eta_yield_threshold',
+        'random_deconflict_goal_tolerance',
+        'random_deconflict_max_distance',
+        'random_deconflict_lookahead_distance',
+        'random_deconflict_time_horizon',
+        'random_deconflict_dcpa_target',
+        'random_deconflict_closing_speed_min',
+        'random_deconflict_local_danger',
+        'random_deconflict_safe_separation',
+        'random_deconflict_release_separation',
+        'random_deconflict_critical_separation',
+        'random_deconflict_power',
+        'random_deconflict_standon_speed',
+        'random_deconflict_standon_close_separation',
+        'random_deconflict_standon_close_speed',
+        'random_deconflict_yield_speed',
+        'random_deconflict_yield_danger_scale',
+        'random_deconflict_standon_omega',
+        'random_deconflict_yield_omega',
+        'random_deconflict_turn_mode',
+        'random_deconflict_omega_weight',
+        'random_deconflict_standon_weight',
+        'random_deconflict_yield_weight',
+        'random_role_balance_weight',
+        'random_role_balance_weight_end',
+        'random_role_balance_pretrain_epochs',
+        'random_role_balance_pretrain_learning_rate',
+        'random_role_balance_pretrain_max_grad_norm',
+        'random_role_balance_min_danger',
+        'random_role_balance_standon_min_speed',
+        'random_role_balance_standon_close_separation',
+        'random_role_balance_yield_max_speed',
+        'random_role_balance_yield_min_starboard_omega',
+        'random_role_balance_standon_weight',
+        'random_role_balance_yield_weight',
+        'random_role_balance_omega_weight',
+        'random_pairwise_role_guard_weight',
+        'random_pairwise_role_guard_weight_end',
+        'random_pairwise_role_guard_safe_separation',
+        'random_pairwise_role_guard_release_separation',
+        'random_pairwise_role_guard_min_danger',
+        'random_pairwise_role_guard_yield_speed',
+        'random_pairwise_role_guard_standon_close_speed',
+        'random_pairwise_role_guard_yield_omega',
+        'random_pairwise_role_guard_standon_omega',
+        'random_pairwise_role_guard_linear_weight',
+        'random_pairwise_role_guard_omega_weight',
+        'random_pairwise_role_guard_yield_weight',
+        'random_pairwise_role_guard_standon_weight',
+        'random_safe_finish_weight',
+        'random_safe_finish_weight_end',
+        'random_safe_finish_goal_tolerance',
+        'random_safe_finish_max_distance',
+        'random_safe_finish_phase_min',
+        'random_safe_finish_min_team_separation',
+        'random_safe_finish_full_team_separation',
+        'random_safe_finish_min_neighbor_separation',
+        'random_safe_finish_local_separation_scale',
+        'random_safe_finish_max_abs_cte',
+        'random_safe_finish_yield_release_min_separation',
+        'random_safe_finish_yield_release_max_closing_speed',
+        'random_safe_finish_yield_release_min_route_progress',
+        'random_safe_finish_max_cpa_score',
+        'random_safe_finish_max_local_score',
+        'random_safe_finish_target_speed',
+        'random_safe_finish_min_speed_scale',
+        'random_safe_finish_hold_distance',
+        'random_safe_finish_hold_weight',
+        'random_safe_finish_low_priority_threshold',
+        'random_safe_finish_low_priority_speed_multiplier',
+        'random_safe_finish_max_omega',
+        'random_safe_finish_omega_weight',
+        'random_goal_hold_weight',
+        'random_goal_hold_weight_end',
+        'random_goal_hold_distance',
+        'random_goal_hold_phase_min',
+        'random_goal_hold_target_speed',
+        'random_goal_hold_target_omega',
+        'random_goal_hold_omega_weight',
+        'random_offroute_finish_weight',
+        'random_offroute_finish_weight_end',
+        'random_offroute_finish_goal_tolerance',
+        'random_offroute_finish_max_distance',
+        'random_offroute_finish_min_distance',
+        'random_offroute_finish_route_progress_min',
+        'random_offroute_finish_min_abs_cte',
+        'random_offroute_finish_full_abs_cte',
+        'random_offroute_finish_phase_min',
+        'random_offroute_finish_min_team_separation',
+        'random_offroute_finish_min_neighbor_separation',
+        'random_offroute_finish_max_cpa_score',
+        'random_offroute_finish_max_local_score',
+        'random_offroute_finish_allow_threat_overlap',
+        'random_offroute_finish_target_speed',
+        'random_offroute_finish_min_speed',
+        'random_offroute_finish_max_omega',
+        'random_offroute_finish_omega_reference',
+        'random_offroute_finish_omega_weight',
+        'random_cte_recovery_weight',
+        'random_cte_recovery_weight_end',
+        'random_cte_recovery_goal_tolerance',
+        'random_cte_recovery_max_distance',
+        'random_cte_recovery_min_abs_cte',
+        'random_cte_recovery_full_abs_cte',
+        'random_cte_recovery_min_neighbor_separation',
+        'random_cte_recovery_allow_threat_overlap',
+        'random_cte_recovery_target_speed',
+        'random_cte_recovery_min_speed',
+        'random_cte_recovery_max_omega',
+        'random_cte_recovery_omega_reference',
+        'random_cte_recovery_omega_weight',
+        'random_clear_ahead_weight',
+        'random_clear_ahead_weight_end',
+        'random_clear_ahead_scenarios',
+        'random_clear_ahead_distance',
+        'random_clear_ahead_bearing_deg',
+        'random_clear_ahead_cone_mode',
+        'random_clear_ahead_goal_tolerance',
+        'random_clear_ahead_max_distance',
+        'random_clear_ahead_min_neighbor_separation',
+        'random_clear_ahead_max_cpa_score',
+        'random_clear_ahead_max_local_score',
+        'random_clear_ahead_exclude_deconflict',
+        'random_clear_ahead_target_source',
+        'random_clear_ahead_target_speed',
+        'random_clear_ahead_min_speed',
+        'random_clear_ahead_max_omega',
+        'random_clear_ahead_omega_reference',
+        'random_clear_ahead_omega_weight',
         'policy_anchor_weight',
         'policy_anchor_weight_end',
         'policy_anchor_crossing_only',
         'policy_anchor_exclude_lagging_finish',
         'policy_anchor_exclude_team_safety_brake',
+        'policy_anchor_exclude_random_deconflict',
+        'policy_anchor_exclude_random_safe_finish',
+        'policy_anchor_exclude_random_goal_hold',
+        'policy_anchor_exclude_random_offroute_finish',
+        'policy_anchor_exclude_random_cte_recovery',
+        'policy_anchor_exclude_random_pairwise_role_guard',
+        'policy_anchor_exclude_random_pairwise_role_guard',
         'separate_actor_critic_grad_clip',
     )
     for field in simple_fields:
@@ -2550,19 +5121,23 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             speed_scale_distance=float(getattr(args, 'speed_scale_distance', 0.0)),
             speed_scale_min=float(getattr(args, 'speed_scale_min', 0.35)),
             cte_clip_range=float(getattr(args, 'cte_clip_range', 3.0)),
+            route_progress_cte_gate_start=float(getattr(args, 'route_progress_cte_gate_start', 0.0)),
+            route_progress_cte_gate_width=float(getattr(args, 'route_progress_cte_gate_width', 0.0)),
+            route_progress_cte_gate_floor=float(getattr(args, 'route_progress_cte_gate_floor', 0.25)),
+            random_encounter_route_priority=bool(getattr(args, 'random_encounter_route_priority', False)),
             max_waypoints_per_episode=int(getattr(args, 'max_waypoints_per_episode', 1)),
             waypoint_bonus=float(getattr(args, 'waypoint_bonus', 10.0)),
         )
     )
 
 
-def _recover_env(env_factory, *, context: str, max_attempts: int = 3):
+def _recover_env(env_factory, *, context: str, max_attempts: int = 3, reset_seed: int | None = None, reset_options: dict | None = None):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         env = None
         try:
             env = env_factory()
-            observations, info = env.reset()
+            observations, info = env.reset(seed=reset_seed, options=reset_options)
             return env, observations, info
         except RuntimeError as exc:
             last_error = exc
@@ -2600,6 +5175,7 @@ def main():
     agent_namespaces = _build_agent_namespaces(max(2, args.num_agents))
     scenarios = _resolve_scenarios(args)
     curriculum_scenarios = _resolve_curriculum_scenarios(args, scenarios)
+    seed_scheduler = _CurriculumSeedScheduler(getattr(args, 'curriculum_seeds', None))
     reward_config = _build_reward_config(args)
     model_metadata = _build_model_metadata(args, agent_namespaces)
     output_path = Path(args.output)
@@ -2616,6 +5192,8 @@ def main():
         checkpoint_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else output_path.with_name(f'{output_path.stem}_checkpoints')
     print(f'Using MAPPO scenario branches: {scenarios}', flush=True)
     print(f'Using MAPPO rollout curriculum: {curriculum_scenarios}', flush=True)
+    if seed_scheduler.enabled:
+        print(f'Using MAPPO rollout reset seeds: {seed_scheduler.seeds}', flush=True)
     env_factory = lambda: _create_env(args, agent_namespaces, curriculum_scenarios, reward_config)
     scenario_to_index = _scenario_index_map(scenarios)
     max_env_recovery_attempts = 3
@@ -2666,6 +5244,7 @@ def main():
                 env_factory,
                 context='initial MAPPO environment setup',
                 max_attempts=max_env_recovery_attempts,
+                reset_seed=seed_scheduler.next(),
             )
             global_state = info['global_state']
 
@@ -2813,6 +5392,7 @@ def main():
                 flat_advantages_parts = []
                 flat_returns_parts = []
                 flat_scenario_ids_parts = []
+                flat_agent_indices_parts = []
                 rollout_reward_count = 0
 
                 for result in worker_results:
@@ -2827,6 +5407,8 @@ def main():
                     flat_returns_parts.append(returns.reshape(-1))
                     if 'scenario_ids' in result:
                         flat_scenario_ids_parts.append(np.asarray(result['scenario_ids'], dtype=np.int32).reshape(-1))
+                    if 'agent_indices' in result:
+                        flat_agent_indices_parts.append(np.asarray(result['agent_indices'], dtype=np.int32).reshape(-1))
                     rollout_agent_steps += int(result['agent_steps'])
                     rollout_steps_collected += int(result['rollout_steps_collected'])
                     rollout_mean_reward += float(rewards.sum())
@@ -2851,6 +5433,7 @@ def main():
                 flat_advantages = torch.as_tensor(np.concatenate(flat_advantages_parts, axis=0), dtype=torch.float32, device=device)
                 flat_returns = torch.as_tensor(np.concatenate(flat_returns_parts, axis=0), dtype=torch.float32, device=device)
                 flat_scenario_ids_np = np.concatenate(flat_scenario_ids_parts, axis=0) if flat_scenario_ids_parts else None
+                flat_agent_indices_np = np.concatenate(flat_agent_indices_parts, axis=0) if flat_agent_indices_parts else None
             else:
                 storage_obs = []
                 storage_states = []
@@ -2860,6 +5443,7 @@ def main():
                 storage_rewards = []
                 storage_dones = []
                 storage_scenario_ids = []
+                storage_agent_indices = []
                 rollout_episode_count = 0
                 current_scenario = env.current_scenario_name
                 current_scenario_id = int(scenario_to_index.get(current_scenario, -1))
@@ -2925,6 +5509,7 @@ def main():
                             env_factory,
                             context='MAPPO rollout step recovery',
                             max_attempts=max_env_recovery_attempts,
+                            reset_seed=seed_scheduler.next(),
                         )
                         global_state = info['global_state']
                         current_scenario = env.current_scenario_name
@@ -2942,6 +5527,7 @@ def main():
                     storage_rewards.append(reward_batch)
                     storage_dones.append(np.full(len(agent_order), float(done), dtype=np.float32))
                     storage_scenario_ids.append(np.full(len(agent_order), current_scenario_id, dtype=np.int32))
+                    storage_agent_indices.append(np.arange(len(agent_order), dtype=np.int32))
 
                     total_steps += len(agent_order)
                     rollout_agent_steps += len(agent_order)
@@ -2951,8 +5537,9 @@ def main():
                     observations = next_observations
                     global_state = next_info['global_state']
                     if done:
+                        reset_seed = seed_scheduler.next()
                         try:
-                            observations, info = env.reset()
+                            observations, info = env.reset(seed=reset_seed)
                         except RuntimeError as exc:
                             consecutive_env_failures += 1
                             print(
@@ -2970,6 +5557,7 @@ def main():
                                 env_factory,
                                 context='MAPPO episode reset recovery',
                                 max_attempts=max_env_recovery_attempts,
+                                reset_seed=reset_seed,
                             )
                         else:
                             consecutive_env_failures = 0
@@ -3019,6 +5607,7 @@ def main():
                 flat_advantages = torch.as_tensor(advantages.reshape(-1), dtype=torch.float32, device=device)
                 flat_returns = torch.as_tensor(returns.reshape(-1), dtype=torch.float32, device=device)
                 flat_scenario_ids_np = _flatten_rollout_batches(storage_scenario_ids).reshape(-1) if storage_scenario_ids else None
+                flat_agent_indices_np = _flatten_rollout_batches(storage_agent_indices).reshape(-1) if storage_agent_indices else None
 
             # ---------- Advantage Normalization ----------
             if getattr(args, 'per_scenario_advantage_norm', False) and flat_scenario_ids_np is not None:
@@ -3066,6 +5655,16 @@ def main():
             current_crossing_imitation_weight = crossing_imitation_start + (crossing_imitation_end - crossing_imitation_start) * progress_fraction
             last_crossing_imitation_loss = 0.0
             last_crossing_pretrain_loss = 0.0
+            overtaking_imitation_start = float(getattr(args, 'overtaking_imitation_weight', 0.0))
+            overtaking_imitation_end = (
+                float(getattr(args, 'overtaking_imitation_weight_end'))
+                if getattr(args, 'overtaking_imitation_weight_end', None) is not None
+                else overtaking_imitation_start
+            )
+            current_overtaking_imitation_weight = overtaking_imitation_start + (overtaking_imitation_end - overtaking_imitation_start) * progress_fraction
+            last_overtaking_imitation_loss = 0.0
+            overtaking_imitation_active_sum = 0
+            overtaking_imitation_active_seen = 0
             near_goal_finish_start = float(getattr(args, 'near_goal_finish_weight', 0.0))
             near_goal_finish_end = (
                 float(getattr(args, 'near_goal_finish_weight_end'))
@@ -3096,6 +5695,92 @@ def main():
             last_team_safety_brake_loss = 0.0
             team_safety_brake_active_sum = 0
             team_safety_brake_active_seen = 0
+            random_deconflict_start = float(getattr(args, 'random_deconflict_weight', 0.0))
+            random_deconflict_end = (
+                float(getattr(args, 'random_deconflict_weight_end'))
+                if getattr(args, 'random_deconflict_weight_end', None) is not None
+                else random_deconflict_start
+            )
+            current_random_deconflict_weight = random_deconflict_start + (random_deconflict_end - random_deconflict_start) * progress_fraction
+            last_random_deconflict_loss = 0.0
+            last_random_deconflict_pretrain_loss = 0.0
+            random_deconflict_active_sum = 0
+            random_deconflict_active_seen = 0
+            random_role_balance_start = float(getattr(args, 'random_role_balance_weight', 0.0))
+            random_role_balance_end = (
+                float(getattr(args, 'random_role_balance_weight_end'))
+                if getattr(args, 'random_role_balance_weight_end', None) is not None
+                else random_role_balance_start
+            )
+            current_random_role_balance_weight = random_role_balance_start + (random_role_balance_end - random_role_balance_start) * progress_fraction
+            last_random_role_balance_loss = 0.0
+            last_random_role_balance_pretrain_loss = 0.0
+            random_role_balance_active_sum = 0
+            random_role_balance_active_seen = 0
+            random_pairwise_role_guard_start = float(getattr(args, 'random_pairwise_role_guard_weight', 0.0))
+            random_pairwise_role_guard_end = (
+                float(getattr(args, 'random_pairwise_role_guard_weight_end'))
+                if getattr(args, 'random_pairwise_role_guard_weight_end', None) is not None
+                else random_pairwise_role_guard_start
+            )
+            current_random_pairwise_role_guard_weight = random_pairwise_role_guard_start + (random_pairwise_role_guard_end - random_pairwise_role_guard_start) * progress_fraction
+            last_random_pairwise_role_guard_loss = 0.0
+            random_pairwise_role_guard_active_sum = 0
+            random_pairwise_role_guard_active_seen = 0
+            random_safe_finish_start = float(getattr(args, 'random_safe_finish_weight', 0.0))
+            random_safe_finish_end = (
+                float(getattr(args, 'random_safe_finish_weight_end'))
+                if getattr(args, 'random_safe_finish_weight_end', None) is not None
+                else random_safe_finish_start
+            )
+            current_random_safe_finish_weight = random_safe_finish_start + (random_safe_finish_end - random_safe_finish_start) * progress_fraction
+            last_random_safe_finish_loss = 0.0
+            random_safe_finish_active_sum = 0
+            random_safe_finish_active_seen = 0
+            random_safe_finish_hold_sum = 0
+            random_safe_finish_low_priority_sum = 0
+            random_safe_finish_blocked_sum = 0
+            random_safe_finish_release_sum = 0
+            random_goal_hold_start = float(getattr(args, 'random_goal_hold_weight', 0.0))
+            random_goal_hold_end = (
+                float(getattr(args, 'random_goal_hold_weight_end'))
+                if getattr(args, 'random_goal_hold_weight_end', None) is not None
+                else random_goal_hold_start
+            )
+            current_random_goal_hold_weight = random_goal_hold_start + (random_goal_hold_end - random_goal_hold_start) * progress_fraction
+            last_random_goal_hold_loss = 0.0
+            random_goal_hold_active_sum = 0
+            random_goal_hold_active_seen = 0
+            random_offroute_finish_start = float(getattr(args, 'random_offroute_finish_weight', 0.0))
+            random_offroute_finish_end = (
+                float(getattr(args, 'random_offroute_finish_weight_end'))
+                if getattr(args, 'random_offroute_finish_weight_end', None) is not None
+                else random_offroute_finish_start
+            )
+            current_random_offroute_finish_weight = random_offroute_finish_start + (random_offroute_finish_end - random_offroute_finish_start) * progress_fraction
+            last_random_offroute_finish_loss = 0.0
+            random_offroute_finish_active_sum = 0
+            random_offroute_finish_active_seen = 0
+            random_cte_recovery_start = float(getattr(args, 'random_cte_recovery_weight', 0.0))
+            random_cte_recovery_end = (
+                float(getattr(args, 'random_cte_recovery_weight_end'))
+                if getattr(args, 'random_cte_recovery_weight_end', None) is not None
+                else random_cte_recovery_start
+            )
+            current_random_cte_recovery_weight = random_cte_recovery_start + (random_cte_recovery_end - random_cte_recovery_start) * progress_fraction
+            last_random_cte_recovery_loss = 0.0
+            random_cte_recovery_active_sum = 0
+            random_cte_recovery_active_seen = 0
+            random_clear_ahead_start = float(getattr(args, 'random_clear_ahead_weight', 0.0))
+            random_clear_ahead_end = (
+                float(getattr(args, 'random_clear_ahead_weight_end'))
+                if getattr(args, 'random_clear_ahead_weight_end', None) is not None
+                else random_clear_ahead_start
+            )
+            current_random_clear_ahead_weight = random_clear_ahead_start + (random_clear_ahead_end - random_clear_ahead_start) * progress_fraction
+            last_random_clear_ahead_loss = 0.0
+            random_clear_ahead_active_sum = 0
+            random_clear_ahead_active_seen = 0
             current_policy_anchor_weight = policy_anchor_start + (policy_anchor_end - policy_anchor_start) * progress_fraction
             last_policy_anchor_loss = 0.0
 
@@ -3114,6 +5799,13 @@ def main():
                     if flat_scenario_ids_np is not None:
                         batch_scenario_ids = torch.as_tensor(
                             flat_scenario_ids_np[batch_indices.detach().cpu().numpy()],
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    batch_agent_indices = None
+                    if flat_agent_indices_np is not None:
+                        batch_agent_indices = torch.as_tensor(
+                            flat_agent_indices_np[batch_indices.detach().cpu().numpy()],
                             dtype=torch.long,
                             device=device,
                         )
@@ -3166,6 +5858,33 @@ def main():
                             )
                             loss = loss + current_crossing_imitation_weight * crossing_imitation_loss
                             last_crossing_imitation_loss = float(crossing_imitation_loss.detach().cpu().item())
+                        if current_overtaking_imitation_weight > 0.0:
+                            with torch.no_grad():
+                                overtaking_imitation_mask = _overtaking_imitation_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if overtaking_imitation_mask.numel() > 0:
+                                    overtaking_imitation_active_sum += int(overtaking_imitation_mask.sum().detach().cpu().item())
+                                    overtaking_imitation_active_seen += int(overtaking_imitation_mask.numel())
+                            overtaking_imitation_loss = _overtaking_imitation_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_overtaking_imitation_weight * overtaking_imitation_loss
+                            last_overtaking_imitation_loss = float(overtaking_imitation_loss.detach().cpu().item())
                         if current_near_goal_finish_weight > 0.0:
                             near_goal_finish_loss = _near_goal_finish_loss(
                                 torch,
@@ -3189,6 +5908,7 @@ def main():
                                     batch_scenario_ids,
                                     scenario_to_index,
                                     args,
+                                    agent_indices=batch_agent_indices,
                                 )
                                 if lagging_active_mask.numel() > 0:
                                     lagging_finish_active_sum += int(lagging_active_mask.sum().detach().cpu().item())
@@ -3204,6 +5924,7 @@ def main():
                                 action_low_tensor,
                                 action_high_tensor,
                                 sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
                             )
                             loss = loss + current_lagging_finish_weight * lagging_finish_loss
                             last_lagging_finish_loss = float(lagging_finish_loss.detach().cpu().item())
@@ -3216,6 +5937,7 @@ def main():
                                     batch_scenario_ids,
                                     scenario_to_index,
                                     args,
+                                    agent_indices=batch_agent_indices,
                                 )
                                 if team_safety_brake_mask.numel() > 0:
                                     team_safety_brake_active_sum += int(team_safety_brake_mask.sum().detach().cpu().item())
@@ -3231,9 +5953,233 @@ def main():
                                 action_low_tensor,
                                 action_high_tensor,
                                 sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
                             )
                             loss = loss + current_team_safety_brake_weight * team_safety_brake_loss
                             last_team_safety_brake_loss = float(team_safety_brake_loss.detach().cpu().item())
+                        if current_random_deconflict_weight > 0.0:
+                            with torch.no_grad():
+                                random_deconflict_mask = _random_deconflict_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_deconflict_mask.numel() > 0:
+                                    random_deconflict_active_sum += int(random_deconflict_mask.sum().detach().cpu().item())
+                                    random_deconflict_active_seen += int(random_deconflict_mask.numel())
+                            random_deconflict_loss = _random_deconflict_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_deconflict_weight * random_deconflict_loss
+                            last_random_deconflict_loss = float(random_deconflict_loss.detach().cpu().item())
+                        if current_random_role_balance_weight > 0.0:
+                            with torch.no_grad():
+                                random_role_balance_mask = _random_deconflict_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_role_balance_mask.numel() > 0:
+                                    random_role_balance_active_sum += int(random_role_balance_mask.sum().detach().cpu().item())
+                                    random_role_balance_active_seen += int(random_role_balance_mask.numel())
+                            random_role_balance_loss = _random_role_balance_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_role_balance_weight * random_role_balance_loss
+                            last_random_role_balance_loss = float(random_role_balance_loss.detach().cpu().item())
+                        if current_random_pairwise_role_guard_weight > 0.0:
+                            with torch.no_grad():
+                                pairwise_role_guard_mask = _random_pairwise_role_guard_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if pairwise_role_guard_mask.numel() > 0:
+                                    random_pairwise_role_guard_active_sum += int(pairwise_role_guard_mask.sum().detach().cpu().item())
+                                    random_pairwise_role_guard_active_seen += int(pairwise_role_guard_mask.numel())
+                            pairwise_role_guard_loss = _random_pairwise_role_guard_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_pairwise_role_guard_weight * pairwise_role_guard_loss
+                            last_random_pairwise_role_guard_loss = float(pairwise_role_guard_loss.detach().cpu().item())
+                        if current_random_safe_finish_weight > 0.0:
+                            with torch.no_grad():
+                                random_safe_finish_components = _random_safe_finish_components(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_states,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                random_safe_finish_mask = random_safe_finish_components['active']
+                                if random_safe_finish_mask.numel() > 0:
+                                    random_safe_finish_active_sum += int(random_safe_finish_mask.sum().detach().cpu().item())
+                                    random_safe_finish_active_seen += int(random_safe_finish_mask.numel())
+                                    random_safe_finish_hold_sum += int(random_safe_finish_components['hold'].sum().detach().cpu().item())
+                                    random_safe_finish_low_priority_sum += int(random_safe_finish_components['low_priority_active'].sum().detach().cpu().item())
+                                    random_safe_finish_blocked_sum += int(random_safe_finish_components['deconflict_block'].sum().detach().cpu().item())
+                                    random_safe_finish_release_sum += int(random_safe_finish_components['release_overlap'].sum().detach().cpu().item())
+                            random_safe_finish_loss = _random_safe_finish_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_safe_finish_weight * random_safe_finish_loss
+                            last_random_safe_finish_loss = float(random_safe_finish_loss.detach().cpu().item())
+                        if current_random_goal_hold_weight > 0.0:
+                            with torch.no_grad():
+                                random_goal_hold_mask = _random_goal_hold_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                )
+                                if random_goal_hold_mask.numel() > 0:
+                                    random_goal_hold_active_sum += int(random_goal_hold_mask.sum().detach().cpu().item())
+                                    random_goal_hold_active_seen += int(random_goal_hold_mask.numel())
+                            random_goal_hold_loss = _random_goal_hold_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                            )
+                            loss = loss + current_random_goal_hold_weight * random_goal_hold_loss
+                            last_random_goal_hold_loss = float(random_goal_hold_loss.detach().cpu().item())
+                        if current_random_offroute_finish_weight > 0.0:
+                            with torch.no_grad():
+                                random_offroute_finish_mask = _random_offroute_finish_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_states,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_offroute_finish_mask.numel() > 0:
+                                    random_offroute_finish_active_sum += int(random_offroute_finish_mask.sum().detach().cpu().item())
+                                    random_offroute_finish_active_seen += int(random_offroute_finish_mask.numel())
+                            random_offroute_finish_loss = _random_offroute_finish_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_offroute_finish_weight * random_offroute_finish_loss
+                            last_random_offroute_finish_loss = float(random_offroute_finish_loss.detach().cpu().item())
+                        if current_random_cte_recovery_weight > 0.0:
+                            with torch.no_grad():
+                                random_cte_recovery_mask = _random_cte_recovery_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_cte_recovery_mask.numel() > 0:
+                                    random_cte_recovery_active_sum += int(random_cte_recovery_mask.sum().detach().cpu().item())
+                                    random_cte_recovery_active_seen += int(random_cte_recovery_mask.numel())
+                            random_cte_recovery_loss = _random_cte_recovery_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_cte_recovery_weight * random_cte_recovery_loss
+                            last_random_cte_recovery_loss = float(random_cte_recovery_loss.detach().cpu().item())
+                        if current_random_clear_ahead_weight > 0.0:
+                            with torch.no_grad():
+                                random_clear_ahead_mask = _random_clear_ahead_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_clear_ahead_mask.numel() > 0:
+                                    random_clear_ahead_active_sum += int(random_clear_ahead_mask.sum().detach().cpu().item())
+                                    random_clear_ahead_active_seen += int(random_clear_ahead_mask.numel())
+                            random_clear_ahead_loss = _random_clear_ahead_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_clear_ahead_weight * random_clear_ahead_loss
+                            last_random_clear_ahead_loss = float(random_clear_ahead_loss.detach().cpu().item())
                         if policy_anchor_actor is not None and current_policy_anchor_weight > 0.0:
                             with torch.no_grad():
                                 anchor_action_mean = _actor_forward(policy_anchor_actor, batch_obs, batch_scenario_ids)
@@ -3254,6 +6200,7 @@ def main():
                                 action_low_tensor,
                                 action_high_tensor,
                                 sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
                             )
                             loss = loss + current_policy_anchor_weight * policy_anchor_loss
                             last_policy_anchor_loss = float(policy_anchor_loss.detach().cpu().item())
@@ -3301,6 +6248,42 @@ def main():
                 device=device,
                 imitation_weight=current_crossing_imitation_weight,
             )
+            last_random_deconflict_pretrain_loss = _run_random_deconflict_pretrain(
+                torch,
+                actor,
+                optimizer,
+                flat_obs,
+                flat_raw_obs,
+                flat_scenario_ids_np,
+                flat_scenario_weights,
+                flat_agent_indices_np,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_count=sample_count,
+                minibatch_size=minibatch_size,
+                device=device,
+                deconflict_weight=current_random_deconflict_weight,
+            )
+            last_random_role_balance_pretrain_loss = _run_random_role_balance_pretrain(
+                torch,
+                actor,
+                optimizer,
+                flat_obs,
+                flat_raw_obs,
+                flat_scenario_ids_np,
+                flat_scenario_weights,
+                flat_agent_indices_np,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_count=sample_count,
+                minibatch_size=minibatch_size,
+                device=device,
+                role_balance_weight=current_random_role_balance_weight,
+            )
 
             update_wall_time = max(1e-6, time.perf_counter() - update_wall_start)
             update_index += 1
@@ -3322,13 +6305,37 @@ def main():
                     f'entropy_coef={current_entropy_coef:.4f} lr={current_lr:.2e} '
                     f'ppo_pi={ppo_policy_loss_scale:.3f} ppo_v={ppo_value_loss_scale:.3f} '
                     f'crossing_bc_w={current_crossing_imitation_weight:.3f} crossing_bc={last_crossing_imitation_loss:.4f} '
+                    f'overtake_bc_w={current_overtaking_imitation_weight:.3f} overtake_bc={last_overtaking_imitation_loss:.4f} '
+                    f'overtake_active={(overtaking_imitation_active_sum / max(overtaking_imitation_active_seen, 1)):.3f} '
                     f'finish_bc_w={current_near_goal_finish_weight:.3f} finish_bc={last_near_goal_finish_loss:.4f} '
                     f'lag_finish_w={current_lagging_finish_weight:.3f} lag_finish={last_lagging_finish_loss:.4f} '
                     f'lag_active={(lagging_finish_active_sum / max(lagging_finish_active_seen, 1)):.3f} '
                     f'team_brake_w={current_team_safety_brake_weight:.3f} team_brake={last_team_safety_brake_loss:.4f} '
                     f'team_brake_active={(team_safety_brake_active_sum / max(team_safety_brake_active_seen, 1)):.3f} '
+                    f'rand_deconf_w={current_random_deconflict_weight:.3f} rand_deconf={last_random_deconflict_loss:.4f} '
+                    f'rand_deconf_active={(random_deconflict_active_sum / max(random_deconflict_active_seen, 1)):.3f} '
+                    f'rand_role_w={current_random_role_balance_weight:.3f} rand_role={last_random_role_balance_loss:.4f} '
+                    f'rand_role_active={(random_role_balance_active_sum / max(random_role_balance_active_seen, 1)):.3f} '
+                    f'rand_pair_w={current_random_pairwise_role_guard_weight:.3f} rand_pair={last_random_pairwise_role_guard_loss:.4f} '
+                    f'rand_pair_active={(random_pairwise_role_guard_active_sum / max(random_pairwise_role_guard_active_seen, 1)):.3f} '
+                    f'rand_finish_w={current_random_safe_finish_weight:.3f} rand_finish={last_random_safe_finish_loss:.4f} '
+                    f'rand_finish_active={(random_safe_finish_active_sum / max(random_safe_finish_active_seen, 1)):.3f} '
+                    f'rand_finish_hold={(random_safe_finish_hold_sum / max(random_safe_finish_active_seen, 1)):.3f} '
+                    f'rand_finish_lowprio={(random_safe_finish_low_priority_sum / max(random_safe_finish_active_seen, 1)):.3f} '
+                    f'rand_finish_release={(random_safe_finish_release_sum / max(random_safe_finish_active_seen, 1)):.3f} '
+                    f'rand_finish_block={(random_safe_finish_blocked_sum / max(random_safe_finish_active_seen, 1)):.3f} '
+                    f'rand_goal_hold_w={current_random_goal_hold_weight:.3f} rand_goal_hold={last_random_goal_hold_loss:.4f} '
+                    f'rand_goal_hold_active={(random_goal_hold_active_sum / max(random_goal_hold_active_seen, 1)):.3f} '
+                    f'rand_offroute_w={current_random_offroute_finish_weight:.3f} rand_offroute={last_random_offroute_finish_loss:.4f} '
+                    f'rand_offroute_active={(random_offroute_finish_active_sum / max(random_offroute_finish_active_seen, 1)):.3f} '
+                    f'rand_cte_w={current_random_cte_recovery_weight:.3f} rand_cte={last_random_cte_recovery_loss:.4f} '
+                    f'rand_cte_active={(random_cte_recovery_active_sum / max(random_cte_recovery_active_seen, 1)):.3f} '
+                    f'rand_clear_w={current_random_clear_ahead_weight:.3f} rand_clear={last_random_clear_ahead_loss:.4f} '
+                    f'rand_clear_active={(random_clear_ahead_active_sum / max(random_clear_ahead_active_seen, 1)):.3f} '
                     f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '
                     f'crossing_bc_pre={last_crossing_pretrain_loss:.4f} '
+                    f'rand_deconf_pre={last_random_deconflict_pretrain_loss:.4f} '
+                    f'rand_role_pre={last_random_role_balance_pretrain_loss:.4f} '
                     f'{_gpu_runtime_stats(torch, device)}'
                     ,
                     flush=True,

@@ -27,7 +27,10 @@ except ImportError:
 
 # Maps scenario name → encounter type index for one-hot conditioning.
 _SCENARIO_ENCOUNTER_MAP = {
+    'single_usv_overtaking': 2,
     'two_usv_head_on': 0,
+    'two_usv_crossing': 1,
+    'two_usv_overtaking': 2,
     'three_usv_crossing': 1,
     'three_usv_overtaking': 2,
 }
@@ -94,6 +97,14 @@ class MultiAgentEnvConfig:
     entanglement_low_speed_penalty_weight: float = 0.0
     # Signed CTE observation clip range (symmetric, metres).
     cte_clip_range: float = 3.0
+    # Observation-only route_progress correction: when enabled, large CTE lowers
+    # the progress signal so clipped along-track projection is not treated as completion.
+    route_progress_cte_gate_start: float = 0.0
+    route_progress_cte_gate_width: float = 0.0
+    route_progress_cte_gate_floor: float = 0.25
+    # When enabled, random encounters use the mean active route midpoint as a
+    # shared conflict point so priority features follow predicted ETA order.
+    random_encounter_route_priority: bool = False
     # Domain randomization
     domain_randomization: bool = False
     dr_position_noise_std: float = 0.10
@@ -130,6 +141,20 @@ class MultiAgentEnvConfig:
     # Intermediate bonus given each time the agent reaches a waypoint
     # (except the final one, which uses goal_bonus).
     waypoint_bonus: float = 10.0
+    pairwise_shield_enabled: bool = False
+    pairwise_shield_release_separation: float = 1.05
+    pairwise_shield_critical_separation: float = 0.92
+    pairwise_shield_min_closing_speed: float = 0.004
+    pairwise_shield_yield_speed: float = 0.02
+    pairwise_shield_standon_speed: float = 0.24
+    pairwise_shield_yield_omega: float = 0.44
+    pairwise_shield_standon_omega: float = 0.04
+    pairwise_shield_yield_danger_scale: float = 1.0
+    pairwise_shield_blend: float = 1.0
+    pairwise_shield_turn_mode: str = 'away'
+    pairwise_shield_role_mode: str = 'priority-delta'
+    pairwise_shield_priority_delta_yield_threshold: float = -0.01
+    pairwise_shield_route_eta_yield_threshold: float = 0.02
 
 
 class MultiAgentEnv(gym.Env):
@@ -419,6 +444,72 @@ class MultiAgentEnv(gym.Env):
                     linear_x *= speed_scale
         return linear_x, angular_z
 
+    def _pairwise_shield_is_yield(self, agent_id: str, observation: AgentLocalObservation, nearest) -> bool:
+        role_mode = str(self.config.pairwise_shield_role_mode).strip().lower()
+        if role_mode == 'priority-delta':
+            return float(getattr(nearest, 'route_priority_delta', 0.0)) <= float(self.config.pairwise_shield_priority_delta_yield_threshold)
+        if role_mode == 'route-eta-delta':
+            return float(getattr(nearest, 'route_eta_delta', 0.0)) > float(self.config.pairwise_shield_route_eta_yield_threshold)
+        if role_mode == 'priority':
+            return float(observation.crossing_priority) <= -0.10
+        return int(agent_id.rsplit('_', 1)[-1]) >= 2
+
+    def _apply_pairwise_shield(
+        self,
+        agent_id: str,
+        command: tuple[float, float],
+        observation: Optional[AgentLocalObservation],
+    ) -> tuple[float, float]:
+        if not bool(self.config.pairwise_shield_enabled) or observation is None or not observation.neighbors:
+            return command
+        if self.current_scenario_name not in {'two_usv_random_encounter', 'three_usv_random_encounter'}:
+            return command
+
+        nearest = min(observation.neighbors, key=lambda item: float(item.distance), default=None)
+        if nearest is None:
+            return command
+        nearest_distance = max(0.0, float(nearest.distance))
+        release_separation = max(0.0, float(self.config.pairwise_shield_release_separation))
+        if release_separation <= 0.0 or nearest_distance > release_separation:
+            return command
+
+        rel_x = float(nearest.rel_x)
+        rel_y = float(nearest.rel_y)
+        rel_vx = float(nearest.rel_vx)
+        rel_vy = float(nearest.rel_vy)
+        closing_speed = -((rel_x * rel_vx) + (rel_y * rel_vy)) / max(nearest_distance, 1e-3)
+        critical = max(0.0, float(self.config.pairwise_shield_critical_separation))
+        if nearest_distance > critical and closing_speed < float(self.config.pairwise_shield_min_closing_speed):
+            return command
+
+        danger = (release_separation - nearest_distance) / max(release_separation - min(critical, release_separation - 1e-3), 1e-3)
+        danger = float(np.clip(danger, 0.0, 1.0))
+        if nearest_distance <= critical:
+            danger = 1.0
+
+        is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
+        turn_sign = -1.0
+        if str(self.config.pairwise_shield_turn_mode).strip().lower() == 'away':
+            if rel_y > 0.0:
+                turn_sign = -1.0
+            elif rel_y < 0.0:
+                turn_sign = 1.0
+
+        if is_yield:
+            danger_scale = float(np.clip(self.config.pairwise_shield_yield_danger_scale, 0.0, 2.0))
+            target_linear = max(0.0, float(self.config.pairwise_shield_yield_speed)) * float(np.clip(1.0 - danger_scale * danger, 0.0, 1.0))
+            target_omega = turn_sign * max(0.0, float(self.config.pairwise_shield_yield_omega)) * danger
+        else:
+            target_linear = max(0.0, float(self.config.pairwise_shield_standon_speed))
+            target_omega = turn_sign * max(0.0, float(self.config.pairwise_shield_standon_omega)) * danger
+
+        blend = float(np.clip(self.config.pairwise_shield_blend, 0.0, 1.0))
+        linear_x = (1.0 - blend) * float(command[0]) + blend * target_linear
+        angular_z = (1.0 - blend) * float(command[1]) + blend * target_omega
+        linear_x = float(np.clip(linear_x, self.action_low[0], self.action_high[0]))
+        angular_z = float(np.clip(angular_z, self.action_low[1], self.action_high[1]))
+        return linear_x, angular_z
+
     def _wait_for_local_observations(self, timeout: Optional[float] = None) -> Dict[str, AgentLocalObservation]:
         deadline = time.monotonic() + (timeout or self.config.state_timeout)
         while time.monotonic() < deadline:
@@ -479,8 +570,14 @@ class MultiAgentEnv(gym.Env):
 
     def _scenario_conflict_point(self) -> tuple[float, float] | None:
         """Return the shared route conflict point for structured crossing scenarios."""
-        if self._scenario is None or self._scenario.name != 'three_usv_crossing':
+        if self._scenario is None:
             return None
+        if self._scenario.name != 'three_usv_crossing':
+            if not (
+                bool(getattr(self.config, 'random_encounter_route_priority', False))
+                and 'random_encounter' in self._scenario.name
+            ):
+                return None
 
         midpoints: list[tuple[float, float]] = []
         for agent_id in self._active_agent_ids:
@@ -507,6 +604,31 @@ class MultiAgentEnv(gym.Env):
             return 100 - int(str(agent_id).rsplit('_', 1)[-1])
         except (TypeError, ValueError):
             return 100
+
+    def _annotate_random_priority_for_observations(self, observations: Dict[str, AgentLocalObservation]) -> None:
+        if self._scenario is None or 'random_encounter' not in self._scenario.name:
+            return
+        ordered_ids = sorted(
+            (agent_id for agent_id in observations if agent_id in self._active_agent_ids),
+            key=self._agent_priority_key,
+        )
+        if len(ordered_ids) <= 1:
+            return
+
+        denominator = max(1, len(ordered_ids) - 1)
+        priority_by_id = {
+            agent_id: float(1.0 - (2.0 * rank / denominator))
+            for rank, agent_id in enumerate(ordered_ids)
+        }
+        for agent_id, observation in observations.items():
+            observation.crossing_priority = priority_by_id.get(agent_id, 0.0)
+            observation.crossing_eta_gap = 1.0
+
+        for agent_id, observation in observations.items():
+            own_priority = float(np.clip(observation.crossing_priority, -1.0, 1.0))
+            for neighbor in observation.neighbors:
+                other_priority = float(np.clip(priority_by_id.get(neighbor.source_id, 0.0), -1.0, 1.0))
+                neighbor.route_priority_delta = float(np.clip((own_priority - other_priority) * 0.5, -1.0, 1.0))
 
     def _route_timing_features(
         self,
@@ -557,6 +679,14 @@ class MultiAgentEnv(gym.Env):
         cross_track = ((relative_x * route_dy) - (relative_y * route_dx)) / route_length
         clip_range = max(1.0, self.config.cte_clip_range)
         route_progress = float(np.clip(progress_s / route_length, 0.0, 1.0))
+        gate_width = max(0.0, float(getattr(self.config, 'route_progress_cte_gate_width', 0.0)))
+        if gate_width > 0.0:
+            gate_start = max(0.0, float(getattr(self.config, 'route_progress_cte_gate_start', 0.0)))
+            gate_floor = float(np.clip(getattr(self.config, 'route_progress_cte_gate_floor', 0.25), 0.0, 1.0))
+            abs_cross_track = abs(float(cross_track))
+            cte_ratio = np.clip((abs_cross_track - gate_start) / max(gate_width - gate_start, 1e-3), 0.0, 1.0)
+            cte_gate = 1.0 - ((1.0 - gate_floor) * cte_ratio)
+            route_progress *= float(np.clip(cte_gate, gate_floor, 1.0))
 
         conflict_phase = 0.0
         conflict_eta = 1.0
@@ -601,6 +731,7 @@ class MultiAgentEnv(gym.Env):
             observation.crossing_eta_gap = 1.0
 
         if conflict_point is None or len(stats) <= 1:
+            self._annotate_random_priority_for_observations(observations)
             return
 
         ordered_ids = sorted(
@@ -672,6 +803,26 @@ class MultiAgentEnv(gym.Env):
             'global_state': global_state.to_vector(self.config.max_agents, self.config.max_neighbors),
         }
 
+    def _effective_pair_min_separation(
+        self,
+        observations: Dict[str, AgentLocalObservation],
+        global_state: FleetGlobalState,
+    ) -> float:
+        """Minimum active-agent separation, including scripted/background neighbours.
+
+        FleetGlobalState only measures pairwise separation among selected active
+        observations.  Background tracks are encoded as neighbours, not agents,
+        so rear-only overtaking needs this additional check to make the slow
+        lead vessel count for collision and near-miss logic.
+        """
+        pair_min = float(global_state.team_min_separation)
+        for agent_id in self._active_agent_ids:
+            observation = observations.get(agent_id)
+            if observation is None:
+                continue
+            pair_min = min(pair_min, float(observation.min_neighbor_distance()))
+        return pair_min
+
     def _compute_conflict_risk(self, observation: AgentLocalObservation) -> float:
         max_risk = 0.0
         conflict_distance = max(
@@ -708,23 +859,17 @@ class MultiAgentEnv(gym.Env):
 
         half_angle = math.radians(max(1.0, min(179.0, float(self.config.reward.clear_ahead_bearing_deg))))
         closest_front_blocker = float('inf')
-        closest_neighbor = float('inf')
         for neighbor in observation.neighbors:
             if neighbor.distance <= 1e-3:
                 continue
-            closest_neighbor = min(closest_neighbor, float(neighbor.distance))
             if abs(float(neighbor.bearing)) <= half_angle:
                 closest_front_blocker = min(closest_front_blocker, float(neighbor.distance))
 
-        if closest_front_blocker < clear_distance or closest_neighbor < clear_distance:
+        if closest_front_blocker < clear_distance:
             return 0.0
 
         front_margin = clear_distance if not np.isfinite(closest_front_blocker) else closest_front_blocker - clear_distance
-        neighbor_margin = clear_distance if not np.isfinite(closest_neighbor) else closest_neighbor - clear_distance
-        front_gate = min(1.0, max(0.0, front_margin / max(0.5 * clear_distance, 1e-3)))
-        neighbor_gate = min(1.0, max(0.0, neighbor_margin / max(0.75 * clear_distance, 1e-3)))
-
-        return min(front_gate, neighbor_gate)
+        return min(1.0, max(0.0, front_margin / max(0.5 * clear_distance, 1e-3)))
 
     @staticmethod
     def _neighbor_cpa_metrics(neighbor) -> Dict[str, float]:
@@ -1168,7 +1313,7 @@ class MultiAgentEnv(gym.Env):
             self._runtime_agent_ids,
             goal_distance=self.config.goal_distance,
             neighbor_speed=self.config.scenario_neighbor_speed,
-            rng=self._rng if (self.config.scenario_spawn_position_std > 0 or self.config.scenario_spawn_heading_std > 0 or self.config.scenario_goal_position_std > 0) else None,
+            rng=self._rng,
             spawn_position_std=self.config.scenario_spawn_position_std,
             spawn_heading_std=self.config.scenario_spawn_heading_std,
             goal_position_std=self.config.scenario_goal_position_std,
@@ -1259,9 +1404,7 @@ class MultiAgentEnv(gym.Env):
             goal_proximity = min(goal_proximity, 1.0)
         progress += self.config.goal_proximity_reward_weight * goal_proximity
 
-        pair_min = global_state.team_min_separation
-        if not np.isfinite(pair_min):
-            pair_min = observation.min_neighbor_distance()
+        pair_min = min(float(global_state.team_min_separation), float(observation.min_neighbor_distance()))
 
         safety = 0.0
         conflict_risk = self._compute_conflict_risk(observation)
@@ -1621,7 +1764,12 @@ class MultiAgentEnv(gym.Env):
             raw_action = actions.get(namespace, self.zero_policy_action())
             projected = self.project_policy_action(namespace, raw_action)
             projected_actions[namespace] = projected
-            action_map[namespace] = self.expand_policy_action(namespace, projected)
+            command = self.expand_policy_action(namespace, projected)
+            action_map[namespace] = self._apply_pairwise_shield(
+                namespace,
+                command,
+                self._latest_observations.get(namespace),
+            )
 
         if self.config.enable_rl_backend:
             self._bridge.publish_actions(action_map)
@@ -1641,7 +1789,7 @@ class MultiAgentEnv(gym.Env):
             self._last_team_progress_time = time.monotonic()
         self._best_team_mean_distance = min(self._best_team_mean_distance, global_state.team_mean_goal_distance)
 
-        pair_min = global_state.team_min_separation
+        pair_min = self._effective_pair_min_separation(observations, global_state)
         collision = np.isfinite(pair_min) and pair_min < self.config.collision_distance
         all_reached = all(
             observations[namespace].distance_to_goal <= self.config.goal_tolerance
@@ -1725,6 +1873,7 @@ class MultiAgentEnv(gym.Env):
         truncated_dict['__all__'] = truncated
 
         info = self._build_episode_info(global_state)
+        info['pairwise_min_separation'] = pair_min
         active_observations = self._filter_active_observations(observations)
 
         return (

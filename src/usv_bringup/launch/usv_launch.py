@@ -430,6 +430,8 @@ def generate_launch_description():
         name='log_collector',
         namespace=namespace,
         output='screen',
+        respawn=True,
+        respawn_delay=2.0,
         condition=IfCondition(enable_log_collector)
     )
 
