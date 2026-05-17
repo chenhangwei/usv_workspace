@@ -151,10 +151,14 @@ class MultiAgentEnvConfig:
     pairwise_shield_standon_omega: float = 0.04
     pairwise_shield_yield_danger_scale: float = 1.0
     pairwise_shield_blend: float = 1.0
+    pairwise_shield_yield_only: bool = False
     pairwise_shield_turn_mode: str = 'away'
     pairwise_shield_role_mode: str = 'priority-delta'
     pairwise_shield_priority_delta_yield_threshold: float = -0.01
     pairwise_shield_route_eta_yield_threshold: float = 0.02
+    pairwise_shield_min_route_progress: float = 0.0
+    pairwise_shield_max_route_progress: float = 1.1
+    pairwise_shield_min_abs_cte: float = 0.0
 
 
 class MultiAgentEnv(gym.Env):
@@ -464,6 +468,13 @@ class MultiAgentEnv(gym.Env):
             return command
         if self.current_scenario_name not in {'two_usv_random_encounter', 'three_usv_random_encounter'}:
             return command
+        route_progress = float(getattr(observation, 'route_progress', 0.0))
+        if route_progress < float(self.config.pairwise_shield_min_route_progress):
+            return command
+        if route_progress > float(self.config.pairwise_shield_max_route_progress):
+            return command
+        if abs(float(getattr(observation, 'cross_track_error', 0.0))) < float(self.config.pairwise_shield_min_abs_cte):
+            return command
 
         nearest = min(observation.neighbors, key=lambda item: float(item.distance), default=None)
         if nearest is None:
@@ -488,6 +499,8 @@ class MultiAgentEnv(gym.Env):
             danger = 1.0
 
         is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
+        if bool(self.config.pairwise_shield_yield_only) and not is_yield:
+            return command
         turn_sign = -1.0
         if str(self.config.pairwise_shield_turn_mode).strip().lower() == 'away':
             if rel_y > 0.0:

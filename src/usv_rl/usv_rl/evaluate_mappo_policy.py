@@ -492,10 +492,14 @@ def _build_env_kwargs_from_checkpoint(
         'pairwise_shield_standon_omega': _env_float('PAIRWISE_SHIELD_STANDON_OMEGA', float(checkpoint.get('random_deconflict_standon_omega', 0.04))),
         'pairwise_shield_yield_danger_scale': _env_float('PAIRWISE_SHIELD_YIELD_DANGER_SCALE', float(checkpoint.get('random_deconflict_yield_danger_scale', 1.0))),
         'pairwise_shield_blend': _env_float('PAIRWISE_SHIELD_BLEND', float(checkpoint.get('pairwise_shield_blend', 1.0))),
+        'pairwise_shield_yield_only': _env_bool('PAIRWISE_SHIELD_YIELD_ONLY', bool(checkpoint.get('pairwise_shield_yield_only', False))),
         'pairwise_shield_turn_mode': _env_str('PAIRWISE_SHIELD_TURN_MODE', str(checkpoint.get('random_deconflict_turn_mode', 'away'))),
         'pairwise_shield_role_mode': _env_str('PAIRWISE_SHIELD_ROLE_MODE', str(checkpoint.get('random_deconflict_role_mode', 'priority-delta'))),
         'pairwise_shield_priority_delta_yield_threshold': _env_float('PAIRWISE_SHIELD_PRIORITY_DELTA_YIELD_THRESHOLD', float(checkpoint.get('random_deconflict_priority_delta_yield_threshold', -0.01))),
         'pairwise_shield_route_eta_yield_threshold': _env_float('PAIRWISE_SHIELD_ROUTE_ETA_YIELD_THRESHOLD', float(checkpoint.get('random_deconflict_route_eta_yield_threshold', 0.02))),
+        'pairwise_shield_min_route_progress': _env_float('PAIRWISE_SHIELD_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_min_route_progress', 0.0))),
+        'pairwise_shield_max_route_progress': _env_float('PAIRWISE_SHIELD_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_max_route_progress', 1.1))),
+        'pairwise_shield_min_abs_cte': _env_float('PAIRWISE_SHIELD_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_min_abs_cte', 0.0))),
     }
     return env_kwargs, resolved_scenarios
 

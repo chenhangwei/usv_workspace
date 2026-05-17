@@ -449,6 +449,8 @@ def parse_args():
     parser.add_argument('--random-cte-recovery-max-omega', type=float, default=0.30, help='Maximum goal-heading yaw-rate target for random-cte-recovery.')
     parser.add_argument('--random-cte-recovery-omega-reference', type=float, default=0.55, help='Heading error magnitude mapped to max omega for random-cte-recovery.')
     parser.add_argument('--random-cte-recovery-omega-weight', type=float, default=1.00, help='Relative yaw-rate loss weight for random-cte-recovery.')
+    parser.add_argument('--random-recovery-safety-gate-scale', type=float, default=1.0, help='Multiplier applied to random offroute/CTE recovery samples while random deconflict or pairwise role guard is active. 1 keeps legacy behavior; 0 fully suppresses recovery during active safety conflicts.')
+    parser.add_argument('--random-recovery-safety-gate-mode', choices=['batch', 'sample'], default='batch', help='How random recovery safety gating is applied when scale < 1. batch scales the whole minibatch if any safety conflict is active; sample only scales overlapping samples.')
     parser.add_argument('--random-clear-ahead-weight', type=float, default=0.0, help='Trainer-side action loss for random encounters when the forward route cone is clear.')
     parser.add_argument('--random-clear-ahead-weight-end', type=float, default=None, help='Final random-clear-ahead auxiliary weight for linear annealing.')
     parser.add_argument('--random-clear-ahead-scenario', action='append', dest='random_clear_ahead_scenarios', default=None, help='Scenario name where random-clear-ahead may activate. Repeatable. Defaults to random encounter scenarios.')
@@ -2706,6 +2708,14 @@ def _random_offroute_finish_loss(
     per_sample_loss = (linear_loss + omega_weight * omega_loss * urgency) * urgency
 
     weights = active_mask.to(dtype=per_sample_loss.dtype)
+    weights = weights * _random_recovery_safety_gate_weights(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    ).to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     if sample_weights is not None:
         weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
@@ -2771,6 +2781,48 @@ def _random_cte_recovery_active_mask(
     return scenario_mask & unfinished_mask & cte_mask & neighbor_clear & threat_clear
 
 
+def _random_recovery_safety_gate_weights(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    gate_scale = min(1.0, max(0.0, float(getattr(args, 'random_recovery_safety_gate_scale', 1.0))))
+    weights = torch.ones(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    if sample_count <= 0 or gate_scale >= 1.0:
+        return weights
+    deconflict_mask = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    pairwise_guard_mask = _random_pairwise_role_guard_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    safety_mask = deconflict_mask | pairwise_guard_mask
+    gate_mode = str(getattr(args, 'random_recovery_safety_gate_mode', 'batch')).strip().lower()
+    if gate_mode == 'batch':
+        if bool(safety_mask.any().detach().cpu()):
+            return weights * gate_scale
+        return weights
+    return torch.where(
+        safety_mask,
+        torch.full((sample_count,), gate_scale, dtype=raw_obs.dtype, device=raw_obs.device),
+        weights,
+    )
+
+
 def _random_cte_recovery_loss(
     torch,
     action_mean,
@@ -2823,6 +2875,14 @@ def _random_cte_recovery_loss(
     per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
 
     weights = active_mask.to(dtype=per_sample_loss.dtype)
+    weights = weights * _random_recovery_safety_gate_weights(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    ).to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     if sample_weights is not None:
         weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
     return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
@@ -4014,6 +4074,8 @@ def _checkpoint_payload(
         'random_cte_recovery_max_omega': float(getattr(args, 'random_cte_recovery_max_omega', 0.30)),
         'random_cte_recovery_omega_reference': float(getattr(args, 'random_cte_recovery_omega_reference', 0.55)),
         'random_cte_recovery_omega_weight': float(getattr(args, 'random_cte_recovery_omega_weight', 1.0)),
+        'random_recovery_safety_gate_scale': float(getattr(args, 'random_recovery_safety_gate_scale', 1.0)),
+        'random_recovery_safety_gate_mode': str(getattr(args, 'random_recovery_safety_gate_mode', 'batch')),
         'random_clear_ahead_weight': float(getattr(args, 'random_clear_ahead_weight', 0.0)),
         'random_clear_ahead_weight_end': (
             float(getattr(args, 'random_clear_ahead_weight_end'))
@@ -4733,6 +4795,8 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'random_cte_recovery_max_omega',
         'random_cte_recovery_omega_reference',
         'random_cte_recovery_omega_weight',
+        'random_recovery_safety_gate_scale',
+        'random_recovery_safety_gate_mode',
         'random_clear_ahead_weight',
         'random_clear_ahead_weight_end',
         'random_clear_ahead_scenarios',
@@ -6330,6 +6394,7 @@ def main():
                     f'rand_offroute_active={(random_offroute_finish_active_sum / max(random_offroute_finish_active_seen, 1)):.3f} '
                     f'rand_cte_w={current_random_cte_recovery_weight:.3f} rand_cte={last_random_cte_recovery_loss:.4f} '
                     f'rand_cte_active={(random_cte_recovery_active_sum / max(random_cte_recovery_active_seen, 1)):.3f} '
+                    f'rand_recovery_gate={float(getattr(args, "random_recovery_safety_gate_scale", 1.0)):.3f}/{str(getattr(args, "random_recovery_safety_gate_mode", "batch"))} '
                     f'rand_clear_w={current_random_clear_ahead_weight:.3f} rand_clear={last_random_clear_ahead_loss:.4f} '
                     f'rand_clear_active={(random_clear_ahead_active_sum / max(random_clear_ahead_active_seen, 1)):.3f} '
                     f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '

@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument('--model', required=True, help='Input MAPPO checkpoint.')
     parser.add_argument('--trace-json', action='append', required=True, help='Trace JSON containing raw_observation and mask_diagnostics. Repeatable.')
     parser.add_argument('--anchor-trace-json', action='append', default=[], help='Extra raw-observation trace JSON used only for source-policy anchoring. Repeatable.')
+    parser.add_argument('--preserve-trace-json', action='append', default=[], help='Trace JSON used as supervised action-preservation samples. Repeatable.')
     parser.add_argument('--output', required=True, help='Output checkpoint path.')
     parser.add_argument('--epochs', type=int, default=80, help='Actor-only fitting epochs over traced slices.')
     parser.add_argument('--batch-size', type=int, default=128, help='Trace fitting minibatch size.')
@@ -73,9 +74,14 @@ def parse_args():
     parser.add_argument('--risk-guard-min-threat', type=float, default=0.08, help='Add risk guard samples when threat score is at least this value.')
     parser.add_argument('--risk-guard-max-separation', type=float, default=2.8, help='Add risk guard samples when team min separation is at most this value.')
     parser.add_argument('--risk-guard-max-linear', type=float, default=0.12, help='Maximum linear target for risk guard samples.')
+    parser.add_argument('--risk-guard-omega-blend', type=float, default=1.0, help='Blend risk guard omega toward the deconflict target when active; 0 preserves traced source omega.')
     parser.add_argument('--risk-guard-min-starboard-omega', type=float, default=0.0, help='If positive, enforce at least this starboard-turn magnitude (negative omega) for yield risk guard samples.')
     parser.add_argument('--risk-guard-min-starboard-threat', type=float, default=0.0, help='Only enforce risk-guard-min-starboard-omega when threat score is at least this value.')
     parser.add_argument('--risk-guard-min-distance', type=float, default=2.0, help='Only add risk guard samples farther than this distance from goal.')
+    parser.add_argument('--risk-guard-agent', action='append', dest='risk_guard_agents', default=None, help='Only add risk guard samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--risk-guard-min-route-progress', type=float, default=0.0, help='Only add risk guard samples whose route progress is at least this value.')
+    parser.add_argument('--risk-guard-max-route-progress', type=float, default=1.1, help='Only add risk guard samples whose route progress is at most this value.')
+    parser.add_argument('--risk-guard-min-abs-cte', type=float, default=0.0, help='Only add risk guard samples whose absolute CTE is at least this value.')
     parser.add_argument('--risk-guard-max-step', type=int, default=-1, help='If nonnegative, only add risk guard samples at or before this traced step index.')
     parser.add_argument('--risk-guard-yield-only', action='store_true', help='Only add risk guard samples for traced deconf yield agents.')
     parser.add_argument('--risk-guard-require-threat', action='store_true', help='Only add risk guard samples when threat score is at least risk-guard-min-threat.')
@@ -95,6 +101,11 @@ def parse_args():
     parser.add_argument('--imitate-action-max-distance', type=float, default=13.0, help='Only imitate samples within this distance from goal.')
     parser.add_argument('--imitate-action-max-abs-cte', type=float, default=3.1, help='Only imitate samples whose absolute CTE is at most this value.')
     parser.add_argument('--imitate-action-min-team-separation', type=float, default=0.0, help='Only imitate samples whose team min separation is at least this value. 0 disables.')
+    parser.add_argument('--preserve-action-weight', type=float, default=0.0, help='Sample weight for preserve-trace-json source-action imitation samples. 0 disables.')
+    parser.add_argument('--preserve-min-route-progress', type=float, default=0.0, help='Only preserve samples whose route progress is at least this value.')
+    parser.add_argument('--preserve-max-route-progress', type=float, default=1.1, help='Only preserve samples whose route progress is at most this value.')
+    parser.add_argument('--preserve-min-team-separation', type=float, default=0.0, help='Only preserve samples whose team min separation is at least this value. 0 disables.')
+    parser.add_argument('--preserve-exclude-collisions', action='store_true', help='Skip preserve samples from collision episodes.')
     parser.add_argument('--scripted-overtake-weight', type=float, default=0.0, help='Sample weight for deterministic overtaking teacher targets. 0 disables.')
     parser.add_argument('--scripted-overtake-scenario', action='append', dest='scripted_overtake_scenarios', default=None, help='Scenario name for scripted overtaking targets. Defaults to two_usv_overtaking.')
     parser.add_argument('--scripted-overtake-min-distance', type=float, default=0.8, help='Only add scripted overtaking samples farther than this distance from goal.')
@@ -353,6 +364,7 @@ def _collect_samples(args, checkpoint: dict):
                     team_min_separation = float(diagnostics.get('team_min_separation', 0.0))
                     threat_score = float(diagnostics.get('threat_score', 1.0))
                     distance_to_goal = float(agent.get('distance_to_goal', 0.0))
+                    route_progress = float(agent.get('route_progress', 0.0))
                     cross_track_error = abs(float(agent.get('cross_track_error', 0.0)))
                     scripted_weight = float(args.scripted_overtake_weight)
                     scripted_scenarios = set(str(value) for value in (args.scripted_overtake_scenarios or ['two_usv_overtaking']))
@@ -425,6 +437,7 @@ def _collect_samples(args, checkpoint: dict):
                         continue
                     guard_weight = float(args.risk_guard_weight)
                     guard_max_step = int(args.risk_guard_max_step)
+                    guard_agents = set(str(value) for value in (args.risk_guard_agents or []))
                     guard_risk_active = (
                         team_min_separation <= float(args.risk_guard_max_separation)
                         or threat_score >= float(args.risk_guard_min_threat)
@@ -435,6 +448,10 @@ def _collect_samples(args, checkpoint: dict):
                     if (
                         guard_weight > 0.0
                         and distance_to_goal > float(args.risk_guard_min_distance)
+                        and (not guard_agents or str(agent_id) in guard_agents)
+                        and route_progress >= float(args.risk_guard_min_route_progress)
+                        and route_progress <= float(args.risk_guard_max_route_progress)
+                        and cross_track_error >= float(args.risk_guard_min_abs_cte)
                         and (guard_max_step < 0 or step <= guard_max_step)
                         and (not bool(args.risk_guard_yield_only) or bool(diagnostics.get('deconf_is_yield', False)))
                         and guard_risk_active
@@ -442,7 +459,9 @@ def _collect_samples(args, checkpoint: dict):
                         guard_omega = source_omega
                         deconf_target = diagnostics.get('deconf_target', {})
                         if diagnostics.get('random_deconflict_weighted_active', False):
-                            guard_omega = float(deconf_target.get('target_omega', guard_omega))
+                            deconf_omega = float(deconf_target.get('target_omega', guard_omega))
+                            omega_blend = float(np.clip(args.risk_guard_omega_blend, 0.0, 1.0))
+                            guard_omega = (1.0 - omega_blend) * source_omega + omega_blend * deconf_omega
                         min_starboard_omega = max(0.0, float(args.risk_guard_min_starboard_omega))
                         min_starboard_threat = max(0.0, float(args.risk_guard_min_starboard_threat))
                         if (
@@ -539,6 +558,41 @@ def _collect_samples(args, checkpoint: dict):
                     weights.append(float(target_weights.get(selected_kind, 1.0)))
                     kind_ids.append(int(TARGET_KIND_TO_ID[selected_kind]))
                     counts[selected_kind] += 1
+
+    preserve_weight = float(args.preserve_action_weight)
+    if preserve_weight > 0.0:
+        for trace_path in args.preserve_trace_json or []:
+            payload = json.loads(Path(trace_path).read_text(encoding='utf-8'))
+            for episode in payload.get('episode_metrics', []):
+                if bool(args.preserve_exclude_collisions) and bool(episode.get('collision', False)):
+                    continue
+                scenario_id = _scenario_index(checkpoint, episode.get('scenario', ''))
+                for sample in episode.get('trace_samples', []):
+                    for agent in sample.get('agents', {}).values():
+                        raw_observation = agent.get('raw_observation')
+                        if raw_observation is None:
+                            continue
+                        diagnostics = agent.get('mask_diagnostics', {})
+                        route_progress = float(agent.get('route_progress', 0.0))
+                        team_min_separation = float(diagnostics.get('team_min_separation', 0.0))
+                        if route_progress < float(args.preserve_min_route_progress):
+                            continue
+                        if route_progress > float(args.preserve_max_route_progress):
+                            continue
+                        if team_min_separation < float(args.preserve_min_team_separation):
+                            continue
+                        raw_observation_np = np.asarray(raw_observation, dtype=np.float32)
+                        anchor_observations.append(raw_observation_np)
+                        anchor_scenario_ids.append(int(scenario_id))
+                        observations.append(raw_observation_np)
+                        targets.append(np.asarray([
+                            float(agent.get('final_linear_x', 0.0)),
+                            float(agent.get('final_angular_z', 0.0)),
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(preserve_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['imitate']))
+                        counts['imitate'] += 1
 
     for trace_path in args.anchor_trace_json or []:
         payload = json.loads(Path(trace_path).read_text(encoding='utf-8'))
@@ -750,9 +804,14 @@ def main():
         'risk_guard_min_threat': float(args.risk_guard_min_threat),
         'risk_guard_max_separation': float(args.risk_guard_max_separation),
         'risk_guard_max_linear': float(args.risk_guard_max_linear),
+        'risk_guard_omega_blend': float(args.risk_guard_omega_blend),
         'risk_guard_min_starboard_omega': float(args.risk_guard_min_starboard_omega),
         'risk_guard_min_starboard_threat': float(args.risk_guard_min_starboard_threat),
         'risk_guard_min_distance': float(args.risk_guard_min_distance),
+        'risk_guard_agents': [str(value) for value in (args.risk_guard_agents or [])],
+        'risk_guard_min_route_progress': float(args.risk_guard_min_route_progress),
+        'risk_guard_max_route_progress': float(args.risk_guard_max_route_progress),
+        'risk_guard_min_abs_cte': float(args.risk_guard_min_abs_cte),
         'risk_guard_max_step': int(args.risk_guard_max_step),
         'risk_guard_yield_only': bool(args.risk_guard_yield_only),
         'risk_guard_require_threat': bool(args.risk_guard_require_threat),
@@ -764,6 +823,12 @@ def main():
         'goal_hold_min_threat': float(args.goal_hold_min_threat),
         'goal_hold_target_linear': float(args.goal_hold_target_linear),
         'goal_hold_omega_blend': float(args.goal_hold_omega_blend),
+        'preserve_trace_json': [str(path) for path in args.preserve_trace_json or []],
+        'preserve_action_weight': float(args.preserve_action_weight),
+        'preserve_min_route_progress': float(args.preserve_min_route_progress),
+        'preserve_max_route_progress': float(args.preserve_max_route_progress),
+        'preserve_min_team_separation': float(args.preserve_min_team_separation),
+        'preserve_exclude_collisions': bool(args.preserve_exclude_collisions),
         'last_loss': last_loss,
         'train_all_actor': bool(args.train_all_actor),
     }
