@@ -31,6 +31,8 @@ setup(
             'evaluate_policy = usv_rl.evaluate_policy:main',
             'evaluate_mappo_policy = usv_rl.evaluate_mappo_policy:main',
             'diagnose_mappo_loss_gradients = usv_rl.diagnose_mappo_loss_gradients:main',
+            'audit_mappo_trace_samples = usv_rl.audit_mappo_trace_samples:main',
+            'interpolate_mappo_checkpoints = usv_rl.interpolate_mappo_checkpoints:main',
             'collect_teacher_trajectories = usv_rl.collect_teacher_trajectories:main',
             'train_distill_policy = usv_rl.train_distill_policy:main',
             'policy_inference_node = usv_rl.policy_inference_node:main',

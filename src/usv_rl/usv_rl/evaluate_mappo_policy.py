@@ -14,6 +14,78 @@ from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 
 
+def _infer_obs_layout_for_migration(obs_dim: int) -> tuple[int, int, int] | None:
+    new_ego_dim = AgentLocalObservation.ego_feature_size()
+    for ego_dim in (new_ego_dim, 17, 12, 11, 10):
+        for neighbor_dim in (NEIGHBOR_FEATURE_COUNT, 6):
+            neighbor_width = int(obs_dim) - int(ego_dim) - ENCOUNTER_TYPE_COUNT
+            if neighbor_width >= 0 and neighbor_width % int(neighbor_dim) == 0:
+                return int(ego_dim), int(neighbor_dim), int(neighbor_width // int(neighbor_dim))
+    return None
+
+
+def _migrate_obs_stats_by_layout(mean: np.ndarray, var: np.ndarray, new_obs_dim: int) -> tuple[np.ndarray, np.ndarray] | None:
+    old_layout = _infer_obs_layout_for_migration(int(mean.shape[0]))
+    new_layout = _infer_obs_layout_for_migration(int(new_obs_dim))
+    if old_layout is None or new_layout is None or old_layout[2] != new_layout[2]:
+        return None
+    old_ego_dim, old_neighbor_dim, neighbor_slots = old_layout
+    new_ego_dim, new_neighbor_dim, _ = new_layout
+    mean_parts = []
+    var_parts = []
+    ego_cols = min(old_ego_dim, new_ego_dim)
+    mean_parts.append(mean[:ego_cols])
+    var_parts.append(var[:ego_cols])
+    if new_ego_dim > ego_cols:
+        mean_parts.append(np.zeros(new_ego_dim - ego_cols, dtype=np.float64))
+        var_parts.append(np.ones(new_ego_dim - ego_cols, dtype=np.float64))
+    old_pos = old_ego_dim
+    for _ in range(neighbor_slots):
+        neighbor_cols = min(old_neighbor_dim, new_neighbor_dim)
+        mean_parts.append(mean[old_pos:old_pos + neighbor_cols])
+        var_parts.append(var[old_pos:old_pos + neighbor_cols])
+        if new_neighbor_dim > neighbor_cols:
+            mean_parts.append(np.zeros(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+            var_parts.append(np.ones(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+        old_pos += old_neighbor_dim
+    mean_parts.append(mean[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+    var_parts.append(var[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+    return np.concatenate(mean_parts), np.concatenate(var_parts)
+
+
+def _adapt_observation_vector_dim(observation: np.ndarray, target_dim: int) -> np.ndarray:
+    obs = np.asarray(observation, dtype=np.float32)
+    current_dim = int(obs.shape[-1]) if obs.ndim > 0 else 0
+    target_dim = int(target_dim)
+    if current_dim == target_dim:
+        return obs
+    current_layout = _infer_obs_layout_for_migration(current_dim)
+    target_layout = _infer_obs_layout_for_migration(target_dim)
+    if current_layout is not None and target_layout is not None and current_layout[2] == target_layout[2]:
+        current_ego_dim, current_neighbor_dim, neighbor_slots = current_layout
+        target_ego_dim, target_neighbor_dim, _ = target_layout
+        parts = []
+        ego_cols = min(current_ego_dim, target_ego_dim)
+        parts.append(obs[..., :ego_cols])
+        if target_ego_dim > ego_cols:
+            pad_shape = obs.shape[:-1] + (target_ego_dim - ego_cols,)
+            parts.append(np.zeros(pad_shape, dtype=np.float32))
+        old_pos = current_ego_dim
+        for _ in range(neighbor_slots):
+            neighbor_cols = min(current_neighbor_dim, target_neighbor_dim)
+            parts.append(obs[..., old_pos:old_pos + neighbor_cols])
+            if target_neighbor_dim > neighbor_cols:
+                pad_shape = obs.shape[:-1] + (target_neighbor_dim - neighbor_cols,)
+                parts.append(np.zeros(pad_shape, dtype=np.float32))
+            old_pos += current_neighbor_dim
+        parts.append(obs[..., old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+        return np.concatenate(parts, axis=-1).astype(np.float32, copy=False)
+    if target_dim > current_dim:
+        pad_shape = obs.shape[:-1] + (target_dim - current_dim,)
+        return np.concatenate([obs, np.zeros(pad_shape, dtype=np.float32)], axis=-1)
+    return obs[..., :target_dim].astype(np.float32, copy=False)
+
+
 def _migrate_obs_normalizer_state_for_obs_dim(state: dict, new_obs_dim: int) -> dict:
     mean = np.asarray(state.get('mean', ()), dtype=np.float64)
     var = np.asarray(state.get('var', ()), dtype=np.float64)
@@ -25,6 +97,12 @@ def _migrate_obs_normalizer_state_for_obs_dim(state: dict, new_obs_dim: int) -> 
         return state
 
     delta = new_obs_dim - old_obs_dim
+    layout_stats = _migrate_obs_stats_by_layout(mean, var, new_obs_dim)
+    if layout_stats is not None:
+        migrated = dict(state)
+        migrated['mean'], migrated['var'] = layout_stats
+        print(f'Migrated eval observation normalizer: {old_obs_dim} -> {new_obs_dim} dims.', flush=True)
+        return migrated
     new_ego_dim = AgentLocalObservation.ego_feature_size()
     old_neighbor_dim = 6
     old_neighbor_width = old_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
@@ -166,6 +244,7 @@ class MappoActorPolicy:
             self._actor.set_active_scenario_name(scenario_name)
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
+        observation = _adapt_observation_vector_dim(observation, self.obs_dim)
         if self._obs_normalizer is not None:
             observation = self._obs_normalizer.normalize(observation)
         obs_tensor = self._torch.as_tensor(observation, dtype=self._torch.float32, device=self._device).unsqueeze(0)
@@ -204,11 +283,123 @@ class WeightedBlendPolicy:
         self.action_dim = reference_policy.action_dim
         self.obs_dim = reference_policy.obs_dim
 
+    def set_active_scenario(self, scenario_name: str | None) -> None:
+        for policy, _ in self._weighted_policies:
+            policy.set_active_scenario(scenario_name)
+
     def predict(self, observation: np.ndarray) -> np.ndarray:
         blended = np.zeros(self.action_dim, dtype=np.float32)
         for policy, weight in self._weighted_policies:
             blended += np.asarray(policy.predict(observation), dtype=np.float32) * np.float32(weight)
         return blended
+
+
+class GatedBlendPolicy:
+    def __init__(
+        self,
+        base_policy: MappoActorPolicy,
+        safety_policy: MappoActorPolicy,
+        gate_config: dict,
+        critical_safety_policy: MappoActorPolicy | None = None,
+    ):
+        if base_policy.action_dim != safety_policy.action_dim or base_policy.obs_dim != safety_policy.obs_dim:
+            raise RuntimeError('Gated blend experts must share the same obs_dim/action_dim.')
+        if critical_safety_policy is not None and (
+            base_policy.action_dim != critical_safety_policy.action_dim or base_policy.obs_dim != critical_safety_policy.obs_dim
+        ):
+            raise RuntimeError('Critical gated blend expert must share the same obs_dim/action_dim.')
+        self._base_policy = base_policy
+        self._safety_policy = safety_policy
+        self._critical_safety_policy = critical_safety_policy
+        self._blend = float(gate_config.get('blend', 0.35))
+        self._yield_blend = float(gate_config.get('yield_blend', self._blend))
+        self._standon_blend = float(gate_config.get('standon_blend', self._blend))
+        self._yield_linear_blend = float(gate_config.get('yield_linear_blend', gate_config.get('linear_blend', self._yield_blend)))
+        self._standon_linear_blend = float(gate_config.get('standon_linear_blend', gate_config.get('linear_blend', self._standon_blend)))
+        self._yield_angular_blend = float(gate_config.get('yield_angular_blend', gate_config.get('angular_blend', self._yield_blend)))
+        self._standon_angular_blend = float(gate_config.get('standon_angular_blend', gate_config.get('angular_blend', self._standon_blend)))
+        self._max_separation = float(gate_config.get('max_separation', 1.35))
+        self._critical_separation = float(gate_config.get('critical_separation', 0.85))
+        self._min_route_progress = float(gate_config.get('min_route_progress', 0.0))
+        self._max_route_progress = float(gate_config.get('max_route_progress', 1.1))
+        self._min_abs_cte = float(gate_config.get('min_abs_cte', 0.0))
+        self._early_min_abs_cte = float(gate_config.get('early_min_abs_cte', 0.0))
+        self._yield_only = bool(gate_config.get('yield_only', False))
+        self._standon_only = bool(gate_config.get('standon_only', False))
+        self.action_dim = base_policy.action_dim
+        self.obs_dim = base_policy.obs_dim
+
+    def set_active_scenario(self, scenario_name: str | None) -> None:
+        self._base_policy.set_active_scenario(scenario_name)
+        self._safety_policy.set_active_scenario(scenario_name)
+        if self._critical_safety_policy is not None:
+            self._critical_safety_policy.set_active_scenario(scenario_name)
+
+    def _nearest_neighbor(self, observation: np.ndarray) -> tuple[float, float]:
+        ego_dim = AgentLocalObservation.ego_feature_size()
+        available = int(observation.shape[0]) - ego_dim - ENCOUNTER_TYPE_COUNT
+        slots = max(0, available // NEIGHBOR_FEATURE_COUNT)
+        nearest_distance = float('inf')
+        nearest_priority_delta = 0.0
+        for slot in range(slots):
+            start = ego_dim + slot * NEIGHBOR_FEATURE_COUNT
+            block = observation[start:start + NEIGHBOR_FEATURE_COUNT]
+            if block.shape[0] < NEIGHBOR_FEATURE_COUNT:
+                continue
+            distance = float(block[4])
+            if distance <= 1e-6 or distance >= nearest_distance:
+                continue
+            nearest_distance = distance
+            nearest_priority_delta = float(block[9])
+        return nearest_distance, nearest_priority_delta
+
+    def _gate_weights(self, observation: np.ndarray) -> tuple[float, float]:
+        route_progress = float(observation[12]) if observation.shape[0] > 12 else 0.0
+        abs_cte = abs(float(observation[11])) if observation.shape[0] > 11 else 0.0
+        if route_progress < self._min_route_progress or route_progress > self._max_route_progress:
+            return 0.0, 0.0
+        if abs_cte < self._min_abs_cte:
+            return 0.0, 0.0
+        nearest_distance, priority_delta = self._nearest_neighbor(observation)
+        if nearest_distance > self._max_separation:
+            return 0.0, 0.0
+        if nearest_distance > self._critical_separation and abs_cte < self._early_min_abs_cte:
+            return 0.0, 0.0
+        is_yield = priority_delta < 0.0
+        if self._yield_only and not is_yield:
+            return 0.0, 0.0
+        if self._standon_only and is_yield:
+            return 0.0, 0.0
+        linear_blend = self._yield_linear_blend if is_yield else self._standon_linear_blend
+        angular_blend = self._yield_angular_blend if is_yield else self._standon_angular_blend
+        if nearest_distance <= self._critical_separation:
+            scale = 1.0
+        else:
+            width = max(1e-6, self._max_separation - self._critical_separation)
+            scale = 1.0 - ((nearest_distance - self._critical_separation) / width)
+        return (
+            float(np.clip(linear_blend * scale, 0.0, 1.0)),
+            float(np.clip(angular_blend * scale, 0.0, 1.0)),
+        )
+
+    def _gate_weight(self, observation: np.ndarray) -> float:
+        linear_weight, angular_weight = self._gate_weights(observation)
+        return max(linear_weight, angular_weight)
+
+    def predict(self, observation: np.ndarray) -> np.ndarray:
+        base_action = np.asarray(self._base_policy.predict(observation), dtype=np.float32)
+        linear_weight, angular_weight = self._gate_weights(np.asarray(observation, dtype=np.float32))
+        if max(linear_weight, angular_weight) <= 0.0:
+            return base_action
+        nearest_distance, _ = self._nearest_neighbor(np.asarray(observation, dtype=np.float32))
+        safety_policy = self._safety_policy
+        if self._critical_safety_policy is not None and nearest_distance <= self._critical_separation:
+            safety_policy = self._critical_safety_policy
+        safety_action = np.asarray(safety_policy.predict(observation), dtype=np.float32)
+        component_weights = np.full(self.action_dim, angular_weight, dtype=np.float32)
+        if self.action_dim > 0:
+            component_weights[0] = np.float32(linear_weight)
+        return ((1.0 - component_weights) * base_action + component_weights * safety_action).astype(np.float32)
 
 
 class ScenarioRouterPolicy:
@@ -221,13 +412,21 @@ class ScenarioRouterPolicy:
         if not isinstance(raw_scenario_blends, dict):
             raise RuntimeError('MAPPO router config requires scenario_blends to be a mapping when provided.')
 
-        if not raw_scenario_models and not raw_scenario_blends:
-            raise RuntimeError('MAPPO router config requires at least one scenario_models or scenario_blends entry.')
+        raw_scenario_gated_blends = router_config.get('scenario_gated_blends') or {}
+        if not isinstance(raw_scenario_gated_blends, dict):
+            raise RuntimeError('MAPPO router config requires scenario_gated_blends to be a mapping when provided.')
 
-        overlapping_scenarios = set(raw_scenario_models) & set(raw_scenario_blends)
+        if not raw_scenario_models and not raw_scenario_blends and not raw_scenario_gated_blends:
+            raise RuntimeError('MAPPO router config requires at least one scenario_models, scenario_blends, or scenario_gated_blends entry.')
+
+        overlapping_scenarios = (
+            (set(raw_scenario_models) & set(raw_scenario_blends))
+            | (set(raw_scenario_models) & set(raw_scenario_gated_blends))
+            | (set(raw_scenario_blends) & set(raw_scenario_gated_blends))
+        )
         if overlapping_scenarios:
             joined = ', '.join(sorted(str(value) for value in overlapping_scenarios))
-            raise RuntimeError(f'Scenarios cannot be defined in both scenario_models and scenario_blends: {joined}')
+            raise RuntimeError(f'Scenarios cannot be defined in multiple router policy maps: {joined}')
 
         self._scenario_models = {
             str(scenario_name): str(model_path)
@@ -260,16 +459,43 @@ class ScenarioRouterPolicy:
                     )
                 specs.append((model_path, weight))
             self._scenario_blends[str(scenario_name)] = specs
+        self._scenario_gated_blends: dict[str, dict] = {}
+        for scenario_name, raw_spec in raw_scenario_gated_blends.items():
+            if not isinstance(raw_spec, dict):
+                raise RuntimeError(f'Gated blend entry must be an object. Problem scenario: {scenario_name}')
+            base_model = str(raw_spec.get('base_model') or raw_spec.get('base') or '').strip()
+            safety_model = str(raw_spec.get('safety_model') or raw_spec.get('safety') or '').strip()
+            if not base_model or not safety_model:
+                raise RuntimeError(f'Gated blend entry must define base_model and safety_model. Problem scenario: {scenario_name}')
+            spec = dict(raw_spec)
+            spec['base_model'] = base_model
+            spec['safety_model'] = safety_model
+            critical_safety_model = str(raw_spec.get('critical_safety_model') or raw_spec.get('critical_safety') or '').strip()
+            if critical_safety_model:
+                spec['critical_safety_model'] = critical_safety_model
+            self._scenario_gated_blends[str(scenario_name)] = spec
 
-        self._default_model = str(router_config.get('default_model') or next(iter(self._scenario_models.values())))
+        self._default_model = str(
+            router_config.get('default_model')
+            or next(iter(self._scenario_models.values()), '')
+            or next(iter((specs[0][0] for specs in self._scenario_blends.values() if specs)), '')
+            or next(iter((spec['base_model'] for spec in self._scenario_gated_blends.values())), '')
+        )
+        if not self._default_model:
+            raise RuntimeError('MAPPO router config must resolve a default model or gated base model.')
         self._active_scenario: str | None = None
         self._policies: dict[str, MappoActorPolicy] = {}
-        self._scenario_policies: dict[str, MappoActorPolicy | WeightedBlendPolicy] = {}
+        self._scenario_policies: dict[str, MappoActorPolicy | WeightedBlendPolicy | GatedBlendPolicy] = {}
 
         reference_policy: MappoActorPolicy | None = None
         unique_paths = {self._default_model, *self._scenario_models.values()}
         for blend_specs in self._scenario_blends.values():
             unique_paths.update(model_path for model_path, _ in blend_specs)
+        for gated_spec in self._scenario_gated_blends.values():
+            unique_paths.add(str(gated_spec['base_model']))
+            unique_paths.add(str(gated_spec['safety_model']))
+            if gated_spec.get('critical_safety_model'):
+                unique_paths.add(str(gated_spec['critical_safety_model']))
         for model_path in unique_paths:
             _, policy = _load_mappo_checkpoint(model_path, device)
             _require_supported_action_dim(policy.action_dim, model_path=model_path)
@@ -293,14 +519,24 @@ class ScenarioRouterPolicy:
             self._scenario_policies[scenario_name] = WeightedBlendPolicy(
                 [(self._policies[model_path], weight) for model_path, weight in blend_specs]
             )
+        for scenario_name, gated_spec in self._scenario_gated_blends.items():
+            self._scenario_policies[scenario_name] = GatedBlendPolicy(
+                self._policies[str(gated_spec['base_model'])],
+                self._policies[str(gated_spec['safety_model'])],
+                gated_spec,
+                self._policies[str(gated_spec['critical_safety_model'])]
+                if gated_spec.get('critical_safety_model') else None,
+            )
 
         self.action_dim = self._default_policy.action_dim
         self.obs_dim = self._default_policy.obs_dim
 
     def set_active_scenario(self, scenario_name: str | None) -> None:
         self._active_scenario = str(scenario_name) if scenario_name else None
+        for policy in self._policies.values():
+            policy.set_active_scenario(self._active_scenario)
 
-    def _resolve_policy(self) -> MappoActorPolicy | WeightedBlendPolicy:
+    def _resolve_policy(self) -> MappoActorPolicy | WeightedBlendPolicy | GatedBlendPolicy:
         return self._scenario_policies.get(self._active_scenario or '', self._default_policy)
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
@@ -460,10 +696,10 @@ def _build_env_kwargs_from_checkpoint(
         'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
         'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
         'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
-        'cte_clip_range': float(checkpoint.get('cte_clip_range', 3.0)),
-        'route_progress_cte_gate_start': float(checkpoint.get('route_progress_cte_gate_start', 0.0)),
-        'route_progress_cte_gate_width': float(checkpoint.get('route_progress_cte_gate_width', 0.0)),
-        'route_progress_cte_gate_floor': float(checkpoint.get('route_progress_cte_gate_floor', 0.25)),
+        'cte_clip_range': _env_float('CTE_CLIP_RANGE', float(checkpoint.get('cte_clip_range', 3.0))),
+        'route_progress_cte_gate_start': _env_float('ROUTE_PROGRESS_CTE_GATE_START', float(checkpoint.get('route_progress_cte_gate_start', 0.0))),
+        'route_progress_cte_gate_width': _env_float('ROUTE_PROGRESS_CTE_GATE_WIDTH', float(checkpoint.get('route_progress_cte_gate_width', 0.0))),
+        'route_progress_cte_gate_floor': _env_float('ROUTE_PROGRESS_CTE_GATE_FLOOR', float(checkpoint.get('route_progress_cte_gate_floor', 0.25))),
         'random_encounter_route_priority': bool(checkpoint.get('random_encounter_route_priority', False)),
         'default_scenarios': resolved_scenarios,
         'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
@@ -492,7 +728,13 @@ def _build_env_kwargs_from_checkpoint(
         'pairwise_shield_standon_omega': _env_float('PAIRWISE_SHIELD_STANDON_OMEGA', float(checkpoint.get('random_deconflict_standon_omega', 0.04))),
         'pairwise_shield_yield_danger_scale': _env_float('PAIRWISE_SHIELD_YIELD_DANGER_SCALE', float(checkpoint.get('random_deconflict_yield_danger_scale', 1.0))),
         'pairwise_shield_blend': _env_float('PAIRWISE_SHIELD_BLEND', float(checkpoint.get('pairwise_shield_blend', 1.0))),
+        'pairwise_shield_yield_blend': _env_float('PAIRWISE_SHIELD_YIELD_BLEND', float(checkpoint.get('pairwise_shield_yield_blend', -1.0))),
+        'pairwise_shield_standon_blend': _env_float('PAIRWISE_SHIELD_STANDON_BLEND', float(checkpoint.get('pairwise_shield_standon_blend', -1.0))),
         'pairwise_shield_yield_only': _env_bool('PAIRWISE_SHIELD_YIELD_ONLY', bool(checkpoint.get('pairwise_shield_yield_only', False))),
+        'pairwise_shield_yield_agent_ids': _env_str('PAIRWISE_SHIELD_YIELD_AGENT_IDS', str(checkpoint.get('pairwise_shield_yield_agent_ids', ''))),
+        'pairwise_shield_standon_agent_ids': _env_str('PAIRWISE_SHIELD_STANDON_AGENT_IDS', str(checkpoint.get('pairwise_shield_standon_agent_ids', ''))),
+        'pairwise_shield_pair_ids': _env_str('PAIRWISE_SHIELD_PAIR_IDS', str(checkpoint.get('pairwise_shield_pair_ids', ''))),
+        'pairwise_shield_critical_bypass_gates': _env_bool('PAIRWISE_SHIELD_CRITICAL_BYPASS_GATES', bool(checkpoint.get('pairwise_shield_critical_bypass_gates', False))),
         'pairwise_shield_turn_mode': _env_str('PAIRWISE_SHIELD_TURN_MODE', str(checkpoint.get('random_deconflict_turn_mode', 'away'))),
         'pairwise_shield_role_mode': _env_str('PAIRWISE_SHIELD_ROLE_MODE', str(checkpoint.get('random_deconflict_role_mode', 'priority-delta'))),
         'pairwise_shield_priority_delta_yield_threshold': _env_float('PAIRWISE_SHIELD_PRIORITY_DELTA_YIELD_THRESHOLD', float(checkpoint.get('random_deconflict_priority_delta_yield_threshold', -0.01))),
@@ -500,6 +742,16 @@ def _build_env_kwargs_from_checkpoint(
         'pairwise_shield_min_route_progress': _env_float('PAIRWISE_SHIELD_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_min_route_progress', 0.0))),
         'pairwise_shield_max_route_progress': _env_float('PAIRWISE_SHIELD_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_max_route_progress', 1.1))),
         'pairwise_shield_min_abs_cte': _env_float('PAIRWISE_SHIELD_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_min_abs_cte', 0.0))),
+        'pairwise_shield_yield_min_route_progress': _env_float('PAIRWISE_SHIELD_YIELD_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_yield_min_route_progress', -1.0))),
+        'pairwise_shield_yield_max_route_progress': _env_float('PAIRWISE_SHIELD_YIELD_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_yield_max_route_progress', -1.0))),
+        'pairwise_shield_yield_min_abs_cte': _env_float('PAIRWISE_SHIELD_YIELD_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_yield_min_abs_cte', -1.0))),
+        'pairwise_shield_standon_min_route_progress': _env_float('PAIRWISE_SHIELD_STANDON_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_standon_min_route_progress', -1.0))),
+        'pairwise_shield_standon_max_route_progress': _env_float('PAIRWISE_SHIELD_STANDON_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_standon_max_route_progress', -1.0))),
+        'pairwise_shield_standon_min_abs_cte': _env_float('PAIRWISE_SHIELD_STANDON_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_standon_min_abs_cte', -1.0))),
+        'pairwise_shield_yield_late_min_route_progress': _env_float('PAIRWISE_SHIELD_YIELD_LATE_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_yield_late_min_route_progress', -1.0))),
+        'pairwise_shield_yield_late_min_abs_cte': _env_float('PAIRWISE_SHIELD_YIELD_LATE_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_yield_late_min_abs_cte', -1.0))),
+        'pairwise_shield_standon_late_min_route_progress': _env_float('PAIRWISE_SHIELD_STANDON_LATE_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_standon_late_min_route_progress', -1.0))),
+        'pairwise_shield_standon_late_min_abs_cte': _env_float('PAIRWISE_SHIELD_STANDON_LATE_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_standon_late_min_abs_cte', -1.0))),
     }
     return env_kwargs, resolved_scenarios
 
@@ -734,6 +986,8 @@ def _trace_episode_sample(
             'distance_to_goal': float(obs_obj.distance_to_goal),
             'route_progress': float(obs_obj.route_progress),
             'cross_track_error': float(obs_obj.cross_track_error),
+            'raw_cross_track_error': float(getattr(obs_obj, 'raw_cross_track_error', obs_obj.cross_track_error)),
+            'cross_track_overflow': float(getattr(obs_obj, 'cross_track_overflow', 0.0)),
             'heading_error': float(obs_obj.heading_error),
             'crossing_priority': float(obs_obj.crossing_priority),
             'final_linear_x': float(obs_obj.final_linear_x),
@@ -777,6 +1031,10 @@ def _trace_bool(config: dict, key: str, default: bool = False) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {'1', 'true', 'yes', 'on'}
     return bool(value)
+
+
+def _trace_goal_heading_omega_sign(config: dict) -> float:
+    return 1.0 if _trace_float(config, 'goal_heading_omega_sign', -1.0) >= 0.0 else -1.0
 
 
 def _trace_str(config: dict, key: str, default: str) -> str:
@@ -1157,7 +1415,7 @@ def _trace_offroute_target(
     max_omega = max(0.0, _trace_float(config, 'random_offroute_finish_max_omega', 0.18))
     omega_reference = max(0.05, _trace_float(config, 'random_offroute_finish_omega_reference', 0.65))
     target_linear = target_speed - (target_speed - min_speed) * cte_urgency
-    target_omega = -_trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
+    target_omega = _trace_goal_heading_omega_sign(config) * _trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
     return _trace_action_target(
         obs_obj,
         target_linear,
@@ -1185,7 +1443,7 @@ def _trace_cte_recovery_target(
     max_omega = max(0.0, _trace_float(config, 'random_cte_recovery_max_omega', 0.30))
     omega_reference = max(0.05, _trace_float(config, 'random_cte_recovery_omega_reference', 0.55))
     target_linear = target_speed - (target_speed - min_speed) * cte_urgency
-    target_omega = -_trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega
+    target_omega = _trace_goal_heading_omega_sign(config) * _trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega
     return _trace_action_target(
         obs_obj,
         target_linear,
@@ -1307,14 +1565,16 @@ def _trace_random_mask_diagnostics(
     cte_max_distance = max(cte_goal_tolerance + 0.05, _trace_float(config, 'random_cte_recovery_max_distance', 13.0))
     cte_min_abs = max(0.0, _trace_float(config, 'random_cte_recovery_min_abs_cte', 1.10))
     cte_min_neighbor_sep = max(0.0, _trace_float(config, 'random_cte_recovery_min_neighbor_separation', 0.85))
+    cte_agent_indices = tuple(int(index) for index in (config.get('random_cte_recovery_agent_indices', ()) or ()))
     cte_unfinished = distance > cte_goal_tolerance and distance <= cte_max_distance
     cte_gate = abs_cte >= cte_min_abs
+    cte_role = (not cte_agent_indices) or (_trace_agent_index(str(obs_obj.agent_id)) in cte_agent_indices)
     cte_neighbor_clear = (not bool(nearest['valid'])) or float(nearest['distance']) >= cte_min_neighbor_sep
     cte_threat_clear = True
     if not _trace_bool(config, 'random_cte_recovery_allow_threat_overlap', False):
         cte_threat_clear = ((not valid_cpa) or cpa_score <= 0.0) and ((not valid_local) or local_score <= 0.0) and not deconf_active
     cte_weight = _trace_weight(config, 'random_cte_recovery_weight')
-    cte_active = bool(scenario_mask and cte_unfinished and cte_gate and cte_neighbor_clear and cte_threat_clear)
+    cte_active = bool(scenario_mask and cte_unfinished and cte_gate and cte_role and cte_neighbor_clear and cte_threat_clear)
     cte_weighted_active = cte_active and cte_weight > 0.0
 
     return {
@@ -1391,6 +1651,7 @@ def _trace_random_mask_diagnostics(
         ),
         'cte_recovery_unfinished': bool(cte_unfinished),
         'cte_recovery_gate': bool(cte_gate),
+        'cte_recovery_role': bool(cte_role),
         'cte_recovery_neighbor_clear': bool(cte_neighbor_clear),
         'cte_recovery_threat_clear': bool(cte_threat_clear),
         'cte_recovery_weight': cte_weight,
@@ -1719,6 +1980,8 @@ def evaluate_policy(
                             'distance_to_goal': float(obs_obj.distance_to_goal),
                             'route_progress': float(obs_obj.route_progress),
                             'cross_track_error': float(obs_obj.cross_track_error),
+                            'raw_cross_track_error': float(getattr(obs_obj, 'raw_cross_track_error', obs_obj.cross_track_error)),
+                            'cross_track_overflow': float(getattr(obs_obj, 'cross_track_overflow', 0.0)),
                             'heading_error': float(obs_obj.heading_error),
                             'crossing_priority': float(obs_obj.crossing_priority),
                             'final_linear_x': float(obs_obj.final_linear_x),

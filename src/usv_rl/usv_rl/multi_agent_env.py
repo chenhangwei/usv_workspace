@@ -151,7 +151,13 @@ class MultiAgentEnvConfig:
     pairwise_shield_standon_omega: float = 0.04
     pairwise_shield_yield_danger_scale: float = 1.0
     pairwise_shield_blend: float = 1.0
+    pairwise_shield_yield_blend: float = -1.0
+    pairwise_shield_standon_blend: float = -1.0
     pairwise_shield_yield_only: bool = False
+    pairwise_shield_yield_agent_ids: str = ''
+    pairwise_shield_standon_agent_ids: str = ''
+    pairwise_shield_pair_ids: str = ''
+    pairwise_shield_critical_bypass_gates: bool = False
     pairwise_shield_turn_mode: str = 'away'
     pairwise_shield_role_mode: str = 'priority-delta'
     pairwise_shield_priority_delta_yield_threshold: float = -0.01
@@ -159,6 +165,16 @@ class MultiAgentEnvConfig:
     pairwise_shield_min_route_progress: float = 0.0
     pairwise_shield_max_route_progress: float = 1.1
     pairwise_shield_min_abs_cte: float = 0.0
+    pairwise_shield_yield_min_route_progress: float = -1.0
+    pairwise_shield_yield_max_route_progress: float = -1.0
+    pairwise_shield_yield_min_abs_cte: float = -1.0
+    pairwise_shield_standon_min_route_progress: float = -1.0
+    pairwise_shield_standon_max_route_progress: float = -1.0
+    pairwise_shield_standon_min_abs_cte: float = -1.0
+    pairwise_shield_yield_late_min_route_progress: float = -1.0
+    pairwise_shield_yield_late_min_abs_cte: float = -1.0
+    pairwise_shield_standon_late_min_route_progress: float = -1.0
+    pairwise_shield_standon_late_min_abs_cte: float = -1.0
 
 
 class MultiAgentEnv(gym.Env):
@@ -458,6 +474,38 @@ class MultiAgentEnv(gym.Env):
             return float(observation.crossing_priority) <= -0.10
         return int(agent_id.rsplit('_', 1)[-1]) >= 2
 
+    @staticmethod
+    def _pairwise_shield_agent_id_allowed(agent_id: str, allowed_ids: str) -> bool:
+        tokens = {
+            token.strip()
+            for token in str(allowed_ids).replace(',', ' ').split()
+            if token.strip()
+        }
+        return not tokens or str(agent_id) in tokens
+
+    @staticmethod
+    def _pairwise_shield_pair_allowed(agent_id: str, neighbor_id: str, allowed_pairs: str) -> bool:
+        tokens = {
+            token.strip()
+            for token in str(allowed_pairs).replace(',', ' ').split()
+            if token.strip()
+        }
+        if not tokens:
+            return True
+        if not neighbor_id:
+            return False
+        current_pair = {str(agent_id), str(neighbor_id)}
+        for token in tokens:
+            normalized = token
+            for separator in (':', '/', '|'):
+                normalized = normalized.replace(separator, '-')
+            if '-' not in normalized:
+                continue
+            left, right = normalized.split('-', 1)
+            if {left.strip(), right.strip()} == current_pair:
+                return True
+        return False
+
     def _apply_pairwise_shield(
         self,
         agent_id: str,
@@ -468,16 +516,12 @@ class MultiAgentEnv(gym.Env):
             return command
         if self.current_scenario_name not in {'two_usv_random_encounter', 'three_usv_random_encounter'}:
             return command
-        route_progress = float(getattr(observation, 'route_progress', 0.0))
-        if route_progress < float(self.config.pairwise_shield_min_route_progress):
-            return command
-        if route_progress > float(self.config.pairwise_shield_max_route_progress):
-            return command
-        if abs(float(getattr(observation, 'cross_track_error', 0.0))) < float(self.config.pairwise_shield_min_abs_cte):
-            return command
 
         nearest = min(observation.neighbors, key=lambda item: float(item.distance), default=None)
         if nearest is None:
+            return command
+        nearest_id = str(getattr(nearest, 'source_id', ''))
+        if not self._pairwise_shield_pair_allowed(agent_id, nearest_id, self.config.pairwise_shield_pair_ids):
             return command
         nearest_distance = max(0.0, float(nearest.distance))
         release_separation = max(0.0, float(self.config.pairwise_shield_release_separation))
@@ -497,10 +541,47 @@ class MultiAgentEnv(gym.Env):
         danger = float(np.clip(danger, 0.0, 1.0))
         if nearest_distance <= critical:
             danger = 1.0
-
         is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
         if bool(self.config.pairwise_shield_yield_only) and not is_yield:
             return command
+        allowed_ids = self.config.pairwise_shield_yield_agent_ids if is_yield else self.config.pairwise_shield_standon_agent_ids
+        if not self._pairwise_shield_agent_id_allowed(agent_id, allowed_ids):
+            return command
+        route_progress = float(getattr(observation, 'route_progress', 0.0))
+        abs_cross_track_error = abs(float(getattr(observation, 'cross_track_error', 0.0)))
+        min_route_progress = float(self.config.pairwise_shield_min_route_progress)
+        max_route_progress = float(self.config.pairwise_shield_max_route_progress)
+        min_abs_cte = float(self.config.pairwise_shield_min_abs_cte)
+        late_min_route_progress = -1.0
+        late_min_abs_cte = -1.0
+        if is_yield:
+            if float(self.config.pairwise_shield_yield_min_route_progress) >= 0.0:
+                min_route_progress = float(self.config.pairwise_shield_yield_min_route_progress)
+            if float(self.config.pairwise_shield_yield_max_route_progress) >= 0.0:
+                max_route_progress = float(self.config.pairwise_shield_yield_max_route_progress)
+            if float(self.config.pairwise_shield_yield_min_abs_cte) >= 0.0:
+                min_abs_cte = float(self.config.pairwise_shield_yield_min_abs_cte)
+            if float(self.config.pairwise_shield_yield_late_min_route_progress) >= 0.0:
+                late_min_route_progress = float(self.config.pairwise_shield_yield_late_min_route_progress)
+            if float(self.config.pairwise_shield_yield_late_min_abs_cte) >= 0.0:
+                late_min_abs_cte = float(self.config.pairwise_shield_yield_late_min_abs_cte)
+        else:
+            if float(self.config.pairwise_shield_standon_min_route_progress) >= 0.0:
+                min_route_progress = float(self.config.pairwise_shield_standon_min_route_progress)
+            if float(self.config.pairwise_shield_standon_max_route_progress) >= 0.0:
+                max_route_progress = float(self.config.pairwise_shield_standon_max_route_progress)
+            if float(self.config.pairwise_shield_standon_min_abs_cte) >= 0.0:
+                min_abs_cte = float(self.config.pairwise_shield_standon_min_abs_cte)
+            if float(self.config.pairwise_shield_standon_late_min_route_progress) >= 0.0:
+                late_min_route_progress = float(self.config.pairwise_shield_standon_late_min_route_progress)
+            if float(self.config.pairwise_shield_standon_late_min_abs_cte) >= 0.0:
+                late_min_abs_cte = float(self.config.pairwise_shield_standon_late_min_abs_cte)
+        bypass_gates = bool(self.config.pairwise_shield_critical_bypass_gates) and nearest_distance <= critical
+        if not bypass_gates:
+            primary_gate = min_route_progress <= route_progress <= max_route_progress and abs_cross_track_error >= min_abs_cte
+            late_gate = late_min_route_progress >= 0.0 and route_progress >= late_min_route_progress and abs_cross_track_error >= max(0.0, late_min_abs_cte)
+            if not (primary_gate or late_gate):
+                return command
         turn_sign = -1.0
         if str(self.config.pairwise_shield_turn_mode).strip().lower() == 'away':
             if rel_y > 0.0:
@@ -517,6 +598,10 @@ class MultiAgentEnv(gym.Env):
             target_omega = turn_sign * max(0.0, float(self.config.pairwise_shield_standon_omega)) * danger
 
         blend = float(np.clip(self.config.pairwise_shield_blend, 0.0, 1.0))
+        if is_yield and float(self.config.pairwise_shield_yield_blend) >= 0.0:
+            blend = float(np.clip(self.config.pairwise_shield_yield_blend, 0.0, 1.0))
+        if not is_yield and float(self.config.pairwise_shield_standon_blend) >= 0.0:
+            blend = float(np.clip(self.config.pairwise_shield_standon_blend, 0.0, 1.0))
         linear_x = (1.0 - blend) * float(command[0]) + blend * target_linear
         angular_z = (1.0 - blend) * float(command[1]) + blend * target_omega
         linear_x = float(np.clip(linear_x, self.action_low[0], self.action_high[0]))
@@ -652,6 +737,8 @@ class MultiAgentEnv(gym.Env):
         if self._scenario is None:
             return {
                 'cross_track_error': 0.0,
+                'raw_cross_track_error': 0.0,
+                'cross_track_overflow': 0.0,
                 'route_progress': 0.0,
                 'conflict_phase': 0.0,
                 'conflict_eta': 1.0,
@@ -664,6 +751,8 @@ class MultiAgentEnv(gym.Env):
         if spawn is None or goal is None:
             return {
                 'cross_track_error': 0.0,
+                'raw_cross_track_error': 0.0,
+                'cross_track_overflow': 0.0,
                 'route_progress': 0.0,
                 'conflict_phase': 0.0,
                 'conflict_eta': 1.0,
@@ -677,6 +766,8 @@ class MultiAgentEnv(gym.Env):
         if route_length <= 1e-6:
             return {
                 'cross_track_error': 0.0,
+                'raw_cross_track_error': 0.0,
+                'cross_track_overflow': 0.0,
                 'route_progress': 0.0,
                 'conflict_phase': 0.0,
                 'conflict_eta': 1.0,
@@ -722,6 +813,8 @@ class MultiAgentEnv(gym.Env):
 
         return {
             'cross_track_error': float(np.clip(cross_track, -clip_range, clip_range)),
+            'raw_cross_track_error': float(cross_track),
+            'cross_track_overflow': float(max(0.0, abs(cross_track) - clip_range)),
             'route_progress': route_progress,
             'conflict_phase': conflict_phase,
             'conflict_eta': conflict_eta,
@@ -737,6 +830,8 @@ class MultiAgentEnv(gym.Env):
             stat = self._route_timing_features(agent_id, observation, conflict_point)
             stats[agent_id] = stat
             observation.cross_track_error = stat['cross_track_error']
+            observation.raw_cross_track_error = stat['raw_cross_track_error']
+            observation.cross_track_overflow = stat['cross_track_overflow']
             observation.route_progress = stat['route_progress']
             observation.conflict_phase = stat['conflict_phase']
             observation.conflict_eta = stat['conflict_eta']
@@ -1015,6 +1110,8 @@ class MultiAgentEnv(gym.Env):
         self,
         agent_id: str,
         observation: AgentLocalObservation,
+        *,
+        clipped: bool = True,
     ) -> float:
         if self._scenario is None:
             return 0.0
@@ -1033,6 +1130,8 @@ class MultiAgentEnv(gym.Env):
         relative_x = float(observation.pose_x - spawn.x)
         relative_y = float(observation.pose_y - spawn.y)
         cross_track = ((relative_x * route_dy) - (relative_y * route_dx)) / route_length
+        if not bool(clipped):
+            return float(cross_track)
         clip_range = max(1.0, self.config.cte_clip_range)
         return float(np.clip(cross_track, -clip_range, clip_range))
 
@@ -1537,7 +1636,11 @@ class MultiAgentEnv(gym.Env):
             min_approach_speed = 0.10
             near_goal_speed_deficit = max(0.0, min_approach_speed - current_forward_speed) / min_approach_speed
             progress -= self.config.reward.near_goal_idle_penalty_weight * goal_proximity * (near_goal_speed_deficit ** 2)
-        cross_track_error = self._compute_route_cross_track_error(agent_id, observation)
+        cross_track_error = self._compute_route_cross_track_error(
+            agent_id,
+            observation,
+            clipped=not bool(getattr(self.config.reward, 'path_deviation_use_unclipped_cte', False)),
+        )
         path_tolerance = (
             self.config.reward.path_deviation_tolerance
             + self.config.reward.path_deviation_conflict_scale * conflict_level

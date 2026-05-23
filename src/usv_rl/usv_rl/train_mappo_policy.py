@@ -105,6 +105,7 @@ def parse_args():
     parser.add_argument('--path-deviation-penalty-weight', type=float, default=RewardConfig.path_deviation_penalty_weight, help='Penalty weight for drifting too far away from the spawn-to-goal reference route.')
     parser.add_argument('--path-deviation-tolerance', type=float, default=RewardConfig.path_deviation_tolerance, help='Cross-track deviation (m) allowed before route-tracking penalty activates.')
     parser.add_argument('--path-deviation-conflict-scale', type=float, default=RewardConfig.path_deviation_conflict_scale, help='Additional cross-track tolerance (m) allowed at maximum conflict level.')
+    parser.add_argument('--path-deviation-use-unclipped-cte', action='store_true', default=RewardConfig.path_deviation_use_unclipped_cte, help='Compute route-deviation reward with the true CTE instead of the observation-clipped CTE.')
     parser.add_argument('--desired-conflict-speed', type=float, default=RewardConfig.desired_conflict_speed, help='Target forward speed maintained during conflict handling.')
     parser.add_argument('--stop-go-penalty-weight', type=float, default=RewardConfig.stop_go_penalty_weight, help='Penalty weight for rapid stop-go behavior under conflict.')
     parser.add_argument('--head-on-guidance-distance', type=float, default=RewardConfig.head_on_guidance_distance, help='Distance threshold for head-on starboard guidance shaping.')
@@ -376,6 +377,9 @@ def parse_args():
     parser.add_argument('--random-role-balance-omega-weight', type=float, default=0.6, help='Loss multiplier for yield starboard-omega hinge violations in role-balance constraints.')
     parser.add_argument('--random-pairwise-role-guard-weight', type=float, default=0.0, help='Local nearest-pair guard loss for random encounters. Enforces pair-relative yield/stand-on behavior near collision distance.')
     parser.add_argument('--random-pairwise-role-guard-weight-end', type=float, default=None, help='Final pairwise role guard weight for linear annealing. If unset, random-pairwise-role-guard-weight stays constant.')
+    parser.add_argument('--random-pairwise-role-guard-pretrain-epochs', type=int, default=0, help='Extra actor-only epochs per rollout for pairwise role guard constraints after PPO updates.')
+    parser.add_argument('--random-pairwise-role-guard-pretrain-learning-rate', type=float, default=0.0, help='Optional separate actor-only learning rate for pairwise role guard pretrain; <=0 reuses the main optimizer.')
+    parser.add_argument('--random-pairwise-role-guard-pretrain-max-grad-norm', type=float, default=0.0, help='Optional separate grad norm for pairwise role guard pretrain; <=0 uses --max-grad-norm.')
     parser.add_argument('--random-pairwise-role-guard-safe-separation', type=float, default=0.82, help='Nearest-neighbor separation where pairwise guard danger reaches full strength.')
     parser.add_argument('--random-pairwise-role-guard-release-separation', type=float, default=1.45, help='Nearest-neighbor separation where pairwise guard fades out.')
     parser.add_argument('--random-pairwise-role-guard-min-danger', type=float, default=0.10, help='Minimum local pair danger required for pairwise role guard samples.')
@@ -442,15 +446,32 @@ def parse_args():
     parser.add_argument('--random-cte-recovery-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-cte-recovery samples.')
     parser.add_argument('--random-cte-recovery-min-abs-cte', type=float, default=1.10, help='Minimum absolute CTE for random-cte-recovery activation.')
     parser.add_argument('--random-cte-recovery-full-abs-cte', type=float, default=3.00, help='Absolute CTE where random-cte-recovery reaches full slowdown urgency.')
+    parser.add_argument('--random-cte-source', choices=('clipped', 'raw'), default='clipped', help='CTE feature used by random offroute/recovery/clear-ahead auxiliary gates. raw uses policy-visible raw CTE when available.')
     parser.add_argument('--random-cte-recovery-min-neighbor-separation', type=float, default=0.85, help='Minimum nearest-neighbor distance required for random-cte-recovery activation.')
+    parser.add_argument('--random-cte-recovery-agent-index', action='append', dest='random_cte_recovery_agent_indices', type=int, default=None, help='Optional 0-based agent index allowed to receive random-cte-recovery. Repeatable. Defaults to all agents.')
+    parser.add_argument('--random-cte-recovery-all-agents', action='store_true', help='Ignore any random-cte-recovery agent-index filters inherited from wrapper scripts.')
     parser.add_argument('--random-cte-recovery-allow-threat-overlap', action='store_true', help='Allow random-cte-recovery to overlap with CPA/local deconflict threats when the nearest-neighbor gate is satisfied.')
     parser.add_argument('--random-cte-recovery-target-speed', type=float, default=0.18, help='Forward target speed at the random-cte-recovery activation threshold.')
     parser.add_argument('--random-cte-recovery-min-speed', type=float, default=0.07, help='Forward target speed at full random-cte-recovery urgency.')
+    parser.add_argument('--random-cte-recovery-speed-cte-slowdown', type=float, default=1.0, help='How strongly CTE urgency slows the random-cte-recovery speed target. 1 preserves legacy slowdown; 0 keeps target speed.')
+    parser.add_argument('--random-cte-recovery-speed-heading-gate', type=float, default=0.0, help='How strongly recovery speed is gated by alignment to the selected recovery heading. 0 preserves legacy speed target; 1 fully applies cosine alignment.')
     parser.add_argument('--random-cte-recovery-max-omega', type=float, default=0.30, help='Maximum goal-heading yaw-rate target for random-cte-recovery.')
     parser.add_argument('--random-cte-recovery-omega-reference', type=float, default=0.55, help='Heading error magnitude mapped to max omega for random-cte-recovery.')
+    parser.add_argument('--random-cte-recovery-linear-weight', type=float, default=1.00, help='Relative forward-speed loss weight for random-cte-recovery. 1 preserves legacy weighting.')
     parser.add_argument('--random-cte-recovery-omega-weight', type=float, default=1.00, help='Relative yaw-rate loss weight for random-cte-recovery.')
+    parser.add_argument('--random-cte-recovery-omega-mode', choices=('goal-heading', 'signed-cte', 'signed-cte-inverted', 'goal-cte-lookahead'), default='goal-heading', help='Yaw target source for random-cte-recovery. goal-cte-lookahead blends goal heading with a CTE lookahead bias.')
+    parser.add_argument('--random-cte-recovery-cte-lookahead', type=float, default=4.0, help='Lookahead distance used by goal-cte-lookahead omega mode.')
+    parser.add_argument('--random-cte-recovery-cte-heading-scale', type=float, default=1.0, help='Scale applied to the CTE lookahead heading bias.')
+    parser.add_argument('--random-recovery-pretrain-epochs', type=int, default=0, help='Extra actor-only epochs per rollout for random CTE/offroute/clear recovery constraints after PPO updates.')
+    parser.add_argument('--random-recovery-pretrain-learning-rate', type=float, default=0.0, help='Optional separate actor-only learning rate for random recovery pretrain; <=0 reuses the main optimizer.')
+    parser.add_argument('--random-recovery-pretrain-max-grad-norm', type=float, default=0.0, help='Optional separate grad norm for random recovery pretrain; <=0 uses --max-grad-norm.')
+    parser.add_argument('--random-recovery-pretrain-offroute-scale', type=float, default=1.0, help='Multiplier for offroute-finish loss inside random recovery pretrain only.')
+    parser.add_argument('--random-recovery-pretrain-cte-scale', type=float, default=1.0, help='Multiplier for CTE-recovery loss inside random recovery pretrain only.')
+    parser.add_argument('--random-recovery-pretrain-clear-scale', type=float, default=1.0, help='Multiplier for clear-ahead loss inside random recovery pretrain only.')
+    parser.add_argument('--random-recovery-pretrain-late-lagging-scale', type=float, default=1.0, help='Multiplier for random-late-lagging loss inside random recovery pretrain only.')
     parser.add_argument('--random-recovery-safety-gate-scale', type=float, default=1.0, help='Multiplier applied to random offroute/CTE recovery samples while random deconflict or pairwise role guard is active. 1 keeps legacy behavior; 0 fully suppresses recovery during active safety conflicts.')
     parser.add_argument('--random-recovery-safety-gate-mode', choices=['batch', 'sample'], default='batch', help='How random recovery safety gating is applied when scale < 1. batch scales the whole minibatch if any safety conflict is active; sample only scales overlapping samples.')
+    parser.add_argument('--goal-heading-omega-sign', type=float, default=-1.0, help='Sign multiplier for goal-heading omega targets. -1 preserves legacy targets; +1 matches yaw += omega * dt with heading_error=target_yaw-yaw.')
     parser.add_argument('--random-clear-ahead-weight', type=float, default=0.0, help='Trainer-side action loss for random encounters when the forward route cone is clear.')
     parser.add_argument('--random-clear-ahead-weight-end', type=float, default=None, help='Final random-clear-ahead auxiliary weight for linear annealing.')
     parser.add_argument('--random-clear-ahead-scenario', action='append', dest='random_clear_ahead_scenarios', default=None, help='Scenario name where random-clear-ahead may activate. Repeatable. Defaults to random encounter scenarios.')
@@ -459,16 +480,47 @@ def parse_args():
     parser.add_argument('--random-clear-ahead-cone-mode', choices=['heading', 'goal'], default='goal', help='Forward cone reference. heading uses ego yaw; goal uses the current target/route heading from heading_error.')
     parser.add_argument('--random-clear-ahead-goal-tolerance', type=float, default=1.0, help='Goal tolerance used to ignore completed random-clear-ahead samples.')
     parser.add_argument('--random-clear-ahead-max-distance', type=float, default=13.0, help='Maximum distance-to-goal for random-clear-ahead samples.')
+    parser.add_argument('--random-clear-ahead-min-route-progress', type=float, default=0.0, help='Minimum route_progress for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-max-route-progress', type=float, default=1.0, help='Maximum route_progress for random-clear-ahead activation.')
+    parser.add_argument('--random-clear-ahead-min-abs-cte', type=float, default=0.0, help='Minimum absolute CTE for random-clear-ahead activation. 0 disables the lower CTE gate.')
+    parser.add_argument('--random-clear-ahead-max-abs-cte', type=float, default=0.0, help='Maximum absolute CTE for random-clear-ahead activation. 0 disables the upper CTE gate.')
     parser.add_argument('--random-clear-ahead-min-neighbor-separation', type=float, default=0.0, help='If >0, require all-around nearest-neighbor separation at least this large before random-clear-ahead activates.')
+    parser.add_argument('--random-clear-ahead-agent-index', action='append', dest='random_clear_ahead_agent_indices', type=int, default=None, help='Optional 0-based agent index allowed to receive random-clear-ahead. Repeatable. Defaults to all agents.')
     parser.add_argument('--random-clear-ahead-max-cpa-score', type=float, default=0.0, help='Maximum CPA score allowed for random-clear-ahead activation.')
     parser.add_argument('--random-clear-ahead-max-local-score', type=float, default=0.0, help='Maximum local random-deconflict danger score allowed for random-clear-ahead activation.')
     parser.add_argument('--random-clear-ahead-exclude-deconflict', action='store_true', help='Disable random-clear-ahead on samples where random-deconflict is active.')
     parser.add_argument('--random-clear-ahead-target-source', choices=['raw', 'constant'], default='raw', help='Linear/yaw target source for random-clear-ahead. raw imitates base navigation; constant uses configured speed and heading-error yaw.')
     parser.add_argument('--random-clear-ahead-target-speed', type=float, default=0.30, help='Forward speed target when random-clear-ahead-target-source=constant or raw speed is below min speed.')
     parser.add_argument('--random-clear-ahead-min-speed', type=float, default=0.18, help='Minimum target forward speed retained for clear-ahead route discipline.')
+    parser.add_argument('--random-clear-ahead-speed-cte-slowdown', type=float, default=0.0, help='How strongly clear-ahead target speed decays as absolute CTE approaches the configured full slowdown band. 0 preserves legacy speed target.')
+    parser.add_argument('--random-clear-ahead-speed-cte-start', type=float, default=0.0, help='Absolute CTE where clear-ahead speed slowdown begins.')
+    parser.add_argument('--random-clear-ahead-speed-cte-full', type=float, default=0.0, help='Absolute CTE where clear-ahead speed slowdown reaches full strength. 0 uses max-abs-cte when enabled.')
     parser.add_argument('--random-clear-ahead-max-omega', type=float, default=0.18, help='Absolute yaw-rate cap for random-clear-ahead target omega.')
     parser.add_argument('--random-clear-ahead-omega-reference', type=float, default=0.55, help='Heading error magnitude mapped to max omega when target-source=constant.')
     parser.add_argument('--random-clear-ahead-omega-weight', type=float, default=1.0, help='Relative yaw-rate loss weight for random-clear-ahead.')
+    parser.add_argument('--random-late-lagging-weight', type=float, default=0.0, help='Trainer-side auxiliary that gently pushes low-progress random-encounter agents after teammates are clearly ahead.')
+    parser.add_argument('--random-late-lagging-weight-end', type=float, default=None, help='Final random-late-lagging auxiliary weight for linear annealing. If unset, the start weight stays constant.')
+    parser.add_argument('--random-late-lagging-goal-tolerance', type=float, default=1.0, help='Goal tolerance used by random-late-lagging.')
+    parser.add_argument('--random-late-lagging-max-distance', type=float, default=80.0, help='Maximum distance-to-goal where random-late-lagging may activate.')
+    parser.add_argument('--random-late-lagging-min-distance', type=float, default=2.0, help='Minimum distance-to-goal where random-late-lagging may activate.')
+    parser.add_argument('--random-late-lagging-max-self-progress', type=float, default=0.25, help='Maximum own route_progress for a sample to count as late-lagging.')
+    parser.add_argument('--random-late-lagging-min-team-progress', type=float, default=0.75, help='Minimum best team route_progress before random-late-lagging activates.')
+    parser.add_argument('--random-late-lagging-min-progress-gap', type=float, default=0.50, help='Minimum gap between best team route_progress and own route_progress.')
+    parser.add_argument('--random-late-lagging-agent-index', action='append', dest='random_late_lagging_agent_indices', type=int, default=None, help='Optional 0-based agent index allowed to receive random-late-lagging. Repeatable. Defaults to all agents.')
+    parser.add_argument('--random-late-lagging-min-finished-teammates', type=int, default=0, help='If >0, require at least this many teammates to have route_progress above random-late-lagging-finished-progress.')
+    parser.add_argument('--random-late-lagging-finished-progress', type=float, default=0.98, help='Route progress threshold used by random-late-lagging-min-finished-teammates.')
+    parser.add_argument('--random-late-lagging-phase-min', type=float, default=-1.0, help='Minimum conflict_phase for random-late-lagging activation.')
+    parser.add_argument('--random-late-lagging-min-team-separation', type=float, default=4.8, help='Minimum fleet separation required for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-min-neighbor-separation', type=float, default=4.8, help='Minimum nearest-neighbor separation required for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-max-cpa-score', type=float, default=0.0, help='Maximum CPA threat score allowed for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-max-local-score', type=float, default=0.0, help='Maximum local threat score allowed for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-allow-threat-overlap', action='store_true', help='Allow random-late-lagging to overlap active CPA/local/deconflict threats.')
+    parser.add_argument('--random-late-lagging-target-speed', type=float, default=0.16, help='Target forward speed for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-min-speed', type=float, default=0.06, help='Minimum target forward speed for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-max-omega', type=float, default=0.34, help='Maximum yaw-rate target magnitude for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-omega-reference', type=float, default=0.80, help='Heading error magnitude mapped to max omega for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-omega-weight', type=float, default=2.60, help='Relative yaw-rate loss weight for random-late-lagging.')
+    parser.add_argument('--random-late-lagging-target-source', choices=['goal', 'raw'], default='goal', help='Target source for random-late-lagging: goal-heading correction or raw navigation command.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
     parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
@@ -479,6 +531,8 @@ def parse_args():
     parser.add_argument('--policy-anchor-exclude-random-goal-hold', action='store_true', help='Exclude samples currently targeted by random-goal-hold from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-random-offroute-finish', action='store_true', help='Exclude samples currently targeted by random-offroute-finish from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-random-cte-recovery', action='store_true', help='Exclude samples currently targeted by random-cte-recovery from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-clear-ahead', action='store_true', help='Exclude samples currently targeted by random-clear-ahead from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-random-late-lagging', action='store_true', help='Exclude samples currently targeted by random-late-lagging from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-random-pairwise-role-guard', action='store_true', help='Exclude samples currently targeted by random-pairwise-role-guard from policy-anchor loss.')
     parser.add_argument('--separate-actor-critic-grad-clip', action='store_true', help='Clip actor/log-std and critic gradients separately so large value losses do not suppress trainer-side actor auxiliaries.')
     return parser.parse_args()
@@ -486,6 +540,14 @@ def parse_args():
 
 def _build_agent_namespaces(num_agents: int) -> tuple[str, ...]:
     return tuple(f'usv_{index + 1:02d}' for index in range(num_agents))
+
+
+def _goal_heading_omega_sign(args) -> float:
+    try:
+        sign_value = float(getattr(args, 'goal_heading_omega_sign', -1.0))
+    except (TypeError, ValueError):
+        sign_value = -1.0
+    return 1.0 if sign_value >= 0.0 else -1.0
 
 
 def _validate_parallel_sampler_args(args):
@@ -2255,6 +2317,27 @@ def _random_safe_finish_empty_components(torch, raw_obs, sample_count: int):
     }
 
 
+def _random_aux_cte_source(args) -> str:
+    source = str(getattr(args, 'random_cte_source', 'clipped')).strip().lower()
+    return 'raw' if source == 'raw' else 'clipped'
+
+
+def _random_aux_signed_cte(torch, raw_obs, args, *, like=None):
+    if like is None:
+        sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+        like = torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    clipped = raw_obs[:, 11] if raw_obs.shape[-1] > 11 else torch.zeros_like(like)
+    if _random_aux_cte_source(args) != 'raw':
+        return clipped.to(dtype=like.dtype, device=like.device)
+    ego_dim = AgentLocalObservation.ego_feature_size()
+    raw_cte_index = ego_dim - 2
+    neighbor_width = int(raw_obs.shape[-1]) - ego_dim - ENCOUNTER_TYPE_COUNT
+    has_current_layout = neighbor_width >= 0 and neighbor_width % NEIGHBOR_FEATURE_COUNT == 0
+    if has_current_layout and raw_obs.shape[-1] > raw_cte_index:
+        return raw_obs[:, raw_cte_index].to(dtype=like.dtype, device=like.device)
+    return clipped.to(dtype=like.dtype, device=like.device)
+
+
 def _random_safe_finish_components(
     torch,
     raw_obs,
@@ -2296,7 +2379,7 @@ def _random_safe_finish_components(
     phase_mask = raw_obs[:, 13] >= phase_min
     cte_clear = torch.ones_like(unfinished_mask)
     if max_abs_cte > 0.0 and raw_obs.shape[-1] > 11:
-        cte_clear = torch.abs(raw_obs[:, 11]) <= max_abs_cte
+        cte_clear = torch.abs(_random_aux_signed_cte(torch, raw_obs, args, like=distance)) <= max_abs_cte
     team_min_separation = global_state[:, -5]
     team_clear = team_min_separation >= min_team_separation
 
@@ -2604,7 +2687,7 @@ def _random_offroute_finish_active_mask(
     max_local_score = max(0.0, float(getattr(args, 'random_offroute_finish_max_local_score', 0.0)))
 
     distance = torch.clamp(raw_obs[:, 4], min=0.0)
-    abs_cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    abs_cte = torch.abs(_random_aux_signed_cte(torch, raw_obs, args, like=distance))
     route_progress = raw_obs[:, 12] if raw_obs.shape[-1] > 12 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
     phase = raw_obs[:, 13] if raw_obs.shape[-1] > 13 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
     offroute_mask = (route_progress >= min_route_progress) & (abs_cte >= min_abs_cte)
@@ -2681,7 +2764,7 @@ def _random_offroute_finish_loss(
     if not bool(active_mask.any().detach().cpu()):
         return action_mean.new_zeros(())
 
-    abs_cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(action_mean.shape[0], dtype=action_mean.dtype, device=action_mean.device)
+    abs_cte = torch.abs(_random_aux_signed_cte(torch, raw_obs, args, like=action_mean[:, 0]))
     heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
     min_abs_cte = max(0.0, float(getattr(args, 'random_offroute_finish_min_abs_cte', 1.20)))
     full_abs_cte = max(min_abs_cte + 0.05, float(getattr(args, 'random_offroute_finish_full_abs_cte', 3.00)))
@@ -2694,7 +2777,7 @@ def _random_offroute_finish_loss(
     omega_weight = max(0.0, float(getattr(args, 'random_offroute_finish_omega_weight', 0.55)))
 
     target_linear = target_speed - (target_speed - min_speed) * cte_urgency
-    target_omega = -torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
+    target_omega = _goal_heading_omega_sign(args) * torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega * (0.45 + 0.55 * cte_urgency)
     target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
 
     low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
@@ -2745,11 +2828,25 @@ def _random_cte_recovery_active_mask(
     max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_cte_recovery_max_distance', 13.0)))
     min_abs_cte = max(0.0, float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)))
     min_neighbor_separation = max(0.0, float(getattr(args, 'random_cte_recovery_min_neighbor_separation', 0.85)))
+    if bool(getattr(args, 'random_cte_recovery_all_agents', False)):
+        allowed_agent_indices = ()
+    else:
+        allowed_agent_indices = tuple(int(index) for index in (getattr(args, 'random_cte_recovery_agent_indices', None) or ()))
 
     distance = torch.clamp(raw_obs[:, 4], min=0.0)
-    cte = raw_obs[:, 11] if raw_obs.shape[-1] > 11 else torch.zeros_like(distance)
+    cte = _random_aux_signed_cte(torch, raw_obs, args, like=distance)
     unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
     cte_mask = torch.abs(cte) >= min_abs_cte
+    if allowed_agent_indices:
+        if agent_indices is None:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        else:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+            agent_index_tensor = agent_indices.to(device=raw_obs.device)
+            for allowed_index in allowed_agent_indices:
+                role_mask = role_mask | (agent_index_tensor == allowed_index)
+    else:
+        role_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
     nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
     neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
 
@@ -2778,7 +2875,7 @@ def _random_cte_recovery_active_mask(
         )
         threat_clear = ((~valid_cpa) | (cpa_score <= 0.0)) & ((~valid_local) | (local_score <= 0.0)) & (~active_deconflict)
 
-    return scenario_mask & unfinished_mask & cte_mask & neighbor_clear & threat_clear
+    return scenario_mask & unfinished_mask & cte_mask & role_mask & neighbor_clear & threat_clear
 
 
 def _random_recovery_safety_gate_weights(
@@ -2848,7 +2945,8 @@ def _random_cte_recovery_loss(
     if not bool(active_mask.any().detach().cpu()):
         return action_mean.new_zeros(())
 
-    cte = torch.abs(raw_obs[:, 11]) if raw_obs.shape[-1] > 11 else torch.zeros(action_mean.shape[0], dtype=action_mean.dtype, device=action_mean.device)
+    signed_cte = _random_aux_signed_cte(torch, raw_obs, args, like=action_mean[:, 0])
+    cte = torch.abs(signed_cte)
     heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
     min_abs_cte = max(0.0, float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)))
     full_abs_cte = max(min_abs_cte + 0.05, float(getattr(args, 'random_cte_recovery_full_abs_cte', 3.00)))
@@ -2858,10 +2956,32 @@ def _random_cte_recovery_loss(
     min_speed = max(0.0, float(getattr(args, 'random_cte_recovery_min_speed', 0.07)))
     max_omega = max(0.0, float(getattr(args, 'random_cte_recovery_max_omega', 0.30)))
     omega_reference = max(0.05, float(getattr(args, 'random_cte_recovery_omega_reference', 0.55)))
+    linear_weight = max(0.0, float(getattr(args, 'random_cte_recovery_linear_weight', 1.0)))
     omega_weight = max(0.0, float(getattr(args, 'random_cte_recovery_omega_weight', 1.0)))
 
-    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
-    target_omega = -torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega
+    speed_cte_slowdown = max(0.0, float(getattr(args, 'random_cte_recovery_speed_cte_slowdown', 1.0)))
+    target_linear = target_speed - (target_speed - min_speed) * torch.clamp(cte_urgency * speed_cte_slowdown, 0.0, 1.0)
+    recovery_heading_error = heading_error.to(dtype=action_mean.dtype)
+    target_omega = _goal_heading_omega_sign(args) * torch.clamp(heading_error / omega_reference, -1.0, 1.0) * max_omega
+    omega_mode = str(getattr(args, 'random_cte_recovery_omega_mode', 'goal-heading')).strip().lower().replace('_', '-')
+    if omega_mode == 'signed-cte':
+        target_omega = -torch.sign(signed_cte).to(dtype=action_mean.dtype) * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'signed-cte-inverted':
+        target_omega = torch.sign(signed_cte).to(dtype=action_mean.dtype) * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'goal-cte-lookahead':
+        cte_lookahead = max(0.25, float(getattr(args, 'random_cte_recovery_cte_lookahead', 4.0)))
+        cte_heading_scale = max(0.0, float(getattr(args, 'random_cte_recovery_cte_heading_scale', 1.0)))
+        lookahead = torch.full_like(signed_cte.to(dtype=action_mean.dtype), cte_lookahead)
+        cte_heading_bias = torch.atan2(signed_cte.to(dtype=action_mean.dtype), lookahead) * cte_heading_scale
+        blended_heading_error = heading_error.to(dtype=action_mean.dtype) + cte_heading_bias
+        blended_heading_error = torch.atan2(torch.sin(blended_heading_error), torch.cos(blended_heading_error))
+        recovery_heading_error = blended_heading_error
+        target_omega = _goal_heading_omega_sign(args) * torch.clamp(blended_heading_error / omega_reference, -1.0, 1.0) * max_omega
+    speed_heading_gate = min(1.0, max(0.0, float(getattr(args, 'random_cte_recovery_speed_heading_gate', 0.0))))
+    if speed_heading_gate > 0.0:
+        recovery_alignment = torch.clamp(torch.cos(torch.clamp(torch.abs(recovery_heading_error), max=math.pi / 2.0)), 0.0, 1.0)
+        target_linear = target_linear * ((1.0 - speed_heading_gate) + speed_heading_gate * recovery_alignment)
+        target_linear = torch.clamp(target_linear, min=min_speed)
     target = torch.stack([target_linear, target_omega], dim=-1).to(dtype=action_mean.dtype)
 
     low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
@@ -2872,7 +2992,7 @@ def _random_cte_recovery_loss(
     linear_loss = ((action_mean[:, 0] - target[:, 0]) / range_scale[0]) ** 2
     omega_loss = ((action_mean[:, 1] - target[:, 1]) / range_scale[1]) ** 2
     urgency = (0.55 + 0.45 * cte_urgency).to(dtype=action_mean.dtype)
-    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+    per_sample_loss = (linear_weight * linear_loss + omega_weight * omega_loss) * urgency
 
     weights = active_mask.to(dtype=per_sample_loss.dtype)
     weights = weights * _random_recovery_safety_gate_weights(
@@ -2916,7 +3036,7 @@ def _random_clear_ahead_front_clear_mask(torch, raw_obs, args):
     return ~front_blocker.any(dim=1)
 
 
-def _random_clear_ahead_active_mask(
+def _random_clear_ahead_component_masks(
     torch,
     raw_obs,
     scenario_ids,
@@ -2925,10 +3045,23 @@ def _random_clear_ahead_active_mask(
     agent_indices=None,
 ):
     sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    empty = {
+        'scenario': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'unfinished': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'front': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'cpa': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'local': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'neighbor': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'progress': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'cte': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'role': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'deconflict': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'active': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+    }
     if sample_count <= 0 or scenario_ids is None:
-        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        return empty
     if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
-        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        return empty
 
     scenario_names = tuple(getattr(args, 'random_clear_ahead_scenarios', None) or ('two_usv_random_encounter', 'three_usv_random_encounter'))
     scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
@@ -2941,6 +3074,16 @@ def _random_clear_ahead_active_mask(
     max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_clear_ahead_max_distance', 13.0)))
     distance = torch.clamp(raw_obs[:, 4], min=0.0)
     unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+    route_progress = torch.clamp(raw_obs[:, 12], 0.0, 1.0) if raw_obs.shape[-1] > 12 else torch.zeros_like(distance)
+    min_route_progress = min(1.0, max(0.0, float(getattr(args, 'random_clear_ahead_min_route_progress', 0.0))))
+    max_route_progress = min(1.0, max(min_route_progress, float(getattr(args, 'random_clear_ahead_max_route_progress', 1.0))))
+    progress_mask = (route_progress >= min_route_progress) & (route_progress <= max_route_progress)
+    abs_cte = torch.abs(_random_aux_signed_cte(torch, raw_obs, args, like=distance))
+    min_abs_cte = max(0.0, float(getattr(args, 'random_clear_ahead_min_abs_cte', 0.0)))
+    max_abs_cte = max(0.0, float(getattr(args, 'random_clear_ahead_max_abs_cte', 0.0)))
+    cte_mask = abs_cte >= min_abs_cte
+    if max_abs_cte > 0.0:
+        cte_mask = cte_mask & (abs_cte <= max_abs_cte)
     front_clear = _random_clear_ahead_front_clear_mask(torch, raw_obs, args)
 
     lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
@@ -2968,6 +3111,18 @@ def _random_clear_ahead_active_mask(
         nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
         neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
 
+    allowed_agent_indices = tuple(int(index) for index in (getattr(args, 'random_clear_ahead_agent_indices', None) or ()))
+    if allowed_agent_indices:
+        if agent_indices is None:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        else:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+            agent_index_tensor = agent_indices.to(device=raw_obs.device)
+            for allowed_index in allowed_agent_indices:
+                role_mask = role_mask | (agent_index_tensor == allowed_index)
+    else:
+        role_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
     deconflict_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
     if bool(getattr(args, 'random_clear_ahead_exclude_deconflict', False)):
         deconflict_clear = ~_random_deconflict_active_mask(
@@ -2979,7 +3134,38 @@ def _random_clear_ahead_active_mask(
             agent_indices=agent_indices,
         )
 
-    return scenario_mask & unfinished_mask & front_clear & cpa_clear & local_clear & neighbor_clear & deconflict_clear
+    active = scenario_mask & unfinished_mask & progress_mask & cte_mask & front_clear & cpa_clear & local_clear & neighbor_clear & role_mask & deconflict_clear
+    return {
+        'scenario': scenario_mask,
+        'unfinished': unfinished_mask,
+        'front': front_clear,
+        'cpa': cpa_clear,
+        'local': local_clear,
+        'neighbor': neighbor_clear,
+        'progress': progress_mask,
+        'cte': cte_mask,
+        'role': role_mask,
+        'deconflict': deconflict_clear,
+        'active': active,
+    }
+
+
+def _random_clear_ahead_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    return _random_clear_ahead_component_masks(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )['active']
 
 
 def _random_clear_ahead_loss(
@@ -3019,6 +3205,7 @@ def _random_clear_ahead_loss(
     omega_weight = max(0.0, float(getattr(args, 'random_clear_ahead_omega_weight', 1.0)))
 
     heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+    abs_cte = torch.abs(_random_aux_signed_cte(torch, raw_obs, args, like=action_mean[:, 0])).to(dtype=action_mean.dtype)
     if target_source == 'raw':
         raw_linear = raw_obs[:, 7].to(dtype=action_mean.dtype)
         raw_omega = raw_obs[:, 8].to(dtype=action_mean.dtype)
@@ -3026,17 +3213,286 @@ def _random_clear_ahead_loss(
         target_omega = torch.clamp(raw_omega, min=-max_omega, max=max_omega)
     else:
         target_linear = torch.full_like(action_mean[:, 0], target_speed)
-        target_omega = -torch.clamp(heading_error.to(dtype=action_mean.dtype) / omega_reference, -1.0, 1.0) * max_omega
+        target_omega = _goal_heading_omega_sign(args) * torch.clamp(heading_error.to(dtype=action_mean.dtype) / omega_reference, -1.0, 1.0) * max_omega
+
+    speed_cte_slowdown = max(0.0, float(getattr(args, 'random_clear_ahead_speed_cte_slowdown', 0.0)))
+    if speed_cte_slowdown > 0.0:
+        cte_start = max(0.0, float(getattr(args, 'random_clear_ahead_speed_cte_start', 0.0)))
+        cte_full = float(getattr(args, 'random_clear_ahead_speed_cte_full', 0.0))
+        if cte_full <= cte_start:
+            cte_full = max(cte_start + 0.05, float(getattr(args, 'random_clear_ahead_max_abs_cte', 0.0)))
+        if cte_full <= cte_start:
+            cte_full = cte_start + 1.5
+        cte_slowdown = torch.clamp((abs_cte - cte_start) / max(cte_full - cte_start, 1e-3), 0.0, 1.0)
+        cte_slowdown = torch.clamp(cte_slowdown * speed_cte_slowdown, 0.0, 1.0).to(dtype=target_linear.dtype)
+        target_linear = target_linear - (target_linear - min_speed) * cte_slowdown
+        target_linear = torch.clamp(target_linear, min=min_speed)
 
     target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
     target_omega = torch.clamp(target_omega, min=low[1], max=high[1])
     linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
     omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
 
-    abs_cte = torch.abs(raw_obs[:, 11]).to(dtype=action_mean.dtype) if raw_obs.shape[-1] > 11 else torch.zeros_like(action_mean[:, 0])
     heading_urgency = torch.clamp(torch.abs(heading_error).to(dtype=action_mean.dtype) / omega_reference, 0.0, 1.0)
     cte_urgency = torch.clamp(abs_cte / 1.5, 0.0, 1.0)
     urgency = 0.45 + 0.55 * torch.maximum(heading_urgency, cte_urgency)
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
+def _team_route_progress_blocks_from_state(torch, raw_obs, global_state):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    empty_progress = torch.zeros((sample_count, 0), dtype=raw_obs.dtype, device=raw_obs.device)
+    empty_mask = torch.zeros((sample_count, 0), dtype=torch.bool, device=raw_obs.device)
+    if sample_count <= 0 or raw_obs.shape[-1] <= 12:
+        return empty_progress, empty_mask
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < raw_obs.shape[-1] + 5:
+        return empty_progress, empty_mask
+
+    local_size = int(raw_obs.shape[-1])
+    packed_size = int(global_state.shape[-1]) - 5
+    if local_size <= 0 or packed_size < local_size or packed_size % local_size != 0:
+        return empty_progress, empty_mask
+
+    team_blocks = global_state[:, :packed_size].reshape(sample_count, packed_size // local_size, local_size)
+    valid_team_mask = team_blocks.abs().sum(dim=-1) > 1e-6
+    team_progress = torch.clamp(team_blocks[:, :, 12], 0.0, 1.0)
+    return team_progress, valid_team_mask
+
+
+def _team_max_route_progress_from_state(torch, raw_obs, global_state):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or raw_obs.shape[-1] <= 12:
+        return torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    team_progress, valid_team_mask = _team_route_progress_blocks_from_state(torch, raw_obs, global_state)
+    if team_progress.numel() == 0:
+        return torch.clamp(raw_obs[:, 12], 0.0, 1.0)
+    masked_progress = torch.where(valid_team_mask, team_progress, torch.full_like(team_progress, -1.0))
+    max_progress = masked_progress.max(dim=1).values
+    own_progress = torch.clamp(raw_obs[:, 12], 0.0, 1.0)
+    return torch.maximum(max_progress, own_progress)
+
+
+def _random_late_lagging_component_masks(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    empty = {
+        'scenario': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'unfinished': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'lagging': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'phase': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'role': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'finished': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'team': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'neighbor': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'threat': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+        'active': torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device),
+    }
+    if sample_count <= 0 or scenario_ids is None:
+        return empty
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return empty
+    if global_state.numel() == 0 or global_state.shape[0] != sample_count or global_state.shape[-1] < 5:
+        return empty
+
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in ('two_usv_random_encounter', 'three_usv_random_encounter'):
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_late_lagging_goal_tolerance', 1.0)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_late_lagging_max_distance', 80.0)))
+    min_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_late_lagging_min_distance', 2.0)))
+    max_self_progress = min(1.0, max(0.0, float(getattr(args, 'random_late_lagging_max_self_progress', 0.25))))
+    min_team_progress = min(1.0, max(0.0, float(getattr(args, 'random_late_lagging_min_team_progress', 0.75))))
+    min_progress_gap = min(1.0, max(0.0, float(getattr(args, 'random_late_lagging_min_progress_gap', 0.50))))
+    allowed_agent_indices = tuple(int(index) for index in (getattr(args, 'random_late_lagging_agent_indices', None) or ()))
+    min_finished_teammates = max(0, int(getattr(args, 'random_late_lagging_min_finished_teammates', 0)))
+    finished_progress = min(1.0, max(0.0, float(getattr(args, 'random_late_lagging_finished_progress', 0.98))))
+    phase_min = float(getattr(args, 'random_late_lagging_phase_min', -1.0))
+    min_team_separation = max(0.0, float(getattr(args, 'random_late_lagging_min_team_separation', 4.8)))
+    min_neighbor_separation = max(0.0, float(getattr(args, 'random_late_lagging_min_neighbor_separation', 4.8)))
+    max_cpa_score = max(0.0, float(getattr(args, 'random_late_lagging_max_cpa_score', 0.0)))
+    max_local_score = max(0.0, float(getattr(args, 'random_late_lagging_max_local_score', 0.0)))
+
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    route_progress = torch.clamp(raw_obs[:, 12], 0.0, 1.0) if raw_obs.shape[-1] > 12 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    phase = raw_obs[:, 13] if raw_obs.shape[-1] > 13 else torch.zeros(sample_count, dtype=raw_obs.dtype, device=raw_obs.device)
+    team_max_progress = _team_max_route_progress_from_state(torch, raw_obs, global_state)
+    lagging_mask = (
+        (route_progress <= max_self_progress)
+        & (team_max_progress >= min_team_progress)
+        & ((team_max_progress - route_progress) >= min_progress_gap)
+    )
+    if allowed_agent_indices:
+        if agent_indices is None:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        else:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+            agent_index_tensor = agent_indices.to(device=raw_obs.device)
+            for allowed_index in allowed_agent_indices:
+                role_mask = role_mask | (agent_index_tensor == allowed_index)
+    else:
+        role_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    if min_finished_teammates > 0:
+        team_progress, valid_team_mask = _team_route_progress_blocks_from_state(torch, raw_obs, global_state)
+        if team_progress.numel() == 0 or agent_indices is None:
+            finished_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        else:
+            finished_team = valid_team_mask & (team_progress >= finished_progress)
+            block_indices = torch.arange(team_progress.shape[1], device=raw_obs.device).view(1, -1)
+            self_indices = agent_indices.to(device=raw_obs.device).view(-1, 1)
+            finished_team = finished_team & (block_indices != self_indices)
+            finished_mask = finished_team.sum(dim=1) >= min_finished_teammates
+    else:
+        finished_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance) & (distance >= min_distance)
+    phase_mask = phase >= phase_min
+
+    team_min_separation = global_state[:, -5]
+    team_clear = team_min_separation >= min_team_separation
+    nearest_distance, _, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    neighbor_clear = (~valid_neighbor) | (nearest_distance >= min_neighbor_separation)
+
+    lookahead = max(0.0, float(getattr(args, 'random_deconflict_lookahead_distance', 10.8)))
+    horizon = max(0.0, float(getattr(args, 'random_deconflict_time_horizon', 30.0)))
+    dcpa_target = max(0.0, float(getattr(args, 'random_deconflict_dcpa_target', 1.45)))
+    closing_min = max(0.0, float(getattr(args, 'random_deconflict_closing_speed_min', 0.004)))
+    _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+        torch,
+        raw_obs,
+        lookahead,
+        horizon,
+        dcpa_target,
+        closing_min,
+    )
+    local_score, valid_local = _random_deconflict_local_threat_score(torch, raw_obs, args)
+    active_deconflict = _random_deconflict_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    active_pairwise = _random_pairwise_role_guard_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    cpa_clear = (~valid_cpa) | (cpa_score <= max_cpa_score)
+    local_clear = (~valid_local) | (local_score <= max_local_score)
+    threat_clear = cpa_clear & local_clear & (~active_deconflict) & (~active_pairwise)
+    if bool(getattr(args, 'random_late_lagging_allow_threat_overlap', False)):
+        threat_clear = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    active = scenario_mask & unfinished_mask & lagging_mask & phase_mask & role_mask & finished_mask & team_clear & neighbor_clear & threat_clear
+    return {
+        'scenario': scenario_mask,
+        'unfinished': unfinished_mask,
+        'lagging': lagging_mask,
+        'phase': phase_mask,
+        'role': role_mask,
+        'finished': finished_mask,
+        'team': team_clear,
+        'neighbor': neighbor_clear,
+        'threat': threat_clear,
+        'active': active,
+    }
+
+
+def _random_late_lagging_active_mask(
+    torch,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    return _random_late_lagging_component_masks(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )['active']
+
+
+def _random_late_lagging_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    global_state,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_late_lagging_active_mask(
+        torch,
+        raw_obs,
+        global_state,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+    heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
+
+    target_speed = max(0.0, float(getattr(args, 'random_late_lagging_target_speed', 0.16)))
+    min_speed = max(0.0, float(getattr(args, 'random_late_lagging_min_speed', 0.06)))
+    max_omega = max(0.0, float(getattr(args, 'random_late_lagging_max_omega', 0.34)))
+    omega_reference = max(0.05, float(getattr(args, 'random_late_lagging_omega_reference', 0.80)))
+    omega_weight = max(0.0, float(getattr(args, 'random_late_lagging_omega_weight', 2.60)))
+    target_source = str(getattr(args, 'random_late_lagging_target_source', 'goal')).strip().lower()
+
+    if target_source == 'raw' and raw_obs.shape[-1] > 8:
+        raw_linear = torch.clamp(raw_obs[:, 7].to(dtype=action_mean.dtype), min=0.0, max=max(target_speed, min_speed))
+        target_linear = torch.maximum(raw_linear, torch.full_like(raw_linear, min_speed))
+        target_omega = torch.clamp(raw_obs[:, 8].to(dtype=action_mean.dtype), min=-max_omega, max=max_omega)
+    else:
+        target_linear = torch.full_like(action_mean[:, 0], target_speed)
+        target_omega = _goal_heading_omega_sign(args) * torch.clamp(heading_error.to(dtype=action_mean.dtype) / omega_reference, -1.0, 1.0) * max_omega
+
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    target_omega = torch.clamp(target_omega, min=low[1], max=high[1])
+    linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+
+    route_progress = torch.clamp(raw_obs[:, 12], 0.0, 1.0) if raw_obs.shape[-1] > 12 else torch.zeros_like(action_mean[:, 0])
+    team_max_progress = _team_max_route_progress_from_state(torch, raw_obs, global_state).to(dtype=action_mean.dtype)
+    progress_gap = torch.clamp(team_max_progress - route_progress.to(dtype=action_mean.dtype), 0.0, 1.0)
+    urgency = 0.45 + 0.55 * progress_gap
     per_sample_loss = (linear_loss + omega_weight * omega_loss) * urgency
 
     weights = active_mask.to(dtype=per_sample_loss.dtype)
@@ -3162,6 +3618,31 @@ def _policy_anchor_loss(
         )
         if random_cte_recovery_mask.shape[0] == sample_count:
             anchor_mask = anchor_mask & (~random_cte_recovery_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_clear_ahead', False)):
+        random_clear_ahead_mask = _random_clear_ahead_active_mask(
+            torch,
+            raw_obs,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_clear_ahead_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_clear_ahead_mask)
+
+    if bool(getattr(args, 'policy_anchor_exclude_random_late_lagging', False)):
+        random_late_lagging_mask = _random_late_lagging_active_mask(
+            torch,
+            raw_obs,
+            global_state,
+            scenario_ids,
+            scenario_to_index,
+            args,
+            agent_indices=agent_indices,
+        )
+        if random_late_lagging_mask.shape[0] == sample_count:
+            anchor_mask = anchor_mask & (~random_late_lagging_mask)
 
     if bool(getattr(args, 'policy_anchor_exclude_random_pairwise_role_guard', False)):
         pairwise_guard_mask = _random_pairwise_role_guard_active_mask(
@@ -3445,6 +3926,234 @@ def _run_random_role_balance_pretrain(
     return last_loss
 
 
+def _run_random_pairwise_role_guard_pretrain(
+    torch,
+    actor,
+    optimizer,
+    flat_obs,
+    flat_raw_obs,
+    flat_scenario_ids_np,
+    flat_scenario_weights,
+    flat_agent_indices_np,
+    scenario_to_index,
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    *,
+    sample_count: int,
+    minibatch_size: int,
+    device,
+    pairwise_role_guard_weight: float,
+) -> float:
+    pretrain_epochs = max(0, int(getattr(args, 'random_pairwise_role_guard_pretrain_epochs', 0)))
+    if pretrain_epochs <= 0 or pairwise_role_guard_weight <= 0.0 or sample_count <= 0 or flat_agent_indices_np is None:
+        return 0.0
+
+    actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not actor_parameters:
+        return 0.0
+    pretrain_lr = float(getattr(args, 'random_pairwise_role_guard_pretrain_learning_rate', 0.0))
+    pretrain_optimizer = optimizer
+    if pretrain_lr > 0.0:
+        pretrain_optimizer = torch.optim.Adam(actor_parameters, lr=pretrain_lr)
+    pretrain_max_grad_norm = float(getattr(args, 'random_pairwise_role_guard_pretrain_max_grad_norm', 0.0))
+    if pretrain_max_grad_norm <= 0.0:
+        pretrain_max_grad_norm = float(getattr(args, 'max_grad_norm', 0.5))
+
+    last_loss = 0.0
+    for _ in range(pretrain_epochs):
+        permutation = torch.randperm(sample_count, device=device)
+        for start in range(0, sample_count, minibatch_size):
+            batch_indices = permutation[start:start + minibatch_size]
+            batch_np_indices = batch_indices.detach().cpu().numpy()
+            batch_obs = flat_obs[batch_indices]
+            batch_raw_obs = flat_raw_obs[batch_indices]
+            batch_scenario_ids = None
+            if flat_scenario_ids_np is not None:
+                batch_scenario_ids = torch.as_tensor(
+                    flat_scenario_ids_np[batch_np_indices],
+                    dtype=torch.long,
+                    device=device,
+                )
+            batch_agent_indices = torch.as_tensor(
+                flat_agent_indices_np[batch_np_indices],
+                dtype=torch.long,
+                device=device,
+            )
+            batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
+
+            action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
+            if getattr(args, 'squash_actions', False):
+                action_mean = action_mean.clamp(-3.0, 3.0)
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
+
+            pairwise_role_guard_loss = _random_pairwise_role_guard_loss(
+                torch,
+                action_mean,
+                batch_raw_obs,
+                batch_scenario_ids,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_weights=batch_weights,
+                agent_indices=batch_agent_indices,
+            )
+            if not pairwise_role_guard_loss.requires_grad:
+                continue
+
+            pretrain_optimizer.zero_grad(set_to_none=True)
+            (float(pairwise_role_guard_weight) * pairwise_role_guard_loss).backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, pretrain_max_grad_norm)
+            pretrain_optimizer.step()
+            last_loss = float(pairwise_role_guard_loss.detach().cpu().item())
+
+    return last_loss
+
+
+def _run_random_recovery_pretrain(
+    torch,
+    actor,
+    optimizer,
+    flat_obs,
+    flat_raw_obs,
+    flat_states,
+    flat_scenario_ids_np,
+    flat_scenario_weights,
+    flat_agent_indices_np,
+    scenario_to_index,
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    *,
+    sample_count: int,
+    minibatch_size: int,
+    device,
+    offroute_weight: float,
+    cte_weight: float,
+    clear_ahead_weight: float,
+    late_lagging_weight: float,
+) -> float:
+    pretrain_epochs = max(0, int(getattr(args, 'random_recovery_pretrain_epochs', 0)))
+    if pretrain_epochs <= 0 or sample_count <= 0 or flat_agent_indices_np is None:
+        return 0.0
+    offroute_weight = float(offroute_weight) * max(0.0, float(getattr(args, 'random_recovery_pretrain_offroute_scale', 1.0)))
+    cte_weight = float(cte_weight) * max(0.0, float(getattr(args, 'random_recovery_pretrain_cte_scale', 1.0)))
+    clear_ahead_weight = float(clear_ahead_weight) * max(0.0, float(getattr(args, 'random_recovery_pretrain_clear_scale', 1.0)))
+    late_lagging_weight = float(late_lagging_weight) * max(0.0, float(getattr(args, 'random_recovery_pretrain_late_lagging_scale', 1.0)))
+    if offroute_weight <= 0.0 and cte_weight <= 0.0 and clear_ahead_weight <= 0.0 and late_lagging_weight <= 0.0:
+        return 0.0
+
+    actor_parameters = [parameter for parameter in actor.parameters() if parameter.requires_grad]
+    if not actor_parameters:
+        return 0.0
+    pretrain_lr = float(getattr(args, 'random_recovery_pretrain_learning_rate', 0.0))
+    pretrain_optimizer = optimizer
+    if pretrain_lr > 0.0:
+        pretrain_optimizer = torch.optim.Adam(actor_parameters, lr=pretrain_lr)
+    pretrain_max_grad_norm = float(getattr(args, 'random_recovery_pretrain_max_grad_norm', 0.0))
+    if pretrain_max_grad_norm <= 0.0:
+        pretrain_max_grad_norm = float(getattr(args, 'max_grad_norm', 0.5))
+
+    last_loss = 0.0
+    for _ in range(pretrain_epochs):
+        permutation = torch.randperm(sample_count, device=device)
+        for start in range(0, sample_count, minibatch_size):
+            batch_indices = permutation[start:start + minibatch_size]
+            batch_np_indices = batch_indices.detach().cpu().numpy()
+            batch_obs = flat_obs[batch_indices]
+            batch_raw_obs = flat_raw_obs[batch_indices]
+            batch_states = flat_states[batch_indices]
+            batch_scenario_ids = None
+            if flat_scenario_ids_np is not None:
+                batch_scenario_ids = torch.as_tensor(
+                    flat_scenario_ids_np[batch_np_indices],
+                    dtype=torch.long,
+                    device=device,
+                )
+            batch_agent_indices = torch.as_tensor(
+                flat_agent_indices_np[batch_np_indices],
+                dtype=torch.long,
+                device=device,
+            )
+            batch_weights = flat_scenario_weights[batch_indices] if flat_scenario_weights is not None else None
+
+            action_mean = _actor_forward(actor, batch_obs, batch_scenario_ids)
+            if getattr(args, 'squash_actions', False):
+                action_mean = action_mean.clamp(-3.0, 3.0)
+                _half = (action_high_tensor - action_low_tensor) / 2.0
+                _mid = (action_high_tensor + action_low_tensor) / 2.0
+                action_mean = torch.tanh(action_mean) * _half + _mid
+
+            recovery_loss = action_mean.new_zeros(())
+            if offroute_weight > 0.0:
+                recovery_loss = recovery_loss + float(offroute_weight) * _random_offroute_finish_loss(
+                    torch,
+                    action_mean,
+                    batch_raw_obs,
+                    batch_states,
+                    batch_scenario_ids,
+                    scenario_to_index,
+                    args,
+                    action_low_tensor,
+                    action_high_tensor,
+                    sample_weights=batch_weights,
+                    agent_indices=batch_agent_indices,
+                )
+            if cte_weight > 0.0:
+                recovery_loss = recovery_loss + float(cte_weight) * _random_cte_recovery_loss(
+                    torch,
+                    action_mean,
+                    batch_raw_obs,
+                    batch_scenario_ids,
+                    scenario_to_index,
+                    args,
+                    action_low_tensor,
+                    action_high_tensor,
+                    sample_weights=batch_weights,
+                    agent_indices=batch_agent_indices,
+                )
+            if clear_ahead_weight > 0.0:
+                recovery_loss = recovery_loss + float(clear_ahead_weight) * _random_clear_ahead_loss(
+                    torch,
+                    action_mean,
+                    batch_raw_obs,
+                    batch_scenario_ids,
+                    scenario_to_index,
+                    args,
+                    action_low_tensor,
+                    action_high_tensor,
+                    sample_weights=batch_weights,
+                    agent_indices=batch_agent_indices,
+                )
+            if late_lagging_weight > 0.0:
+                recovery_loss = recovery_loss + float(late_lagging_weight) * _random_late_lagging_loss(
+                    torch,
+                    action_mean,
+                    batch_raw_obs,
+                    batch_states,
+                    batch_scenario_ids,
+                    scenario_to_index,
+                    args,
+                    action_low_tensor,
+                    action_high_tensor,
+                    sample_weights=batch_weights,
+                    agent_indices=batch_agent_indices,
+                )
+            if not recovery_loss.requires_grad:
+                continue
+
+            pretrain_optimizer.zero_grad(set_to_none=True)
+            recovery_loss.backward()
+            torch.nn.utils.clip_grad_norm_(actor_parameters, pretrain_max_grad_norm)
+            pretrain_optimizer.step()
+            last_loss = float(recovery_loss.detach().cpu().item())
+
+    return last_loss
+
+
 def _scenario_index_map(scenarios: tuple[str, ...]) -> dict[str, int]:
     return {str(scenario_name): index for index, scenario_name in enumerate(scenarios)}
 
@@ -3620,6 +4329,7 @@ def _build_reward_config(args) -> RewardConfig:
         path_deviation_penalty_weight=float(args.path_deviation_penalty_weight),
         path_deviation_tolerance=float(args.path_deviation_tolerance),
         path_deviation_conflict_scale=float(args.path_deviation_conflict_scale),
+        path_deviation_use_unclipped_cte=bool(args.path_deviation_use_unclipped_cte),
         desired_conflict_speed=float(args.desired_conflict_speed),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),
@@ -3755,6 +4465,8 @@ def _checkpoint_payload(
         'agent_namespaces': agent_namespaces,
         'local_observation_size': model_metadata['local_observation_size'],
         'global_state_size': model_metadata['global_state_size'],
+        'ego_dim': AgentLocalObservation.ego_feature_size(),
+        'neighbor_feature_dim': NEIGHBOR_FEATURE_COUNT,
         'action_dim': model_metadata['action_dim'],
         'hidden_sizes': hidden_sizes,
         'ppo_policy_loss_scale': float(getattr(args, 'ppo_policy_loss_scale', 1.0)),
@@ -3985,6 +4697,9 @@ def _checkpoint_payload(
             if getattr(args, 'random_pairwise_role_guard_weight_end', None) is not None
             else None
         ),
+        'random_pairwise_role_guard_pretrain_epochs': int(getattr(args, 'random_pairwise_role_guard_pretrain_epochs', 0)),
+        'random_pairwise_role_guard_pretrain_learning_rate': float(getattr(args, 'random_pairwise_role_guard_pretrain_learning_rate', 0.0)),
+        'random_pairwise_role_guard_pretrain_max_grad_norm': float(getattr(args, 'random_pairwise_role_guard_pretrain_max_grad_norm', 0.0)),
         'random_pairwise_role_guard_safe_separation': float(getattr(args, 'random_pairwise_role_guard_safe_separation', 0.82)),
         'random_pairwise_role_guard_release_separation': float(getattr(args, 'random_pairwise_role_guard_release_separation', 1.45)),
         'random_pairwise_role_guard_min_danger': float(getattr(args, 'random_pairwise_role_guard_min_danger', 0.10)),
@@ -4067,15 +4782,32 @@ def _checkpoint_payload(
         'random_cte_recovery_max_distance': float(getattr(args, 'random_cte_recovery_max_distance', 13.0)),
         'random_cte_recovery_min_abs_cte': float(getattr(args, 'random_cte_recovery_min_abs_cte', 1.10)),
         'random_cte_recovery_full_abs_cte': float(getattr(args, 'random_cte_recovery_full_abs_cte', 3.00)),
+        'random_cte_source': str(getattr(args, 'random_cte_source', 'clipped')),
         'random_cte_recovery_min_neighbor_separation': float(getattr(args, 'random_cte_recovery_min_neighbor_separation', 0.85)),
+        'random_cte_recovery_agent_indices': [int(index) for index in (getattr(args, 'random_cte_recovery_agent_indices', None) or [])],
+        'random_cte_recovery_all_agents': bool(getattr(args, 'random_cte_recovery_all_agents', False)),
         'random_cte_recovery_allow_threat_overlap': bool(getattr(args, 'random_cte_recovery_allow_threat_overlap', False)),
         'random_cte_recovery_target_speed': float(getattr(args, 'random_cte_recovery_target_speed', 0.18)),
         'random_cte_recovery_min_speed': float(getattr(args, 'random_cte_recovery_min_speed', 0.07)),
+        'random_cte_recovery_speed_cte_slowdown': float(getattr(args, 'random_cte_recovery_speed_cte_slowdown', 1.0)),
+        'random_cte_recovery_speed_heading_gate': float(getattr(args, 'random_cte_recovery_speed_heading_gate', 0.0)),
         'random_cte_recovery_max_omega': float(getattr(args, 'random_cte_recovery_max_omega', 0.30)),
         'random_cte_recovery_omega_reference': float(getattr(args, 'random_cte_recovery_omega_reference', 0.55)),
+        'random_cte_recovery_linear_weight': float(getattr(args, 'random_cte_recovery_linear_weight', 1.0)),
         'random_cte_recovery_omega_weight': float(getattr(args, 'random_cte_recovery_omega_weight', 1.0)),
+        'random_cte_recovery_omega_mode': str(getattr(args, 'random_cte_recovery_omega_mode', 'goal-heading')),
+        'random_cte_recovery_cte_lookahead': float(getattr(args, 'random_cte_recovery_cte_lookahead', 4.0)),
+        'random_cte_recovery_cte_heading_scale': float(getattr(args, 'random_cte_recovery_cte_heading_scale', 1.0)),
+        'random_recovery_pretrain_epochs': int(getattr(args, 'random_recovery_pretrain_epochs', 0)),
+        'random_recovery_pretrain_learning_rate': float(getattr(args, 'random_recovery_pretrain_learning_rate', 0.0)),
+        'random_recovery_pretrain_max_grad_norm': float(getattr(args, 'random_recovery_pretrain_max_grad_norm', 0.0)),
+        'random_recovery_pretrain_offroute_scale': float(getattr(args, 'random_recovery_pretrain_offroute_scale', 1.0)),
+        'random_recovery_pretrain_cte_scale': float(getattr(args, 'random_recovery_pretrain_cte_scale', 1.0)),
+        'random_recovery_pretrain_clear_scale': float(getattr(args, 'random_recovery_pretrain_clear_scale', 1.0)),
+        'random_recovery_pretrain_late_lagging_scale': float(getattr(args, 'random_recovery_pretrain_late_lagging_scale', 1.0)),
         'random_recovery_safety_gate_scale': float(getattr(args, 'random_recovery_safety_gate_scale', 1.0)),
         'random_recovery_safety_gate_mode': str(getattr(args, 'random_recovery_safety_gate_mode', 'batch')),
+        'goal_heading_omega_sign': _goal_heading_omega_sign(args),
         'random_clear_ahead_weight': float(getattr(args, 'random_clear_ahead_weight', 0.0)),
         'random_clear_ahead_weight_end': (
             float(getattr(args, 'random_clear_ahead_weight_end'))
@@ -4088,16 +4820,51 @@ def _checkpoint_payload(
         'random_clear_ahead_cone_mode': str(getattr(args, 'random_clear_ahead_cone_mode', 'goal')),
         'random_clear_ahead_goal_tolerance': float(getattr(args, 'random_clear_ahead_goal_tolerance', 1.0)),
         'random_clear_ahead_max_distance': float(getattr(args, 'random_clear_ahead_max_distance', 13.0)),
+        'random_clear_ahead_min_route_progress': float(getattr(args, 'random_clear_ahead_min_route_progress', 0.0)),
+        'random_clear_ahead_max_route_progress': float(getattr(args, 'random_clear_ahead_max_route_progress', 1.0)),
+        'random_clear_ahead_min_abs_cte': float(getattr(args, 'random_clear_ahead_min_abs_cte', 0.0)),
+        'random_clear_ahead_max_abs_cte': float(getattr(args, 'random_clear_ahead_max_abs_cte', 0.0)),
         'random_clear_ahead_min_neighbor_separation': float(getattr(args, 'random_clear_ahead_min_neighbor_separation', 0.0)),
+        'random_clear_ahead_agent_indices': [int(index) for index in (getattr(args, 'random_clear_ahead_agent_indices', None) or [])],
         'random_clear_ahead_max_cpa_score': float(getattr(args, 'random_clear_ahead_max_cpa_score', 0.0)),
         'random_clear_ahead_max_local_score': float(getattr(args, 'random_clear_ahead_max_local_score', 0.0)),
         'random_clear_ahead_exclude_deconflict': bool(getattr(args, 'random_clear_ahead_exclude_deconflict', False)),
         'random_clear_ahead_target_source': str(getattr(args, 'random_clear_ahead_target_source', 'raw')),
         'random_clear_ahead_target_speed': float(getattr(args, 'random_clear_ahead_target_speed', 0.30)),
         'random_clear_ahead_min_speed': float(getattr(args, 'random_clear_ahead_min_speed', 0.18)),
+        'random_clear_ahead_speed_cte_slowdown': float(getattr(args, 'random_clear_ahead_speed_cte_slowdown', 0.0)),
+        'random_clear_ahead_speed_cte_start': float(getattr(args, 'random_clear_ahead_speed_cte_start', 0.0)),
+        'random_clear_ahead_speed_cte_full': float(getattr(args, 'random_clear_ahead_speed_cte_full', 0.0)),
         'random_clear_ahead_max_omega': float(getattr(args, 'random_clear_ahead_max_omega', 0.18)),
         'random_clear_ahead_omega_reference': float(getattr(args, 'random_clear_ahead_omega_reference', 0.55)),
         'random_clear_ahead_omega_weight': float(getattr(args, 'random_clear_ahead_omega_weight', 1.0)),
+        'random_late_lagging_weight': float(getattr(args, 'random_late_lagging_weight', 0.0)),
+        'random_late_lagging_weight_end': (
+            float(getattr(args, 'random_late_lagging_weight_end'))
+            if getattr(args, 'random_late_lagging_weight_end', None) is not None
+            else None
+        ),
+        'random_late_lagging_goal_tolerance': float(getattr(args, 'random_late_lagging_goal_tolerance', 1.0)),
+        'random_late_lagging_max_distance': float(getattr(args, 'random_late_lagging_max_distance', 80.0)),
+        'random_late_lagging_min_distance': float(getattr(args, 'random_late_lagging_min_distance', 2.0)),
+        'random_late_lagging_max_self_progress': float(getattr(args, 'random_late_lagging_max_self_progress', 0.25)),
+        'random_late_lagging_min_team_progress': float(getattr(args, 'random_late_lagging_min_team_progress', 0.75)),
+        'random_late_lagging_min_progress_gap': float(getattr(args, 'random_late_lagging_min_progress_gap', 0.50)),
+        'random_late_lagging_agent_indices': [int(index) for index in (getattr(args, 'random_late_lagging_agent_indices', None) or [])],
+        'random_late_lagging_min_finished_teammates': int(getattr(args, 'random_late_lagging_min_finished_teammates', 0)),
+        'random_late_lagging_finished_progress': float(getattr(args, 'random_late_lagging_finished_progress', 0.98)),
+        'random_late_lagging_phase_min': float(getattr(args, 'random_late_lagging_phase_min', -1.0)),
+        'random_late_lagging_min_team_separation': float(getattr(args, 'random_late_lagging_min_team_separation', 4.8)),
+        'random_late_lagging_min_neighbor_separation': float(getattr(args, 'random_late_lagging_min_neighbor_separation', 4.8)),
+        'random_late_lagging_max_cpa_score': float(getattr(args, 'random_late_lagging_max_cpa_score', 0.0)),
+        'random_late_lagging_max_local_score': float(getattr(args, 'random_late_lagging_max_local_score', 0.0)),
+        'random_late_lagging_allow_threat_overlap': bool(getattr(args, 'random_late_lagging_allow_threat_overlap', False)),
+        'random_late_lagging_target_speed': float(getattr(args, 'random_late_lagging_target_speed', 0.16)),
+        'random_late_lagging_min_speed': float(getattr(args, 'random_late_lagging_min_speed', 0.06)),
+        'random_late_lagging_max_omega': float(getattr(args, 'random_late_lagging_max_omega', 0.34)),
+        'random_late_lagging_omega_reference': float(getattr(args, 'random_late_lagging_omega_reference', 0.80)),
+        'random_late_lagging_omega_weight': float(getattr(args, 'random_late_lagging_omega_weight', 2.60)),
+        'random_late_lagging_target_source': str(getattr(args, 'random_late_lagging_target_source', 'goal')),
         'policy_anchor_weight': float(getattr(args, 'policy_anchor_weight', 0.0)),
         'policy_anchor_weight_end': (
             float(getattr(args, 'policy_anchor_weight_end'))
@@ -4112,6 +4879,8 @@ def _checkpoint_payload(
         'policy_anchor_exclude_random_goal_hold': bool(getattr(args, 'policy_anchor_exclude_random_goal_hold', False)),
         'policy_anchor_exclude_random_offroute_finish': bool(getattr(args, 'policy_anchor_exclude_random_offroute_finish', False)),
         'policy_anchor_exclude_random_cte_recovery': bool(getattr(args, 'policy_anchor_exclude_random_cte_recovery', False)),
+        'policy_anchor_exclude_random_clear_ahead': bool(getattr(args, 'policy_anchor_exclude_random_clear_ahead', False)),
+        'policy_anchor_exclude_random_late_lagging': bool(getattr(args, 'policy_anchor_exclude_random_late_lagging', False)),
         'separate_actor_critic_grad_clip': bool(getattr(args, 'separate_actor_critic_grad_clip', False)),
         'ego_dim': AgentLocalObservation.ego_feature_size(),
         'neighbor_feature_dim': NEIGHBOR_FEATURE_COUNT,
@@ -4209,6 +4978,35 @@ def _load_resume_payload(torch, resume_path: Path) -> dict:
     return payload
 
 
+def _infer_obs_layout_for_migration(obs_dim: int) -> tuple[int, int, int] | None:
+    new_ego_dim = AgentLocalObservation.ego_feature_size()
+    for ego_dim in (new_ego_dim, 17, 12, 11, 10):
+        for neighbor_dim in (NEIGHBOR_FEATURE_COUNT, 6):
+            neighbor_width = int(obs_dim) - int(ego_dim) - ENCOUNTER_TYPE_COUNT
+            if neighbor_width >= 0 and neighbor_width % int(neighbor_dim) == 0:
+                return int(ego_dim), int(neighbor_dim), int(neighbor_width // int(neighbor_dim))
+    return None
+
+
+def _copy_obs_block_weight(torch, old_block, new_block, old_layout, new_layout):
+    old_ego_dim, old_neighbor_dim, old_neighbors = old_layout
+    new_ego_dim, new_neighbor_dim, new_neighbors = new_layout
+    if old_neighbors != new_neighbors:
+        return None
+    migrated = torch.zeros_like(new_block)
+    ego_cols = min(old_ego_dim, new_ego_dim)
+    migrated[:, :ego_cols] = old_block[:, :ego_cols]
+    old_pos = old_ego_dim
+    new_pos = new_ego_dim
+    for _ in range(old_neighbors):
+        neighbor_cols = min(old_neighbor_dim, new_neighbor_dim)
+        migrated[:, new_pos:new_pos + neighbor_cols] = old_block[:, old_pos:old_pos + neighbor_cols]
+        old_pos += old_neighbor_dim
+        new_pos += new_neighbor_dim
+    migrated[:, new_pos:new_pos + ENCOUNTER_TYPE_COUNT] = old_block[:, old_pos:old_pos + ENCOUNTER_TYPE_COUNT]
+    return migrated
+
+
 def _migrate_first_layer_weights(torch, old_state_dict, new_state_dict, old_obs_dim, new_obs_dim, num_obs_blocks, layer_key='0'):
     """Zero-pad the first MLP layer when observation dimension grows.
 
@@ -4230,10 +5028,20 @@ def _migrate_first_layer_weights(torch, old_state_dict, new_state_dict, old_obs_
             f'expected_new={expected_new}, actual_new={new_input_dim}'
         )
     new_w = torch.zeros(old_w.shape[0], new_input_dim, dtype=old_w.dtype, device=old_w.device)
+    old_layout = _infer_obs_layout_for_migration(old_obs_dim)
+    new_layout = _infer_obs_layout_for_migration(new_obs_dim)
     old_pos = 0
     new_pos = 0
     for _ in range(num_obs_blocks):
-        new_w[:, new_pos:new_pos + old_obs_dim] = old_w[:, old_pos:old_pos + old_obs_dim]
+        old_block = old_w[:, old_pos:old_pos + old_obs_dim]
+        new_block = new_w[:, new_pos:new_pos + new_obs_dim]
+        migrated_block = None
+        if old_layout is not None and new_layout is not None:
+            migrated_block = _copy_obs_block_weight(torch, old_block, new_block, old_layout, new_layout)
+        if migrated_block is None:
+            new_w[:, new_pos:new_pos + old_obs_dim] = old_block
+        else:
+            new_w[:, new_pos:new_pos + new_obs_dim] = migrated_block
         old_pos += old_obs_dim
         new_pos += new_obs_dim
     remaining = old_w.shape[1] - old_pos
@@ -4256,6 +5064,34 @@ def _migrate_normalizer_state(old_norm_state, old_obs_dim, new_obs_dim):
     if old_mean.shape[0] != old_obs_dim:
         return old_norm_state
     delta = new_obs_dim - old_obs_dim
+    old_layout = _infer_obs_layout_for_migration(old_obs_dim)
+    new_layout = _infer_obs_layout_for_migration(new_obs_dim)
+    if old_layout is not None and new_layout is not None and old_layout[2] == new_layout[2]:
+        old_ego_dim, old_neighbor_dim, neighbor_slots = old_layout
+        new_ego_dim, new_neighbor_dim, _ = new_layout
+        mean_parts = []
+        var_parts = []
+        ego_cols = min(old_ego_dim, new_ego_dim)
+        mean_parts.append(old_mean[:ego_cols])
+        var_parts.append(old_var[:ego_cols])
+        if new_ego_dim > ego_cols:
+            mean_parts.append(np.zeros(new_ego_dim - ego_cols, dtype=np.float64))
+            var_parts.append(np.ones(new_ego_dim - ego_cols, dtype=np.float64))
+        old_pos = old_ego_dim
+        for _ in range(neighbor_slots):
+            neighbor_cols = min(old_neighbor_dim, new_neighbor_dim)
+            mean_parts.append(old_mean[old_pos:old_pos + neighbor_cols])
+            var_parts.append(old_var[old_pos:old_pos + neighbor_cols])
+            if new_neighbor_dim > neighbor_cols:
+                mean_parts.append(np.zeros(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+                var_parts.append(np.ones(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+            old_pos += old_neighbor_dim
+        mean_parts.append(old_mean[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+        var_parts.append(old_var[old_pos:old_pos + ENCOUNTER_TYPE_COUNT])
+        migrated = dict(old_norm_state)
+        migrated['mean'] = np.concatenate(mean_parts)
+        migrated['var'] = np.concatenate(var_parts)
+        return migrated
     new_ego_dim = AgentLocalObservation.ego_feature_size()
     old_neighbor_dim = 6
     old_neighbor_width = old_obs_dim - new_ego_dim - ENCOUNTER_TYPE_COUNT
@@ -4722,6 +5558,9 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'random_role_balance_omega_weight',
         'random_pairwise_role_guard_weight',
         'random_pairwise_role_guard_weight_end',
+        'random_pairwise_role_guard_pretrain_epochs',
+        'random_pairwise_role_guard_pretrain_learning_rate',
+        'random_pairwise_role_guard_pretrain_max_grad_norm',
         'random_pairwise_role_guard_safe_separation',
         'random_pairwise_role_guard_release_separation',
         'random_pairwise_role_guard_min_danger',
@@ -4788,15 +5627,32 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'random_cte_recovery_max_distance',
         'random_cte_recovery_min_abs_cte',
         'random_cte_recovery_full_abs_cte',
+        'random_cte_source',
         'random_cte_recovery_min_neighbor_separation',
+        'random_cte_recovery_agent_indices',
+        'random_cte_recovery_all_agents',
         'random_cte_recovery_allow_threat_overlap',
         'random_cte_recovery_target_speed',
         'random_cte_recovery_min_speed',
+        'random_cte_recovery_speed_cte_slowdown',
+        'random_cte_recovery_speed_heading_gate',
         'random_cte_recovery_max_omega',
         'random_cte_recovery_omega_reference',
+        'random_cte_recovery_linear_weight',
         'random_cte_recovery_omega_weight',
+        'random_cte_recovery_omega_mode',
+        'random_cte_recovery_cte_lookahead',
+        'random_cte_recovery_cte_heading_scale',
+        'random_recovery_pretrain_epochs',
+        'random_recovery_pretrain_learning_rate',
+        'random_recovery_pretrain_max_grad_norm',
+        'random_recovery_pretrain_offroute_scale',
+        'random_recovery_pretrain_cte_scale',
+        'random_recovery_pretrain_clear_scale',
+        'random_recovery_pretrain_late_lagging_scale',
         'random_recovery_safety_gate_scale',
         'random_recovery_safety_gate_mode',
+        'goal_heading_omega_sign',
         'random_clear_ahead_weight',
         'random_clear_ahead_weight_end',
         'random_clear_ahead_scenarios',
@@ -4805,16 +5661,47 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'random_clear_ahead_cone_mode',
         'random_clear_ahead_goal_tolerance',
         'random_clear_ahead_max_distance',
+        'random_clear_ahead_min_route_progress',
+        'random_clear_ahead_max_route_progress',
+        'random_clear_ahead_min_abs_cte',
+        'random_clear_ahead_max_abs_cte',
         'random_clear_ahead_min_neighbor_separation',
+        'random_clear_ahead_agent_indices',
         'random_clear_ahead_max_cpa_score',
         'random_clear_ahead_max_local_score',
         'random_clear_ahead_exclude_deconflict',
         'random_clear_ahead_target_source',
         'random_clear_ahead_target_speed',
         'random_clear_ahead_min_speed',
+        'random_clear_ahead_speed_cte_slowdown',
+        'random_clear_ahead_speed_cte_start',
+        'random_clear_ahead_speed_cte_full',
         'random_clear_ahead_max_omega',
         'random_clear_ahead_omega_reference',
         'random_clear_ahead_omega_weight',
+        'random_late_lagging_weight',
+        'random_late_lagging_weight_end',
+        'random_late_lagging_goal_tolerance',
+        'random_late_lagging_max_distance',
+        'random_late_lagging_min_distance',
+        'random_late_lagging_max_self_progress',
+        'random_late_lagging_min_team_progress',
+        'random_late_lagging_min_progress_gap',
+        'random_late_lagging_agent_indices',
+        'random_late_lagging_min_finished_teammates',
+        'random_late_lagging_finished_progress',
+        'random_late_lagging_phase_min',
+        'random_late_lagging_min_team_separation',
+        'random_late_lagging_min_neighbor_separation',
+        'random_late_lagging_max_cpa_score',
+        'random_late_lagging_max_local_score',
+        'random_late_lagging_allow_threat_overlap',
+        'random_late_lagging_target_speed',
+        'random_late_lagging_min_speed',
+        'random_late_lagging_max_omega',
+        'random_late_lagging_omega_reference',
+        'random_late_lagging_omega_weight',
+        'random_late_lagging_target_source',
         'policy_anchor_weight',
         'policy_anchor_weight_end',
         'policy_anchor_crossing_only',
@@ -4825,6 +5712,8 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'policy_anchor_exclude_random_goal_hold',
         'policy_anchor_exclude_random_offroute_finish',
         'policy_anchor_exclude_random_cte_recovery',
+        'policy_anchor_exclude_random_clear_ahead',
+        'policy_anchor_exclude_random_late_lagging',
         'policy_anchor_exclude_random_pairwise_role_guard',
         'policy_anchor_exclude_random_pairwise_role_guard',
         'separate_actor_critic_grad_clip',
@@ -5789,6 +6678,8 @@ def main():
             )
             current_random_pairwise_role_guard_weight = random_pairwise_role_guard_start + (random_pairwise_role_guard_end - random_pairwise_role_guard_start) * progress_fraction
             last_random_pairwise_role_guard_loss = 0.0
+            last_random_pairwise_role_guard_pretrain_loss = 0.0
+            last_random_recovery_pretrain_loss = 0.0
             random_pairwise_role_guard_active_sum = 0
             random_pairwise_role_guard_active_seen = 0
             random_safe_finish_start = float(getattr(args, 'random_safe_finish_weight', 0.0))
@@ -5845,6 +6736,35 @@ def main():
             last_random_clear_ahead_loss = 0.0
             random_clear_ahead_active_sum = 0
             random_clear_ahead_active_seen = 0
+            random_clear_ahead_scenario_sum = 0
+            random_clear_ahead_unfinished_sum = 0
+            random_clear_ahead_front_sum = 0
+            random_clear_ahead_cpa_sum = 0
+            random_clear_ahead_local_sum = 0
+            random_clear_ahead_neighbor_sum = 0
+            random_clear_ahead_progress_sum = 0
+            random_clear_ahead_cte_sum = 0
+            random_clear_ahead_role_sum = 0
+            random_clear_ahead_deconflict_sum = 0
+            random_late_lagging_start = float(getattr(args, 'random_late_lagging_weight', 0.0))
+            random_late_lagging_end = (
+                float(getattr(args, 'random_late_lagging_weight_end'))
+                if getattr(args, 'random_late_lagging_weight_end', None) is not None
+                else random_late_lagging_start
+            )
+            current_random_late_lagging_weight = random_late_lagging_start + (random_late_lagging_end - random_late_lagging_start) * progress_fraction
+            last_random_late_lagging_loss = 0.0
+            random_late_lagging_active_sum = 0
+            random_late_lagging_active_seen = 0
+            random_late_lagging_scenario_sum = 0
+            random_late_lagging_unfinished_sum = 0
+            random_late_lagging_lagging_sum = 0
+            random_late_lagging_phase_sum = 0
+            random_late_lagging_role_sum = 0
+            random_late_lagging_finished_sum = 0
+            random_late_lagging_team_sum = 0
+            random_late_lagging_neighbor_sum = 0
+            random_late_lagging_threat_sum = 0
             current_policy_anchor_weight = policy_anchor_start + (policy_anchor_end - policy_anchor_start) * progress_fraction
             last_policy_anchor_loss = 0.0
 
@@ -6217,9 +7137,48 @@ def main():
                             )
                             loss = loss + current_random_cte_recovery_weight * random_cte_recovery_loss
                             last_random_cte_recovery_loss = float(random_cte_recovery_loss.detach().cpu().item())
+                        if current_random_late_lagging_weight > 0.0:
+                            with torch.no_grad():
+                                random_late_lagging_components = _random_late_lagging_component_masks(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_states,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                random_late_lagging_mask = random_late_lagging_components['active']
+                                if random_late_lagging_mask.numel() > 0:
+                                    random_late_lagging_active_sum += int(random_late_lagging_mask.sum().detach().cpu().item())
+                                    random_late_lagging_active_seen += int(random_late_lagging_mask.numel())
+                                    random_late_lagging_scenario_sum += int(random_late_lagging_components['scenario'].sum().detach().cpu().item())
+                                    random_late_lagging_unfinished_sum += int(random_late_lagging_components['unfinished'].sum().detach().cpu().item())
+                                    random_late_lagging_lagging_sum += int(random_late_lagging_components['lagging'].sum().detach().cpu().item())
+                                    random_late_lagging_phase_sum += int(random_late_lagging_components['phase'].sum().detach().cpu().item())
+                                    random_late_lagging_role_sum += int(random_late_lagging_components['role'].sum().detach().cpu().item())
+                                    random_late_lagging_finished_sum += int(random_late_lagging_components['finished'].sum().detach().cpu().item())
+                                    random_late_lagging_team_sum += int(random_late_lagging_components['team'].sum().detach().cpu().item())
+                                    random_late_lagging_neighbor_sum += int(random_late_lagging_components['neighbor'].sum().detach().cpu().item())
+                                    random_late_lagging_threat_sum += int(random_late_lagging_components['threat'].sum().detach().cpu().item())
+                            random_late_lagging_loss = _random_late_lagging_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_states,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_late_lagging_weight * random_late_lagging_loss
+                            last_random_late_lagging_loss = float(random_late_lagging_loss.detach().cpu().item())
                         if current_random_clear_ahead_weight > 0.0:
                             with torch.no_grad():
-                                random_clear_ahead_mask = _random_clear_ahead_active_mask(
+                                random_clear_components = _random_clear_ahead_component_masks(
                                     torch,
                                     batch_raw_obs,
                                     batch_scenario_ids,
@@ -6227,9 +7186,20 @@ def main():
                                     args,
                                     agent_indices=batch_agent_indices,
                                 )
+                                random_clear_ahead_mask = random_clear_components['active']
                                 if random_clear_ahead_mask.numel() > 0:
                                     random_clear_ahead_active_sum += int(random_clear_ahead_mask.sum().detach().cpu().item())
                                     random_clear_ahead_active_seen += int(random_clear_ahead_mask.numel())
+                                    random_clear_ahead_scenario_sum += int(random_clear_components['scenario'].sum().detach().cpu().item())
+                                    random_clear_ahead_unfinished_sum += int(random_clear_components['unfinished'].sum().detach().cpu().item())
+                                    random_clear_ahead_front_sum += int(random_clear_components['front'].sum().detach().cpu().item())
+                                    random_clear_ahead_cpa_sum += int(random_clear_components['cpa'].sum().detach().cpu().item())
+                                    random_clear_ahead_local_sum += int(random_clear_components['local'].sum().detach().cpu().item())
+                                    random_clear_ahead_neighbor_sum += int(random_clear_components['neighbor'].sum().detach().cpu().item())
+                                    random_clear_ahead_progress_sum += int(random_clear_components['progress'].sum().detach().cpu().item())
+                                    random_clear_ahead_cte_sum += int(random_clear_components['cte'].sum().detach().cpu().item())
+                                    random_clear_ahead_role_sum += int(random_clear_components['role'].sum().detach().cpu().item())
+                                    random_clear_ahead_deconflict_sum += int(random_clear_components['deconflict'].sum().detach().cpu().item())
                             random_clear_ahead_loss = _random_clear_ahead_loss(
                                 torch,
                                 action_mean,
@@ -6348,6 +7318,46 @@ def main():
                 device=device,
                 role_balance_weight=current_random_role_balance_weight,
             )
+            last_random_pairwise_role_guard_pretrain_loss = _run_random_pairwise_role_guard_pretrain(
+                torch,
+                actor,
+                optimizer,
+                flat_obs,
+                flat_raw_obs,
+                flat_scenario_ids_np,
+                flat_scenario_weights,
+                flat_agent_indices_np,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_count=sample_count,
+                minibatch_size=minibatch_size,
+                device=device,
+                pairwise_role_guard_weight=current_random_pairwise_role_guard_weight,
+            )
+            last_random_recovery_pretrain_loss = _run_random_recovery_pretrain(
+                torch,
+                actor,
+                optimizer,
+                flat_obs,
+                flat_raw_obs,
+                flat_states,
+                flat_scenario_ids_np,
+                flat_scenario_weights,
+                flat_agent_indices_np,
+                scenario_to_index,
+                args,
+                action_low_tensor,
+                action_high_tensor,
+                sample_count=sample_count,
+                minibatch_size=minibatch_size,
+                device=device,
+                offroute_weight=current_random_offroute_finish_weight,
+                cte_weight=current_random_cte_recovery_weight,
+                clear_ahead_weight=current_random_clear_ahead_weight,
+                late_lagging_weight=current_random_late_lagging_weight,
+            )
 
             update_wall_time = max(1e-6, time.perf_counter() - update_wall_start)
             update_index += 1
@@ -6395,12 +7405,38 @@ def main():
                     f'rand_cte_w={current_random_cte_recovery_weight:.3f} rand_cte={last_random_cte_recovery_loss:.4f} '
                     f'rand_cte_active={(random_cte_recovery_active_sum / max(random_cte_recovery_active_seen, 1)):.3f} '
                     f'rand_recovery_gate={float(getattr(args, "random_recovery_safety_gate_scale", 1.0)):.3f}/{str(getattr(args, "random_recovery_safety_gate_mode", "batch"))} '
+                    f'rand_late_lag_w={current_random_late_lagging_weight:.3f} rand_late_lag={last_random_late_lagging_loss:.4f} '
+                    f'rand_late_lag_active={(random_late_lagging_active_sum / max(random_late_lagging_active_seen, 1)):.3f} '
+                    f'rand_late_lag_gates='
+                    f'{(random_late_lagging_scenario_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_unfinished_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_lagging_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_phase_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_team_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_neighbor_sum / max(random_late_lagging_active_seen, 1)):.3f}/'
+                    f'{(random_late_lagging_threat_sum / max(random_late_lagging_active_seen, 1)):.3f} '
+                    f'rand_late_lag_focus=' \
+                    f'{(random_late_lagging_role_sum / max(random_late_lagging_active_seen, 1)):.3f}/' \
+                    f'{(random_late_lagging_finished_sum / max(random_late_lagging_active_seen, 1)):.3f} '
                     f'rand_clear_w={current_random_clear_ahead_weight:.3f} rand_clear={last_random_clear_ahead_loss:.4f} '
                     f'rand_clear_active={(random_clear_ahead_active_sum / max(random_clear_ahead_active_seen, 1)):.3f} '
+                    f'rand_clear_gates='
+                    f'{(random_clear_ahead_scenario_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_unfinished_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_front_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_cpa_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_local_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_neighbor_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_progress_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_cte_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_role_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
+                    f'{(random_clear_ahead_deconflict_sum / max(random_clear_ahead_active_seen, 1)):.3f} '
                     f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '
                     f'crossing_bc_pre={last_crossing_pretrain_loss:.4f} '
                     f'rand_deconf_pre={last_random_deconflict_pretrain_loss:.4f} '
                     f'rand_role_pre={last_random_role_balance_pretrain_loss:.4f} '
+                    f'rand_pair_pre={last_random_pairwise_role_guard_pretrain_loss:.4f} '
+                    f'rand_recovery_pre={last_random_recovery_pretrain_loss:.4f} '
                     f'{_gpu_runtime_stats(torch, device)}'
                     ,
                     flush=True,

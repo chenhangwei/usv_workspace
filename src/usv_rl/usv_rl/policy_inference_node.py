@@ -113,6 +113,12 @@ def _migrate_runtime_normalizer_state(state: dict, new_obs_dim: int) -> dict:
     if old_obs_dim == new_obs_dim or old_obs_dim <= 0 or new_obs_dim <= old_obs_dim:
         return state
 
+    layout_stats = _migrate_runtime_obs_stats_by_layout(mean, var, new_obs_dim)
+    if layout_stats is not None:
+        migrated = dict(state)
+        migrated['mean'], migrated['var'] = layout_stats
+        return migrated
+
     ego_dim = UsvObservation.ego_feature_size()
     old_neighbor_dim = 6
     old_neighbor_width = old_obs_dim - ego_dim - ENCOUNTER_TYPE_COUNT
@@ -145,6 +151,84 @@ def _migrate_runtime_normalizer_state(state: dict, new_obs_dim: int) -> dict:
     migrated['mean'] = np.concatenate([mean, np.zeros(delta, dtype=np.float64)])
     migrated['var'] = np.concatenate([var, np.ones(delta, dtype=np.float64)])
     return migrated
+
+
+def _infer_runtime_obs_layout(obs_dim: int) -> tuple[int, int, int, int] | None:
+    new_ego_dim = UsvObservation.ego_feature_size()
+    for encounter_dim in (ENCOUNTER_TYPE_COUNT, 0):
+        for ego_dim in (new_ego_dim, 17, 12, 11, 10):
+            for neighbor_dim in (USV_NEIGHBOR_FEATURE_COUNT, 6):
+                neighbor_width = int(obs_dim) - int(ego_dim) - int(encounter_dim)
+                if neighbor_width >= 0 and neighbor_width % int(neighbor_dim) == 0:
+                    return int(ego_dim), int(neighbor_dim), int(neighbor_width // int(neighbor_dim)), int(encounter_dim)
+    return None
+
+
+def _migrate_runtime_obs_stats_by_layout(mean: np.ndarray, var: np.ndarray, new_obs_dim: int) -> tuple[np.ndarray, np.ndarray] | None:
+    old_layout = _infer_runtime_obs_layout(int(mean.shape[0]))
+    new_layout = _infer_runtime_obs_layout(int(new_obs_dim))
+    if old_layout is None or new_layout is None:
+        return None
+    old_ego_dim, old_neighbor_dim, neighbor_slots, old_encounter_dim = old_layout
+    new_ego_dim, new_neighbor_dim, new_neighbor_slots, new_encounter_dim = new_layout
+    if neighbor_slots != new_neighbor_slots or old_encounter_dim != new_encounter_dim:
+        return None
+    mean_parts = []
+    var_parts = []
+    ego_cols = min(old_ego_dim, new_ego_dim)
+    mean_parts.append(mean[:ego_cols])
+    var_parts.append(var[:ego_cols])
+    if new_ego_dim > ego_cols:
+        mean_parts.append(np.zeros(new_ego_dim - ego_cols, dtype=np.float64))
+        var_parts.append(np.ones(new_ego_dim - ego_cols, dtype=np.float64))
+    old_pos = old_ego_dim
+    for _ in range(neighbor_slots):
+        neighbor_cols = min(old_neighbor_dim, new_neighbor_dim)
+        mean_parts.append(mean[old_pos:old_pos + neighbor_cols])
+        var_parts.append(var[old_pos:old_pos + neighbor_cols])
+        if new_neighbor_dim > neighbor_cols:
+            mean_parts.append(np.zeros(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+            var_parts.append(np.ones(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+        old_pos += old_neighbor_dim
+    if new_encounter_dim > 0:
+        mean_parts.append(mean[old_pos:old_pos + new_encounter_dim])
+        var_parts.append(var[old_pos:old_pos + new_encounter_dim])
+    return np.concatenate(mean_parts), np.concatenate(var_parts)
+
+
+def _adapt_runtime_observation_dim(observation: np.ndarray, target_dim: int) -> np.ndarray:
+    obs = np.asarray(observation, dtype=np.float32)
+    current_dim = int(obs.shape[-1]) if obs.ndim > 0 else 0
+    target_dim = int(target_dim)
+    if current_dim == target_dim:
+        return obs
+    current_layout = _infer_runtime_obs_layout(current_dim)
+    target_layout = _infer_runtime_obs_layout(target_dim)
+    if current_layout is not None and target_layout is not None:
+        current_ego_dim, current_neighbor_dim, neighbor_slots, current_encounter_dim = current_layout
+        target_ego_dim, target_neighbor_dim, target_neighbor_slots, target_encounter_dim = target_layout
+        if neighbor_slots == target_neighbor_slots and current_encounter_dim == target_encounter_dim:
+            parts = []
+            ego_cols = min(current_ego_dim, target_ego_dim)
+            parts.append(obs[..., :ego_cols])
+            if target_ego_dim > ego_cols:
+                pad_shape = obs.shape[:-1] + (target_ego_dim - ego_cols,)
+                parts.append(np.zeros(pad_shape, dtype=np.float32))
+            old_pos = current_ego_dim
+            for _ in range(neighbor_slots):
+                neighbor_cols = min(current_neighbor_dim, target_neighbor_dim)
+                parts.append(obs[..., old_pos:old_pos + neighbor_cols])
+                if target_neighbor_dim > neighbor_cols:
+                    pad_shape = obs.shape[:-1] + (target_neighbor_dim - neighbor_cols,)
+                    parts.append(np.zeros(pad_shape, dtype=np.float32))
+                old_pos += current_neighbor_dim
+            if target_encounter_dim > 0:
+                parts.append(obs[..., old_pos:old_pos + target_encounter_dim])
+            return np.concatenate(parts, axis=-1).astype(np.float32, copy=False)
+    if target_dim > current_dim:
+        pad_shape = obs.shape[:-1] + (target_dim - current_dim,)
+        return np.concatenate([obs, np.zeros(pad_shape, dtype=np.float32)], axis=-1)
+    return obs[..., :target_dim].astype(np.float32, copy=False)
 
 
 class ZeroPolicy:
@@ -235,6 +319,7 @@ class MappoActorPolicyRuntime:
             self._obs_normalizer.load_state_dict(norm_state)
 
     def predict(self, observation: np.ndarray) -> np.ndarray:
+        observation = _adapt_runtime_observation_dim(observation, self.obs_dim)
         if self._obs_normalizer is not None:
             observation = self._obs_normalizer.normalize(observation)
         obs_tensor = self._torch.as_tensor(
@@ -474,49 +559,69 @@ class PolicyInferenceNode(Node):
                         f'Encounter-type conditioning enabled: {encounter_type} (index={self._encounter_type_index}).'
                     )
             else:
-                # Backwards compatibility: try old ego_dim=12/11 layouts.
-                _old_ego = 12
-                if policy_obs_dim >= _old_ego and (policy_obs_dim - _old_ego) % 6 == 0:
-                    inferred_neighbors = max(1, (policy_obs_dim - _old_ego) // 6)
+                # Backwards compatibility: try older ego layouts.
+                _legacy_rawless_ego = 17
+                if policy_obs_dim >= _legacy_rawless_ego and (policy_obs_dim - _legacy_rawless_ego) % USV_NEIGHBOR_FEATURE_COUNT == 0:
+                    inferred_neighbors = max(1, (policy_obs_dim - _legacy_rawless_ego) // USV_NEIGHBOR_FEATURE_COUNT)
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=12 layout (obs_dim={policy_obs_dim}). '
-                        f'fresh96 route/timing observations will be ignored by the model.'
+                        f'Model uses legacy ego_dim=17 layout (obs_dim={policy_obs_dim}). '
+                        'raw CTE/overflow observations will be removed before inference.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
-                elif policy_obs_dim >= _old_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
-                    inferred_neighbors = max(1, (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) // 6)
+                elif policy_obs_dim >= _legacy_rawless_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _legacy_rawless_ego - ENCOUNTER_TYPE_COUNT) % USV_NEIGHBOR_FEATURE_COUNT == 0:
+                    inferred_neighbors = max(1, (policy_obs_dim - _legacy_rawless_ego - ENCOUNTER_TYPE_COUNT) // USV_NEIGHBOR_FEATURE_COUNT)
                     self._encounter_type_enabled = True
                     self.get_logger().warn(
-                        f'Model uses legacy ego_dim=12 layout with encounter type (obs_dim={policy_obs_dim}). '
-                        f'fresh96 route/timing observations will be ignored by the model.'
+                        f'Model uses legacy ego_dim=17 layout with encounter type (obs_dim={policy_obs_dim}). '
+                        'raw CTE/overflow observations will be removed before inference.'
                     )
                     if inferred_neighbors != self._max_neighbors:
                         self._max_neighbors = inferred_neighbors
                 else:
-                    # Try older ego_dim=11 layouts (scalar heading_error).
-                    _oldest_ego = 11
-                    if policy_obs_dim >= _oldest_ego and (policy_obs_dim - _oldest_ego) % 6 == 0:
-                        inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego) // 6)
+                    # Backwards compatibility: try old ego_dim=12/11 layouts.
+                    _old_ego = 12
+                    if policy_obs_dim >= _old_ego and (policy_obs_dim - _old_ego) % 6 == 0:
+                        inferred_neighbors = max(1, (policy_obs_dim - _old_ego) // 6)
                         self.get_logger().warn(
-                            f'Model uses legacy ego_dim=11 layout (obs_dim={policy_obs_dim}). '
-                            f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                            f'Model uses legacy ego_dim=12 layout (obs_dim={policy_obs_dim}). '
+                            f'fresh96 route/timing observations will be ignored by the model.'
                         )
                         if inferred_neighbors != self._max_neighbors:
                             self._max_neighbors = inferred_neighbors
-                    elif policy_obs_dim >= _oldest_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
-                        inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) // 6)
+                    elif policy_obs_dim >= _old_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                        inferred_neighbors = max(1, (policy_obs_dim - _old_ego - ENCOUNTER_TYPE_COUNT) // 6)
                         self._encounter_type_enabled = True
                         self.get_logger().warn(
-                            f'Model uses legacy ego_dim=11 layout with encounter type (obs_dim={policy_obs_dim}). '
-                            f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                            f'Model uses legacy ego_dim=12 layout with encounter type (obs_dim={policy_obs_dim}). '
+                            f'fresh96 route/timing observations will be ignored by the model.'
                         )
                         if inferred_neighbors != self._max_neighbors:
                             self._max_neighbors = inferred_neighbors
                     else:
-                        raise RuntimeError(
-                            f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
-                        )
+                        # Try older ego_dim=11 layouts (scalar heading_error).
+                        _oldest_ego = 11
+                        if policy_obs_dim >= _oldest_ego and (policy_obs_dim - _oldest_ego) % 6 == 0:
+                            inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego) // 6)
+                            self.get_logger().warn(
+                                f'Model uses legacy ego_dim=11 layout (obs_dim={policy_obs_dim}). '
+                                f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                            )
+                            if inferred_neighbors != self._max_neighbors:
+                                self._max_neighbors = inferred_neighbors
+                        elif policy_obs_dim >= _oldest_ego + ENCOUNTER_TYPE_COUNT and (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) % 6 == 0:
+                            inferred_neighbors = max(1, (policy_obs_dim - _oldest_ego - ENCOUNTER_TYPE_COUNT) // 6)
+                            self._encounter_type_enabled = True
+                            self.get_logger().warn(
+                                f'Model uses legacy ego_dim=11 layout with encounter type (obs_dim={policy_obs_dim}). '
+                                f'sin/cos heading_error observation will be collapsed to scalar for this model.'
+                            )
+                            if inferred_neighbors != self._max_neighbors:
+                                self._max_neighbors = inferred_neighbors
+                        else:
+                            raise RuntimeError(
+                                f'Unsupported observation dimension {policy_obs_dim}; cannot map it to UsvObservation vector slots.'
+                            )
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -934,6 +1039,8 @@ class PolicyInferenceNode(Node):
 
         # Compute route/timing features from spawn→goal line.
         cte = 0.0
+        raw_cte = 0.0
+        cte_overflow = 0.0
         route_progress = 0.0
         conflict_phase = 0.0
         conflict_eta = 1.0
@@ -951,8 +1058,9 @@ class PolicyInferenceNode(Node):
                 rel_x = own_x - sx
                 rel_y = own_y - sy
                 progress_s = rel_x * unit_x + rel_y * unit_y
-                cte = (rel_x * route_dy - rel_y * route_dx) / route_len
-                cte = max(-3.0, min(3.0, cte))
+                raw_cte = (rel_x * route_dy - rel_y * route_dx) / route_len
+                cte = max(-3.0, min(3.0, raw_cte))
+                cte_overflow = max(0.0, abs(raw_cte) - 3.0)
                 route_progress = max(0.0, min(1.0, progress_s / route_len))
                 conflict_s = route_len * 0.5
                 to_conflict = conflict_s - progress_s
@@ -974,6 +1082,8 @@ class PolicyInferenceNode(Node):
             final_linear_x=final_linear_x,
             final_angular_z=final_angular_z,
             cross_track_error=cte,
+            raw_cross_track_error=raw_cte,
+            cross_track_overflow=cte_overflow,
             route_progress=route_progress,
             conflict_phase=conflict_phase,
             conflict_eta=conflict_eta,

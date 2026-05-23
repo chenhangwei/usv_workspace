@@ -1,0 +1,19 @@
+{
+  "policy_type": "mappo_router",
+  "env_template": "/mnt/data/checkpoints/usv_rl/fresh331_nearmiss_event_guard_from_fresh329.pt",
+  "default_model": "/mnt/data/checkpoints/usv_rl/fresh331_nearmiss_event_guard_from_fresh329.pt",
+  "scenario_gated_blends": {
+    "three_usv_random_encounter": {
+      "base_model": "/mnt/data/checkpoints/usv_rl/fresh331_nearmiss_event_guard_from_fresh329.pt",
+      "safety_model": "/mnt/data/checkpoints/usv_rl/fresh352_interp_a002_from_fresh331_fresh351.pt",
+      "critical_safety_model": "/mnt/data/checkpoints/usv_rl/fresh351_guard_only_probe_from_fresh331.pt",
+      "yield_blend": 1.0,
+      "standon_blend": 1.0,
+      "max_separation": 3.10,
+      "critical_separation": 1.85,
+      "min_route_progress": 0.0,
+      "max_route_progress": 1.08,
+      "min_abs_cte": 0.0
+    }
+  }
+}

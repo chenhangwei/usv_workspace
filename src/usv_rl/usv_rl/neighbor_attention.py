@@ -18,16 +18,23 @@ import math
 import torch
 import torch.nn as nn
 
+from .multi_agent_types import LOCAL_EGO_FEATURE_COUNT, NEIGHBOR_FEATURE_COUNT
+
 # Fixed observation layout constants (must match multi_agent_types / types).
-_EGO_DIM = 17               # base ego + route/crossing timing coordination features
-_NEIGHBOR_FEATURE_DIM = 10   # rel_x, rel_y, rel_vx, rel_vy, distance, bearing, tcpa, dcpa, route_eta_delta, route_priority_delta
+_EGO_DIM = LOCAL_EGO_FEATURE_COUNT  # base ego + route/crossing timing coordination + raw CTE features
+_NEIGHBOR_FEATURE_DIM = NEIGHBOR_FEATURE_COUNT  # rel_x, rel_y, rel_vx, rel_vy, distance, bearing, tcpa, dcpa, route_eta_delta, route_priority_delta
 _LEGACY_NEIGHBOR_FEATURE_DIMS = (6,)
 _OLD_EGO_DIM = 11            # previous ego dimension (before sin/cos heading_error split)
+_LEGACY_EGO_DIMS = (17, 12, _OLD_EGO_DIM, 10)
 
 
 def _infer_ego_dim_from_obs_dim(obs_dim: int, encounter_dim: int) -> int:
     """Infer a saved local-observation ego width from total obs dimension."""
-    for candidate in (_EGO_DIM, 12, _OLD_EGO_DIM, 10):
+    seen = set()
+    for candidate in (_EGO_DIM, *_LEGACY_EGO_DIMS):
+        if candidate in seen:
+            continue
+        seen.add(candidate)
         for neighbor_dim in (_NEIGHBOR_FEATURE_DIM, *_LEGACY_NEIGHBOR_FEATURE_DIMS):
             remaining = int(obs_dim) - int(candidate) - int(encounter_dim)
             if remaining >= 0 and remaining % int(neighbor_dim) == 0:

@@ -5,7 +5,7 @@ from typing import List
 import numpy as np
 
 
-USV_EGO_FEATURE_COUNT = 17
+USV_EGO_FEATURE_COUNT = 19
 # Must mirror usv_rl.multi_agent_types.NEIGHBOR_FEATURE_COUNT.
 USV_NEIGHBOR_FEATURE_COUNT = 10
 
@@ -48,6 +48,8 @@ class UsvObservation:
     final_linear_x: float
     final_angular_z: float
     cross_track_error: float = 0.0
+    raw_cross_track_error: float = 0.0
+    cross_track_overflow: float = 0.0
     route_progress: float = 0.0
     conflict_phase: float = 0.0
     conflict_eta: float = 1.0
@@ -87,6 +89,8 @@ class UsvObservation:
             self.conflict_eta,
             self.crossing_priority,
             self.crossing_eta_gap,
+            self.raw_cross_track_error,
+            self.cross_track_overflow,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]

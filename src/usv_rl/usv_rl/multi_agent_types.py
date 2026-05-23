@@ -7,7 +7,7 @@ import numpy as np
 # Number of distinct encounter types encoded as a one-hot in the observation.
 # 0=head_on, 1=crossing, 2=overtaking.  -1 means unset (zero vector).
 ENCOUNTER_TYPE_COUNT = 3
-LOCAL_EGO_FEATURE_COUNT = 17
+LOCAL_EGO_FEATURE_COUNT = 19
 # Neighbor layout: relative pose/velocity plus pairwise conflict timing.
 # 0..5: rel_x, rel_y, rel_vx, rel_vy, distance, bearing
 # 6..9: tcpa_norm, dcpa_norm, route_eta_delta, route_priority_delta
@@ -43,6 +43,8 @@ class AgentLocalObservation:
     final_linear_x: float
     final_angular_z: float
     cross_track_error: float = 0.0
+    raw_cross_track_error: float = 0.0
+    cross_track_overflow: float = 0.0
     route_progress: float = 0.0
     conflict_phase: float = 0.0
     conflict_eta: float = 1.0
@@ -83,6 +85,8 @@ class AgentLocalObservation:
             self.conflict_eta,
             self.crossing_priority,
             self.crossing_eta_gap,
+            self.raw_cross_track_error,
+            self.cross_track_overflow,
         ]
 
         sorted_neighbors = sorted(self.neighbors, key=lambda item: item.distance)[:max_neighbors]

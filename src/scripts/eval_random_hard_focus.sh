@@ -8,6 +8,7 @@ source ../install/setup.bash
 export PYTHONPATH="$PWD/usv_rl:${PYTHONPATH:-}"
 
 MODEL="${MODEL:-/mnt/data/checkpoints/usv_rl/fresh313_single_overtake_early_return_from_fresh310.pt}"
+POLICY="${POLICY:-auto}"
 OUT="${OUT:-/tmp/random_hard_focus_eval}"
 LABEL="${LABEL:-random_hard_focus}"
 SEEDS="${SEEDS:-1458 1460 1461 1463}"
@@ -54,7 +55,7 @@ for seed in $SEEDS; do
     trace_args+=(--trace-collision-raw-observation)
   fi
   ROS_DOMAIN_ID="$domain" timeout "$EVAL_TIMEOUT" /bin/python3 -u -m usv_rl.evaluate_mappo_policy \
-    --policy mappo \
+    --policy "$POLICY" \
     --model "$MODEL" \
     --episodes 1 \
     --steps-per-episode "$STEPS" \

@@ -14,7 +14,7 @@ TARGET_SPECS = {
     'cte': ('random_cte_recovery_weighted_active', 'cte_recovery_target'),
     'finish': ('random_safe_finish_weighted_active', 'safe_finish_target'),
 }
-TARGET_KINDS = tuple(TARGET_SPECS) + ('clear', 'guard', 'late_clear', 'goal_hold')
+TARGET_KINDS = tuple(TARGET_SPECS) + ('clear', 'guard', 'stall_start', 'goal_return', 'late_clear', 'recovery_turn', 'recovery', 'edge_coast', 'goal_hold')
 TARGET_KINDS = TARGET_KINDS + ('imitate', 'scripted_overtake')
 TARGET_KIND_TO_ID = {kind: index for index, kind in enumerate(TARGET_KINDS)}
 
@@ -70,11 +70,91 @@ def parse_args():
     parser.add_argument('--late-clear-cte-slow-threshold', type=float, default=-1.0, help='If positive, cap late clear linear target when absolute CTE is above this value.')
     parser.add_argument('--late-clear-cte-recovery-linear', type=float, default=0.16, help='Late clear linear target used when CTE exceeds late-clear-cte-slow-threshold.')
     parser.add_argument('--late-clear-allow-deconf', action='store_true', help='Allow late clear samples even while deconflict target is active.')
+    parser.add_argument('--late-clear-agent', action='append', dest='late_clear_agents', default=None, help='Only add late-clear samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--stall-start-weight', type=float, default=0.0, help='Sample weight for clear low-progress stall-start targets. 0 disables.')
+    parser.add_argument('--stall-start-agent', action='append', dest='stall_start_agents', default=None, help='Only add stall-start samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--stall-start-source-threshold', type=float, default=0.04, help='Only add stall-start samples when traced source linear speed is below this value.')
+    parser.add_argument('--stall-start-target-linear', type=float, default=0.14, help='Target linear speed for stall-start samples.')
+    parser.add_argument('--stall-start-min-distance', type=float, default=5.0, help='Only add stall-start samples farther than this distance from goal.')
+    parser.add_argument('--stall-start-max-route-progress', type=float, default=0.03, help='Only add stall-start samples whose route progress is at most this value.')
+    parser.add_argument('--stall-start-max-cte', type=float, default=1.0, help='Only add stall-start samples with absolute CTE below this value.')
+    parser.add_argument('--stall-start-min-separation', type=float, default=2.75, help='Only add stall-start samples when team min separation is at least this value.')
+    parser.add_argument('--stall-start-max-threat', type=float, default=0.08, help='Only add stall-start samples when traced threat score is at most this value.')
+    parser.add_argument('--stall-start-min-step', type=int, default=40, help='Only add stall-start samples at or after this traced step index.')
+    parser.add_argument('--stall-start-max-step', type=int, default=-1, help='If nonnegative, only add stall-start samples at or before this traced step index.')
+    parser.add_argument('--stall-start-cte-omega-blend', type=float, default=0.55, help='Blend stall-start omega toward the traced CTE recovery omega target.')
+    parser.add_argument('--stall-start-heading-slow-threshold', type=float, default=2.20, help='If positive, cap stall-start linear target when absolute heading error is above this value.')
+    parser.add_argument('--stall-start-heading-recovery-linear', type=float, default=0.07, help='Stall-start linear target used when heading error exceeds stall-start-heading-slow-threshold.')
+    parser.add_argument('--stall-start-allow-deconf', action='store_true', help='Allow stall-start samples even while deconflict target is active.')
+    parser.add_argument('--goal-return-weight', type=float, default=0.0, help='Sample weight for high-progress far-from-goal return targets. 0 disables.')
+    parser.add_argument('--goal-return-agent', action='append', dest='goal_return_agents', default=None, help='Only add goal-return samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--goal-return-source-threshold', type=float, default=0.12, help='Only add goal-return samples when traced source linear speed is above this value.')
+    parser.add_argument('--goal-return-target-linear', type=float, default=0.11, help='Target linear speed for goal-return samples.')
+    parser.add_argument('--goal-return-min-distance', type=float, default=2.5, help='Only add goal-return samples farther than this distance from goal.')
+    parser.add_argument('--goal-return-min-route-progress', type=float, default=0.92, help='Only add goal-return samples whose route progress is at least this value.')
+    parser.add_argument('--goal-return-max-cte', type=float, default=3.2, help='Only add goal-return samples with absolute CTE below this value.')
+    parser.add_argument('--goal-return-min-separation', type=float, default=2.75, help='Only add goal-return samples when team min separation is at least this value.')
+    parser.add_argument('--goal-return-max-threat', type=float, default=0.10, help='Only add goal-return samples when traced threat score is at most this value.')
+    parser.add_argument('--goal-return-min-step', type=int, default=320, help='Only add goal-return samples at or after this traced step index.')
+    parser.add_argument('--goal-return-safe-omega-blend', type=float, default=0.75, help='Blend goal-return omega toward the traced safe-finish omega target.')
+    parser.add_argument('--goal-return-allow-deconf', action='store_true', help='Allow goal-return samples even while deconflict target is active.')
+    parser.add_argument('--recovery-speedup-weight', type=float, default=0.0, help='Sample weight for low-threat recovery speed-up targets. 0 disables.')
+    parser.add_argument('--recovery-speedup-source-threshold', type=float, default=0.34, help='Only add recovery speed-up samples when traced source linear speed is below this value.')
+    parser.add_argument('--recovery-speedup-target-linear', type=float, default=0.30, help='Target linear speed for recovery speed-up samples.')
+    parser.add_argument('--recovery-speedup-min-distance', type=float, default=2.5, help='Only add recovery samples farther than this distance from goal.')
+    parser.add_argument('--recovery-speedup-max-cte', type=float, default=3.2, help='Only add recovery samples with absolute CTE below this value.')
+    parser.add_argument('--recovery-speedup-min-separation', type=float, default=2.4, help='Only add recovery samples when team min separation is at least this value.')
+    parser.add_argument('--recovery-speedup-max-threat', type=float, default=0.16, help='Only add recovery samples when traced threat score is at most this value.')
+    parser.add_argument('--recovery-speedup-min-step', type=int, default=120, help='Only add recovery samples at or after this traced step index.')
+    parser.add_argument('--recovery-speedup-min-route-progress', type=float, default=0.0, help='Only add recovery samples whose route progress is at least this value.')
+    parser.add_argument('--recovery-speedup-max-route-progress', type=float, default=1.1, help='Only add recovery samples whose route progress is at most this value.')
+    parser.add_argument('--recovery-speedup-max-heading-error', type=float, default=3.2, help='Only add recovery speed-up samples whose absolute heading error is at most this value.')
+    parser.add_argument('--recovery-speedup-cte-omega-blend', type=float, default=0.75, help='Blend recovery omega toward the traced CTE recovery omega target.')
+    parser.add_argument('--recovery-speedup-agent', action='append', dest='recovery_speedup_agents', default=None, help='Only add recovery speed-up samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--edge-coast-weight', type=float, default=0.0, help='Sample weight for low-threat edge coasting targets that keep progress after reaching high CTE. 0 disables.')
+    parser.add_argument('--edge-coast-agent', action='append', dest='edge_coast_agents', default=None, help='Only add edge-coast samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--edge-coast-source-threshold', type=float, default=0.12, help='Only add edge-coast samples when traced source linear speed is below this value.')
+    parser.add_argument('--edge-coast-target-linear', type=float, default=0.08, help='Target linear speed for edge-coast samples.')
+    parser.add_argument('--edge-coast-min-distance', type=float, default=2.5, help='Only add edge-coast samples farther than this distance from goal.')
+    parser.add_argument('--edge-coast-min-abs-cte', type=float, default=2.6, help='Only add edge-coast samples with absolute CTE at least this value.')
+    parser.add_argument('--edge-coast-max-abs-cte', type=float, default=3.1, help='Only add edge-coast samples with absolute CTE at most this value.')
+    parser.add_argument('--edge-coast-min-separation', type=float, default=2.4, help='Only add edge-coast samples when team min separation is at least this value.')
+    parser.add_argument('--edge-coast-max-threat', type=float, default=0.16, help='Only add edge-coast samples when traced threat score is at most this value.')
+    parser.add_argument('--edge-coast-min-step', type=int, default=120, help='Only add edge-coast samples at or after this traced step index.')
+    parser.add_argument('--edge-coast-min-route-progress', type=float, default=0.0, help='Only add edge-coast samples whose route progress is at least this value.')
+    parser.add_argument('--edge-coast-max-route-progress', type=float, default=1.1, help='Only add edge-coast samples whose route progress is at most this value.')
+    parser.add_argument('--edge-coast-max-heading-error', type=float, default=3.2, help='Only add edge-coast samples whose absolute heading error is at most this value.')
+    parser.add_argument('--edge-coast-omega-zero-blend', type=float, default=0.75, help='Blend edge-coast omega toward zero; 0 preserves source omega, 1 targets zero.')
+    parser.add_argument('--edge-coast-max-omega-abs', type=float, default=0.04, help='Clamp absolute edge-coast omega to this value. Negative disables.')
+    parser.add_argument('--recovery-turn-weight', type=float, default=0.0, help='Sample weight for low-threat route-heading recovery turn targets. 0 disables.')
+    parser.add_argument('--recovery-turn-agent', action='append', dest='recovery_turn_agents', default=None, help='Only add recovery-turn samples for this agent id. Repeatable; unset allows all agents.')
+    parser.add_argument('--recovery-turn-target-linear', type=float, default=0.05, help='Target linear speed for route-heading recovery turn samples.')
+    parser.add_argument('--recovery-turn-min-distance', type=float, default=2.5, help='Only add recovery turn samples farther than this distance from goal.')
+    parser.add_argument('--recovery-turn-min-abs-cte', type=float, default=1.2, help='Only add recovery turn samples with absolute CTE at least this value.')
+    parser.add_argument('--recovery-turn-min-heading-error', type=float, default=1.2, help='Only add recovery turn samples with absolute heading error at least this value.')
+    parser.add_argument('--recovery-turn-max-heading-error', type=float, default=3.2, help='Only add recovery turn samples with absolute heading error at most this value.')
+    parser.add_argument('--recovery-turn-heading-sign', choices=('any', 'negative', 'positive'), default='any', help='Optional signed heading-error gate for recovery turn samples.')
+    parser.add_argument('--recovery-turn-min-separation', type=float, default=2.4, help='Only add recovery turn samples when team min separation is at least this value.')
+    parser.add_argument('--recovery-turn-max-threat', type=float, default=0.16, help='Only add recovery turn samples when traced threat score is at most this value.')
+    parser.add_argument('--recovery-turn-min-step', type=int, default=120, help='Only add recovery turn samples at or after this traced step index.')
+    parser.add_argument('--recovery-turn-max-step', type=int, default=-1, help='If nonnegative, only add recovery turn samples at or before this traced step index.')
+    parser.add_argument('--recovery-turn-min-route-progress', type=float, default=0.0, help='Only add recovery turn samples whose route progress is at least this value.')
+    parser.add_argument('--recovery-turn-max-route-progress', type=float, default=0.98, help='Only add recovery turn samples whose route progress is at most this value.')
+    parser.add_argument('--recovery-turn-omega-blend', type=float, default=1.0, help='Blend recovery turn omega toward the traced CTE/offroute recovery omega target.')
+    parser.add_argument('--recovery-turn-min-omega-abs', type=float, default=0.20, help='Minimum absolute omega magnitude for recovery turn samples.')
+    parser.add_argument('--recovery-turn-heading-gain', type=float, default=0.0, help='If positive, use heading_error * gain as the recovery turn omega teacher before clipping, scaled by --recovery-turn-heading-omega-sign.')
+    parser.add_argument('--recovery-turn-heading-omega-sign', type=float, default=-1.0, help='Sign multiplier for recovery-turn heading omega. -1 preserves legacy behavior; +1 matches yaw += omega * dt.')
+    parser.add_argument('--recovery-turn-max-omega', type=float, default=0.45, help='Absolute omega cap for recovery-turn heading controller samples.')
+    parser.add_argument('--recovery-turn-target-omega-cap', type=float, default=-1.0, help='If nonnegative, clip the recovery turn teacher omega before blending.')
     parser.add_argument('--risk-guard-weight', type=float, default=0.0, help='Sample weight for synthetic risk guard targets that preserve/cap cautious source actions. 0 disables.')
     parser.add_argument('--risk-guard-min-threat', type=float, default=0.08, help='Add risk guard samples when threat score is at least this value.')
     parser.add_argument('--risk-guard-max-separation', type=float, default=2.8, help='Add risk guard samples when team min separation is at most this value.')
     parser.add_argument('--risk-guard-max-linear', type=float, default=0.12, help='Maximum linear target for risk guard samples.')
+    parser.add_argument('--risk-guard-yield-max-linear', type=float, default=-1.0, help='Role-specific maximum linear target for yield risk guard samples. Negative uses risk-guard-max-linear.')
+    parser.add_argument('--risk-guard-standon-max-linear', type=float, default=-1.0, help='Role-specific maximum linear target for stand-on risk guard samples. Negative uses risk-guard-max-linear.')
     parser.add_argument('--risk-guard-omega-blend', type=float, default=1.0, help='Blend risk guard omega toward the deconflict target when active; 0 preserves traced source omega.')
+    parser.add_argument('--risk-guard-yield-min-omega-abs', type=float, default=0.0, help='Minimum absolute omega target for yield risk guard samples. 0 disables.')
+    parser.add_argument('--risk-guard-standon-min-omega-abs', type=float, default=0.0, help='Minimum absolute omega target for stand-on risk guard samples. 0 disables.')
     parser.add_argument('--risk-guard-min-starboard-omega', type=float, default=0.0, help='If positive, enforce at least this starboard-turn magnitude (negative omega) for yield risk guard samples.')
     parser.add_argument('--risk-guard-min-starboard-threat', type=float, default=0.0, help='Only enforce risk-guard-min-starboard-omega when threat score is at least this value.')
     parser.add_argument('--risk-guard-min-distance', type=float, default=2.0, help='Only add risk guard samples farther than this distance from goal.')
@@ -84,6 +164,7 @@ def parse_args():
     parser.add_argument('--risk-guard-min-abs-cte', type=float, default=0.0, help='Only add risk guard samples whose absolute CTE is at least this value.')
     parser.add_argument('--risk-guard-max-step', type=int, default=-1, help='If nonnegative, only add risk guard samples at or before this traced step index.')
     parser.add_argument('--risk-guard-yield-only', action='store_true', help='Only add risk guard samples for traced deconf yield agents.')
+    parser.add_argument('--risk-guard-standon-only', action='store_true', help='Only add risk guard samples for traced stand-on agents.')
     parser.add_argument('--risk-guard-require-threat', action='store_true', help='Only add risk guard samples when threat score is at least risk-guard-min-threat.')
     parser.add_argument('--goal-hold-weight', type=float, default=0.0, help='Sample weight for near-goal blocked hold targets. 0 disables.')
     parser.add_argument('--goal-hold-source-threshold', type=float, default=0.08, help='Only add goal-hold samples when traced source linear speed is above this value.')
@@ -105,6 +186,7 @@ def parse_args():
     parser.add_argument('--preserve-min-route-progress', type=float, default=0.0, help='Only preserve samples whose route progress is at least this value.')
     parser.add_argument('--preserve-max-route-progress', type=float, default=1.1, help='Only preserve samples whose route progress is at most this value.')
     parser.add_argument('--preserve-min-team-separation', type=float, default=0.0, help='Only preserve samples whose team min separation is at least this value. 0 disables.')
+    parser.add_argument('--preserve-min-episode-progress', type=float, default=-1.0, help='Only preserve samples from episodes whose team progress is at least this value.')
     parser.add_argument('--preserve-exclude-collisions', action='store_true', help='Skip preserve samples from collision episodes.')
     parser.add_argument('--scripted-overtake-weight', type=float, default=0.0, help='Sample weight for deterministic overtaking teacher targets. 0 disables.')
     parser.add_argument('--scripted-overtake-scenario', action='append', dest='scripted_overtake_scenarios', default=None, help='Scenario name for scripted overtaking targets. Defaults to two_usv_overtaking.')
@@ -330,7 +412,12 @@ def _collect_samples(args, checkpoint: dict):
         'finish': float(args.finish_weight),
         'clear': float(args.clear_speedup_weight),
         'guard': float(args.risk_guard_weight),
+        'stall_start': float(args.stall_start_weight),
+        'goal_return': float(args.goal_return_weight),
         'late_clear': float(args.late_clear_weight),
+        'recovery_turn': float(args.recovery_turn_weight),
+        'recovery': float(args.recovery_speedup_weight),
+        'edge_coast': float(args.edge_coast_weight),
         'goal_hold': float(args.goal_hold_weight),
         'imitate': float(args.imitate_action_weight),
         'scripted_overtake': float(args.scripted_overtake_weight),
@@ -366,6 +453,8 @@ def _collect_samples(args, checkpoint: dict):
                     distance_to_goal = float(agent.get('distance_to_goal', 0.0))
                     route_progress = float(agent.get('route_progress', 0.0))
                     cross_track_error = abs(float(agent.get('cross_track_error', 0.0)))
+                    heading_error_signed = float(agent.get('heading_error', 0.0))
+                    heading_error = abs(heading_error_signed)
                     scripted_weight = float(args.scripted_overtake_weight)
                     scripted_scenarios = set(str(value) for value in (args.scripted_overtake_scenarios or ['two_usv_overtaking']))
                     if (
@@ -454,25 +543,38 @@ def _collect_samples(args, checkpoint: dict):
                         and cross_track_error >= float(args.risk_guard_min_abs_cte)
                         and (guard_max_step < 0 or step <= guard_max_step)
                         and (not bool(args.risk_guard_yield_only) or bool(diagnostics.get('deconf_is_yield', False)))
+                        and (not bool(args.risk_guard_standon_only) or not bool(diagnostics.get('deconf_is_yield', False)))
                         and guard_risk_active
                     ):
-                        guard_omega = source_omega
+                        is_yield = bool(diagnostics.get('deconf_is_yield', False))
                         deconf_target = diagnostics.get('deconf_target', {})
+                        guard_omega = source_omega
                         if diagnostics.get('random_deconflict_weighted_active', False):
                             deconf_omega = float(deconf_target.get('target_omega', guard_omega))
                             omega_blend = float(np.clip(args.risk_guard_omega_blend, 0.0, 1.0))
                             guard_omega = (1.0 - omega_blend) * source_omega + omega_blend * deconf_omega
+                        min_omega_abs = float(args.risk_guard_yield_min_omega_abs if is_yield else args.risk_guard_standon_min_omega_abs)
+                        if min_omega_abs > 0.0 and abs(guard_omega) < min_omega_abs:
+                            reference_omega = float(deconf_target.get('target_omega', guard_omega))
+                            if abs(reference_omega) <= 1e-6:
+                                reference_omega = source_omega
+                            omega_sign = -1.0 if reference_omega < 0.0 else 1.0
+                            guard_omega = omega_sign * min_omega_abs
                         min_starboard_omega = max(0.0, float(args.risk_guard_min_starboard_omega))
                         min_starboard_threat = max(0.0, float(args.risk_guard_min_starboard_threat))
                         if (
                             min_starboard_omega > 0.0
                             and threat_score >= min_starboard_threat
-                            and bool(diagnostics.get('deconf_is_yield', False))
+                            and is_yield
                         ):
                             guard_omega = min(guard_omega, -min_starboard_omega)
+                        max_linear = float(args.risk_guard_max_linear)
+                        role_max_linear = float(args.risk_guard_yield_max_linear if is_yield else args.risk_guard_standon_max_linear)
+                        if role_max_linear >= 0.0:
+                            max_linear = role_max_linear
                         observations.append(np.asarray(raw_observation, dtype=np.float32))
                         targets.append(np.asarray([
-                            min(source_linear, float(args.risk_guard_max_linear)),
+                            min(source_linear, max_linear),
                             guard_omega,
                         ], dtype=np.float32))
                         scenario_ids.append(int(scenario_id))
@@ -480,9 +582,129 @@ def _collect_samples(args, checkpoint: dict):
                         kind_ids.append(int(TARGET_KIND_TO_ID['guard']))
                         counts['guard'] += 1
                         continue
+                    recovery_turn_weight = float(args.recovery_turn_weight)
+                    recovery_turn_agents = set(str(value) for value in (args.recovery_turn_agents or []))
+                    recovery_turn_heading_sign = str(args.recovery_turn_heading_sign).lower()
+                    recovery_turn_heading_sign_ok = (
+                        recovery_turn_heading_sign == 'any'
+                        or (recovery_turn_heading_sign == 'negative' and heading_error_signed < 0.0)
+                        or (recovery_turn_heading_sign == 'positive' and heading_error_signed > 0.0)
+                    )
+                    recovery_turn_max_step = int(args.recovery_turn_max_step)
+                    if (
+                        recovery_turn_weight > 0.0
+                        and (not recovery_turn_agents or str(agent_id) in recovery_turn_agents)
+                        and distance_to_goal > float(args.recovery_turn_min_distance)
+                        and step >= int(args.recovery_turn_min_step)
+                        and (recovery_turn_max_step < 0 or step <= recovery_turn_max_step)
+                        and route_progress >= float(args.recovery_turn_min_route_progress)
+                        and route_progress <= float(args.recovery_turn_max_route_progress)
+                        and cross_track_error >= float(args.recovery_turn_min_abs_cte)
+                        and heading_error >= float(args.recovery_turn_min_heading_error)
+                        and heading_error <= float(args.recovery_turn_max_heading_error)
+                        and recovery_turn_heading_sign_ok
+                        and team_min_separation >= float(args.recovery_turn_min_separation)
+                        and threat_score <= float(args.recovery_turn_max_threat)
+                    ):
+                        heading_gain = max(0.0, float(args.recovery_turn_heading_gain))
+                        max_omega = max(0.0, float(args.recovery_turn_max_omega))
+                        if heading_gain > 0.0 and max_omega > 0.0:
+                            omega_sign = 1.0 if float(args.recovery_turn_heading_omega_sign) >= 0.0 else -1.0
+                            target_omega = float(np.clip(omega_sign * heading_error_signed * heading_gain, -max_omega, max_omega))
+                        else:
+                            cte_target = diagnostics.get('cte_recovery_target', {})
+                            offroute_target = diagnostics.get('offroute_target', {})
+                            target_omega = float(cte_target.get('target_omega', offroute_target.get('target_omega', source_omega)))
+                        target_omega_cap = float(args.recovery_turn_target_omega_cap)
+                        if target_omega_cap >= 0.0:
+                            target_omega = float(np.clip(target_omega, -target_omega_cap, target_omega_cap))
+                        omega_blend = float(np.clip(args.recovery_turn_omega_blend, 0.0, 1.0))
+                        turn_omega = (1.0 - omega_blend) * source_omega + omega_blend * target_omega
+                        min_omega = max(0.0, float(args.recovery_turn_min_omega_abs))
+                        if min_omega > 0.0 and abs(turn_omega) < min_omega:
+                            sign_source = target_omega if abs(target_omega) > 1.0e-6 else turn_omega
+                            turn_omega = float(np.sign(sign_source) or 1.0) * min_omega
+                        observations.append(np.asarray(raw_observation, dtype=np.float32))
+                        targets.append(np.asarray([
+                            float(args.recovery_turn_target_linear),
+                            turn_omega,
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(recovery_turn_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['recovery_turn']))
+                        counts['recovery_turn'] += 1
+                        continue
+                    stall_start_weight = float(args.stall_start_weight)
+                    stall_start_agents = set(str(value) for value in (args.stall_start_agents or []))
+                    stall_start_max_step = int(args.stall_start_max_step)
+                    if (
+                        stall_start_weight > 0.0
+                        and (not stall_start_agents or str(agent_id) in stall_start_agents)
+                        and source_linear < float(args.stall_start_source_threshold)
+                        and distance_to_goal > float(args.stall_start_min_distance)
+                        and route_progress <= float(args.stall_start_max_route_progress)
+                        and step >= int(args.stall_start_min_step)
+                        and (stall_start_max_step < 0 or step <= stall_start_max_step)
+                        and cross_track_error <= float(args.stall_start_max_cte)
+                        and team_min_separation >= float(args.stall_start_min_separation)
+                        and threat_score <= float(args.stall_start_max_threat)
+                        and (bool(args.stall_start_allow_deconf) or not bool(diagnostics.get('random_deconflict_weighted_active', False)))
+                        and bool(diagnostics.get('finish_team_clear', False))
+                        and bool(diagnostics.get('finish_neighbor_clear', False))
+                    ):
+                        cte_target = diagnostics.get('cte_recovery_target', {})
+                        cte_target_omega = float(cte_target.get('target_omega', source_omega))
+                        omega_blend = float(np.clip(args.stall_start_cte_omega_blend, 0.0, 1.0))
+                        stall_omega = (1.0 - omega_blend) * source_omega + omega_blend * cte_target_omega
+                        stall_linear = float(args.stall_start_target_linear)
+                        heading_slow_threshold = float(args.stall_start_heading_slow_threshold)
+                        if heading_slow_threshold > 0.0 and heading_error > heading_slow_threshold:
+                            stall_linear = min(stall_linear, float(args.stall_start_heading_recovery_linear))
+                        observations.append(np.asarray(raw_observation, dtype=np.float32))
+                        targets.append(np.asarray([
+                            stall_linear,
+                            stall_omega,
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(stall_start_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['stall_start']))
+                        counts['stall_start'] += 1
+                        continue
+                    goal_return_weight = float(args.goal_return_weight)
+                    goal_return_agents = set(str(value) for value in (args.goal_return_agents or []))
+                    if (
+                        goal_return_weight > 0.0
+                        and (not goal_return_agents or str(agent_id) in goal_return_agents)
+                        and source_linear > float(args.goal_return_source_threshold)
+                        and distance_to_goal > float(args.goal_return_min_distance)
+                        and route_progress >= float(args.goal_return_min_route_progress)
+                        and step >= int(args.goal_return_min_step)
+                        and cross_track_error <= float(args.goal_return_max_cte)
+                        and team_min_separation >= float(args.goal_return_min_separation)
+                        and threat_score <= float(args.goal_return_max_threat)
+                        and (bool(args.goal_return_allow_deconf) or not bool(diagnostics.get('random_deconflict_weighted_active', False)))
+                        and bool(diagnostics.get('finish_team_clear', False))
+                        and bool(diagnostics.get('finish_neighbor_clear', False))
+                    ):
+                        safe_target = diagnostics.get('safe_finish_target', {})
+                        safe_target_omega = float(safe_target.get('target_omega', source_omega))
+                        omega_blend = float(np.clip(args.goal_return_safe_omega_blend, 0.0, 1.0))
+                        return_omega = (1.0 - omega_blend) * source_omega + omega_blend * safe_target_omega
+                        observations.append(np.asarray(raw_observation, dtype=np.float32))
+                        targets.append(np.asarray([
+                            float(args.goal_return_target_linear),
+                            return_omega,
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(goal_return_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['goal_return']))
+                        counts['goal_return'] += 1
+                        continue
                     late_clear_weight = float(args.late_clear_weight)
+                    late_clear_agents = set(str(value) for value in (args.late_clear_agents or []))
                     if (
                         late_clear_weight > 0.0
+                        and (not late_clear_agents or str(agent_id) in late_clear_agents)
                         and source_linear < float(args.late_clear_source_threshold)
                         and distance_to_goal > float(args.late_clear_min_distance)
                         and step >= int(args.late_clear_min_step)
@@ -511,6 +733,67 @@ def _collect_samples(args, checkpoint: dict):
                         weights.append(late_clear_weight)
                         kind_ids.append(int(TARGET_KIND_TO_ID['late_clear']))
                         counts['late_clear'] += 1
+                        continue
+                    recovery_weight = float(args.recovery_speedup_weight)
+                    recovery_agents = set(str(value) for value in (args.recovery_speedup_agents or []))
+                    if (
+                        recovery_weight > 0.0
+                        and (not recovery_agents or str(agent_id) in recovery_agents)
+                        and source_linear < float(args.recovery_speedup_source_threshold)
+                        and distance_to_goal > float(args.recovery_speedup_min_distance)
+                        and step >= int(args.recovery_speedup_min_step)
+                        and route_progress >= float(args.recovery_speedup_min_route_progress)
+                        and route_progress <= float(args.recovery_speedup_max_route_progress)
+                        and heading_error <= float(args.recovery_speedup_max_heading_error)
+                        and cross_track_error <= float(args.recovery_speedup_max_cte)
+                        and team_min_separation >= float(args.recovery_speedup_min_separation)
+                        and threat_score <= float(args.recovery_speedup_max_threat)
+                    ):
+                        recovery_omega = source_omega
+                        cte_target = diagnostics.get('cte_recovery_target', {})
+                        cte_target_omega = float(cte_target.get('target_omega', source_omega))
+                        omega_blend = float(np.clip(args.recovery_speedup_cte_omega_blend, 0.0, 1.0))
+                        recovery_omega = (1.0 - omega_blend) * recovery_omega + omega_blend * cte_target_omega
+                        observations.append(np.asarray(raw_observation, dtype=np.float32))
+                        targets.append(np.asarray([
+                            float(args.recovery_speedup_target_linear),
+                            recovery_omega,
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(recovery_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['recovery']))
+                        counts['recovery'] += 1
+                        continue
+                    edge_coast_weight = float(args.edge_coast_weight)
+                    edge_coast_agents = set(str(value) for value in (args.edge_coast_agents or []))
+                    if (
+                        edge_coast_weight > 0.0
+                        and (not edge_coast_agents or str(agent_id) in edge_coast_agents)
+                        and source_linear < float(args.edge_coast_source_threshold)
+                        and distance_to_goal > float(args.edge_coast_min_distance)
+                        and step >= int(args.edge_coast_min_step)
+                        and route_progress >= float(args.edge_coast_min_route_progress)
+                        and route_progress <= float(args.edge_coast_max_route_progress)
+                        and heading_error <= float(args.edge_coast_max_heading_error)
+                        and cross_track_error >= float(args.edge_coast_min_abs_cte)
+                        and cross_track_error <= float(args.edge_coast_max_abs_cte)
+                        and team_min_separation >= float(args.edge_coast_min_separation)
+                        and threat_score <= float(args.edge_coast_max_threat)
+                    ):
+                        zero_blend = float(np.clip(args.edge_coast_omega_zero_blend, 0.0, 1.0))
+                        coast_omega = (1.0 - zero_blend) * source_omega
+                        max_omega_abs = float(args.edge_coast_max_omega_abs)
+                        if max_omega_abs >= 0.0:
+                            coast_omega = float(np.clip(coast_omega, -max_omega_abs, max_omega_abs))
+                        observations.append(np.asarray(raw_observation, dtype=np.float32))
+                        targets.append(np.asarray([
+                            float(args.edge_coast_target_linear),
+                            coast_omega,
+                        ], dtype=np.float32))
+                        scenario_ids.append(int(scenario_id))
+                        weights.append(edge_coast_weight)
+                        kind_ids.append(int(TARGET_KIND_TO_ID['edge_coast']))
+                        counts['edge_coast'] += 1
                         continue
                     clear_weight = float(args.clear_speedup_weight)
                     if (
@@ -565,6 +848,8 @@ def _collect_samples(args, checkpoint: dict):
             payload = json.loads(Path(trace_path).read_text(encoding='utf-8'))
             for episode in payload.get('episode_metrics', []):
                 if bool(args.preserve_exclude_collisions) and bool(episode.get('collision', False)):
+                    continue
+                if float(episode.get('team_goal_progress_ratio', 0.0)) < float(args.preserve_min_episode_progress):
                     continue
                 scenario_id = _scenario_index(checkpoint, episode.get('scenario', ''))
                 for sample in episode.get('trace_samples', []):
@@ -800,11 +1085,70 @@ def main():
         'late_clear_cte_slow_threshold': float(args.late_clear_cte_slow_threshold),
         'late_clear_cte_recovery_linear': float(args.late_clear_cte_recovery_linear),
         'late_clear_allow_deconf': bool(args.late_clear_allow_deconf),
+        'late_clear_agents': [str(value) for value in (args.late_clear_agents or [])],
+        'stall_start_weight': float(args.stall_start_weight),
+        'stall_start_agents': [str(value) for value in (args.stall_start_agents or [])],
+        'stall_start_source_threshold': float(args.stall_start_source_threshold),
+        'stall_start_target_linear': float(args.stall_start_target_linear),
+        'stall_start_min_distance': float(args.stall_start_min_distance),
+        'stall_start_max_route_progress': float(args.stall_start_max_route_progress),
+        'stall_start_max_cte': float(args.stall_start_max_cte),
+        'stall_start_min_separation': float(args.stall_start_min_separation),
+        'stall_start_max_threat': float(args.stall_start_max_threat),
+        'stall_start_min_step': int(args.stall_start_min_step),
+        'stall_start_max_step': int(args.stall_start_max_step),
+        'stall_start_cte_omega_blend': float(args.stall_start_cte_omega_blend),
+        'stall_start_heading_slow_threshold': float(args.stall_start_heading_slow_threshold),
+        'stall_start_heading_recovery_linear': float(args.stall_start_heading_recovery_linear),
+        'stall_start_allow_deconf': bool(args.stall_start_allow_deconf),
+        'goal_return_weight': float(args.goal_return_weight),
+        'goal_return_agents': [str(value) for value in (args.goal_return_agents or [])],
+        'goal_return_source_threshold': float(args.goal_return_source_threshold),
+        'goal_return_target_linear': float(args.goal_return_target_linear),
+        'goal_return_min_distance': float(args.goal_return_min_distance),
+        'goal_return_min_route_progress': float(args.goal_return_min_route_progress),
+        'goal_return_max_cte': float(args.goal_return_max_cte),
+        'goal_return_min_separation': float(args.goal_return_min_separation),
+        'goal_return_max_threat': float(args.goal_return_max_threat),
+        'goal_return_min_step': int(args.goal_return_min_step),
+        'goal_return_safe_omega_blend': float(args.goal_return_safe_omega_blend),
+        'goal_return_allow_deconf': bool(args.goal_return_allow_deconf),
+        'recovery_speedup_weight': float(args.recovery_speedup_weight),
+        'recovery_speedup_source_threshold': float(args.recovery_speedup_source_threshold),
+        'recovery_speedup_target_linear': float(args.recovery_speedup_target_linear),
+        'recovery_speedup_min_distance': float(args.recovery_speedup_min_distance),
+        'recovery_speedup_max_cte': float(args.recovery_speedup_max_cte),
+        'recovery_speedup_min_separation': float(args.recovery_speedup_min_separation),
+        'recovery_speedup_max_threat': float(args.recovery_speedup_max_threat),
+        'recovery_speedup_min_step': int(args.recovery_speedup_min_step),
+        'recovery_speedup_min_route_progress': float(args.recovery_speedup_min_route_progress),
+        'recovery_speedup_max_route_progress': float(args.recovery_speedup_max_route_progress),
+        'recovery_speedup_max_heading_error': float(args.recovery_speedup_max_heading_error),
+        'recovery_speedup_cte_omega_blend': float(args.recovery_speedup_cte_omega_blend),
+        'recovery_speedup_agents': [str(value) for value in (args.recovery_speedup_agents or [])],
+        'recovery_turn_weight': float(args.recovery_turn_weight),
+        'recovery_turn_target_linear': float(args.recovery_turn_target_linear),
+        'recovery_turn_min_distance': float(args.recovery_turn_min_distance),
+        'recovery_turn_min_abs_cte': float(args.recovery_turn_min_abs_cte),
+        'recovery_turn_min_heading_error': float(args.recovery_turn_min_heading_error),
+        'recovery_turn_min_separation': float(args.recovery_turn_min_separation),
+        'recovery_turn_max_threat': float(args.recovery_turn_max_threat),
+        'recovery_turn_min_step': int(args.recovery_turn_min_step),
+        'recovery_turn_min_route_progress': float(args.recovery_turn_min_route_progress),
+        'recovery_turn_max_route_progress': float(args.recovery_turn_max_route_progress),
+        'recovery_turn_omega_blend': float(args.recovery_turn_omega_blend),
+        'recovery_turn_min_omega_abs': float(args.recovery_turn_min_omega_abs),
+        'recovery_turn_heading_gain': float(args.recovery_turn_heading_gain),
+        'recovery_turn_max_omega': float(args.recovery_turn_max_omega),
         'risk_guard_weight': float(args.risk_guard_weight),
         'risk_guard_min_threat': float(args.risk_guard_min_threat),
         'risk_guard_max_separation': float(args.risk_guard_max_separation),
         'risk_guard_max_linear': float(args.risk_guard_max_linear),
+        'risk_guard_yield_max_linear': float(args.risk_guard_yield_max_linear),
+        'risk_guard_standon_max_linear': float(args.risk_guard_standon_max_linear),
         'risk_guard_omega_blend': float(args.risk_guard_omega_blend),
+        'risk_guard_yield_min_omega_abs': float(args.risk_guard_yield_min_omega_abs),
+        'risk_guard_standon_min_omega_abs': float(args.risk_guard_standon_min_omega_abs),
         'risk_guard_min_starboard_omega': float(args.risk_guard_min_starboard_omega),
         'risk_guard_min_starboard_threat': float(args.risk_guard_min_starboard_threat),
         'risk_guard_min_distance': float(args.risk_guard_min_distance),
@@ -814,6 +1158,7 @@ def main():
         'risk_guard_min_abs_cte': float(args.risk_guard_min_abs_cte),
         'risk_guard_max_step': int(args.risk_guard_max_step),
         'risk_guard_yield_only': bool(args.risk_guard_yield_only),
+        'risk_guard_standon_only': bool(args.risk_guard_standon_only),
         'risk_guard_require_threat': bool(args.risk_guard_require_threat),
         'goal_hold_weight': float(args.goal_hold_weight),
         'goal_hold_source_threshold': float(args.goal_hold_source_threshold),
@@ -828,6 +1173,7 @@ def main():
         'preserve_min_route_progress': float(args.preserve_min_route_progress),
         'preserve_max_route_progress': float(args.preserve_max_route_progress),
         'preserve_min_team_separation': float(args.preserve_min_team_separation),
+        'preserve_min_episode_progress': float(args.preserve_min_episode_progress),
         'preserve_exclude_collisions': bool(args.preserve_exclude_collisions),
         'last_loss': last_loss,
         'train_all_actor': bool(args.train_all_actor),

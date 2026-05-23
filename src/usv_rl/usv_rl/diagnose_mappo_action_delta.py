@@ -10,6 +10,107 @@ from torch import nn
 from .observation_normalizer import ObservationNormalizer
 
 
+ENCOUNTER_DIM = 3
+CURRENT_EGO_DIM = 19
+RAWLESS_EGO_DIM = 17
+NEIGHBOR_DIM = 10
+
+
+def _infer_obs_layout(obs_dim: int) -> tuple[int, int, int] | None:
+    for ego_dim in (CURRENT_EGO_DIM, RAWLESS_EGO_DIM, 12, 11, 10):
+        for neighbor_dim in (NEIGHBOR_DIM, 6):
+            neighbor_width = int(obs_dim) - int(ego_dim) - ENCOUNTER_DIM
+            if neighbor_width >= 0 and neighbor_width % int(neighbor_dim) == 0:
+                return int(ego_dim), int(neighbor_dim), int(neighbor_width // int(neighbor_dim))
+    return None
+
+
+def _migrate_normalizer_state(state: dict, new_obs_dim: int) -> dict:
+    mean = np.asarray(state.get('mean', ()), dtype=np.float64)
+    var = np.asarray(state.get('var', ()), dtype=np.float64)
+    if mean.ndim != 1 or var.ndim != 1 or mean.shape != var.shape:
+        return state
+    if mean.shape[0] == int(new_obs_dim):
+        return state
+    old_layout = _infer_obs_layout(int(mean.shape[0]))
+    new_layout = _infer_obs_layout(int(new_obs_dim))
+    if old_layout is None or new_layout is None or old_layout[2] != new_layout[2]:
+        migrated = dict(state)
+        if int(new_obs_dim) > int(mean.shape[0]):
+            delta = int(new_obs_dim) - int(mean.shape[0])
+            migrated['mean'] = np.concatenate([mean, np.zeros(delta, dtype=np.float64)])
+            migrated['var'] = np.concatenate([var, np.ones(delta, dtype=np.float64)])
+        else:
+            migrated['mean'] = mean[:int(new_obs_dim)]
+            migrated['var'] = var[:int(new_obs_dim)]
+        return migrated
+    old_ego_dim, old_neighbor_dim, neighbor_slots = old_layout
+    new_ego_dim, new_neighbor_dim, _ = new_layout
+    mean_parts = []
+    var_parts = []
+    ego_cols = min(old_ego_dim, new_ego_dim)
+    mean_parts.append(mean[:ego_cols])
+    var_parts.append(var[:ego_cols])
+    if new_ego_dim > ego_cols:
+        mean_parts.append(np.zeros(new_ego_dim - ego_cols, dtype=np.float64))
+        var_parts.append(np.ones(new_ego_dim - ego_cols, dtype=np.float64))
+    old_pos = old_ego_dim
+    for _ in range(neighbor_slots):
+        neighbor_cols = min(old_neighbor_dim, new_neighbor_dim)
+        mean_parts.append(mean[old_pos:old_pos + neighbor_cols])
+        var_parts.append(var[old_pos:old_pos + neighbor_cols])
+        if new_neighbor_dim > neighbor_cols:
+            mean_parts.append(np.zeros(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+            var_parts.append(np.ones(new_neighbor_dim - neighbor_cols, dtype=np.float64))
+        old_pos += old_neighbor_dim
+    mean_parts.append(mean[old_pos:old_pos + ENCOUNTER_DIM])
+    var_parts.append(var[old_pos:old_pos + ENCOUNTER_DIM])
+    migrated = dict(state)
+    migrated['mean'] = np.concatenate(mean_parts)
+    migrated['var'] = np.concatenate(var_parts)
+    return migrated
+
+
+def _adapt_raw_observation(raw: np.ndarray, target_dim: int, agent_payload: dict) -> np.ndarray | None:
+    raw = np.asarray(raw, dtype=np.float32)
+    current_dim = int(raw.shape[0])
+    target_dim = int(target_dim)
+    if current_dim == target_dim:
+        return raw
+
+    current_layout = _infer_obs_layout(current_dim)
+    target_layout = _infer_obs_layout(target_dim)
+    if current_layout is not None and target_layout is not None and current_layout[2] == target_layout[2]:
+        current_ego_dim, current_neighbor_dim, neighbor_slots = current_layout
+        target_ego_dim, target_neighbor_dim, _ = target_layout
+        parts = []
+        ego_cols = min(current_ego_dim, target_ego_dim)
+        parts.append(raw[:ego_cols])
+        if target_ego_dim > ego_cols:
+            if current_ego_dim == RAWLESS_EGO_DIM and target_ego_dim >= CURRENT_EGO_DIM:
+                raw_cte = float(agent_payload.get('raw_cross_track_error', raw[11] if current_dim > 11 else 0.0))
+                overflow = float(agent_payload.get('cross_track_overflow', max(0.0, abs(raw_cte) - 3.0)))
+                parts.append(np.asarray([raw_cte, overflow], dtype=np.float32)[:target_ego_dim - ego_cols])
+                if target_ego_dim - ego_cols > 2:
+                    parts.append(np.zeros(target_ego_dim - ego_cols - 2, dtype=np.float32))
+            else:
+                parts.append(np.zeros(target_ego_dim - ego_cols, dtype=np.float32))
+        old_pos = current_ego_dim
+        for _ in range(neighbor_slots):
+            neighbor_cols = min(current_neighbor_dim, target_neighbor_dim)
+            parts.append(raw[old_pos:old_pos + neighbor_cols])
+            if target_neighbor_dim > neighbor_cols:
+                parts.append(np.zeros(target_neighbor_dim - neighbor_cols, dtype=np.float32))
+            old_pos += current_neighbor_dim
+        parts.append(raw[old_pos:old_pos + ENCOUNTER_DIM])
+        adapted = np.concatenate(parts).astype(np.float32, copy=False)
+        return adapted if adapted.shape[0] == target_dim else None
+
+    if target_dim > current_dim:
+        return np.pad(raw, (0, target_dim - current_dim)).astype(np.float32, copy=False)
+    return raw[:target_dim].astype(np.float32, copy=False)
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Compare two MAPPO checkpoints on saved raw-observation traces.')
     parser.add_argument('--base-model', required=True, help='Reference MAPPO checkpoint.')
@@ -46,11 +147,11 @@ def _load_actor(checkpoint: dict, device):
 def _load_bundle(model_path: str, device):
     checkpoint = torch.load(model_path, map_location=device, weights_only=False)
     actor = _load_actor(checkpoint, device)
-    obs_dim = int(checkpoint['local_observation_size'])
+    obs_dim = int(getattr(actor, 'obs_dim', int(checkpoint['local_observation_size'])))
     normalizer = None
     if checkpoint.get('normalize_observations') and checkpoint.get('obs_normalizer') is not None:
         normalizer = ObservationNormalizer(obs_dim)
-        normalizer.load_state_dict(checkpoint['obs_normalizer'])
+        normalizer.load_state_dict(_migrate_normalizer_state(checkpoint['obs_normalizer'], obs_dim))
     action_low = np.asarray(checkpoint.get('action_low', [0.0, -0.4]), dtype=np.float32)
     action_high = np.asarray(checkpoint.get('action_high', [0.4, 0.4]), dtype=np.float32)
     return {
@@ -108,7 +209,9 @@ def _collect_records(trace_paths: list[str], base_bundle: dict, candidate_bundle
                     if raw_observation is None:
                         continue
                     raw = np.asarray(raw_observation, dtype=np.float32)
-                    if raw.shape[0] != int(base_bundle['obs_dim']) or raw.shape[0] != int(candidate_bundle['obs_dim']):
+                    base_raw = _adapt_raw_observation(raw, int(base_bundle['obs_dim']), agent)
+                    candidate_raw = _adapt_raw_observation(raw, int(candidate_bundle['obs_dim']), agent)
+                    if base_raw is None or candidate_raw is None:
                         continue
                     records.append({
                         'trace': str(trace_path),
@@ -123,7 +226,8 @@ def _collect_records(trace_paths: list[str], base_bundle: dict, candidate_bundle
                         'cte': float(agent.get('cross_track_error', np.nan)),
                         'trace_linear': float(agent.get('final_linear_x', np.nan)),
                         'trace_omega': float(agent.get('final_angular_z', np.nan)),
-                        'raw_observation': raw,
+                        'base_raw_observation': base_raw,
+                        'candidate_raw_observation': candidate_raw,
                     })
     return records
 
@@ -168,11 +272,12 @@ def main(argv=None):
     if not records:
         raise SystemExit('No comparable raw_observation samples found in trace JSON.')
 
-    raw_observations = np.stack([row['raw_observation'] for row in records], axis=0)
+    base_raw_observations = np.stack([row['base_raw_observation'] for row in records], axis=0)
+    candidate_raw_observations = np.stack([row['candidate_raw_observation'] for row in records], axis=0)
     base_scenario_ids = np.asarray([_scenario_id(base, row['scenario']) for row in records], dtype=np.int64)
     candidate_scenario_ids = np.asarray([_scenario_id(candidate, row['scenario']) for row in records], dtype=np.int64)
-    base_actions = _predict(base, raw_observations, base_scenario_ids, device)
-    candidate_actions = _predict(candidate, raw_observations, candidate_scenario_ids, device)
+    base_actions = _predict(base, base_raw_observations, base_scenario_ids, device)
+    candidate_actions = _predict(candidate, candidate_raw_observations, candidate_scenario_ids, device)
     action_range = np.maximum(base['action_high'] - base['action_low'], 1e-6)
 
     rows = []
@@ -180,7 +285,8 @@ def main(argv=None):
         delta = candidate_action - base_action
         normalized_delta = delta / action_range
         out = dict(row)
-        out.pop('raw_observation', None)
+        out.pop('base_raw_observation', None)
+        out.pop('candidate_raw_observation', None)
         out.update({
             'base_linear': float(base_action[0]),
             'base_omega': float(base_action[1]),
