@@ -545,7 +545,7 @@ class UsvLedNode(Node):
                         r = rgb_to_send[i]
                         g = rgb_to_send[i+1]
                         b = rgb_to_send[i+2]
-                        rbg_to_send.extend([r, g, b])
+                        rbg_to_send.extend([b, g, r])
                         
                 command = self.build_command(rbg_to_send, 60)
                 if command and self.serial_manager.is_open:
