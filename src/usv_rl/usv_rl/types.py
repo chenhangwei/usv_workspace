@@ -6,7 +6,10 @@ import numpy as np
 
 
 USV_EGO_FEATURE_COUNT = 19
-# Must mirror usv_rl.multi_agent_types.NEIGHBOR_FEATURE_COUNT.
+# Legacy single-USV inference observation. Independent from
+# usv_rl.multi_agent_types.NEIGHBOR_FEATURE_COUNT; the SITL inference path was
+# frozen at the pre-Stage-A.2 layout (10 features per neighbor: no
+# encounter/role one-hots).
 USV_NEIGHBOR_FEATURE_COUNT = 10
 
 

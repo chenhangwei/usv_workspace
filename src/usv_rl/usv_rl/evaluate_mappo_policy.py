@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -9,7 +10,15 @@ import numpy as np
 from .config import ActionBounds, RewardConfig
 from .multi_agent_env import MultiAgentEnv, MultiAgentEnvConfig
 from .multi_agent_scenarios import MultiAgentScenarioFactory
-from .multi_agent_types import AgentLocalObservation, ENCOUNTER_TYPE_COUNT, NEIGHBOR_FEATURE_COUNT
+from .multi_agent_types import (
+    AgentLocalObservation,
+    ENCOUNTER_TYPE_COUNT,
+    NEIGHBOR_FEATURE_COUNT,
+    ENC_HEAD_ON,
+    ENC_CROSSING,
+    ENC_OVERTAKING,
+    classify_encounter_role,
+)
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 
@@ -700,6 +709,21 @@ def _build_env_kwargs_from_checkpoint(
         'route_progress_cte_gate_start': _env_float('ROUTE_PROGRESS_CTE_GATE_START', float(checkpoint.get('route_progress_cte_gate_start', 0.0))),
         'route_progress_cte_gate_width': _env_float('ROUTE_PROGRESS_CTE_GATE_WIDTH', float(checkpoint.get('route_progress_cte_gate_width', 0.0))),
         'route_progress_cte_gate_floor': _env_float('ROUTE_PROGRESS_CTE_GATE_FLOOR', float(checkpoint.get('route_progress_cte_gate_floor', 0.25))),
+        'low_speed_recovery_floor_enabled': _env_bool('LOW_SPEED_RECOVERY_FLOOR_ENABLED', bool(checkpoint.get('low_speed_recovery_floor_enabled', False))),
+        'low_speed_recovery_floor_speed': _env_float('LOW_SPEED_RECOVERY_FLOOR_SPEED', float(checkpoint.get('low_speed_recovery_floor_speed', 0.12))),
+        'low_speed_recovery_floor_cte_speed': _env_float('LOW_SPEED_RECOVERY_FLOOR_CTE_SPEED', float(checkpoint.get('low_speed_recovery_floor_cte_speed', 0.08))),
+        'low_speed_recovery_floor_min_raw_linear': _env_float('LOW_SPEED_RECOVERY_FLOOR_MIN_RAW_LINEAR', float(checkpoint.get('low_speed_recovery_floor_min_raw_linear', 0.16))),
+        'low_speed_recovery_floor_min_distance': _env_float('LOW_SPEED_RECOVERY_FLOOR_MIN_DISTANCE', float(checkpoint.get('low_speed_recovery_floor_min_distance', 2.5))),
+        'low_speed_recovery_floor_min_neighbor_separation': _env_float('LOW_SPEED_RECOVERY_FLOOR_MIN_NEIGHBOR_SEPARATION', float(checkpoint.get('low_speed_recovery_floor_min_neighbor_separation', 1.35))),
+        'low_speed_recovery_floor_max_conflict_level': _env_float('LOW_SPEED_RECOVERY_FLOOR_MAX_CONFLICT_LEVEL', float(checkpoint.get('low_speed_recovery_floor_max_conflict_level', 0.12))),
+        'low_speed_recovery_floor_min_route_progress': _env_float('LOW_SPEED_RECOVERY_FLOOR_MIN_ROUTE_PROGRESS', float(checkpoint.get('low_speed_recovery_floor_min_route_progress', 0.0))),
+        'low_speed_recovery_floor_max_route_progress': _env_float('LOW_SPEED_RECOVERY_FLOOR_MAX_ROUTE_PROGRESS', float(checkpoint.get('low_speed_recovery_floor_max_route_progress', 1.10))),
+        'low_speed_recovery_floor_cte_slow_threshold': _env_float('LOW_SPEED_RECOVERY_FLOOR_CTE_SLOW_THRESHOLD', float(checkpoint.get('low_speed_recovery_floor_cte_slow_threshold', 1.80))),
+        'low_speed_recovery_floor_heading_slow_threshold': _env_float('LOW_SPEED_RECOVERY_FLOOR_HEADING_SLOW_THRESHOLD', float(checkpoint.get('low_speed_recovery_floor_heading_slow_threshold', 2.45))),
+        'low_speed_recovery_floor_omega_blend': _env_float('LOW_SPEED_RECOVERY_FLOOR_OMEGA_BLEND', float(checkpoint.get('low_speed_recovery_floor_omega_blend', 0.60))),
+        'low_speed_recovery_floor_cte_omega_enabled': _env_bool('LOW_SPEED_RECOVERY_FLOOR_CTE_OMEGA_ENABLED', bool(checkpoint.get('low_speed_recovery_floor_cte_omega_enabled', True))),
+        'low_speed_recovery_floor_cte_omega_max': _env_float('LOW_SPEED_RECOVERY_FLOOR_CTE_OMEGA_MAX', float(checkpoint.get('low_speed_recovery_floor_cte_omega_max', 0.35))),
+        'low_speed_recovery_floor_cte_omega_full_abs_cte': _env_float('LOW_SPEED_RECOVERY_FLOOR_CTE_OMEGA_FULL_ABS_CTE', float(checkpoint.get('low_speed_recovery_floor_cte_omega_full_abs_cte', 3.0))),
         'random_encounter_route_priority': bool(checkpoint.get('random_encounter_route_priority', False)),
         'default_scenarios': resolved_scenarios,
         'reward': RewardConfig(**checkpoint['reward_config']) if 'reward_config' in checkpoint else RewardConfig(),
@@ -745,6 +769,20 @@ def _build_env_kwargs_from_checkpoint(
         'pairwise_shield_yield_min_route_progress': _env_float('PAIRWISE_SHIELD_YIELD_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_yield_min_route_progress', -1.0))),
         'pairwise_shield_yield_max_route_progress': _env_float('PAIRWISE_SHIELD_YIELD_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_yield_max_route_progress', -1.0))),
         'pairwise_shield_yield_min_abs_cte': _env_float('PAIRWISE_SHIELD_YIELD_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_yield_min_abs_cte', -1.0))),
+        'pairwise_shield_pair_yield_agent_ids': _env_str('PAIRWISE_SHIELD_PAIR_YIELD_AGENT_IDS', str(checkpoint.get('pairwise_shield_pair_yield_agent_ids', ''))),
+        'pairwise_shield_pair_standon_agent_ids': _env_str('PAIRWISE_SHIELD_PAIR_STANDON_AGENT_IDS', str(checkpoint.get('pairwise_shield_pair_standon_agent_ids', ''))),
+        'pairwise_shield_pair_yield_speed': _env_str('PAIRWISE_SHIELD_PAIR_YIELD_SPEED', str(checkpoint.get('pairwise_shield_pair_yield_speed', ''))),
+        'pairwise_shield_pair_standon_speed': _env_str('PAIRWISE_SHIELD_PAIR_STANDON_SPEED', str(checkpoint.get('pairwise_shield_pair_standon_speed', ''))),
+        'pairwise_shield_pair_critical_separation': _env_str('PAIRWISE_SHIELD_PAIR_CRITICAL_SEPARATION', str(checkpoint.get('pairwise_shield_pair_critical_separation', ''))),
+        'pairwise_shield_pair_yield_min_route_progress': _env_str('PAIRWISE_SHIELD_PAIR_YIELD_MIN_ROUTE_PROGRESS', str(checkpoint.get('pairwise_shield_pair_yield_min_route_progress', ''))),
+        'pairwise_shield_pair_yield_max_route_progress': _env_str('PAIRWISE_SHIELD_PAIR_YIELD_MAX_ROUTE_PROGRESS', str(checkpoint.get('pairwise_shield_pair_yield_max_route_progress', ''))),
+        'pairwise_shield_pair_yield_min_abs_cte': _env_str('PAIRWISE_SHIELD_PAIR_YIELD_MIN_ABS_CTE', str(checkpoint.get('pairwise_shield_pair_yield_min_abs_cte', ''))),
+        'pairwise_shield_pair_standon_min_route_progress': _env_str('PAIRWISE_SHIELD_PAIR_STANDON_MIN_ROUTE_PROGRESS', str(checkpoint.get('pairwise_shield_pair_standon_min_route_progress', ''))),
+        'pairwise_shield_pair_standon_max_route_progress': _env_str('PAIRWISE_SHIELD_PAIR_STANDON_MAX_ROUTE_PROGRESS', str(checkpoint.get('pairwise_shield_pair_standon_max_route_progress', ''))),
+        'pairwise_shield_pair_standon_min_abs_cte': _env_str('PAIRWISE_SHIELD_PAIR_STANDON_MIN_ABS_CTE', str(checkpoint.get('pairwise_shield_pair_standon_min_abs_cte', ''))),
+        'pairwise_shield_pair_max_dcpa': _env_str('PAIRWISE_SHIELD_PAIR_MAX_DCPA', str(checkpoint.get('pairwise_shield_pair_max_dcpa', ''))),
+        'pairwise_shield_pair_post_cpa_release_separation': _env_str('PAIRWISE_SHIELD_PAIR_POST_CPA_RELEASE_SEPARATION', str(checkpoint.get('pairwise_shield_pair_post_cpa_release_separation', ''))),
+        'pairwise_shield_pair_require_colregs': _env_str('PAIRWISE_SHIELD_PAIR_REQUIRE_COLREGS', str(checkpoint.get('pairwise_shield_pair_require_colregs', ''))),
         'pairwise_shield_standon_min_route_progress': _env_float('PAIRWISE_SHIELD_STANDON_MIN_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_standon_min_route_progress', -1.0))),
         'pairwise_shield_standon_max_route_progress': _env_float('PAIRWISE_SHIELD_STANDON_MAX_ROUTE_PROGRESS', float(checkpoint.get('pairwise_shield_standon_max_route_progress', -1.0))),
         'pairwise_shield_standon_min_abs_cte': _env_float('PAIRWISE_SHIELD_STANDON_MIN_ABS_CTE', float(checkpoint.get('pairwise_shield_standon_min_abs_cte', -1.0))),
@@ -996,6 +1034,8 @@ def _trace_episode_sample(
             'nearest_distance': float(nearest_neighbor.distance) if nearest_neighbor is not None else None,
             'nearest_rel_x': float(nearest_neighbor.rel_x) if nearest_neighbor is not None else None,
             'nearest_rel_y': float(nearest_neighbor.rel_y) if nearest_neighbor is not None else None,
+            'low_speed_recovery_floor_diagnostics': env.low_speed_recovery_floor_diagnostics(trace_agent_id),
+            'pairwise_shield_diagnostics': env.pairwise_shield_diagnostics(trace_agent_id, obs_obj),
             'mask_diagnostics': _trace_random_mask_diagnostics(
                 obs_obj,
                 scenario_name=scenario_name,
@@ -1035,6 +1075,13 @@ def _trace_bool(config: dict, key: str, default: bool = False) -> bool:
 
 def _trace_goal_heading_omega_sign(config: dict) -> float:
     return 1.0 if _trace_float(config, 'goal_heading_omega_sign', -1.0) >= 0.0 else -1.0
+
+
+def _trace_signed_cte(obs_obj: AgentLocalObservation, config: dict) -> float:
+    source = str(config.get('random_cte_source', 'clipped')).strip().lower()
+    if source == 'raw':
+        return float(getattr(obs_obj, 'raw_cross_track_error', getattr(obs_obj, 'cross_track_error', 0.0)))
+    return float(obs_obj.cross_track_error)
 
 
 def _trace_str(config: dict, key: str, default: str) -> str:
@@ -1434,7 +1481,8 @@ def _trace_cte_recovery_target(
     active: bool,
     weighted_active: bool,
 ) -> dict:
-    abs_cte = abs(float(obs_obj.cross_track_error))
+    signed_cte = _trace_signed_cte(obs_obj, config)
+    abs_cte = abs(signed_cte)
     min_abs_cte = max(0.0, _trace_float(config, 'random_cte_recovery_min_abs_cte', 1.10))
     full_abs_cte = max(min_abs_cte + 0.05, _trace_float(config, 'random_cte_recovery_full_abs_cte', 3.00))
     cte_urgency = _trace_clamp((abs_cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0)
@@ -1442,8 +1490,31 @@ def _trace_cte_recovery_target(
     min_speed = max(0.0, _trace_float(config, 'random_cte_recovery_min_speed', 0.07))
     max_omega = max(0.0, _trace_float(config, 'random_cte_recovery_max_omega', 0.30))
     omega_reference = max(0.05, _trace_float(config, 'random_cte_recovery_omega_reference', 0.55))
-    target_linear = target_speed - (target_speed - min_speed) * cte_urgency
-    target_omega = _trace_goal_heading_omega_sign(config) * _trace_clamp(float(obs_obj.heading_error) / omega_reference, -1.0, 1.0) * max_omega
+    speed_cte_slowdown = max(0.0, _trace_float(config, 'random_cte_recovery_speed_cte_slowdown', 1.0))
+    target_linear = target_speed - (target_speed - min_speed) * _trace_clamp(cte_urgency * speed_cte_slowdown, 0.0, 1.0)
+    recovery_heading_error = float(obs_obj.heading_error)
+    target_omega = _trace_goal_heading_omega_sign(config) * _trace_clamp(recovery_heading_error / omega_reference, -1.0, 1.0) * max_omega
+    omega_mode = str(config.get('random_cte_recovery_omega_mode', 'goal-heading')).strip().lower().replace('_', '-')
+    if omega_mode == 'signed-cte':
+        cte_sign = 0.0 if abs(signed_cte) <= 1e-6 else float(np.sign(signed_cte))
+        target_omega = -cte_sign * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'signed-cte-inverted':
+        cte_sign = 0.0 if abs(signed_cte) <= 1e-6 else float(np.sign(signed_cte))
+        target_omega = cte_sign * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'goal-cte-lookahead':
+        cte_lookahead = max(0.25, _trace_float(config, 'random_cte_recovery_cte_lookahead', 4.0))
+        cte_heading_scale = max(0.0, _trace_float(config, 'random_cte_recovery_cte_heading_scale', 1.0))
+        cte_heading_bias = math.atan2(signed_cte, cte_lookahead) * cte_heading_scale
+        recovery_heading_error = math.atan2(
+            math.sin(float(obs_obj.heading_error) + cte_heading_bias),
+            math.cos(float(obs_obj.heading_error) + cte_heading_bias),
+        )
+        target_omega = _trace_goal_heading_omega_sign(config) * _trace_clamp(recovery_heading_error / omega_reference, -1.0, 1.0) * max_omega
+    speed_heading_gate = min(1.0, max(0.0, _trace_float(config, 'random_cte_recovery_speed_heading_gate', 0.0)))
+    if speed_heading_gate > 0.0:
+        recovery_alignment = max(0.0, math.cos(min(abs(recovery_heading_error), math.pi / 2.0)))
+        target_linear *= (1.0 - speed_heading_gate) + speed_heading_gate * recovery_alignment
+        target_linear = max(target_linear, min_speed)
     return _trace_action_target(
         obs_obj,
         target_linear,
@@ -1452,6 +1523,8 @@ def _trace_cte_recovery_target(
         active=active,
         weighted_active=weighted_active,
         cte_urgency=float(cte_urgency),
+        signed_cte=float(signed_cte),
+        omega_mode=omega_mode,
     )
 
 
@@ -1468,7 +1541,8 @@ def _trace_random_mask_diagnostics(
     scenario_mask = str(scenario_name) in {'two_usv_random_encounter', 'three_usv_random_encounter'}
     distance = max(0.0, float(obs_obj.distance_to_goal))
     route_progress = float(obs_obj.route_progress)
-    abs_cte = abs(float(obs_obj.cross_track_error))
+    signed_cte = _trace_signed_cte(obs_obj, config)
+    abs_cte = abs(signed_cte)
     phase = float(obs_obj.conflict_phase)
     team_min = float(team_min_separation) if np.isfinite(team_min_separation) else 1e3
     valid_cpa = bool(cpa['valid_cpa'])
@@ -1565,7 +1639,10 @@ def _trace_random_mask_diagnostics(
     cte_max_distance = max(cte_goal_tolerance + 0.05, _trace_float(config, 'random_cte_recovery_max_distance', 13.0))
     cte_min_abs = max(0.0, _trace_float(config, 'random_cte_recovery_min_abs_cte', 1.10))
     cte_min_neighbor_sep = max(0.0, _trace_float(config, 'random_cte_recovery_min_neighbor_separation', 0.85))
-    cte_agent_indices = tuple(int(index) for index in (config.get('random_cte_recovery_agent_indices', ()) or ()))
+    if _trace_bool(config, 'random_cte_recovery_all_agents', False):
+        cte_agent_indices = ()
+    else:
+        cte_agent_indices = tuple(int(index) for index in (config.get('random_cte_recovery_agent_indices', ()) or ()))
     cte_unfinished = distance > cte_goal_tolerance and distance <= cte_max_distance
     cte_gate = abs_cte >= cte_min_abs
     cte_role = (not cte_agent_indices) or (_trace_agent_index(str(obs_obj.agent_id)) in cte_agent_indices)
@@ -1663,6 +1740,158 @@ def _trace_random_mask_diagnostics(
             active=cte_active,
             weighted_active=cte_weighted_active,
         ),
+    }
+
+
+def _append_timeout_agent_sample(
+    windows: dict[str, list[dict]],
+    agent_id: str,
+    obs_obj: AgentLocalObservation,
+    *,
+    pairwise_shield_active: bool,
+    mask_diagnostics: dict,
+    window_limit: int,
+) -> None:
+    mask_active = {
+        'deconf': bool(mask_diagnostics.get('random_deconflict_weighted_active', False)),
+        'finish': bool(mask_diagnostics.get('random_safe_finish_weighted_active', False)),
+        'offroute': bool(mask_diagnostics.get('random_offroute_finish_weighted_active', False)),
+        'cte': bool(mask_diagnostics.get('random_cte_recovery_weighted_active', False)),
+    }
+    window = windows.setdefault(str(agent_id), [])
+    window.append({
+        'distance_to_goal': float(obs_obj.distance_to_goal),
+        'route_progress': float(obs_obj.route_progress),
+        'cross_track_error': float(obs_obj.cross_track_error),
+        'raw_cross_track_error': float(getattr(obs_obj, 'raw_cross_track_error', obs_obj.cross_track_error)),
+        'heading_error': float(obs_obj.heading_error),
+        'final_linear_x': float(obs_obj.final_linear_x),
+        'final_angular_z': float(obs_obj.final_angular_z),
+        'pairwise_shield_active': bool(pairwise_shield_active),
+        'mask_active': mask_active,
+    })
+    overflow = len(window) - max(1, int(window_limit))
+    if overflow > 0:
+        del window[:overflow]
+
+
+def _timeout_attribution_agent(
+    agent_id: str,
+    final_metrics: dict,
+    samples: list[dict],
+    *,
+    goal_tolerance: float,
+) -> dict:
+    if not samples:
+        return {
+            'status': 'unknown',
+            'final_distance_to_goal': float(final_metrics.get('distance_to_goal', float('inf'))),
+            'final_route_progress': float(final_metrics.get('route_progress', 0.0)),
+            'sample_count': 0,
+        }
+
+    first = samples[0]
+    last = samples[-1]
+    distances = [float(item['distance_to_goal']) for item in samples]
+    route_progress_values = [float(item['route_progress']) for item in samples]
+    abs_cte_values = [abs(float(item['cross_track_error'])) for item in samples]
+    linear_values = [max(0.0, float(item['final_linear_x'])) for item in samples]
+    omega_values = [abs(float(item['final_angular_z'])) for item in samples]
+    heading_values = [abs(float(item['heading_error'])) for item in samples]
+    sample_count = max(1, len(samples))
+    mask_ratios = {
+        key: float(sum(1 for item in samples if bool(item.get('mask_active', {}).get(key, False))) / sample_count)
+        for key in ('deconf', 'finish', 'offroute', 'cte')
+    }
+    pairwise_shield_active_ratio = float(sum(1 for item in samples if bool(item.get('pairwise_shield_active', False))) / sample_count)
+
+    distance_delta = float(last['distance_to_goal'] - first['distance_to_goal'])
+    route_progress_delta = float(last['route_progress'] - first['route_progress'])
+    final_distance = float(final_metrics.get('distance_to_goal', last['distance_to_goal']))
+    final_route_progress = float(final_metrics.get('route_progress', last['route_progress']))
+    final_abs_cte = abs(float(final_metrics.get('cross_track_error', last['cross_track_error'])))
+    mean_linear = float(np.mean(linear_values))
+    stopped_ratio = float(sum(1 for value in linear_values if value <= 0.025) / sample_count)
+    near_goal_ratio = float(sum(1 for value in distances if value <= max(goal_tolerance * 1.5, goal_tolerance + 0.25)) / sample_count)
+    reached_goal = bool(final_metrics.get('reached_goal', final_distance <= goal_tolerance))
+
+    blockers = []
+    if reached_goal:
+        status = 'reached_goal'
+    else:
+        if near_goal_ratio > 0.05 and distance_delta > 0.25:
+            blockers.append('near_goal_rebound')
+        if final_abs_cte >= 2.0 or float(np.mean(abs_cte_values)) >= 2.0:
+            blockers.append('cte_drift')
+        if distance_delta > 0.50:
+            blockers.append('moving_away')
+        if final_distance > max(3.0, goal_tolerance * 3.0) and stopped_ratio >= 0.50:
+            blockers.append('stalled_far')
+        elif final_distance > max(3.0, goal_tolerance * 3.0) and mean_linear < 0.10:
+            blockers.append('slow_far')
+        if mask_ratios['cte'] >= 0.50:
+            blockers.append('cte_recovery_dominant')
+        if mask_ratios['finish'] >= 0.50:
+            blockers.append('finish_target_dominant')
+        if pairwise_shield_active_ratio >= 0.50:
+            blockers.append('shield_dominant')
+        status = blockers[0] if blockers else 'unfinished'
+
+    return {
+        'status': status,
+        'blockers': blockers,
+        'sample_count': int(sample_count),
+        'first_distance_to_goal': float(first['distance_to_goal']),
+        'final_distance_to_goal': final_distance,
+        'distance_delta': distance_delta,
+        'min_distance_to_goal': float(min(distances)),
+        'max_distance_to_goal': float(max(distances)),
+        'first_route_progress': float(first['route_progress']),
+        'final_route_progress': final_route_progress,
+        'route_progress_delta': route_progress_delta,
+        'min_route_progress': float(min(route_progress_values)),
+        'max_route_progress': float(max(route_progress_values)),
+        'final_abs_cte': final_abs_cte,
+        'mean_abs_cte': float(np.mean(abs_cte_values)),
+        'max_abs_cte': float(max(abs_cte_values)),
+        'mean_linear_x': mean_linear,
+        'mean_abs_omega': float(np.mean(omega_values)),
+        'mean_abs_heading_error': float(np.mean(heading_values)),
+        'stopped_ratio': stopped_ratio,
+        'near_goal_ratio': near_goal_ratio,
+        'pairwise_shield_active_ratio': pairwise_shield_active_ratio,
+        'mask_weighted_active_ratio': mask_ratios,
+    }
+
+
+def _timeout_attribution_summary(
+    final_agent_metrics: dict,
+    windows: dict[str, list[dict]],
+    *,
+    goal_tolerance: float,
+) -> dict:
+    agents = {}
+    blocker_counts: dict[str, int] = {}
+    unreached_agents = []
+    for agent_id in sorted(final_agent_metrics):
+        agent_summary = _timeout_attribution_agent(
+            agent_id,
+            final_agent_metrics[agent_id],
+            windows.get(agent_id, []),
+            goal_tolerance=goal_tolerance,
+        )
+        agents[agent_id] = agent_summary
+        if agent_summary.get('status') != 'reached_goal':
+            unreached_agents.append(agent_id)
+            blockers = agent_summary.get('blockers') or [agent_summary.get('status', 'unknown')]
+            for blocker in blockers:
+                blocker_counts[str(blocker)] = blocker_counts.get(str(blocker), 0) + 1
+    return {
+        'window_steps': int(max((len(samples) for samples in windows.values()), default=0)),
+        'goal_tolerance': float(goal_tolerance),
+        'unreached_agents': unreached_agents,
+        'blocker_counts': blocker_counts,
+        'agents': agents,
     }
 
 
@@ -1770,6 +1999,8 @@ def evaluate_policy(
                     trace_event_window_value = max(0, int(trace_event_window))
                     trace_event_remaining = 0
                     trace_collision_recorded = False
+                    timeout_agent_windows: dict[str, list[dict]] = {agent_id: [] for agent_id in env.agent_ids}
+                    timeout_window_limit = min(200, max(1, int(steps_per_episode)))
 
                     if hasattr(policy_impl, 'set_active_scenario'):
                         policy_impl.set_active_scenario(last_info.get('scenario', scenario_name))
@@ -1858,6 +2089,21 @@ def evaluate_policy(
                             cte_val = float(obs_obj.cross_track_error)
                             total_abs_cte += abs(cte_val)
                             cte_samples += 1
+                            mask_diagnostics = _trace_random_mask_diagnostics(
+                                obs_obj,
+                                scenario_name=active_scenario_name,
+                                team_min_separation=step_pair_min,
+                                config=trace_mask_config,
+                            )
+                            pairwise_diagnostics = env.pairwise_shield_diagnostics(agent_id, obs_obj)
+                            _append_timeout_agent_sample(
+                                timeout_agent_windows,
+                                agent_id,
+                                obs_obj,
+                                pairwise_shield_active=bool(pairwise_diagnostics.get('active', False)),
+                                mask_diagnostics=mask_diagnostics,
+                                window_limit=timeout_window_limit,
+                            )
                             if agent_id in prev_vx:
                                 total_linear_accel += abs(vx - prev_vx[agent_id])
                                 total_angular_accel += abs(vw - prev_vw[agent_id])
@@ -1872,6 +2118,8 @@ def evaluate_policy(
                             smoothness_samples += 1
 
                         # --- COLREGs encounter classification & compliance ---
+                        # Detection logic is the single source of truth in
+                        # `multi_agent_types.classify_encounter_role`.
                         for agent_id in env.agent_ids:
                             obs_obj = env._latest_observations.get(agent_id)
                             if obs_obj is None:
@@ -1883,35 +2131,23 @@ def evaluate_policy(
                                     continue
                                 bx = float(neighbor.rel_x)
                                 by = float(neighbor.rel_y)
-                                if bx <= 0.0:
-                                    continue
                                 bvx = float(neighbor.rel_vx)
                                 bvy = float(neighbor.rel_vy)
-                                closing = -((bx * bvx) + (by * bvy)) / max(neighbor.distance, 1e-3)
-                                nfwd = own_speed + bvx
-                                same_lane = bx > 0.8 and abs(by) < 1.5
-                                is_overtaking = (
-                                    same_lane and own_speed > 0.18 and bvx < -0.03
-                                    and nfwd > 0.05 and nfwd < own_speed - 0.02
+                                encounter_type, _role = classify_encounter_role(
+                                    body_x=bx,
+                                    body_y=by,
+                                    body_vx=bvx,
+                                    body_vy=bvy,
+                                    distance=float(neighbor.distance),
+                                    own_speed=own_speed,
                                 )
-                                opposing = nfwd < 0.05
-                                lateral_tol = max(1.3, 0.28 * neighbor.distance)
-                                is_head_on = (
-                                    not is_overtaking and opposing and closing > 0
-                                    and abs(by) < lateral_tol
-                                )
-                                is_crossing = (
-                                    by < -0.35 and closing > -0.05
-                                    and not is_overtaking and not is_head_on
-                                )
-                                enc_type = 'none'
-                                if is_head_on:
+                                if encounter_type == ENC_HEAD_ON:
                                     enc_type = 'head_on'
                                     colregs_head_on_steps += 1
-                                elif is_crossing:
+                                elif encounter_type == ENC_CROSSING:
                                     enc_type = 'crossing'
                                     colregs_crossing_steps += 1
-                                elif is_overtaking:
+                                elif encounter_type == ENC_OVERTAKING:
                                     enc_type = 'overtaking'
                                     colregs_overtaking_steps += 1
                                 else:
@@ -1988,6 +2224,11 @@ def evaluate_policy(
                             'final_angular_z': float(obs_obj.final_angular_z),
                             'reached_goal': bool(obs_obj.distance_to_goal <= env.config.goal_tolerance),
                         }
+                    timeout_attribution = _timeout_attribution_summary(
+                        final_agent_metrics,
+                        timeout_agent_windows,
+                        goal_tolerance=float(env.config.goal_tolerance),
+                    )
                     episode_metric = {
                             'episode': episode,
                             'scenario': scenario_name,
@@ -2007,6 +2248,7 @@ def evaluate_policy(
                             'initial_team_mean_goal_distance': initial_team_mean_goal_distance,
                             'team_mean_goal_distance': final_team_mean_goal_distance,
                             'final_agent_metrics': final_agent_metrics,
+                            'timeout_attribution': timeout_attribution,
                             'team_goal_distance_delta': team_goal_distance_delta,
                             'team_goal_progress_ratio': team_goal_progress_ratio,
                             # Progress rate metrics (step-independent)

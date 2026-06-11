@@ -130,6 +130,21 @@ class MultiAgentEnvConfig:
     # Distance-aware speed scaling (must match SITL deployment)
     speed_scale_distance: float = 0.0
     speed_scale_min: float = 0.35
+    low_speed_recovery_floor_enabled: bool = False
+    low_speed_recovery_floor_speed: float = 0.12
+    low_speed_recovery_floor_cte_speed: float = 0.08
+    low_speed_recovery_floor_min_raw_linear: float = 0.16
+    low_speed_recovery_floor_min_distance: float = 2.5
+    low_speed_recovery_floor_min_neighbor_separation: float = 1.35
+    low_speed_recovery_floor_max_conflict_level: float = 0.12
+    low_speed_recovery_floor_min_route_progress: float = 0.0
+    low_speed_recovery_floor_max_route_progress: float = 1.10
+    low_speed_recovery_floor_cte_slow_threshold: float = 1.80
+    low_speed_recovery_floor_heading_slow_threshold: float = 2.45
+    low_speed_recovery_floor_omega_blend: float = 0.60
+    low_speed_recovery_floor_cte_omega_enabled: bool = True
+    low_speed_recovery_floor_cte_omega_max: float = 0.35
+    low_speed_recovery_floor_cte_omega_full_abs_cte: float = 3.0
     # Encounter type dropout: probability of zeroing out the encounter
     # one-hot during training, forcing the policy to avoid relying on
     # scenario labels for avoidance decisions.
@@ -168,6 +183,20 @@ class MultiAgentEnvConfig:
     pairwise_shield_yield_min_route_progress: float = -1.0
     pairwise_shield_yield_max_route_progress: float = -1.0
     pairwise_shield_yield_min_abs_cte: float = -1.0
+    pairwise_shield_pair_yield_agent_ids: str = ''
+    pairwise_shield_pair_standon_agent_ids: str = ''
+    pairwise_shield_pair_yield_speed: str = ''
+    pairwise_shield_pair_standon_speed: str = ''
+    pairwise_shield_pair_critical_separation: str = ''
+    pairwise_shield_pair_yield_min_route_progress: str = ''
+    pairwise_shield_pair_yield_max_route_progress: str = ''
+    pairwise_shield_pair_yield_min_abs_cte: str = ''
+    pairwise_shield_pair_standon_min_route_progress: str = ''
+    pairwise_shield_pair_standon_max_route_progress: str = ''
+    pairwise_shield_pair_standon_min_abs_cte: str = ''
+    pairwise_shield_pair_max_dcpa: str = ''
+    pairwise_shield_pair_post_cpa_release_separation: str = ''
+    pairwise_shield_pair_require_colregs: str = ''
     pairwise_shield_standon_min_route_progress: float = -1.0
     pairwise_shield_standon_max_route_progress: float = -1.0
     pairwise_shield_standon_min_abs_cte: float = -1.0
@@ -204,6 +233,7 @@ class MultiAgentEnv(gym.Env):
         self._previous_conflict_risks: Dict[str, float] = {}
         self._previous_cpa_metrics: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._latest_observations: Dict[str, AgentLocalObservation] = {}
+        self._low_speed_recovery_floor_diagnostics: Dict[str, Dict[str, object]] = {}
         self._best_team_mean_distance = float('inf')
         self._initial_team_mean_separation = float('inf')
         self._initial_team_mean_goal_distance = float('inf')
@@ -464,6 +494,138 @@ class MultiAgentEnv(gym.Env):
                     linear_x *= speed_scale
         return linear_x, angular_z
 
+    def _apply_low_speed_recovery_floor(
+        self,
+        agent_id: str,
+        command: tuple[float, float],
+        observation: Optional[AgentLocalObservation],
+    ) -> tuple[float, float]:
+        diagnostics: Dict[str, object] = {
+            'enabled': bool(self.config.low_speed_recovery_floor_enabled),
+            'active': False,
+            'reason': '',
+            'input_linear_x': float(command[0]),
+            'input_angular_z': float(command[1]),
+        }
+
+        def finish(reason: str, result: tuple[float, float] = command, *, active: bool = False, **extra) -> tuple[float, float]:
+            diagnostics.update(extra)
+            diagnostics['reason'] = str(reason)
+            diagnostics['active'] = bool(active)
+            diagnostics['output_linear_x'] = float(result[0])
+            diagnostics['output_angular_z'] = float(result[1])
+            self._low_speed_recovery_floor_diagnostics[str(agent_id)] = dict(diagnostics)
+            return result
+
+        if not bool(self.config.low_speed_recovery_floor_enabled) or observation is None:
+            return finish('disabled' if not bool(self.config.low_speed_recovery_floor_enabled) else 'missing_observation')
+
+        linear_x = float(command[0])
+        angular_z = float(command[1])
+        floor_speed = max(0.0, float(self.config.low_speed_recovery_floor_speed))
+        if floor_speed <= 1e-6 or linear_x >= floor_speed:
+            return finish('floor_inactive', floor_speed=floor_speed)
+
+        raw_linear_x = max(0.0, float(getattr(observation, 'raw_linear_x', 0.0)))
+        if raw_linear_x < max(0.0, float(self.config.low_speed_recovery_floor_min_raw_linear)):
+            return finish('raw_linear_low', raw_linear_x=raw_linear_x, floor_speed=floor_speed)
+        if float(getattr(observation, 'distance_to_goal', 0.0)) < max(0.0, float(self.config.low_speed_recovery_floor_min_distance)):
+            return finish('near_goal', raw_linear_x=raw_linear_x, floor_speed=floor_speed)
+
+        route_progress = float(getattr(observation, 'route_progress', 0.0))
+        if route_progress < float(self.config.low_speed_recovery_floor_min_route_progress):
+            return finish('route_progress_low', raw_linear_x=raw_linear_x, route_progress=route_progress, floor_speed=floor_speed)
+        if route_progress > float(self.config.low_speed_recovery_floor_max_route_progress):
+            return finish('route_progress_high', raw_linear_x=raw_linear_x, route_progress=route_progress, floor_speed=floor_speed)
+
+        min_neighbor_distance = observation.min_neighbor_distance() if observation.neighbors else float('inf')
+        if min_neighbor_distance < max(0.0, float(self.config.low_speed_recovery_floor_min_neighbor_separation)):
+            return finish('neighbor_close', raw_linear_x=raw_linear_x, route_progress=route_progress, min_neighbor_distance=float(min_neighbor_distance), floor_speed=floor_speed)
+        conflict_level = float(self._projection_conflict_level(observation))
+        if conflict_level > max(0.0, float(self.config.low_speed_recovery_floor_max_conflict_level)):
+            return finish('conflict_active', raw_linear_x=raw_linear_x, route_progress=route_progress, min_neighbor_distance=float(min_neighbor_distance), conflict_level=conflict_level, floor_speed=floor_speed)
+
+        signed_raw_cross_track_error = float(getattr(
+            observation,
+            'raw_cross_track_error',
+            getattr(observation, 'cross_track_error', 0.0),
+        ))
+        raw_cross_track_error = abs(signed_raw_cross_track_error)
+        heading_error = abs(float(getattr(observation, 'heading_error', 0.0)))
+        target_floor = floor_speed
+        cte_slow_threshold = float(self.config.low_speed_recovery_floor_cte_slow_threshold)
+        heading_slow_threshold = float(self.config.low_speed_recovery_floor_heading_slow_threshold)
+        if (
+            (cte_slow_threshold > 0.0 and raw_cross_track_error > cte_slow_threshold)
+            or (heading_slow_threshold > 0.0 and heading_error > heading_slow_threshold)
+        ):
+            target_floor = min(target_floor, max(0.0, float(self.config.low_speed_recovery_floor_cte_speed)))
+
+        target_linear = max(linear_x, min(target_floor, float(self.action_high[0])))
+        if target_linear <= linear_x + 1e-6:
+            return finish(
+                'no_linear_raise',
+                raw_linear_x=raw_linear_x,
+                route_progress=route_progress,
+                min_neighbor_distance=float(min_neighbor_distance),
+                conflict_level=conflict_level,
+                signed_raw_cross_track_error=signed_raw_cross_track_error,
+                abs_raw_cross_track_error=raw_cross_track_error,
+                heading_error=heading_error,
+                target_floor=target_floor,
+            )
+
+        omega_blend = float(np.clip(self.config.low_speed_recovery_floor_omega_blend, 0.0, 1.0))
+        target_angular_z = angular_z
+        cte_omega_active = False
+        if omega_blend > 0.0:
+            raw_angular_z = float(getattr(observation, 'raw_angular_z', angular_z))
+            target_angular_z = raw_angular_z
+            cte_omega_threshold = max(0.0, cte_slow_threshold)
+            if (
+                bool(self.config.low_speed_recovery_floor_cte_omega_enabled)
+                and raw_cross_track_error >= cte_omega_threshold
+                and raw_cross_track_error > 1e-6
+            ):
+                full_abs_cte = max(cte_omega_threshold + 1e-3, float(self.config.low_speed_recovery_floor_cte_omega_full_abs_cte))
+                cte_urgency = float(np.clip((raw_cross_track_error - cte_omega_threshold) / max(full_abs_cte - cte_omega_threshold, 1e-3), 0.0, 1.0))
+                max_omega = min(
+                    max(0.0, float(self.config.low_speed_recovery_floor_cte_omega_max)),
+                    max(abs(float(self.action_low[1])), abs(float(self.action_high[1]))),
+                )
+                target_angular_z = -float(np.sign(signed_raw_cross_track_error)) * max_omega * (0.45 + 0.55 * cte_urgency)
+                cte_omega_active = True
+            angular_z = (1.0 - omega_blend) * angular_z + omega_blend * target_angular_z
+
+        result = (
+            float(np.clip(target_linear, self.action_low[0], self.action_high[0])),
+            float(np.clip(angular_z, self.action_low[1], self.action_high[1])),
+        )
+        return finish(
+            'active',
+            result,
+            active=True,
+            raw_linear_x=raw_linear_x,
+            route_progress=route_progress,
+            min_neighbor_distance=float(min_neighbor_distance),
+            conflict_level=conflict_level,
+            signed_raw_cross_track_error=signed_raw_cross_track_error,
+            abs_raw_cross_track_error=raw_cross_track_error,
+            heading_error=heading_error,
+            target_floor=target_floor,
+            target_linear_x=float(target_linear),
+            target_angular_z=float(target_angular_z),
+            omega_blend=omega_blend,
+            cte_omega_active=bool(cte_omega_active),
+        )
+
+    def low_speed_recovery_floor_diagnostics(self, agent_id: str) -> Dict[str, object]:
+        return dict(self._low_speed_recovery_floor_diagnostics.get(str(agent_id), {
+            'enabled': bool(self.config.low_speed_recovery_floor_enabled),
+            'active': False,
+            'reason': 'not_evaluated',
+        }))
+
     def _pairwise_shield_is_yield(self, agent_id: str, observation: AgentLocalObservation, nearest) -> bool:
         role_mode = str(self.config.pairwise_shield_role_mode).strip().lower()
         if role_mode == 'priority-delta':
@@ -506,6 +668,90 @@ class MultiAgentEnv(gym.Env):
                 return True
         return False
 
+    @staticmethod
+    def _pairwise_shield_pair_float_override(agent_id: str, neighbor_id: str, overrides: str, default: float) -> float:
+        if not neighbor_id:
+            return default
+        current_pair = {str(agent_id), str(neighbor_id)}
+        tokens = [
+            token.strip()
+            for token in str(overrides).replace(',', ' ').split()
+            if token.strip()
+        ]
+        for token in tokens:
+            if '=' not in token:
+                continue
+            pair_token, value_token = token.split('=', 1)
+            normalized = pair_token.strip()
+            for separator in (':', '/', '|'):
+                normalized = normalized.replace(separator, '-')
+            if '-' not in normalized:
+                continue
+            left, right = normalized.split('-', 1)
+            if {left.strip(), right.strip()} != current_pair:
+                continue
+            try:
+                return float(value_token)
+            except (TypeError, ValueError):
+                return default
+        return default
+
+    @staticmethod
+    def _pairwise_shield_pair_str_override(agent_id: str, neighbor_id: str, overrides: str, default: str) -> str:
+        if not neighbor_id:
+            return default
+        current_pair = {str(agent_id), str(neighbor_id)}
+        tokens = [
+            token.strip()
+            for token in str(overrides).replace(',', ' ').split()
+            if token.strip()
+        ]
+        for token in tokens:
+            if '=' not in token:
+                continue
+            pair_token, value_token = token.split('=', 1)
+            normalized = pair_token.strip()
+            for separator in (':', '/', '|'):
+                normalized = normalized.replace(separator, '-')
+            if '-' not in normalized:
+                continue
+            left, right = normalized.split('-', 1)
+            if {left.strip(), right.strip()} != current_pair:
+                continue
+            return value_token.strip().replace('+', ' ')
+        return default
+
+    @staticmethod
+    def _pairwise_shield_colregs_encounter(observation: AgentLocalObservation, neighbor, detect_distance: float = 5.0) -> bool:
+        distance = float(neighbor.distance)
+        if distance <= 1e-3 or distance > detect_distance:
+            return False
+        bx = float(neighbor.rel_x)
+        by = float(neighbor.rel_y)
+        if bx <= 0.0:
+            return False
+        bvx = float(neighbor.rel_vx)
+        bvy = float(neighbor.rel_vy)
+        own_speed = max(0.0, float(observation.speed), float(observation.final_linear_x))
+        closing = -((bx * bvx) + (by * bvy)) / max(distance, 1e-3)
+        neighbor_forward_speed = own_speed + bvx
+        same_lane = bx > 0.8 and abs(by) < 1.5
+        is_overtaking = (
+            same_lane and own_speed > 0.18 and bvx < -0.03
+            and neighbor_forward_speed > 0.05 and neighbor_forward_speed < own_speed - 0.02
+        )
+        opposing = neighbor_forward_speed < 0.05
+        lateral_tol = max(1.3, 0.28 * distance)
+        is_head_on = (
+            not is_overtaking and opposing and closing > 0.0
+            and abs(by) < lateral_tol
+        )
+        is_crossing = (
+            by < -0.35 and closing > -0.05
+            and not is_overtaking and not is_head_on
+        )
+        return bool(is_head_on or is_crossing or is_overtaking)
+
     def _apply_pairwise_shield(
         self,
         agent_id: str,
@@ -533,18 +779,81 @@ class MultiAgentEnv(gym.Env):
         rel_vx = float(nearest.rel_vx)
         rel_vy = float(nearest.rel_vy)
         closing_speed = -((rel_x * rel_vx) + (rel_y * rel_vy)) / max(nearest_distance, 1e-3)
-        critical = max(0.0, float(self.config.pairwise_shield_critical_separation))
+        critical = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_critical_separation,
+            float(self.config.pairwise_shield_critical_separation),
+        )
+        critical = max(0.0, float(critical))
         if nearest_distance > critical and closing_speed < float(self.config.pairwise_shield_min_closing_speed):
             return command
+        max_dcpa = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_max_dcpa,
+            -1.0,
+        )
+        post_cpa_release_separation = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_post_cpa_release_separation,
+            -1.0,
+        )
+        cpa_metrics = self._neighbor_cpa_metrics(nearest) if max_dcpa >= 0.0 or post_cpa_release_separation >= 0.0 else None
+        dcpa = float(cpa_metrics.get('dcpa', float('inf'))) if cpa_metrics is not None else float('inf')
+        tcpa = float(cpa_metrics.get('tcpa', float('inf'))) if cpa_metrics is not None else float('inf')
+        if (
+            post_cpa_release_separation >= 0.0
+            and nearest_distance >= float(post_cpa_release_separation)
+            and tcpa <= 0.0
+            and closing_speed <= 0.0
+        ):
+            return command
+        dcpa_threat = max_dcpa >= 0.0 and dcpa <= float(max_dcpa)
+        require_colregs_pairs = str(self.config.pairwise_shield_pair_require_colregs).strip()
+        if (
+            require_colregs_pairs
+            and self._pairwise_shield_pair_allowed(agent_id, nearest_id, require_colregs_pairs)
+            and nearest_distance > critical
+            and not self._pairwise_shield_colregs_encounter(observation, nearest)
+            and not dcpa_threat
+        ):
+            return command
+        if max_dcpa >= 0.0 and nearest_distance > critical:
+            if dcpa > float(max_dcpa):
+                return command
 
         danger = (release_separation - nearest_distance) / max(release_separation - min(critical, release_separation - 1e-3), 1e-3)
         danger = float(np.clip(danger, 0.0, 1.0))
         if nearest_distance <= critical:
             danger = 1.0
-        is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
+        pair_yield_agent_ids = self._pairwise_shield_pair_str_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_yield_agent_ids,
+            '',
+        )
+        pair_standon_agent_ids = self._pairwise_shield_pair_str_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_standon_agent_ids,
+            '',
+        )
+        if pair_yield_agent_ids or pair_standon_agent_ids:
+            if pair_yield_agent_ids and self._pairwise_shield_agent_id_allowed(agent_id, pair_yield_agent_ids):
+                is_yield = True
+                allowed_ids = pair_yield_agent_ids
+            elif pair_standon_agent_ids and self._pairwise_shield_agent_id_allowed(agent_id, pair_standon_agent_ids):
+                is_yield = False
+                allowed_ids = pair_standon_agent_ids
+            else:
+                return command
+        else:
+            is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
+            allowed_ids = self.config.pairwise_shield_yield_agent_ids if is_yield else self.config.pairwise_shield_standon_agent_ids
         if bool(self.config.pairwise_shield_yield_only) and not is_yield:
             return command
-        allowed_ids = self.config.pairwise_shield_yield_agent_ids if is_yield else self.config.pairwise_shield_standon_agent_ids
         if not self._pairwise_shield_agent_id_allowed(agent_id, allowed_ids):
             return command
         route_progress = float(getattr(observation, 'route_progress', 0.0))
@@ -565,6 +874,24 @@ class MultiAgentEnv(gym.Env):
                 late_min_route_progress = float(self.config.pairwise_shield_yield_late_min_route_progress)
             if float(self.config.pairwise_shield_yield_late_min_abs_cte) >= 0.0:
                 late_min_abs_cte = float(self.config.pairwise_shield_yield_late_min_abs_cte)
+            min_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_min_route_progress,
+                min_route_progress,
+            )
+            max_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_max_route_progress,
+                max_route_progress,
+            )
+            min_abs_cte = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_min_abs_cte,
+                min_abs_cte,
+            )
         else:
             if float(self.config.pairwise_shield_standon_min_route_progress) >= 0.0:
                 min_route_progress = float(self.config.pairwise_shield_standon_min_route_progress)
@@ -576,6 +903,24 @@ class MultiAgentEnv(gym.Env):
                 late_min_route_progress = float(self.config.pairwise_shield_standon_late_min_route_progress)
             if float(self.config.pairwise_shield_standon_late_min_abs_cte) >= 0.0:
                 late_min_abs_cte = float(self.config.pairwise_shield_standon_late_min_abs_cte)
+            min_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_min_route_progress,
+                min_route_progress,
+            )
+            max_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_max_route_progress,
+                max_route_progress,
+            )
+            min_abs_cte = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_min_abs_cte,
+                min_abs_cte,
+            )
         bypass_gates = bool(self.config.pairwise_shield_critical_bypass_gates) and nearest_distance <= critical
         if not bypass_gates:
             primary_gate = min_route_progress <= route_progress <= max_route_progress and abs_cross_track_error >= min_abs_cte
@@ -589,12 +934,24 @@ class MultiAgentEnv(gym.Env):
             elif rel_y < 0.0:
                 turn_sign = 1.0
 
+        yield_speed = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_yield_speed,
+            float(self.config.pairwise_shield_yield_speed),
+        )
+        standon_speed = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_standon_speed,
+            float(self.config.pairwise_shield_standon_speed),
+        )
         if is_yield:
             danger_scale = float(np.clip(self.config.pairwise_shield_yield_danger_scale, 0.0, 2.0))
-            target_linear = max(0.0, float(self.config.pairwise_shield_yield_speed)) * float(np.clip(1.0 - danger_scale * danger, 0.0, 1.0))
+            target_linear = max(0.0, float(yield_speed)) * float(np.clip(1.0 - danger_scale * danger, 0.0, 1.0))
             target_omega = turn_sign * max(0.0, float(self.config.pairwise_shield_yield_omega)) * danger
         else:
-            target_linear = max(0.0, float(self.config.pairwise_shield_standon_speed))
+            target_linear = max(0.0, float(standon_speed))
             target_omega = turn_sign * max(0.0, float(self.config.pairwise_shield_standon_omega)) * danger
 
         blend = float(np.clip(self.config.pairwise_shield_blend, 0.0, 1.0))
@@ -607,6 +964,263 @@ class MultiAgentEnv(gym.Env):
         linear_x = float(np.clip(linear_x, self.action_low[0], self.action_high[0]))
         angular_z = float(np.clip(angular_z, self.action_low[1], self.action_high[1]))
         return linear_x, angular_z
+
+    def pairwise_shield_diagnostics(self, agent_id: str, observation: Optional[AgentLocalObservation]) -> Dict[str, object]:
+        result: Dict[str, object] = {
+            'enabled': bool(self.config.pairwise_shield_enabled),
+            'active': False,
+            'reason': '',
+        }
+        if not bool(self.config.pairwise_shield_enabled):
+            result['reason'] = 'disabled'
+            return result
+        if observation is None:
+            result['reason'] = 'missing_observation'
+            return result
+        if not observation.neighbors:
+            result['reason'] = 'no_neighbors'
+            return result
+        if self.current_scenario_name not in {'two_usv_random_encounter', 'three_usv_random_encounter'}:
+            result['reason'] = 'scenario'
+            result['scenario'] = str(self.current_scenario_name)
+            return result
+
+        nearest = min(observation.neighbors, key=lambda item: float(item.distance), default=None)
+        if nearest is None:
+            result['reason'] = 'no_nearest'
+            return result
+        nearest_id = str(getattr(nearest, 'source_id', ''))
+        nearest_distance = max(0.0, float(nearest.distance))
+        release_separation = max(0.0, float(self.config.pairwise_shield_release_separation))
+        critical = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_critical_separation,
+            float(self.config.pairwise_shield_critical_separation),
+        )
+        critical = max(0.0, float(critical))
+        rel_x = float(nearest.rel_x)
+        rel_y = float(nearest.rel_y)
+        rel_vx = float(nearest.rel_vx)
+        rel_vy = float(nearest.rel_vy)
+        closing_speed = -((rel_x * rel_vx) + (rel_y * rel_vy)) / max(nearest_distance, 1e-3)
+        cpa_metrics = self._neighbor_cpa_metrics(nearest)
+        colregs_encounter = self._pairwise_shield_colregs_encounter(observation, nearest)
+        max_dcpa = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_max_dcpa,
+            -1.0,
+        )
+        post_cpa_release_separation = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_post_cpa_release_separation,
+            -1.0,
+        )
+        dcpa = float(cpa_metrics.get('dcpa', float('inf')))
+        tcpa = float(cpa_metrics.get('tcpa', float('inf')))
+        dcpa_threat = max_dcpa >= 0.0 and dcpa <= float(max_dcpa)
+        result.update({
+            'nearest_id': nearest_id,
+            'nearest_distance': nearest_distance,
+            'release_separation': release_separation,
+            'critical_separation': critical,
+            'rel_x': rel_x,
+            'rel_y': rel_y,
+            'rel_vx': rel_vx,
+            'rel_vy': rel_vy,
+            'closing_speed': closing_speed,
+            'dcpa': dcpa,
+            'tcpa': tcpa,
+            'max_dcpa': float(max_dcpa),
+            'post_cpa_release_separation': float(post_cpa_release_separation),
+            'dcpa_threat': bool(dcpa_threat),
+            'colregs_encounter': bool(colregs_encounter),
+        })
+        if not self._pairwise_shield_pair_allowed(agent_id, nearest_id, self.config.pairwise_shield_pair_ids):
+            result['reason'] = 'pair_not_allowed'
+            return result
+        if release_separation <= 0.0 or nearest_distance > release_separation:
+            result['reason'] = 'outside_release'
+            return result
+        if nearest_distance > critical and closing_speed < float(self.config.pairwise_shield_min_closing_speed):
+            result['reason'] = 'not_closing'
+            return result
+        if (
+            post_cpa_release_separation >= 0.0
+            and nearest_distance >= float(post_cpa_release_separation)
+            and tcpa <= 0.0
+            and closing_speed <= 0.0
+        ):
+            result['reason'] = 'post_cpa_release'
+            return result
+        require_colregs_pairs = str(self.config.pairwise_shield_pair_require_colregs).strip()
+        if (
+            require_colregs_pairs
+            and self._pairwise_shield_pair_allowed(agent_id, nearest_id, require_colregs_pairs)
+            and nearest_distance > critical
+            and not colregs_encounter
+            and not dcpa_threat
+        ):
+            result['reason'] = 'not_colregs'
+            return result
+        if max_dcpa >= 0.0 and nearest_distance > critical and dcpa > float(max_dcpa):
+            result['reason'] = 'dcpa_too_large'
+            return result
+
+        pair_yield_agent_ids = self._pairwise_shield_pair_str_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_yield_agent_ids,
+            '',
+        )
+        pair_standon_agent_ids = self._pairwise_shield_pair_str_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_standon_agent_ids,
+            '',
+        )
+        if pair_yield_agent_ids or pair_standon_agent_ids:
+            if pair_yield_agent_ids and self._pairwise_shield_agent_id_allowed(agent_id, pair_yield_agent_ids):
+                is_yield = True
+                allowed_ids = pair_yield_agent_ids
+                role_source = 'pair_yield'
+            elif pair_standon_agent_ids and self._pairwise_shield_agent_id_allowed(agent_id, pair_standon_agent_ids):
+                is_yield = False
+                allowed_ids = pair_standon_agent_ids
+                role_source = 'pair_standon'
+            else:
+                result.update({
+                    'is_yield': None,
+                    'role_source': 'pair_override',
+                    'pair_yield_agent_ids': pair_yield_agent_ids,
+                    'pair_standon_agent_ids': pair_standon_agent_ids,
+                    'reason': 'agent_not_in_pair_role',
+                })
+                return result
+        else:
+            is_yield = self._pairwise_shield_is_yield(agent_id, observation, nearest)
+            allowed_ids = self.config.pairwise_shield_yield_agent_ids if is_yield else self.config.pairwise_shield_standon_agent_ids
+            role_source = 'dynamic'
+        result.update({
+            'is_yield': bool(is_yield),
+            'role_source': role_source,
+            'allowed_ids': str(allowed_ids),
+            'pair_yield_agent_ids': pair_yield_agent_ids,
+            'pair_standon_agent_ids': pair_standon_agent_ids,
+        })
+        if bool(self.config.pairwise_shield_yield_only) and not is_yield:
+            result['reason'] = 'yield_only'
+            return result
+        if not self._pairwise_shield_agent_id_allowed(agent_id, allowed_ids):
+            result['reason'] = 'agent_not_allowed'
+            return result
+
+        route_progress = float(getattr(observation, 'route_progress', 0.0))
+        abs_cross_track_error = abs(float(getattr(observation, 'cross_track_error', 0.0)))
+        min_route_progress = float(self.config.pairwise_shield_min_route_progress)
+        max_route_progress = float(self.config.pairwise_shield_max_route_progress)
+        min_abs_cte = float(self.config.pairwise_shield_min_abs_cte)
+        late_min_route_progress = -1.0
+        late_min_abs_cte = -1.0
+        if is_yield:
+            if float(self.config.pairwise_shield_yield_min_route_progress) >= 0.0:
+                min_route_progress = float(self.config.pairwise_shield_yield_min_route_progress)
+            if float(self.config.pairwise_shield_yield_max_route_progress) >= 0.0:
+                max_route_progress = float(self.config.pairwise_shield_yield_max_route_progress)
+            if float(self.config.pairwise_shield_yield_min_abs_cte) >= 0.0:
+                min_abs_cte = float(self.config.pairwise_shield_yield_min_abs_cte)
+            if float(self.config.pairwise_shield_yield_late_min_route_progress) >= 0.0:
+                late_min_route_progress = float(self.config.pairwise_shield_yield_late_min_route_progress)
+            if float(self.config.pairwise_shield_yield_late_min_abs_cte) >= 0.0:
+                late_min_abs_cte = float(self.config.pairwise_shield_yield_late_min_abs_cte)
+            min_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_min_route_progress,
+                min_route_progress,
+            )
+            max_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_max_route_progress,
+                max_route_progress,
+            )
+            min_abs_cte = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_yield_min_abs_cte,
+                min_abs_cte,
+            )
+        else:
+            if float(self.config.pairwise_shield_standon_min_route_progress) >= 0.0:
+                min_route_progress = float(self.config.pairwise_shield_standon_min_route_progress)
+            if float(self.config.pairwise_shield_standon_max_route_progress) >= 0.0:
+                max_route_progress = float(self.config.pairwise_shield_standon_max_route_progress)
+            if float(self.config.pairwise_shield_standon_min_abs_cte) >= 0.0:
+                min_abs_cte = float(self.config.pairwise_shield_standon_min_abs_cte)
+            if float(self.config.pairwise_shield_standon_late_min_route_progress) >= 0.0:
+                late_min_route_progress = float(self.config.pairwise_shield_standon_late_min_route_progress)
+            if float(self.config.pairwise_shield_standon_late_min_abs_cte) >= 0.0:
+                late_min_abs_cte = float(self.config.pairwise_shield_standon_late_min_abs_cte)
+            min_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_min_route_progress,
+                min_route_progress,
+            )
+            max_route_progress = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_max_route_progress,
+                max_route_progress,
+            )
+            min_abs_cte = self._pairwise_shield_pair_float_override(
+                agent_id,
+                nearest_id,
+                self.config.pairwise_shield_pair_standon_min_abs_cte,
+                min_abs_cte,
+            )
+        bypass_gates = bool(self.config.pairwise_shield_critical_bypass_gates) and nearest_distance <= critical
+        primary_gate = min_route_progress <= route_progress <= max_route_progress and abs_cross_track_error >= min_abs_cte
+        late_gate = late_min_route_progress >= 0.0 and route_progress >= late_min_route_progress and abs_cross_track_error >= max(0.0, late_min_abs_cte)
+        result.update({
+            'route_progress': route_progress,
+            'abs_cross_track_error': abs_cross_track_error,
+            'min_route_progress': min_route_progress,
+            'max_route_progress': max_route_progress,
+            'min_abs_cte': min_abs_cte,
+            'late_min_route_progress': late_min_route_progress,
+            'late_min_abs_cte': late_min_abs_cte,
+            'bypass_gates': bool(bypass_gates),
+            'primary_gate': bool(primary_gate),
+            'late_gate': bool(late_gate),
+        })
+        if not bypass_gates and not (primary_gate or late_gate):
+            result['reason'] = 'route_gate'
+            return result
+
+        yield_speed = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_yield_speed,
+            float(self.config.pairwise_shield_yield_speed),
+        )
+        standon_speed = self._pairwise_shield_pair_float_override(
+            agent_id,
+            nearest_id,
+            self.config.pairwise_shield_pair_standon_speed,
+            float(self.config.pairwise_shield_standon_speed),
+        )
+        result.update({
+            'yield_speed': float(yield_speed),
+            'standon_speed': float(standon_speed),
+        })
+
+        result['active'] = True
+        result['reason'] = 'active'
+        return result
 
     def _wait_for_local_observations(self, timeout: Optional[float] = None) -> Dict[str, AgentLocalObservation]:
         deadline = time.monotonic() + (timeout or self.config.state_timeout)
@@ -1881,6 +2495,11 @@ class MultiAgentEnv(gym.Env):
             projected = self.project_policy_action(namespace, raw_action)
             projected_actions[namespace] = projected
             command = self.expand_policy_action(namespace, projected)
+            command = self._apply_low_speed_recovery_floor(
+                namespace,
+                command,
+                self._latest_observations.get(namespace),
+            )
             action_map[namespace] = self._apply_pairwise_shield(
                 namespace,
                 command,

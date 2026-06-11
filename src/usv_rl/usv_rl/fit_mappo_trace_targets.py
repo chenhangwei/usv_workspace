@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from .observation_normalizer import ObservationNormalizer
+from .multi_agent_types import ENCOUNTER_TYPE_COUNT, LOCAL_EGO_FEATURE_COUNT, NEIGHBOR_FEATURE_COUNT
 
 
 TARGET_SPECS = {
@@ -288,9 +289,9 @@ def _scenario_index(checkpoint: dict, scenario_name: str) -> int:
 
 
 def _nearest_neighbor_from_raw(raw_observation: np.ndarray) -> dict | None:
-    ego_dim = 17
-    encounter_dim = 3
-    neighbor_dim = 10
+    ego_dim = LOCAL_EGO_FEATURE_COUNT
+    encounter_dim = ENCOUNTER_TYPE_COUNT
+    neighbor_dim = NEIGHBOR_FEATURE_COUNT
     available = int(raw_observation.shape[0]) - ego_dim - encounter_dim
     slots = max(0, available // neighbor_dim)
     if slots <= 0:
@@ -315,6 +316,80 @@ def _nearest_neighbor_from_raw(raw_observation: np.ndarray) -> dict | None:
         if best is None or distance < best['distance']:
             best = candidate
     return best
+
+
+def _checkpoint_float(checkpoint: dict, key: str, default: float) -> float:
+    try:
+        return float(checkpoint.get(key, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _signed_cte_from_raw(checkpoint: dict, raw_observation: np.ndarray) -> float:
+    clipped_cte = float(raw_observation[11]) if raw_observation.shape[0] > 11 else 0.0
+    source = str(checkpoint.get('random_cte_source', 'clipped')).strip().lower()
+    raw_cte_index = LOCAL_EGO_FEATURE_COUNT - 2
+    if source == 'raw' and raw_observation.shape[0] > raw_cte_index:
+        return float(raw_observation[raw_cte_index])
+    return clipped_cte
+
+
+def _cte_recovery_target_from_raw(checkpoint: dict, raw_observation: np.ndarray) -> dict:
+    signed_cte = _signed_cte_from_raw(checkpoint, raw_observation)
+    abs_cte = abs(signed_cte)
+    min_abs_cte = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_min_abs_cte', 1.10))
+    full_abs_cte = max(min_abs_cte + 0.05, _checkpoint_float(checkpoint, 'random_cte_recovery_full_abs_cte', 3.00))
+    cte_urgency = float(np.clip((abs_cte - min_abs_cte) / max(full_abs_cte - min_abs_cte, 1e-3), 0.0, 1.0))
+    target_speed = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_target_speed', 0.18))
+    min_speed = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_min_speed', 0.07))
+    max_omega = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_max_omega', 0.30))
+    omega_reference = max(0.05, _checkpoint_float(checkpoint, 'random_cte_recovery_omega_reference', 0.55))
+    speed_cte_slowdown = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_speed_cte_slowdown', 1.0))
+    target_linear = target_speed - (target_speed - min_speed) * float(np.clip(cte_urgency * speed_cte_slowdown, 0.0, 1.0))
+
+    heading_error = float(np.arctan2(float(raw_observation[5]), float(raw_observation[6]))) if raw_observation.shape[0] > 6 else 0.0
+    recovery_heading_error = heading_error
+    heading_sign = 1.0 if _checkpoint_float(checkpoint, 'goal_heading_omega_sign', -1.0) >= 0.0 else -1.0
+    target_omega = heading_sign * float(np.clip(heading_error / omega_reference, -1.0, 1.0)) * max_omega
+    omega_mode = str(checkpoint.get('random_cte_recovery_omega_mode', 'goal-heading')).strip().lower().replace('_', '-')
+    if omega_mode == 'signed-cte':
+        cte_sign = 0.0 if abs(signed_cte) <= 1e-6 else float(np.sign(signed_cte))
+        target_omega = -cte_sign * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'signed-cte-inverted':
+        cte_sign = 0.0 if abs(signed_cte) <= 1e-6 else float(np.sign(signed_cte))
+        target_omega = cte_sign * max_omega * (0.45 + 0.55 * cte_urgency)
+    elif omega_mode == 'goal-cte-lookahead':
+        cte_lookahead = max(0.25, _checkpoint_float(checkpoint, 'random_cte_recovery_cte_lookahead', 4.0))
+        cte_heading_scale = max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_cte_heading_scale', 1.0))
+        cte_heading_bias = float(np.arctan2(signed_cte, cte_lookahead)) * cte_heading_scale
+        recovery_heading_error = float(np.arctan2(np.sin(heading_error + cte_heading_bias), np.cos(heading_error + cte_heading_bias)))
+        target_omega = heading_sign * float(np.clip(recovery_heading_error / omega_reference, -1.0, 1.0)) * max_omega
+
+    speed_heading_gate = min(1.0, max(0.0, _checkpoint_float(checkpoint, 'random_cte_recovery_speed_heading_gate', 0.0)))
+    if speed_heading_gate > 0.0:
+        recovery_alignment = max(0.0, float(np.cos(min(abs(recovery_heading_error), np.pi / 2.0))))
+        target_linear *= (1.0 - speed_heading_gate) + speed_heading_gate * recovery_alignment
+        target_linear = max(target_linear, min_speed)
+
+    low = np.asarray(checkpoint.get('action_low', [0.0, -0.5]), dtype=np.float32)
+    high = np.asarray(checkpoint.get('action_high', [float(checkpoint.get('cruise_speed', 0.34)), float(checkpoint.get('max_angular_velocity', 0.5))]), dtype=np.float32)
+    target = np.maximum(low[:2], np.minimum(high[:2], np.asarray([target_linear, target_omega], dtype=np.float32)))
+    return {
+        'target_linear': float(target[0]),
+        'target_omega': float(target[1]),
+        'cte_urgency': float(cte_urgency),
+        'signed_cte': float(signed_cte),
+        'omega_mode': omega_mode,
+    }
+
+
+def _merge_corrected_cte_target(checkpoint: dict, diagnostics: dict, raw_observation: np.ndarray) -> dict:
+    corrected = _cte_recovery_target_from_raw(checkpoint, raw_observation)
+    diagnostics = dict(diagnostics)
+    cte_target = dict(diagnostics.get('cte_recovery_target', {}))
+    cte_target.update(corrected)
+    diagnostics['cte_recovery_target'] = cte_target
+    return diagnostics
 
 
 def _scripted_overtake_target(args, scenario_name: str, agent_id: str, raw_observation: np.ndarray) -> tuple[np.ndarray, float] | None:
@@ -446,6 +521,7 @@ def _collect_samples(args, checkpoint: dict):
                     anchor_observations.append(np.asarray(raw_observation, dtype=np.float32))
                     anchor_scenario_ids.append(int(scenario_id))
                     diagnostics = agent.get('mask_diagnostics', {})
+                    diagnostics = _merge_corrected_cte_target(checkpoint, diagnostics, raw_observation_np)
                     source_linear = float(agent.get('final_linear_x', 0.0))
                     source_omega = float(agent.get('final_angular_z', 0.0))
                     team_min_separation = float(diagnostics.get('team_min_separation', 0.0))

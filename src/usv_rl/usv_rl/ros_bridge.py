@@ -230,8 +230,8 @@ class TrainingBridge(Node):
         own_vy = float(self._velocity_msg.twist.linear.y)
         speed = math.hypot(own_vx, own_vy)
 
-        raw_linear_x = 0.0
-        raw_angular_z = 0.0
+        raw_linear_x = float(self._raw_cmd_msg.twist.linear.x) if self._raw_cmd_msg is not None else 0.0
+        raw_angular_z = float(self._raw_cmd_msg.twist.angular.z) if self._raw_cmd_msg is not None else 0.0
         final_linear_x = float(self._final_cmd_msg.velocity.x) if self._final_cmd_msg is not None else 0.0
         final_angular_z = float(self._final_cmd_msg.yaw_rate) if self._final_cmd_msg is not None else 0.0
 

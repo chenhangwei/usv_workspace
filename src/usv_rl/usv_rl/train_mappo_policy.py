@@ -238,6 +238,7 @@ def parse_args():
     parser.add_argument('--num-sampler-workers', type=int, default=1, help='Number of sampler worker processes. Values >1 use process-level ROS domain isolation for rollout collection.')
     parser.add_argument('--base-ros-domain-id', type=int, default=100, help='Base ROS domain ID used when --num-sampler-workers > 1. Worker rank is added to this base.')
     parser.add_argument('--per-scenario-advantage-norm', action='store_true', help='Normalize advantages per-scenario instead of globally. Prevents reward-scale imbalance from causing gradient dominance by easier scenarios (anti-forgetting).')
+    parser.add_argument('--value-loss-huber-delta', type=float, default=0.0, help='If >0, use a Huber-style critic value loss: squared error when |value_error|<=delta, linear beyond. Prevents large collision returns (e.g. -400) from making the critic loss explode. 0 (default) keeps pure squared error.')
     parser.add_argument('--scenario-balanced-loss', action='store_true', help='Weight PPO loss samples inversely to their scenario sample count. Equalizes per-scenario gradient contribution regardless of episode length (anti-forgetting).')
     parser.add_argument('--crossing-imitation-weight', type=float, default=0.0, help='Auxiliary trainer-side action imitation weight for the three_usv_crossing scenario. The final checkpoint remains a single neural MAPPO policy.')
     parser.add_argument('--crossing-imitation-weight-end', type=float, default=None, help='Final crossing imitation weight for linear annealing. If unset, crossing-imitation-weight stays constant.')
@@ -521,6 +522,20 @@ def parse_args():
     parser.add_argument('--random-late-lagging-omega-reference', type=float, default=0.80, help='Heading error magnitude mapped to max omega for random-late-lagging.')
     parser.add_argument('--random-late-lagging-omega-weight', type=float, default=2.60, help='Relative yaw-rate loss weight for random-late-lagging.')
     parser.add_argument('--random-late-lagging-target-source', choices=['goal', 'raw'], default='goal', help='Target source for random-late-lagging: goal-heading correction or raw navigation command.')
+    parser.add_argument('--random-close-formation-escape-weight', type=float, default=0.0, help='Trainer-side auxiliary that nudges decisive forward + lateral motion when stuck in close-formation low-speed equilibria.')
+    parser.add_argument('--random-close-formation-escape-weight-end', type=float, default=None, help='Final random-close-formation-escape auxiliary weight for linear annealing.')
+    parser.add_argument('--random-close-formation-escape-scenario', action='append', dest='random_close_formation_escape_scenarios', default=None, help='Scenario name where random-close-formation-escape may activate. Repeatable. Defaults to random encounter scenarios.')
+    parser.add_argument('--random-close-formation-escape-min-sep', type=float, default=1.40, help='Minimum nearest-neighbor separation for close-formation-escape activation (lower than pairwise shield gating).')
+    parser.add_argument('--random-close-formation-escape-max-sep', type=float, default=2.40, help='Maximum nearest-neighbor separation for close-formation-escape activation.')
+    parser.add_argument('--random-close-formation-escape-max-self-speed', type=float, default=0.22, help='Maximum own forward speed (raw_linear_x) for close-formation-escape activation.')
+    parser.add_argument('--random-close-formation-escape-goal-tolerance', type=float, default=1.0, help='Goal tolerance used to ignore completed close-formation-escape samples.')
+    parser.add_argument('--random-close-formation-escape-max-distance', type=float, default=20.0, help='Maximum distance-to-goal for close-formation-escape samples.')
+    parser.add_argument('--random-close-formation-escape-target-speed', type=float, default=0.40, help='Target forward speed for close-formation-escape escape action.')
+    parser.add_argument('--random-close-formation-escape-min-speed', type=float, default=0.20, help='Minimum target forward speed for close-formation-escape (lower bound for any sample).')
+    parser.add_argument('--random-close-formation-escape-max-omega', type=float, default=0.45, help='Absolute yaw-rate cap for close-formation-escape escape omega target.')
+    parser.add_argument('--random-close-formation-escape-omega-weight', type=float, default=1.6, help='Relative yaw-rate loss weight for close-formation-escape.')
+    parser.add_argument('--random-close-formation-escape-agent-index', action='append', dest='random_close_formation_escape_agent_indices', type=int, default=None, help='Optional 0-based agent index allowed to receive close-formation-escape. Repeatable. Defaults to all agents.')
+    parser.add_argument('--random-close-formation-escape-require-closing', action='store_true', help='If set, require nearest neighbor to be approaching (closing_speed > 0) for activation.')
     parser.add_argument('--policy-anchor-weight', type=float, default=0.0, help='Trainer-side auxiliary loss that keeps the current actor close to the loaded policy on non-target samples.')
     parser.add_argument('--policy-anchor-weight-end', type=float, default=None, help='Final policy-anchor auxiliary weight for linear annealing. If unset, policy-anchor-weight stays constant.')
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
@@ -3244,6 +3259,129 @@ def _random_clear_ahead_loss(
     return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
 
 
+def _random_close_formation_escape_active_mask(
+    torch,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    agent_indices=None,
+):
+    sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
+    if sample_count <= 0 or scenario_ids is None:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    if raw_obs.shape[-1] < AgentLocalObservation.ego_feature_size() + ENCOUNTER_TYPE_COUNT:
+        return torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    scenario_names = tuple(
+        getattr(args, 'random_close_formation_escape_scenarios', None)
+        or ('two_usv_random_encounter', 'three_usv_random_encounter')
+    )
+    scenario_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+    for scenario_name in scenario_names:
+        scenario_id = scenario_to_index.get(scenario_name)
+        if scenario_id is not None:
+            scenario_mask = scenario_mask | (scenario_ids == int(scenario_id))
+
+    goal_tolerance = max(0.05, float(getattr(args, 'random_close_formation_escape_goal_tolerance', 1.0)))
+    max_distance = max(goal_tolerance + 0.05, float(getattr(args, 'random_close_formation_escape_max_distance', 20.0)))
+    distance = torch.clamp(raw_obs[:, 4], min=0.0)
+    unfinished_mask = (distance > goal_tolerance) & (distance <= max_distance)
+
+    max_self_speed = max(0.0, float(getattr(args, 'random_close_formation_escape_max_self_speed', 0.22)))
+    raw_linear = raw_obs[:, 7] if raw_obs.shape[-1] > 7 else torch.zeros_like(distance)
+    self_slow_mask = raw_linear <= max_self_speed
+
+    nearest_distance, _, closing_speed, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    min_sep = max(0.0, float(getattr(args, 'random_close_formation_escape_min_sep', 1.40)))
+    max_sep = max(min_sep + 0.05, float(getattr(args, 'random_close_formation_escape_max_sep', 2.40)))
+    sep_mask = valid_neighbor & (nearest_distance >= min_sep) & (nearest_distance <= max_sep)
+
+    require_closing = bool(getattr(args, 'random_close_formation_escape_require_closing', False))
+    if require_closing:
+        sep_mask = sep_mask & (closing_speed > 0.0)
+
+    allowed_agent_indices = tuple(
+        int(index) for index in (getattr(args, 'random_close_formation_escape_agent_indices', None) or ())
+    )
+    if allowed_agent_indices:
+        if agent_indices is None:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+        else:
+            role_mask = torch.zeros(sample_count, dtype=torch.bool, device=raw_obs.device)
+            agent_index_tensor = agent_indices.to(device=raw_obs.device)
+            for allowed_index in allowed_agent_indices:
+                role_mask = role_mask | (agent_index_tensor == allowed_index)
+    else:
+        role_mask = torch.ones(sample_count, dtype=torch.bool, device=raw_obs.device)
+
+    return scenario_mask & unfinished_mask & self_slow_mask & sep_mask & role_mask
+
+
+def _random_close_formation_escape_loss(
+    torch,
+    action_mean,
+    raw_obs,
+    scenario_ids,
+    scenario_to_index: dict[str, int],
+    args,
+    action_low_tensor,
+    action_high_tensor,
+    sample_weights=None,
+    agent_indices=None,
+):
+    if action_mean.shape[-1] < 2:
+        return action_mean.new_zeros(())
+    active_mask = _random_close_formation_escape_active_mask(
+        torch,
+        raw_obs,
+        scenario_ids,
+        scenario_to_index,
+        args,
+        agent_indices=agent_indices,
+    )
+    if not bool(active_mask.any().detach().cpu()):
+        return action_mean.new_zeros(())
+
+    low = action_low_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    high = action_high_tensor.to(dtype=action_mean.dtype, device=action_mean.device)
+    range_scale = torch.clamp(high - low, min=1e-3)
+
+    target_speed = max(0.0, float(getattr(args, 'random_close_formation_escape_target_speed', 0.40)))
+    min_speed = max(0.0, float(getattr(args, 'random_close_formation_escape_min_speed', 0.20)))
+    max_omega = max(0.0, float(getattr(args, 'random_close_formation_escape_max_omega', 0.45)))
+    omega_weight = max(0.0, float(getattr(args, 'random_close_formation_escape_omega_weight', 1.6)))
+    min_sep = max(0.05, float(getattr(args, 'random_close_formation_escape_min_sep', 1.40)))
+    max_sep = max(min_sep + 0.05, float(getattr(args, 'random_close_formation_escape_max_sep', 2.40)))
+
+    nearest_distance, nearest_bearing, _, valid_neighbor = _nearest_neighbor_features(torch, raw_obs)
+    # Urgency rises smoothly as nearest neighbor closes from max_sep toward min_sep.
+    urgency = torch.clamp((max_sep - nearest_distance) / max(max_sep - min_sep, 1e-3), 0.0, 1.0).to(dtype=action_mean.dtype)
+
+    # Lateral escape: turn AWAY from the nearest neighbor bearing (body-frame).
+    bearing = nearest_bearing.to(dtype=action_mean.dtype)
+    # bearing > 0 means neighbor on left -> turn right (negative omega) to escape; sign opposite.
+    target_omega = -torch.sign(bearing) * max_omega * (0.50 + 0.50 * urgency)
+    # If bearing magnitude is tiny (head-on), bias to a fixed starboard escape (right turn, COLREGS-flavored).
+    head_on_mask = torch.abs(bearing) < 0.10
+    target_omega = torch.where(head_on_mask, -max_omega * (0.50 + 0.50 * urgency), target_omega)
+
+    # Decisive forward: keep target_speed at the upper bound; the floor avoids hard brake.
+    target_linear = torch.full_like(action_mean[:, 0], max(target_speed, min_speed))
+
+    target_linear = torch.clamp(target_linear, min=low[0], max=high[0])
+    target_omega = torch.clamp(target_omega, min=low[1], max=high[1])
+
+    linear_loss = ((action_mean[:, 0] - target_linear) / range_scale[0]) ** 2
+    omega_loss = ((action_mean[:, 1] - target_omega) / range_scale[1]) ** 2
+    per_sample_loss = (linear_loss + omega_weight * omega_loss) * (0.55 + 0.45 * urgency)
+
+    weights = active_mask.to(dtype=per_sample_loss.dtype)
+    if sample_weights is not None:
+        weights = weights * sample_weights.to(dtype=per_sample_loss.dtype, device=per_sample_loss.device)
+    return (per_sample_loss * weights).sum() / torch.clamp(weights.sum(), min=1.0)
+
+
 def _team_route_progress_blocks_from_state(torch, raw_obs, global_state):
     sample_count = int(raw_obs.shape[0]) if raw_obs.ndim > 0 else 0
     empty_progress = torch.zeros((sample_count, 0), dtype=raw_obs.dtype, device=raw_obs.device)
@@ -4838,6 +4976,24 @@ def _checkpoint_payload(
         'random_clear_ahead_max_omega': float(getattr(args, 'random_clear_ahead_max_omega', 0.18)),
         'random_clear_ahead_omega_reference': float(getattr(args, 'random_clear_ahead_omega_reference', 0.55)),
         'random_clear_ahead_omega_weight': float(getattr(args, 'random_clear_ahead_omega_weight', 1.0)),
+        'random_close_formation_escape_weight': float(getattr(args, 'random_close_formation_escape_weight', 0.0)),
+        'random_close_formation_escape_weight_end': (
+            float(getattr(args, 'random_close_formation_escape_weight_end'))
+            if getattr(args, 'random_close_formation_escape_weight_end', None) is not None
+            else None
+        ),
+        'random_close_formation_escape_scenarios': tuple(str(value) for value in (getattr(args, 'random_close_formation_escape_scenarios', None) or ())),
+        'random_close_formation_escape_min_sep': float(getattr(args, 'random_close_formation_escape_min_sep', 1.40)),
+        'random_close_formation_escape_max_sep': float(getattr(args, 'random_close_formation_escape_max_sep', 2.40)),
+        'random_close_formation_escape_max_self_speed': float(getattr(args, 'random_close_formation_escape_max_self_speed', 0.22)),
+        'random_close_formation_escape_goal_tolerance': float(getattr(args, 'random_close_formation_escape_goal_tolerance', 1.0)),
+        'random_close_formation_escape_max_distance': float(getattr(args, 'random_close_formation_escape_max_distance', 20.0)),
+        'random_close_formation_escape_target_speed': float(getattr(args, 'random_close_formation_escape_target_speed', 0.40)),
+        'random_close_formation_escape_min_speed': float(getattr(args, 'random_close_formation_escape_min_speed', 0.20)),
+        'random_close_formation_escape_max_omega': float(getattr(args, 'random_close_formation_escape_max_omega', 0.45)),
+        'random_close_formation_escape_omega_weight': float(getattr(args, 'random_close_formation_escape_omega_weight', 1.6)),
+        'random_close_formation_escape_agent_indices': [int(index) for index in (getattr(args, 'random_close_formation_escape_agent_indices', None) or [])],
+        'random_close_formation_escape_require_closing': bool(getattr(args, 'random_close_formation_escape_require_closing', False)),
         'random_late_lagging_weight': float(getattr(args, 'random_late_lagging_weight', 0.0)),
         'random_late_lagging_weight_end': (
             float(getattr(args, 'random_late_lagging_weight_end'))
@@ -4980,8 +5136,9 @@ def _load_resume_payload(torch, resume_path: Path) -> dict:
 
 def _infer_obs_layout_for_migration(obs_dim: int) -> tuple[int, int, int] | None:
     new_ego_dim = AgentLocalObservation.ego_feature_size()
+    # Stage A.2 bumped NEIGHBOR_FEATURE_COUNT 10 -> 15; legacy ckpts may use 10 or 6.
     for ego_dim in (new_ego_dim, 17, 12, 11, 10):
-        for neighbor_dim in (NEIGHBOR_FEATURE_COUNT, 6):
+        for neighbor_dim in (NEIGHBOR_FEATURE_COUNT, 10, 6):
             neighbor_width = int(obs_dim) - int(ego_dim) - ENCOUNTER_TYPE_COUNT
             if neighbor_width >= 0 and neighbor_width % int(neighbor_dim) == 0:
                 return int(ego_dim), int(neighbor_dim), int(neighbor_width // int(neighbor_dim))
@@ -5266,9 +5423,14 @@ def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path
             new_ego = new_q_shape[1]
             old_neighbor_dim = old_key_shape[1]
             new_neighbor_dim = new_key_shape[1]
+            old_max_agents = int(payload.get('max_agents') or max_agents)
+            old_max_neighbors = int(payload.get('max_neighbors') or critic.max_neighbors)
             print(
                 f'Attention observation layout changed: ego {old_ego} -> {new_ego}, '
-                f'neighbor {old_neighbor_dim} -> {new_neighbor_dim}. Migrating attention weights.',
+                f'neighbor {old_neighbor_dim} -> {new_neighbor_dim}, '
+                f'max_agents {old_max_agents} -> {max_agents}, '
+                f'max_neighbors {old_max_neighbors} -> {critic.max_neighbors}. '
+                'Migrating attention weights.',
                 flush=True,
             )
             _migrate_attention_actor_layout(
@@ -5289,6 +5451,8 @@ def _load_weights_only(torch, device, actor, critic, actor_log_std, weights_path
                 old_neighbor_dim,
                 _NEIGHBOR_FEATURE_DIM,
                 max_agents,
+                old_max_agents=old_max_agents,
+                old_max_neighbors=old_max_neighbors,
             )
             branch_missing = [
                 key for key in actor.state_dict().keys()
@@ -5679,6 +5843,20 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'random_clear_ahead_max_omega',
         'random_clear_ahead_omega_reference',
         'random_clear_ahead_omega_weight',
+        'random_close_formation_escape_weight',
+        'random_close_formation_escape_weight_end',
+        'random_close_formation_escape_scenarios',
+        'random_close_formation_escape_min_sep',
+        'random_close_formation_escape_max_sep',
+        'random_close_formation_escape_max_self_speed',
+        'random_close_formation_escape_goal_tolerance',
+        'random_close_formation_escape_max_distance',
+        'random_close_formation_escape_target_speed',
+        'random_close_formation_escape_min_speed',
+        'random_close_formation_escape_max_omega',
+        'random_close_formation_escape_omega_weight',
+        'random_close_formation_escape_agent_indices',
+        'random_close_formation_escape_require_closing',
         'random_late_lagging_weight',
         'random_late_lagging_weight_end',
         'random_late_lagging_goal_tolerance',
@@ -6628,6 +6806,7 @@ def main():
             last_near_goal_finish_loss = 0.0
             ppo_policy_loss_scale = max(0.0, float(getattr(args, 'ppo_policy_loss_scale', 1.0)))
             ppo_value_loss_scale = max(0.0, float(getattr(args, 'ppo_value_loss_scale', 1.0)))
+            value_loss_huber_delta = max(0.0, float(getattr(args, 'value_loss_huber_delta', 0.0)))
             lagging_finish_start = float(getattr(args, 'lagging_finish_weight', 0.0))
             lagging_finish_end = (
                 float(getattr(args, 'lagging_finish_weight_end'))
@@ -6765,6 +6944,19 @@ def main():
             random_late_lagging_team_sum = 0
             random_late_lagging_neighbor_sum = 0
             random_late_lagging_threat_sum = 0
+            random_close_formation_escape_start = float(getattr(args, 'random_close_formation_escape_weight', 0.0))
+            random_close_formation_escape_end = (
+                float(getattr(args, 'random_close_formation_escape_weight_end'))
+                if getattr(args, 'random_close_formation_escape_weight_end', None) is not None
+                else random_close_formation_escape_start
+            )
+            current_random_close_formation_escape_weight = (
+                random_close_formation_escape_start
+                + (random_close_formation_escape_end - random_close_formation_escape_start) * progress_fraction
+            )
+            last_random_close_formation_escape_loss = 0.0
+            random_close_formation_escape_active_sum = 0
+            random_close_formation_escape_active_seen = 0
             current_policy_anchor_weight = policy_anchor_start + (policy_anchor_end - policy_anchor_start) * progress_fraction
             last_policy_anchor_loss = 0.0
 
@@ -6814,7 +7006,20 @@ def main():
                         clipped_surrogate = torch.min(surrogate_one, surrogate_two)
 
                         critic_values = critic(torch.cat([batch_obs, batch_states], dim=-1)).squeeze(-1)
-                        value_errors = (critic_values - batch_returns.to(dtype=critic_values.dtype)) ** 2
+                        value_delta = critic_values - batch_returns.to(dtype=critic_values.dtype)
+                        if value_loss_huber_delta > 0.0:
+                            abs_delta = value_delta.abs()
+                            # Squared error for |err|<=delta, linear beyond. Value and
+                            # slope are continuous at abs_delta=delta (quad x^2, linear
+                            # delta*(2|x|-delta)), keeping small-error behavior identical
+                            # to pure MSE so value_coef stays meaningful.
+                            value_errors = torch.where(
+                                abs_delta <= value_loss_huber_delta,
+                                value_delta ** 2,
+                                value_loss_huber_delta * (2.0 * abs_delta - value_loss_huber_delta),
+                            )
+                        else:
+                            value_errors = value_delta ** 2
 
                         if batch_weights is not None:
                             actor_loss = -(clipped_surrogate * batch_weights).mean()
@@ -7214,6 +7419,33 @@ def main():
                             )
                             loss = loss + current_random_clear_ahead_weight * random_clear_ahead_loss
                             last_random_clear_ahead_loss = float(random_clear_ahead_loss.detach().cpu().item())
+                        if current_random_close_formation_escape_weight > 0.0:
+                            with torch.no_grad():
+                                random_close_formation_escape_mask = _random_close_formation_escape_active_mask(
+                                    torch,
+                                    batch_raw_obs,
+                                    batch_scenario_ids,
+                                    scenario_to_index,
+                                    args,
+                                    agent_indices=batch_agent_indices,
+                                )
+                                if random_close_formation_escape_mask.numel() > 0:
+                                    random_close_formation_escape_active_sum += int(random_close_formation_escape_mask.sum().detach().cpu().item())
+                                    random_close_formation_escape_active_seen += int(random_close_formation_escape_mask.numel())
+                            random_close_formation_escape_loss = _random_close_formation_escape_loss(
+                                torch,
+                                action_mean,
+                                batch_raw_obs,
+                                batch_scenario_ids,
+                                scenario_to_index,
+                                args,
+                                action_low_tensor,
+                                action_high_tensor,
+                                sample_weights=batch_weights,
+                                agent_indices=batch_agent_indices,
+                            )
+                            loss = loss + current_random_close_formation_escape_weight * random_close_formation_escape_loss
+                            last_random_close_formation_escape_loss = float(random_close_formation_escape_loss.detach().cpu().item())
                         if policy_anchor_actor is not None and current_policy_anchor_weight > 0.0:
                             with torch.no_grad():
                                 anchor_action_mean = _actor_forward(policy_anchor_actor, batch_obs, batch_scenario_ids)
@@ -7431,6 +7663,8 @@ def main():
                     f'{(random_clear_ahead_cte_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
                     f'{(random_clear_ahead_role_sum / max(random_clear_ahead_active_seen, 1)):.3f}/'
                     f'{(random_clear_ahead_deconflict_sum / max(random_clear_ahead_active_seen, 1)):.3f} '
+                    f'rand_cfe_w={current_random_close_formation_escape_weight:.3f} rand_cfe={last_random_close_formation_escape_loss:.4f} '
+                    f'rand_cfe_active={(random_close_formation_escape_active_sum / max(random_close_formation_escape_active_seen, 1)):.3f} '
                     f'anchor_w={current_policy_anchor_weight:.3f} anchor={last_policy_anchor_loss:.4f} '
                     f'crossing_bc_pre={last_crossing_pretrain_loss:.4f} '
                     f'rand_deconf_pre={last_random_deconflict_pretrain_loss:.4f} '

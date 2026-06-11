@@ -11,7 +11,12 @@ from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 
 from .multi_agent_scenarios import FleetScenario
-from .multi_agent_types import AgentLocalObservation, AgentNeighborObservation, FleetGlobalState
+from .multi_agent_types import (
+    AgentLocalObservation,
+    AgentNeighborObservation,
+    FleetGlobalState,
+    classify_encounter_role,
+)
 from .types import NeighborState
 
 
@@ -266,8 +271,8 @@ class MultiAgentTrainingBridge(Node):
 
             raw_msg = self._raw_cmd_msgs[namespace]
             final_msg = self._final_cmd_msgs[namespace]
-            raw_linear_x = 0.0
-            raw_angular_z = 0.0
+            raw_linear_x = float(raw_msg.twist.linear.x) if raw_msg is not None else 0.0
+            raw_angular_z = float(raw_msg.twist.angular.z) if raw_msg is not None else 0.0
             final_linear_x = float(final_msg.velocity.x) if final_msg is not None else 0.0
             final_angular_z = float(final_msg.yaw_rate) if final_msg is not None else 0.0
 
@@ -329,6 +334,18 @@ class MultiAgentTrainingBridge(Node):
             dcpa = math.hypot(cpa_x, cpa_y)
             tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
         dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
+        # Per-neighbor COLREGS classification (Stage A.2). own_speed in the same
+        # frame as rel_*, mirroring the convention used by multi_agent_env reward
+        # shaping and evaluate_mappo_policy compliance checks.
+        own_speed = math.hypot(own_vx, own_vy)
+        encounter_type_index, role_index = classify_encounter_role(
+            body_x=rel_x,
+            body_y=rel_y,
+            body_vx=rel_vx,
+            body_vy=rel_vy,
+            distance=distance,
+            own_speed=own_speed,
+        )
         return AgentNeighborObservation(
             source_id=source_id,
             rel_x=rel_x,
@@ -339,6 +356,8 @@ class MultiAgentTrainingBridge(Node):
             bearing=bearing,
             tcpa=tcpa_norm,
             dcpa=dcpa_norm,
+            encounter_type_index=encounter_type_index,
+            role_index=role_index,
         )
 
     def get_global_state(

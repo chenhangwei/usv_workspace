@@ -23,7 +23,7 @@ from .multi_agent_types import LOCAL_EGO_FEATURE_COUNT, NEIGHBOR_FEATURE_COUNT
 # Fixed observation layout constants (must match multi_agent_types / types).
 _EGO_DIM = LOCAL_EGO_FEATURE_COUNT  # base ego + route/crossing timing coordination + raw CTE features
 _NEIGHBOR_FEATURE_DIM = NEIGHBOR_FEATURE_COUNT  # rel_x, rel_y, rel_vx, rel_vy, distance, bearing, tcpa, dcpa, route_eta_delta, route_priority_delta
-_LEGACY_NEIGHBOR_FEATURE_DIMS = (6,)
+_LEGACY_NEIGHBOR_FEATURE_DIMS = (10, 6)
 _OLD_EGO_DIM = 11            # previous ego dimension (before sin/cos heading_error split)
 _LEGACY_EGO_DIMS = (17, 12, _OLD_EGO_DIM, 10)
 
@@ -767,18 +767,31 @@ def _copy_local_obs_block_weight(
     new_ego_dim: int,
     old_neighbor_dim: int,
     new_neighbor_dim: int,
-    max_neighbors: int,
+    old_max_neighbors: int,
+    new_max_neighbors: int,
     encounter_dim: int,
 ) -> tuple[int, int]:
+    """Copy a single agent's local-obs sub-block from old to new critic mlp.0.
+
+    Layout per agent: [ego, neighbor_1, ..., neighbor_max_neighbors, encounter].
+    Supports independent old/new values for ego_dim, neighbor_dim, and
+    max_neighbors. Extra new neighbor slots stay zero (training fills them).
+    """
     ego_cols = min(old_ego_dim, new_ego_dim)
     new_first_w[:, new_pos:new_pos + ego_cols] = old_first_w[:, old_pos:old_pos + ego_cols]
     old_pos += old_ego_dim
     new_pos += new_ego_dim
-    for _ in range(max_neighbors):
-        nb_cols = min(old_neighbor_dim, new_neighbor_dim)
+    shared_nb = min(old_max_neighbors, new_max_neighbors)
+    nb_cols = min(old_neighbor_dim, new_neighbor_dim)
+    for _ in range(shared_nb):
         new_first_w[:, new_pos:new_pos + nb_cols] = old_first_w[:, old_pos:old_pos + nb_cols]
         old_pos += old_neighbor_dim
         new_pos += new_neighbor_dim
+    # Skip any old-only neighbor slots; leave any new-only neighbor slots zero.
+    if old_max_neighbors > shared_nb:
+        old_pos += (old_max_neighbors - shared_nb) * old_neighbor_dim
+    if new_max_neighbors > shared_nb:
+        new_pos += (new_max_neighbors - shared_nb) * new_neighbor_dim
     new_first_w[:, new_pos:new_pos + encounter_dim] = old_first_w[:, old_pos:old_pos + encounter_dim]
     old_pos += encounter_dim
     new_pos += encounter_dim
@@ -794,8 +807,18 @@ def _migrate_attention_critic_layout(
     old_neighbor_dim: int,
     new_neighbor_dim: int,
     max_agents: int,
+    *,
+    old_max_agents: int | None = None,
+    old_max_neighbors: int | None = None,
 ) -> None:
-    """Migrate an AttentionCritic across ego and/or neighbor feature layout changes."""
+    """Migrate an AttentionCritic across ego/neighbor feature layout AND
+    structural (max_agents, max_neighbors) changes.
+
+    ``max_agents`` is the new critic's value. ``old_max_agents`` /
+    ``old_max_neighbors`` describe the source checkpoint topology; when
+    omitted they default to the new values (legacy callers that only
+    changed feature dims).
+    """
     new_sd = new_critic.state_dict()
     _migrate_attention_projection(
         old_state_dict, new_sd, 'query', torch_module=torch_module, zero_new_columns=(old_ego_dim != new_ego_dim),
@@ -803,10 +826,21 @@ def _migrate_attention_critic_layout(
     _migrate_attention_projection(old_state_dict, new_sd, 'key', torch_module=torch_module)
     _migrate_attention_projection(old_state_dict, new_sd, 'value', torch_module=torch_module)
 
+    new_max_agents = max_agents
+    new_max_neighbors = new_critic.max_neighbors
+    if old_max_agents is None:
+        old_max_agents = new_max_agents
+    if old_max_neighbors is None:
+        old_max_neighbors = new_max_neighbors
+
     old_first_w = old_state_dict['mlp.0.weight']
     new_first_w = torch_module.zeros_like(new_sd['mlp.0.weight'])
     embed_dim = new_critic.neighbor_attention.embed_dim
     enc_dim = new_critic.encounter_dim
+
+    # Strides for one local-obs block (per agent in the global state).
+    old_local_obs_dim = old_ego_dim + old_max_neighbors * old_neighbor_dim + enc_dim
+    new_local_obs_dim = new_ego_dim + new_max_neighbors * new_neighbor_dim + enc_dim
 
     old_pos = 0
     new_pos = 0
@@ -823,7 +857,8 @@ def _migrate_attention_critic_layout(
     old_pos += self_old_cols
     new_pos += self_new_cols
 
-    for _ in range(max_agents):
+    shared_agents = min(old_max_agents, new_max_agents)
+    for _ in range(shared_agents):
         old_pos, new_pos = _copy_local_obs_block_weight(
             old_first_w,
             new_first_w,
@@ -833,13 +868,22 @@ def _migrate_attention_critic_layout(
             new_ego_dim=new_ego_dim,
             old_neighbor_dim=old_neighbor_dim,
             new_neighbor_dim=new_neighbor_dim,
-            max_neighbors=new_critic.max_neighbors,
+            old_max_neighbors=old_max_neighbors,
+            new_max_neighbors=new_max_neighbors,
             encounter_dim=enc_dim,
         )
+    # Skip old-only agent blocks; leave new-only agent slots zero.
+    if old_max_agents > shared_agents:
+        old_pos += (old_max_agents - shared_agents) * old_local_obs_dim
+    if new_max_agents > shared_agents:
+        new_pos += (new_max_agents - shared_agents) * new_local_obs_dim
 
+    # Fleet metrics tail (5 features today, but stay general).
     remaining = old_first_w.shape[1] - old_pos
-    if remaining > 0:
-        new_first_w[:, new_pos:new_pos + remaining] = old_first_w[:, old_pos:old_pos + remaining]
+    new_remaining = new_first_w.shape[1] - new_pos
+    if remaining > 0 and new_remaining > 0:
+        tail_cols = min(remaining, new_remaining)
+        new_first_w[:, new_pos:new_pos + tail_cols] = old_first_w[:, old_pos:old_pos + tail_cols]
 
     new_sd['mlp.0.weight'] = new_first_w
     new_sd['mlp.0.bias'] = old_state_dict['mlp.0.bias'].clone()
