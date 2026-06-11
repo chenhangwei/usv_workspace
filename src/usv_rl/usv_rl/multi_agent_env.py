@@ -2261,7 +2261,9 @@ class MultiAgentEnv(gym.Env):
         )
         path_deviation_excess = max(0.0, abs(cross_track_error) - path_tolerance)
         if path_deviation_excess > 0.0:
-            progress -= self.config.reward.path_deviation_penalty_weight * path_deviation_excess
+            exclude_overtaking = bool(getattr(self.config.reward, 'path_deviation_exclude_overtaking', False))
+            if not (exclude_overtaking and 'overtaking' in self.current_scenario_name):
+                progress -= self.config.reward.path_deviation_penalty_weight * path_deviation_excess
 
         front_clear_gate = self._compute_clear_ahead_gate(observation)
         low_conflict_gate = max(0.0, 1.0 - (min(conflict_risk, 1.0) / 0.45))

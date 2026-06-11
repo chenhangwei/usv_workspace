@@ -4,13 +4,16 @@ from typing import List
 
 import numpy as np
 
+from .multi_agent_types import ENCOUNTER_TYPE_COUNT, ROLE_TYPE_COUNT
+
 
 USV_EGO_FEATURE_COUNT = 19
-# Legacy single-USV inference observation. Independent from
-# usv_rl.multi_agent_types.NEIGHBOR_FEATURE_COUNT; the SITL inference path was
-# frozen at the pre-Stage-A.2 layout (10 features per neighbor: no
-# encounter/role one-hots).
-USV_NEIGHBOR_FEATURE_COUNT = 10
+# SITL single-USV inference observation. Kept in EXACT parity with the training
+# layout in usv_rl.multi_agent_types: 15 features per neighbor (10 base feats +
+# 3-hot encounter + 2-hot role) followed by a trailing agent-level encounter
+# one-hot. Must mirror NEIGHBOR_FEATURE_COUNT so the SITL observation vector
+# matches the dimensions the policy was trained on.
+USV_NEIGHBOR_FEATURE_COUNT = 15
 
 
 @dataclass
@@ -36,6 +39,9 @@ class NeighborObservation:
     dcpa: float = 1.0
     route_eta_delta: float = 0.0
     route_priority_delta: float = 0.0
+    # Per-neighbor COLREGS tags. Default -1 (no encounter / unset).
+    encounter_type_index: int = -1
+    role_index: int = -1
 
 
 @dataclass
@@ -59,6 +65,7 @@ class UsvObservation:
     crossing_priority: float = 0.0
     crossing_eta_gap: float = 1.0
     neighbors: List[NeighborObservation] = field(default_factory=list)
+    encounter_type_index: int = -1
 
     @staticmethod
     def ego_feature_size() -> int:
@@ -66,7 +73,7 @@ class UsvObservation:
 
     @staticmethod
     def vector_size(max_neighbors: int) -> int:
-        return USV_EGO_FEATURE_COUNT + max_neighbors * USV_NEIGHBOR_FEATURE_COUNT
+        return USV_EGO_FEATURE_COUNT + max_neighbors * USV_NEIGHBOR_FEATURE_COUNT + ENCOUNTER_TYPE_COUNT
 
     def min_neighbor_distance(self) -> float:
         if not self.neighbors:
@@ -110,10 +117,25 @@ class UsvObservation:
                 neighbor.route_eta_delta,
                 neighbor.route_priority_delta,
             ])
+            # Per-neighbor COLREGS one-hots (Stage A.2): 3-hot encounter + 2-hot role.
+            enc_one_hot = [0.0] * ENCOUNTER_TYPE_COUNT
+            if 0 <= neighbor.encounter_type_index < ENCOUNTER_TYPE_COUNT:
+                enc_one_hot[neighbor.encounter_type_index] = 1.0
+            role_one_hot = [0.0] * ROLE_TYPE_COUNT
+            if 0 <= neighbor.role_index < ROLE_TYPE_COUNT:
+                role_one_hot[neighbor.role_index] = 1.0
+            features.extend(enc_one_hot)
+            features.extend(role_one_hot)
 
-        missing = max_neighbors - len(sorted_neighbors)
-        for _ in range(missing):
+        for _ in range(max(0, max_neighbors - len(sorted_neighbors))):
             features.extend([0.0] * USV_NEIGHBOR_FEATURE_COUNT)
+
+        # Trailing agent-level encounter one-hot: lets the network condition on
+        # the scenario/encounter type (matches multi_agent_types.to_vector).
+        encounter_one_hot = [0.0] * ENCOUNTER_TYPE_COUNT
+        if 0 <= self.encounter_type_index < ENCOUNTER_TYPE_COUNT:
+            encounter_one_hot[self.encounter_type_index] = 1.0
+        features.extend(encounter_one_hot)
 
         return np.asarray(features, dtype=np.float32)
 

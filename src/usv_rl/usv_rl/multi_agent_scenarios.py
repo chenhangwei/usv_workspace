@@ -96,6 +96,7 @@ class MultiAgentScenarioFactory:
     _REQUIRED_AGENT_COUNTS = {
         'solo_navigation': 1,
         'single_usv_overtaking': 1,
+        'waypoint_turn': 1,
         'two_usv_head_on': 2,
         'two_usv_crossing': 2,
         'two_usv_overtaking': 2,
@@ -104,6 +105,7 @@ class MultiAgentScenarioFactory:
         'three_usv_overtaking': 3,
         'two_usv_random_encounter': 2,
         'three_usv_random_encounter': 3,
+        'pentagram_convergence': 3,
         'five_usv_dense_head_on': 5,
         'five_usv_dense_crossing': 5,
         'five_usv_dense_overtaking': 5,
@@ -129,6 +131,7 @@ class MultiAgentScenarioFactory:
         return (
             'solo_navigation',
             'single_usv_overtaking',
+            'waypoint_turn',
             'three_usv_clear_route',
             'two_usv_head_on',
             'two_usv_crossing',
@@ -137,6 +140,7 @@ class MultiAgentScenarioFactory:
             'three_usv_overtaking',
             'two_usv_random_encounter',
             'three_usv_random_encounter',
+            'pentagram_convergence',
         )
 
     @staticmethod
@@ -221,6 +225,37 @@ class MultiAgentScenarioFactory:
             }
             agent_goals = {
                 first: AgentGoalConfig(x=goal_distance, y=0.0),
+            }
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=40.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=(first,),
+            )
+
+        if kind == 'waypoint_turn':
+            # Single agent moving east (yaw=0), as if it has just passed a
+            # waypoint.  The goal is placed off to one side at a large bearing so
+            # the policy must execute a big heading change -- exactly the
+            # transient that happens right after a waypoint switch.  Paired with
+            # arc-turn rewards (pure_spin_penalty / pure_cruise_reward /
+            # min_forward_speed_floor>0 / straight_line_omega_penalty) this teaches
+            # a smooth >1m-radius arc instead of a pivot-in-place.
+            first = agent_ids[0]
+            local_rng = rng if rng is not None else np.random.default_rng()
+            # Turn magnitude ~45deg..135deg, random port/starboard.
+            turn = float(local_rng.uniform(0.8, 2.4))
+            if local_rng.uniform() < 0.5:
+                turn = -turn
+            gx = float(goal_distance * math.cos(turn))
+            gy = float(goal_distance * math.sin(turn))
+            agent_spawns = {
+                first: AgentSpawnConfig(x=0.0, y=0.0, yaw=0.0),
+            }
+            agent_goals = {
+                first: AgentGoalConfig(x=gx, y=gy),
             }
             MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
             return FleetScenario(
@@ -488,6 +523,69 @@ class MultiAgentScenarioFactory:
                 agent_spawns=agent_spawns,
                 agent_goals=agent_goals,
                 active_agent_ids=(first, second, third),
+            )
+
+        if kind == 'pentagram_convergence':
+            # Deployment-replica scenario (5-USV pentagram mission, 2026-06-11
+            # SITL analysis): agents sit on the vertices of a regular polygon
+            # and each transits to a vertex two steps away, so every route
+            # crosses the arena centre simultaneously — the exact congestion
+            # pattern that collapsed fresh520 (78% of time all 5 USVs inside
+            # r<8m).  Randomized: global rotation, star direction (±2 skip),
+            # and the number of active agents (density 3..n); inactive agents
+            # hold their vertex as static obstacles, mirroring vessels that
+            # already finished their goal in deployment.
+            if len(agent_ids) < 3:
+                raise ValueError('pentagram_convergence requires at least 3 agents.')
+            _rng = rng if rng is not None else np.random.default_rng()
+            n = min(5, len(agent_ids))
+            vertex_agents = list(agent_ids[:n])
+            radius = goal_distance * 0.5
+            rotation = float(_rng.uniform(0.0, 2.0 * math.pi))
+            skip = 2 if float(_rng.uniform()) < 0.5 else -2
+            vertices = [
+                (
+                    radius * math.cos(rotation + 2.0 * math.pi * k / n),
+                    radius * math.sin(rotation + 2.0 * math.pi * k / n),
+                )
+                for k in range(n)
+            ]
+            agent_spawns = {}
+            agent_goals = {}
+            for k, agent_id in enumerate(vertex_agents):
+                sx, sy = vertices[k]
+                gx, gy = vertices[(k + skip) % n]
+                agent_spawns[agent_id] = AgentSpawnConfig(
+                    x=sx, y=sy, yaw=math.atan2(gy - sy, gx - sx),
+                )
+                agent_goals[agent_id] = AgentGoalConfig(x=gx, y=gy)
+            # Density randomization: 3..n active agents per episode so the
+            # policy stays robust to varying neighbor counts.
+            active_count = int(_rng.integers(3, n + 1))
+            order = list(_rng.permutation(n))
+            active_ids = tuple(vertex_agents[i] for i in sorted(order[:active_count]))
+            # Push inactive vertex agents radially outward so they never sit
+            # exactly on an active agent's goal vertex (which would make the
+            # goal unreachable within collision distance).  They stay visible
+            # as static near-route obstacles.
+            for k, agent_id in enumerate(vertex_agents):
+                if agent_id in active_ids:
+                    continue
+                vx, vy = vertices[k]
+                norm = max(math.hypot(vx, vy), 1e-6)
+                push = 2.0
+                agent_spawns[agent_id] = AgentSpawnConfig(
+                    x=vx * (1.0 + push / norm),
+                    y=vy * (1.0 + push / norm),
+                    yaw=agent_spawns[agent_id].yaw,
+                )
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=60.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=active_ids,
             )
 
         if kind == 'five_usv_dense_head_on':

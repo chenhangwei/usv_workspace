@@ -106,6 +106,7 @@ def parse_args():
     parser.add_argument('--path-deviation-tolerance', type=float, default=RewardConfig.path_deviation_tolerance, help='Cross-track deviation (m) allowed before route-tracking penalty activates.')
     parser.add_argument('--path-deviation-conflict-scale', type=float, default=RewardConfig.path_deviation_conflict_scale, help='Additional cross-track tolerance (m) allowed at maximum conflict level.')
     parser.add_argument('--path-deviation-use-unclipped-cte', action='store_true', default=RewardConfig.path_deviation_use_unclipped_cte, help='Compute route-deviation reward with the true CTE instead of the observation-clipped CTE.')
+    parser.add_argument('--path-deviation-exclude-overtaking', action='store_true', default=RewardConfig.path_deviation_exclude_overtaking, help='Disable the route-deviation penalty on single_usv_overtaking / two_usv_overtaking scenarios, where passing a slow lead requires leaving the lane.')
     parser.add_argument('--desired-conflict-speed', type=float, default=RewardConfig.desired_conflict_speed, help='Target forward speed maintained during conflict handling.')
     parser.add_argument('--stop-go-penalty-weight', type=float, default=RewardConfig.stop_go_penalty_weight, help='Penalty weight for rapid stop-go behavior under conflict.')
     parser.add_argument('--head-on-guidance-distance', type=float, default=RewardConfig.head_on_guidance_distance, help='Distance threshold for head-on starboard guidance shaping.')
@@ -284,6 +285,7 @@ def parse_args():
     parser.add_argument('--near-goal-finish-max-omega', type=float, default=0.18, help='Maximum heading-correction yaw target used by the finish auxiliary.')
     parser.add_argument('--near-goal-finish-omega-weight', type=float, default=0.35, help='Relative loss weight for finish auxiliary yaw-rate target.')
     parser.add_argument('--near-goal-finish-crossing-only', action='store_true', help='Apply the finish auxiliary only to three_usv_crossing samples.')
+    parser.add_argument('--near-goal-finish-exclude-overtaking', action='store_true', help='Disable the finish auxiliary on single_usv_overtaking / two_usv_overtaking samples, where the goal lies ahead in-lane and stopping/aligning conflicts with passing the lead vessel.')
     parser.add_argument('--lagging-finish-weight', type=float, default=0.0, help='Trainer-side auxiliary loss weight that only activates after part of the team has reached the goal and pushes remaining near-goal crossing agents to finish.')
     parser.add_argument('--lagging-finish-weight-end', type=float, default=None, help='Final lagging-finish auxiliary weight for linear annealing. If unset, lagging-finish-weight stays constant.')
     parser.add_argument('--lagging-finish-distance', type=float, default=4.0, help='Distance-to-goal band for lagging agents once teammate completion is already high.')
@@ -1018,6 +1020,12 @@ def _near_goal_finish_loss(
             scenario_mask = raw_obs[:, -2] > 0.5
     else:
         scenario_mask = torch.ones(raw_obs.shape[0], dtype=torch.bool, device=raw_obs.device)
+
+    if bool(getattr(args, 'near_goal_finish_exclude_overtaking', False)) and scenario_ids is not None:
+        for _ot_name in ('single_usv_overtaking', 'two_usv_overtaking'):
+            _ot_id = scenario_to_index.get(_ot_name)
+            if _ot_id is not None:
+                scenario_mask = scenario_mask & (scenario_ids != int(_ot_id))
 
     distance = torch.clamp(raw_obs[:, 4], min=0.0)
     heading_error = torch.atan2(raw_obs[:, 5], raw_obs[:, 6])
@@ -4468,6 +4476,7 @@ def _build_reward_config(args) -> RewardConfig:
         path_deviation_tolerance=float(args.path_deviation_tolerance),
         path_deviation_conflict_scale=float(args.path_deviation_conflict_scale),
         path_deviation_use_unclipped_cte=bool(args.path_deviation_use_unclipped_cte),
+        path_deviation_exclude_overtaking=bool(getattr(args, 'path_deviation_exclude_overtaking', False)),
         desired_conflict_speed=float(args.desired_conflict_speed),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),
@@ -4721,6 +4730,7 @@ def _checkpoint_payload(
         'near_goal_finish_max_omega': float(getattr(args, 'near_goal_finish_max_omega', 0.18)),
         'near_goal_finish_omega_weight': float(getattr(args, 'near_goal_finish_omega_weight', 0.35)),
         'near_goal_finish_crossing_only': bool(getattr(args, 'near_goal_finish_crossing_only', False)),
+        'near_goal_finish_exclude_overtaking': bool(getattr(args, 'near_goal_finish_exclude_overtaking', False)),
         'lagging_finish_weight': float(getattr(args, 'lagging_finish_weight', 0.0)),
         'lagging_finish_weight_end': (
             float(getattr(args, 'lagging_finish_weight_end'))
@@ -5628,6 +5638,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'near_goal_finish_max_omega',
         'near_goal_finish_omega_weight',
         'near_goal_finish_crossing_only',
+        'near_goal_finish_exclude_overtaking',
         'lagging_finish_weight',
         'lagging_finish_weight_end',
         'lagging_finish_distance',

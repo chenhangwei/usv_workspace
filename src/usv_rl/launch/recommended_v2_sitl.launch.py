@@ -53,7 +53,7 @@ def generate_launch_description():
         DeclareLaunchArgument('rl_control_mode', default_value='pure', description='Deprecated compatibility flag passed to the online inference node.'),
         DeclareLaunchArgument('rl_policy_device', default_value='cpu', description='Inference device for the recommended policy.'),
         DeclareLaunchArgument('rl_publish_rate', default_value='10.0', description='Policy publish rate in Hz.'),
-        DeclareLaunchArgument('rl_max_neighbors', default_value='4', description='Maximum number of neighbors encoded into the observation.'),
+        DeclareLaunchArgument('rl_max_neighbors', default_value='2', description='Maximum number of neighbors encoded into the observation.'),
         DeclareLaunchArgument('disable_controller_param', default_value='false', description='Avoid toggling controller params from the policy node if needed.'),
         DeclareLaunchArgument('rl_inference_delay', default_value='7.0', description='Delay before starting the policy node.'),
         recommended_stack,

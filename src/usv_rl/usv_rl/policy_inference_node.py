@@ -22,7 +22,7 @@ from std_msgs.msg import Int8, String
 
 from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
-from .multi_agent_types import ENCOUNTER_TYPE_COUNT
+from .multi_agent_types import ENCOUNTER_TYPE_COUNT, classify_encounter_role
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
 from .types import NeighborObservation, NeighborState, UsvObservation, USV_NEIGHBOR_FEATURE_COUNT
@@ -30,9 +30,13 @@ from .types import NeighborObservation, NeighborState, UsvObservation, USV_NEIGH
 _ENCOUNTER_TYPE_NAMES = {'head_on': 0, 'crossing': 1, 'overtaking': 2}
 
 # ---------- Auto encounter-type classification constants ----------
-_ENCOUNTER_DETECT_DISTANCE = 15.0   # metres – classify only when nearest neighbour is closer
+# Detection range matches the training reward conflict_distance (5.0 m).  The
+# previous 15 m radius kept the encounter one-hot active during nearly the
+# entire 5-USV transit, biasing the policy into permanent avoidance mode.
+_ENCOUNTER_DETECT_DISTANCE = 5.0    # metres – classify only when nearest neighbour is closer
 _ENCOUNTER_HOLD_TIME = 2.0          # seconds – minimum time to hold a classification before switching
 _ENCOUNTER_SPEED_THRESHOLD = 0.05   # m/s – below this, course is unreliable
+_ENCOUNTER_CLOSING_MIN = 0.01      # m/s – require actual closing before flagging an encounter
 
 # ---------- Distance-aware speed scaling constants ----------
 _SPEED_SCALE_DISTANCE = 3.0         # metres – linear speed scaling starts below this distance
@@ -41,6 +45,18 @@ _HEAD_ON_BEARING_DEG = 22.5         # |bearing| < this AND reciprocal courses �
 _HEAD_ON_COURSE_DEG = 135.0         # relative course > this → reciprocal
 _OVERTAKING_COURSE_DEG = 45.0       # relative course < this AND ahead → overtaking
 _OVERTAKING_ASTERN_DEG = 112.5      # |bearing| > this → astern sector
+
+# ---------- Virtual sub-goal (long-transit OOD mitigation) constants ----------
+# The fresh520 policy was trained in a ±8 m arena with distance-to-goal ≤ ~16 m.
+# Real missions can issue goals 30-45 m away, pushing pose_x/pose_y and
+# distance_to_goal far outside the normalizer statistics and degrading the
+# policy into meandering.  When a route leg is long (or starts/ends outside the
+# training arena), the node walks a virtual sub-goal along the route line and
+# expresses the ego pose in a leg-local frame so every observation stays
+# in-distribution.  Short legs keep the exact legacy behaviour.
+_VIRTUAL_LEG_LENGTH = 8.0          # metres – virtual sub-goal lookahead along the route
+_VIRTUAL_GOAL_TRIGGER = 12.0       # metres – enable virtual mode when route is longer
+_POSE_IN_DIST_LIMIT = 9.0          # metres – training arena half-extent for pose features
 
 
 def _candidate_workspace_roots() -> list[Path]:
@@ -488,6 +504,7 @@ class PolicyInferenceNode(Node):
         self._active_goal_id: Optional[int] = None
         self._route_start: Optional[Tuple[float, float]] = None
         self._route_goal: Optional[Tuple[float, float]] = None
+        self._virtual_goal_active = False
         self._first_goal_logged = False
         self._first_active_goal_feedback_logged = False
         self._head_on_guard_logged = False
@@ -778,6 +795,22 @@ class PolicyInferenceNode(Node):
                 )
             else:
                 self._route_start = None
+            # Decide once per goal whether the leg needs virtual sub-goals to
+            # stay inside the training distribution (long leg, or leg outside
+            # the ±9 m training arena).  Fixed per goal → no mid-leg frame jumps.
+            self._virtual_goal_active = False
+            if self._route_start is not None:
+                sx, sy = self._route_start
+                gx, gy = self._route_goal
+                route_len = math.hypot(gx - sx, gy - sy)
+                out_of_arena = max(abs(sx), abs(sy), abs(gx), abs(gy)) > _POSE_IN_DIST_LIMIT
+                if route_len > _VIRTUAL_GOAL_TRIGGER or out_of_arena:
+                    self._virtual_goal_active = True
+                    self.get_logger().info(
+                        f'Virtual sub-goal mode enabled for goal_id={goal_id}: '
+                        f'route_len={route_len:.1f}m, out_of_arena={out_of_arena} '
+                        f'(leg={_VIRTUAL_LEG_LENGTH:.0f}m).'
+                    )
 
         details = [
             f'goal_id={goal_id}',
@@ -1023,6 +1056,18 @@ class PolicyInferenceNode(Node):
                 dcpa = math.hypot(cpa_x, cpa_y)
                 tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
             dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
+            # Per-neighbor COLREGS classification — identical convention to
+            # multi_agent_bridge._build_neighbor_observation (own_speed in the
+            # same world frame as rel_*), so the SITL observation matches the
+            # 15-feature-per-neighbor layout the policy was trained on.
+            encounter_type_index, role_index = classify_encounter_role(
+                body_x=rel_x,
+                body_y=rel_y,
+                body_vx=rel_vx,
+                body_vy=rel_vy,
+                distance=distance,
+                own_speed=speed,
+            )
             neighbors.append(
                 NeighborObservation(
                     usv_id=state.usv_id,
@@ -1034,6 +1079,8 @@ class PolicyInferenceNode(Node):
                     bearing=bearing,
                     tcpa=tcpa_norm,
                     dcpa=dcpa_norm,
+                    encounter_type_index=encounter_type_index,
+                    role_index=role_index,
                 )
             )
 
@@ -1046,6 +1093,10 @@ class PolicyInferenceNode(Node):
         conflict_eta = 1.0
         crossing_priority = 0.0
         crossing_eta_gap = 1.0
+        obs_pose_x = own_x
+        obs_pose_y = own_y
+        obs_distance_to_goal = float(self._feedback_msg.distance_to_goal)
+        obs_heading_error = float(self._feedback_msg.heading_error)
         if self._route_start is not None and self._route_goal is not None:
             sx, sy = self._route_start
             gx, gy = self._route_goal
@@ -1070,13 +1121,33 @@ class PolicyInferenceNode(Node):
                 conflict_eta = max(0.0, min(1.0, eta_seconds / 25.0))
                 crossing_priority = {'usv_03': 1.0, 'usv_02': 0.0, 'usv_01': -1.0}.get(self._usv_id, 0.0)
 
+                if self._virtual_goal_active:
+                    # Virtual sub-goal: a point on the route line at most
+                    # _VIRTUAL_LEG_LENGTH ahead of the ego projection.  Both
+                    # distance_to_goal and heading_error are recomputed toward
+                    # it with the exact velocity_controller feedback formulas,
+                    # and the ego pose is expressed in a leg-local frame whose
+                    # origin sits half a leg behind the virtual goal — keeping
+                    # pose/d2g inside the training distribution.  CTE/route
+                    # features are unchanged (virtual goals lie on the route).
+                    s_v = max(0.0, min(route_len, progress_s + _VIRTUAL_LEG_LENGTH))
+                    vg_x = sx + unit_x * s_v
+                    vg_y = sy + unit_y * s_v
+                    obs_distance_to_goal = math.hypot(vg_x - own_x, vg_y - own_y)
+                    obs_heading_error = self._wrap_angle(
+                        math.atan2(vg_y - own_y, vg_x - own_x) - yaw
+                    )
+                    o_s = s_v - 0.5 * _VIRTUAL_LEG_LENGTH
+                    obs_pose_x = own_x - (sx + unit_x * o_s)
+                    obs_pose_y = own_y - (sy + unit_y * o_s)
+
         return UsvObservation(
-            pose_x=own_x,
-            pose_y=own_y,
+            pose_x=obs_pose_x,
+            pose_y=obs_pose_y,
             yaw=yaw,
             speed=speed,
-            distance_to_goal=float(self._feedback_msg.distance_to_goal),
-            heading_error=float(self._feedback_msg.heading_error),
+            distance_to_goal=obs_distance_to_goal,
+            heading_error=obs_heading_error,
             raw_linear_x=raw_linear_x,
             raw_angular_z=raw_angular_z,
             final_linear_x=final_linear_x,
@@ -1145,6 +1216,15 @@ class PolicyInferenceNode(Node):
         if closest.distance > _ENCOUNTER_DETECT_DISTANCE:
             return -1
 
+        # Closing-speed gate: if the pair is not actually converging there is
+        # no encounter — e.g. matched-speed convoy following or diverging
+        # tracks.  Prevents the one-hot from staying latched during transit.
+        closing_speed = -(
+            (closest.rel_x * closest.rel_vx) + (closest.rel_y * closest.rel_vy)
+        ) / max(closest.distance, 1e-3)
+        if closing_speed < _ENCOUNTER_CLOSING_MIN:
+            return -1
+
         bearing = closest.bearing  # relative to own heading, [-pi, pi]
 
         # Reconstruct absolute velocities of neighbour
@@ -1156,14 +1236,18 @@ class PolicyInferenceNode(Node):
         # Courses
         own_course = obs.yaw if obs.speed < _ENCOUNTER_SPEED_THRESHOLD else math.atan2(own_vy, own_vx)
         nei_speed = math.hypot(nei_vx, nei_vy)
-        if nei_speed > _ENCOUNTER_SPEED_THRESHOLD:
-            nei_course = math.atan2(nei_vy, nei_vx)
-        else:
-            # Stationary neighbour — assume course pointing toward us (worst case)
-            nei_course = math.atan2(-closest.rel_y, -closest.rel_x)
+        abs_bearing = abs(bearing)
+        if nei_speed <= _ENCOUNTER_SPEED_THRESHOLD:
+            # Slow/stationary neighbour: course is unreliable.  A slow vessel
+            # ahead that we are closing on is an overtaking situation (Rule
+            # 13), NOT head-on.  The previous worst-case head-on assumption
+            # caused permanent mutual-avoidance deadlocks in convoy following.
+            if abs_bearing < math.radians(_OVERTAKING_ASTERN_DEG):
+                return 2  # overtaking — ego keeps clear of the slow vessel
+            return -1  # slow vessel astern — no encounter
+        nei_course = math.atan2(nei_vy, nei_vx)
 
         rel_course = abs(self._wrap_angle(nei_course - own_course))
-        abs_bearing = abs(bearing)
 
         # Astern sector: neighbour is behind us
         if abs_bearing > math.radians(_OVERTAKING_ASTERN_DEG):
@@ -1191,17 +1275,16 @@ class PolicyInferenceNode(Node):
             self.get_logger().info('Observation stream ready; pure RL policy inference is active.')
             self._ready_logged = True
 
-        observation_vector = observation.to_vector(self._max_neighbors)
-
         enc_idx = -1
         if self._encounter_type_enabled:
             enc_idx = self._encounter_type_index
             if self._encounter_type_auto:
                 enc_idx = self._classify_encounter_type(observation)
-            one_hot = np.zeros(ENCOUNTER_TYPE_COUNT, dtype=np.float32)
-            if 0 <= enc_idx < ENCOUNTER_TYPE_COUNT:
-                one_hot[enc_idx] = 1.0
-            observation_vector = np.concatenate([observation_vector, one_hot])
+        # to_vector() now appends the trailing agent-level encounter one-hot
+        # itself (full parity with multi_agent_types), so set the index on the
+        # observation rather than concatenating a separate one-hot.
+        observation.encounter_type_index = enc_idx
+        observation_vector = observation.to_vector(self._max_neighbors)
 
         # Publish encounter-type index for downstream logging.
         enc_msg = Int8()

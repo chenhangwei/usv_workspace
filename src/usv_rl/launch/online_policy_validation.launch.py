@@ -142,7 +142,7 @@ def generate_launch_description():
         DeclareLaunchArgument('disable_controller_param', default_value='false', description='Avoid toggling controller params from the policy node if needed.'),
         DeclareLaunchArgument('device', default_value='cpu', description='Inference device for PPO or MAPPO policies.'),
         DeclareLaunchArgument('publish_rate', default_value='10.0', description='Policy publish rate in Hz.'),
-        DeclareLaunchArgument('max_neighbors', default_value='4', description='Max neighbors encoded into the observation.'),
+        DeclareLaunchArgument('max_neighbors', default_value='2', description='Max neighbors encoded into the observation.'),
         DeclareLaunchArgument('encounter_enabled', default_value='false', description='Whether to publish synthetic neighbors for an encounter scenario.'),
         DeclareLaunchArgument('encounter_scenario', default_value='head_on', description='Synthetic encounter scenario: head_on, crossing_starboard, overtaking.'),
         DeclareLaunchArgument('encounter_goal_distance', default_value='8.0', description='Goal distance used when constructing the synthetic encounter geometry.'),

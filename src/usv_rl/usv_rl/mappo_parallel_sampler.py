@@ -44,6 +44,7 @@ def _build_reward_config(args) -> RewardConfig:
         path_deviation_penalty_weight=float(args.path_deviation_penalty_weight),
         path_deviation_tolerance=float(args.path_deviation_tolerance),
         path_deviation_conflict_scale=float(args.path_deviation_conflict_scale),
+        path_deviation_exclude_overtaking=bool(getattr(args, 'path_deviation_exclude_overtaking', False)),
         desired_conflict_speed=float(args.desired_conflict_speed),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),

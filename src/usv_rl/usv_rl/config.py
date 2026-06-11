@@ -29,6 +29,7 @@ class RewardConfig:
     path_deviation_tolerance: float = 0.8
     path_deviation_conflict_scale: float = 0.9
     path_deviation_use_unclipped_cte: bool = False
+    path_deviation_exclude_overtaking: bool = False
     desired_conflict_speed: float = 0.26
     stop_go_penalty_weight: float = 1.8
     head_on_guidance_distance: float = 5.0

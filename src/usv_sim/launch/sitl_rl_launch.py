@@ -124,7 +124,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'rl_max_neighbors',
-            default_value='4',
+            default_value='2',
             description='Maximum number of neighbors encoded into the observation.',
         ),
         DeclareLaunchArgument(
