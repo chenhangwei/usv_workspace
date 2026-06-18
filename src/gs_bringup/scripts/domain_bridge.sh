@@ -15,8 +15,9 @@
 set -e
 
 SCRIPT_NAME="domain_bridge"
-CONFIG_FILE="${HOME}/domain_bridge/domain_bridge.yaml"
-LAUNCH_CMD="ros2 launch gs_bringup domain_bridge.launch.py"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${DOMAIN_BRIDGE_CONFIG_FILE:-${SCRIPT_DIR}/../config/domain_bridge.yaml}"
+LAUNCH_CMD="ros2 launch gs_bringup domain_bridge.launch.py config_file:=${CONFIG_FILE}"
 LOCK_FILE="/tmp/domain_bridge.lock"
 
 # 颜色定义
@@ -42,8 +43,7 @@ print_error() {
 check_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
         print_error "配置文件不存在: $CONFIG_FILE"
-        print_info "请先创建配置文件或使用增强版配置："
-        echo "  cp ~/domain_bridge/domain_bridge_enhanced.yaml ~/domain_bridge/domain_bridge.yaml"
+        print_info "请确认 gs_bringup 配置目录下存在 domain_bridge.yaml，或通过环境变量 DOMAIN_BRIDGE_CONFIG_FILE 指定路径"
         exit 1
     fi
     print_info "配置文件: $CONFIG_FILE"

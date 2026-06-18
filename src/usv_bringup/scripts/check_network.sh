@@ -133,11 +133,11 @@ else
     echo "⚠️  ROS_DOMAIN_ID 未设置 (将使用默认值 0)"
 fi
 
-if [ -n "$FASTRTPS_DEFAULT_PROFILES_FILE" ]; then
-    echo "✅ FASTRTPS_DEFAULT_PROFILES_FILE = $FASTRTPS_DEFAULT_PROFILES_FILE"
+if [ -n "$FASTDDS_DEFAULT_PROFILES_FILE" ]; then
+    echo "✅ FASTDDS_DEFAULT_PROFILES_FILE = $FASTDDS_DEFAULT_PROFILES_FILE"
 else
-    echo "⚠️  FASTRTPS_DEFAULT_PROFILES_FILE 未设置"
-    echo "   建议设置: export FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
+    echo "⚠️  FASTDDS_DEFAULT_PROFILES_FILE 未设置"
+    echo "   建议设置: export FASTDDS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
 fi
 echo ""
 
@@ -155,19 +155,19 @@ case "$CURRENT_IP" in
     "192.168.68.55")
         echo "# 当前机器识别为: USV_01"
         echo "export ROS_DOMAIN_ID=11"
-        echo "export FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
+        echo "export FASTDDS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
         echo "ros2 launch usv_bringup usv_launch.py namespace:=usv_01"
         ;;
     "192.168.68.54")
         echo "# 当前机器识别为: USV_02"
         echo "export ROS_DOMAIN_ID=12"
-        echo "export FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
+        echo "export FASTDDS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
         echo "ros2 launch usv_bringup usv_launch.py namespace:=usv_02"
         ;;
     "192.168.68.52")
         echo "# 当前机器识别为: USV_03"
         echo "export ROS_DOMAIN_ID=13"
-        echo "export FASTRTPS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
+        echo "export FASTDDS_DEFAULT_PROFILES_FILE=/etc/fastdds/usv_endpoints.xml"
         echo "ros2 launch usv_bringup usv_launch.py namespace:=usv_03"
         ;;
     *)

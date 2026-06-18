@@ -16,7 +16,8 @@ Domain Bridge 启动文件 - 地面站端
 特性：
 1. 自动设置地面站 Domain ID
 2. 支持自定义配置文件路径
-3. 可独立启动或集成到其他启动文件
+3. 支持设置 FastDDS Profile 文件
+4. 可独立启动或集成到其他启动文件
 
 使用方法：
     # 使用默认配置
@@ -99,9 +100,17 @@ def generate_launch_description():
         default_value=default_config,
         description='Domain Bridge YAML 配置文件路径'
     )
+
+    # FastDDS 配置文件路径（地面站端）
+    fastdds_profile_arg = DeclareLaunchArgument(
+        'fastdds_profile',
+        default_value='/home/chenhangwei/fastdds_gs.xml',
+        description='FastDDS XML 配置文件路径'
+    )
     
     gs_domain_id = LaunchConfiguration('gs_domain_id')
     config_file = LaunchConfiguration('config_file')
+    fastdds_profile = LaunchConfiguration('fastdds_profile')
     
     # =============================================================================
     # 环境变量设置
@@ -109,6 +118,9 @@ def generate_launch_description():
     
     # 设置地面站 Domain ID
     set_domain_id = SetEnvironmentVariable('ROS_DOMAIN_ID', gs_domain_id)
+
+    # 显式指定 FastDDS Profile，避免仅依赖外部 shell 环境
+    set_fastdds_profile = SetEnvironmentVariable('FASTDDS_DEFAULT_PROFILES_FILE', fastdds_profile)
     
     # =============================================================================
     # Domain Bridge 节点
@@ -148,9 +160,11 @@ def generate_launch_description():
         # 参数
         gs_domain_id_arg,
         config_file_arg,
+        fastdds_profile_arg,
         
         # 环境变量
         set_domain_id,
+        set_fastdds_profile,
         
         # 节点
         domain_bridge_node,
