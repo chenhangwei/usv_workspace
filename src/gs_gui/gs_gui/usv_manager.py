@@ -110,7 +110,7 @@ class UsvManager:
         )
         self.node.get_logger().info(f"为 {usv_id} 创建 StatusText 订阅: {topic_status_text}")
         # 创建飞控系统状态订阅者 (SYS_STATUS)
-        topic_sys_status = f"{ns}/mavros/sys_status"
+        topic_sys_status = f"{ns}/sys_status"
         self.sys_status_subs[usv_id] = self.node.create_subscription(
             SysStatus,
             topic_sys_status,

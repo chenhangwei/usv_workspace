@@ -19,6 +19,7 @@ main_gui_app:
     max_retries: 1                # 失败后最大重试次数
     min_ack_rate_for_proceed: 0.8 # 继续下一步所需的最小确认率 (0.0-1.0)
     offline_grace_period: 5.0     # USV离线宽限期（秒），超时后从GUI移除
+    gui_state_push_period: 0.5    # GUI状态推送周期（秒），2Hz 可显著降低多艇运行时CPU占用
 
     # ==================== 注意 ====================
     # target_reach_threshold 和 distance_mode 参数已移除

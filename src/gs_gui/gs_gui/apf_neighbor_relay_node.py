@@ -28,11 +28,11 @@ class ApfNeighborRelayNode(Node):
         super().__init__('apf_neighbor_relay_node')
 
         self.declare_parameter('fleet_config_file', '')
-        self.declare_parameter('usv_ids', [])
+        self.declare_parameter('usv_ids', '')
         self.declare_parameter('source_pose_topic_suffix', 'local_position/pose_from_gps')
         self.declare_parameter('source_velocity_topic_suffix', 'local_position/velocity_local')
         self.declare_parameter('apf_neighbors_topic_suffix', 'apf/neighbors')
-        self.declare_parameter('publish_rate', 10.0)
+        self.declare_parameter('publish_rate', 2.0)
         self.declare_parameter('neighbor_timeout', 0.8)
         self.declare_parameter('max_neighbor_distance', 12.0)
         self.declare_parameter('prefer_velocity_topic', True)
@@ -41,7 +41,7 @@ class ApfNeighborRelayNode(Node):
         self.declare_parameter('max_estimated_speed', 3.0)
 
         self._fleet_config_file = str(self.get_parameter('fleet_config_file').value or '')
-        self._usv_ids = [str(x) for x in (self.get_parameter('usv_ids').value or []) if str(x)]
+        self._usv_ids = self._parse_usv_ids_parameter(self.get_parameter('usv_ids').value)
         self._source_pose_topic_suffix = str(
             self.get_parameter('source_pose_topic_suffix').value or 'local_position/pose_from_gps'
         )
@@ -51,7 +51,7 @@ class ApfNeighborRelayNode(Node):
         self._neighbors_topic_suffix = str(
             self.get_parameter('apf_neighbors_topic_suffix').value or 'apf/neighbors'
         )
-        self._publish_rate = float(self.get_parameter('publish_rate').value or 10.0)
+        self._publish_rate = float(self.get_parameter('publish_rate').value or 2.0)
         self._neighbor_timeout = float(self.get_parameter('neighbor_timeout').value or 0.8)
         self._max_neighbor_distance = float(self.get_parameter('max_neighbor_distance').value or 12.0)
         self._prefer_velocity_topic = bool(self.get_parameter('prefer_velocity_topic').value)
@@ -66,6 +66,7 @@ class ApfNeighborRelayNode(Node):
             self.get_logger().warn('未检测到可用 USV 列表，邻船聚合节点不会发布数据。')
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
+        qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
 
         self._latest_pose: Dict[str, Dict[str, float]] = {}
         self._pose_subs = []
@@ -92,7 +93,7 @@ class ApfNeighborRelayNode(Node):
             self._vel_subs.append(vel_sub)
 
             pub_topic = f'/{usv_id}/{self._neighbors_topic_suffix}'.replace('//', '/')
-            self._neighbor_pubs[usv_id] = self.create_publisher(FleetNeighborPoses, pub_topic, qos_best_effort)
+            self._neighbor_pubs[usv_id] = self.create_publisher(FleetNeighborPoses, pub_topic, qos_reliable)
 
         if self._publish_rate > 0.0:
             self._timer = self.create_timer(1.0 / self._publish_rate, self._publish_neighbors)
@@ -119,6 +120,13 @@ class ApfNeighborRelayNode(Node):
         state['vy'] = vy
         state['vel_stamp_sec'] = now_sec
         self._latest_pose[usv_id] = state
+
+    def _parse_usv_ids_parameter(self, value) -> List[str]:
+        if isinstance(value, str):
+            return [item.strip().lstrip('/') for item in value.split(',') if item.strip()]
+        if isinstance(value, (list, tuple)):
+            return [str(item).strip().lstrip('/') for item in value if str(item).strip()]
+        return []
 
     def _load_usv_ids_from_fleet_config(self, config_path: str) -> List[str]:
         candidate_paths = []

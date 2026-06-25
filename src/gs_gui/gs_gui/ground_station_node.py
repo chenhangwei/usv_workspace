@@ -78,10 +78,12 @@ class GroundStationNode(Node):
 
         # 声明参数（必须在使用前声明）
         self.declare_parameter('fleet_config_file', '')
+        self.declare_parameter('active_usv_ids', '')
         self.declare_parameter('step_timeout', float(self.DEFAULT_STEP_TIMEOUT))
         self.declare_parameter('max_retries', int(self.DEFAULT_MAX_RETRIES))
         self.declare_parameter('min_ack_rate_for_proceed', float(self.MIN_ACK_RATE_FOR_PROCEED))
         self.declare_parameter('offline_grace_period', 5.0)
+        self.declare_parameter('gui_state_push_period', 0.5)
         self.declare_parameter('ack_resend_interval', 2.0)
         self.declare_parameter('cluster_action_timeout', 300.0)
         self.declare_parameter('area_center_x', 0.0)
@@ -228,8 +230,12 @@ class GroundStationNode(Node):
         self.ns_timer = self.create_timer(5.0, self.check_usv_topics_availability)  # USV话题可用性检查定时器
         self.target_timer = self.create_timer(self.CLUSTER_TARGET_PUBLISH_PERIOD, self.publish_cluster_targets_callback)  # 集群目标发布定时器，定期发布集群目标
         self.infect_check_timer = self.create_timer(self.INFECTION_CHECK_PERIOD, self.check_usv_infect)  # 传染检查定时器，定期检查USV之间的传染逻辑
-        # 添加高频状态推送定时器，确保 Ready 检查等信息能快速更新到 GUI（类似 QGC 的灵敏响应）
-        self.state_push_timer = self.create_timer(0.2, self.push_state_updates)  # 200ms = 5Hz，优化性能
+        try:
+            gui_state_push_period = float(self.get_parameter('gui_state_push_period').value or 0.5)
+        except Exception:
+            gui_state_push_period = 0.5
+        gui_state_push_period = max(0.2, gui_state_push_period)
+        self.state_push_timer = self.create_timer(gui_state_push_period, self.push_state_updates)
         # 定期主动请求飞控 PreArm 检查，加快 Ready 状态响应
         self._prearm_check_timer = self.create_timer(3.0, self._request_prearm_checks)  # 每 3 秒请求一次
         self._cmd_long_clients = {}  # 缓存 CommandLong 服务客户端
@@ -633,6 +639,18 @@ class GroundStationNode(Node):
             list: USV命名空间列表，例如 ['usv_01', 'usv_02', 'usv_03']
         """
         usv_list = []
+        active_usv_ids = set()
+
+        try:
+            active_param = self.get_parameter('active_usv_ids').value
+            if isinstance(active_param, (list, tuple)):
+                active_usv_ids = {str(item).strip().lstrip('/') for item in active_param if str(item).strip()}
+            else:
+                active_text = str(active_param or '').strip()
+                if active_text and active_text.lower() not in ('all', '*'):
+                    active_usv_ids = {item.strip().lstrip('/') for item in active_text.split(',') if item.strip()}
+        except Exception:
+            active_usv_ids = set()
         
         if not self._fleet_config:
             self.get_logger().warn("⚠️  未加载fleet配置，将使用空USV列表")
@@ -644,6 +662,9 @@ class GroundStationNode(Node):
                 # 只添加启用的USV
                 if config.get('enabled', False):
                     namespace = config.get('namespace', usv_id)
+                    if active_usv_ids and namespace not in active_usv_ids and usv_id not in active_usv_ids:
+                        self.get_logger().info(f"  ├─ {namespace} (未在活动列表中，跳过)")
+                        continue
                     usv_list.append(namespace)
                     self.get_logger().info(f"  ├─ {namespace} (已启用)")
                 else:
@@ -1889,12 +1910,28 @@ class GroundStationNode(Node):
         """
         if msg is None:
             return
+
+        sensors_present = getattr(
+            msg,
+            'onboard_control_sensors_present',
+            getattr(msg, 'sensors_present', 0)
+        )
+        sensors_enabled = getattr(
+            msg,
+            'onboard_control_sensors_enabled',
+            getattr(msg, 'sensors_enabled', 0)
+        )
+        sensors_health = getattr(
+            msg,
+            'onboard_control_sensors_health',
+            getattr(msg, 'sensors_health', 0)
+        )
         
         # 缓存原始传感器状态位掩码
         self._sensor_health_cache[usv_id] = {
-            'onboard_control_sensors_present': msg.onboard_control_sensors_present,
-            'onboard_control_sensors_enabled': msg.onboard_control_sensors_enabled,
-            'onboard_control_sensors_health': msg.onboard_control_sensors_health,
+            'onboard_control_sensors_present': sensors_present,
+            'onboard_control_sensors_enabled': sensors_enabled,
+            'onboard_control_sensors_health': sensors_health,
             'timestamp': self._now_seconds()
         }
         
@@ -1903,12 +1940,12 @@ class GroundStationNode(Node):
             self._last_sensor_health_log = {}
         
         prev = self._last_sensor_health_log.get(usv_id)
-        curr_health = msg.onboard_control_sensors_health
+        curr_health = sensors_health
         if prev != curr_health:
             self.get_logger().info(
                 f"[SYS_STATUS] {usv_id} 传感器健康更新: "
-                f"present=0x{msg.onboard_control_sensors_present:08X}, "
-                f"enabled=0x{msg.onboard_control_sensors_enabled:08X}, "
+                f"present=0x{sensors_present:08X}, "
+                f"enabled=0x{sensors_enabled:08X}, "
                 f"health=0x{curr_health:08X}"
             )
             self._last_sensor_health_log[usv_id] = curr_health

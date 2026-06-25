@@ -88,19 +88,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_01/mavros/state:
+  usv_01/state:
     type: mavros_msgs/msg/State
     from_domain: 11
     
-  usv_01/mavros/extended_state:
+  usv_01/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 11
     
   usv_01/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 11
+    qos:
+      reliability: best_effort
     
-  usv_01/mavros/sys_status:
+  usv_01/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 11
     qos:
@@ -117,34 +119,50 @@ topics:
   usv_01/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 11
+    qos:
+      reliability: best_effort
     
   usv_01/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 11
+    qos:
+      reliability: best_effort
     
   usv_01/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 11
+    qos:
+      reliability: best_effort
     
   usv_01/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 11
+    qos:
+      reliability: best_effort
     
   usv_01/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 11
+    qos:
+      reliability: best_effort
 
   usv_01/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 11
+    qos:
+      reliability: best_effort
     
   usv_01/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 11
+    qos:
+      reliability: best_effort
 
   usv_01/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 11
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -275,19 +293,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_02/mavros/state:
+  usv_02/state:
     type: mavros_msgs/msg/State
     from_domain: 12
     
-  usv_02/mavros/extended_state:
+  usv_02/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 12
     
   usv_02/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 12
+    qos:
+      reliability: best_effort
     
-  usv_02/mavros/sys_status:
+  usv_02/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 12
     qos:
@@ -304,34 +324,50 @@ topics:
   usv_02/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 12
+    qos:
+      reliability: best_effort
     
   usv_02/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 12
+    qos:
+      reliability: best_effort
     
   usv_02/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 12
+    qos:
+      reliability: best_effort
     
   usv_02/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 12
+    qos:
+      reliability: best_effort
     
   usv_02/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 12
+    qos:
+      reliability: best_effort
 
   usv_02/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 12
+    qos:
+      reliability: best_effort
     
   usv_02/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 12
+    qos:
+      reliability: best_effort
 
   usv_02/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 12
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -462,19 +498,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_03/mavros/state:
+  usv_03/state:
     type: mavros_msgs/msg/State
     from_domain: 13
     
-  usv_03/mavros/extended_state:
+  usv_03/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 13
     
   usv_03/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 13
+    qos:
+      reliability: best_effort
     
-  usv_03/mavros/sys_status:
+  usv_03/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 13
     qos:
@@ -491,34 +529,50 @@ topics:
   usv_03/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 13
+    qos:
+      reliability: best_effort
     
   usv_03/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 13
+    qos:
+      reliability: best_effort
     
   usv_03/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 13
+    qos:
+      reliability: best_effort
     
   usv_03/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 13
+    qos:
+      reliability: best_effort
     
   usv_03/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 13
+    qos:
+      reliability: best_effort
 
   usv_03/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 13
+    qos:
+      reliability: best_effort
     
   usv_03/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 13
+    qos:
+      reliability: best_effort
 
   usv_03/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 13
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -649,19 +703,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_04/mavros/state:
+  usv_04/state:
     type: mavros_msgs/msg/State
     from_domain: 14
     
-  usv_04/mavros/extended_state:
+  usv_04/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 14
     
   usv_04/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 14
+    qos:
+      reliability: best_effort
     
-  usv_04/mavros/sys_status:
+  usv_04/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 14
     qos:
@@ -678,34 +734,50 @@ topics:
   usv_04/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 14
+    qos:
+      reliability: best_effort
     
   usv_04/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 14
+    qos:
+      reliability: best_effort
     
   usv_04/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 14
+    qos:
+      reliability: best_effort
     
   usv_04/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 14
+    qos:
+      reliability: best_effort
     
   usv_04/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 14
+    qos:
+      reliability: best_effort
 
   usv_04/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 14
+    qos:
+      reliability: best_effort
     
   usv_04/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 14
+    qos:
+      reliability: best_effort
 
   usv_04/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 14
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -836,19 +908,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_05/mavros/state:
+  usv_05/state:
     type: mavros_msgs/msg/State
     from_domain: 15
     
-  usv_05/mavros/extended_state:
+  usv_05/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 15
     
   usv_05/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 15
+    qos:
+      reliability: best_effort
     
-  usv_05/mavros/sys_status:
+  usv_05/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 15
     qos:
@@ -865,34 +939,50 @@ topics:
   usv_05/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 15
+    qos:
+      reliability: best_effort
     
   usv_05/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 15
+    qos:
+      reliability: best_effort
     
   usv_05/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 15
+    qos:
+      reliability: best_effort
     
   usv_05/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 15
+    qos:
+      reliability: best_effort
     
   usv_05/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 15
+    qos:
+      reliability: best_effort
 
   usv_05/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 15
+    qos:
+      reliability: best_effort
     
   usv_05/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 15
+    qos:
+      reliability: best_effort
 
   usv_05/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 15
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1023,19 +1113,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_06/mavros/state:
+  usv_06/state:
     type: mavros_msgs/msg/State
     from_domain: 16
     
-  usv_06/mavros/extended_state:
+  usv_06/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 16
     
   usv_06/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 16
+    qos:
+      reliability: best_effort
     
-  usv_06/mavros/sys_status:
+  usv_06/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 16
     qos:
@@ -1052,34 +1144,50 @@ topics:
   usv_06/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 16
+    qos:
+      reliability: best_effort
     
   usv_06/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 16
+    qos:
+      reliability: best_effort
     
   usv_06/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 16
+    qos:
+      reliability: best_effort
     
   usv_06/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 16
+    qos:
+      reliability: best_effort
     
   usv_06/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 16
+    qos:
+      reliability: best_effort
 
   usv_06/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 16
+    qos:
+      reliability: best_effort
     
   usv_06/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 16
+    qos:
+      reliability: best_effort
 
   usv_06/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 16
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1210,19 +1318,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_07/mavros/state:
+  usv_07/state:
     type: mavros_msgs/msg/State
     from_domain: 17
     
-  usv_07/mavros/extended_state:
+  usv_07/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 17
     
   usv_07/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 17
+    qos:
+      reliability: best_effort
     
-  usv_07/mavros/sys_status:
+  usv_07/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 17
     qos:
@@ -1239,34 +1349,50 @@ topics:
   usv_07/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 17
+    qos:
+      reliability: best_effort
     
   usv_07/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 17
+    qos:
+      reliability: best_effort
     
   usv_07/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 17
+    qos:
+      reliability: best_effort
     
   usv_07/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 17
+    qos:
+      reliability: best_effort
     
   usv_07/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 17
+    qos:
+      reliability: best_effort
 
   usv_07/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 17
+    qos:
+      reliability: best_effort
     
   usv_07/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 17
+    qos:
+      reliability: best_effort
 
   usv_07/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 17
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1397,19 +1523,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_08/mavros/state:
+  usv_08/state:
     type: mavros_msgs/msg/State
     from_domain: 18
     
-  usv_08/mavros/extended_state:
+  usv_08/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 18
     
   usv_08/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 18
+    qos:
+      reliability: best_effort
     
-  usv_08/mavros/sys_status:
+  usv_08/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 18
     qos:
@@ -1426,34 +1554,50 @@ topics:
   usv_08/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 18
+    qos:
+      reliability: best_effort
     
   usv_08/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 18
+    qos:
+      reliability: best_effort
     
   usv_08/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 18
+    qos:
+      reliability: best_effort
     
   usv_08/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 18
+    qos:
+      reliability: best_effort
     
   usv_08/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 18
+    qos:
+      reliability: best_effort
 
   usv_08/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 18
+    qos:
+      reliability: best_effort
     
   usv_08/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 18
+    qos:
+      reliability: best_effort
 
   usv_08/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 18
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1584,19 +1728,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_09/mavros/state:
+  usv_09/state:
     type: mavros_msgs/msg/State
     from_domain: 19
     
-  usv_09/mavros/extended_state:
+  usv_09/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 19
     
   usv_09/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 19
+    qos:
+      reliability: best_effort
     
-  usv_09/mavros/sys_status:
+  usv_09/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 19
     qos:
@@ -1613,34 +1759,50 @@ topics:
   usv_09/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 19
+    qos:
+      reliability: best_effort
     
   usv_09/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 19
+    qos:
+      reliability: best_effort
     
   usv_09/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 19
+    qos:
+      reliability: best_effort
     
   usv_09/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 19
+    qos:
+      reliability: best_effort
     
   usv_09/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 19
+    qos:
+      reliability: best_effort
 
   usv_09/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 19
+    qos:
+      reliability: best_effort
     
   usv_09/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 19
+    qos:
+      reliability: best_effort
 
   usv_09/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 19
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1771,19 +1933,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_10/mavros/state:
+  usv_10/state:
     type: mavros_msgs/msg/State
     from_domain: 20
     
-  usv_10/mavros/extended_state:
+  usv_10/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 20
     
   usv_10/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 20
+    qos:
+      reliability: best_effort
     
-  usv_10/mavros/sys_status:
+  usv_10/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 20
     qos:
@@ -1800,34 +1964,50 @@ topics:
   usv_10/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 20
+    qos:
+      reliability: best_effort
     
   usv_10/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 20
+    qos:
+      reliability: best_effort
     
   usv_10/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 20
+    qos:
+      reliability: best_effort
     
   usv_10/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 20
+    qos:
+      reliability: best_effort
     
   usv_10/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 20
+    qos:
+      reliability: best_effort
 
   usv_10/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 20
+    qos:
+      reliability: best_effort
     
   usv_10/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 20
+    qos:
+      reliability: best_effort
 
   usv_10/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 20
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -1958,19 +2138,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_11/mavros/state:
+  usv_11/state:
     type: mavros_msgs/msg/State
     from_domain: 21
     
-  usv_11/mavros/extended_state:
+  usv_11/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 21
     
   usv_11/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 21
+    qos:
+      reliability: best_effort
     
-  usv_11/mavros/sys_status:
+  usv_11/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 21
     qos:
@@ -1987,34 +2169,50 @@ topics:
   usv_11/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 21
+    qos:
+      reliability: best_effort
     
   usv_11/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 21
+    qos:
+      reliability: best_effort
     
   usv_11/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 21
+    qos:
+      reliability: best_effort
     
   usv_11/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 21
+    qos:
+      reliability: best_effort
     
   usv_11/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 21
+    qos:
+      reliability: best_effort
 
   usv_11/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 21
+    qos:
+      reliability: best_effort
     
   usv_11/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 21
+    qos:
+      reliability: best_effort
 
   usv_11/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 21
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -2145,19 +2343,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_12/mavros/state:
+  usv_12/state:
     type: mavros_msgs/msg/State
     from_domain: 22
     
-  usv_12/mavros/extended_state:
+  usv_12/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 22
     
   usv_12/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 22
+    qos:
+      reliability: best_effort
     
-  usv_12/mavros/sys_status:
+  usv_12/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 22
     qos:
@@ -2174,34 +2374,50 @@ topics:
   usv_12/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 22
+    qos:
+      reliability: best_effort
     
   usv_12/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 22
+    qos:
+      reliability: best_effort
     
   usv_12/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 22
+    qos:
+      reliability: best_effort
     
   usv_12/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 22
+    qos:
+      reliability: best_effort
     
   usv_12/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 22
+    qos:
+      reliability: best_effort
 
   usv_12/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 22
+    qos:
+      reliability: best_effort
     
   usv_12/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 22
+    qos:
+      reliability: best_effort
 
   usv_12/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 22
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -2332,19 +2548,21 @@ topics:
 
   # ------------------------- MAVROS 状态 -------------------------------------
   
-  usv_13/mavros/state:
+  usv_13/state:
     type: mavros_msgs/msg/State
     from_domain: 23
     
-  usv_13/mavros/extended_state:
+  usv_13/extended_state:
     type: mavros_msgs/msg/ExtendedState
     from_domain: 23
     
   usv_13/battery:
     type: sensor_msgs/msg/BatteryState
     from_domain: 23
+    qos:
+      reliability: best_effort
     
-  usv_13/mavros/sys_status:
+  usv_13/sys_status:
     type: mavros_msgs/msg/SysStatus
     from_domain: 23
     qos:
@@ -2361,34 +2579,50 @@ topics:
   usv_13/local_position/pose:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 23
+    qos:
+      reliability: best_effort
     
   usv_13/local_position/velocity_local:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 23
+    qos:
+      reliability: best_effort
     
   usv_13/local_position/pose_from_gps:
     type: geometry_msgs/msg/PoseStamped
     from_domain: 23
+    qos:
+      reliability: best_effort
     
   usv_13/global_position/global:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 23
+    qos:
+      reliability: best_effort
     
   usv_13/global_position/compass_hdg:
     type: std_msgs/msg/Float64
     from_domain: 23
+    qos:
+      reliability: best_effort
 
   usv_13/global_position/raw/fix:
     type: sensor_msgs/msg/NavSatFix
     from_domain: 23
+    qos:
+      reliability: best_effort
     
   usv_13/global_position/raw/gps_vel:
     type: geometry_msgs/msg/TwistStamped
     from_domain: 23
+    qos:
+      reliability: best_effort
 
   usv_13/home_position/home:
     type: mavros_msgs/msg/HomePosition
     from_domain: 23
+    qos:
+      reliability: best_effort
 
   # ------------------------- 传感器数据 --------------------------------------
   
@@ -2756,11 +2990,11 @@ topics:
 #   from_domain: YY
 #
 # # MAVROS 状态
-# usv_XX/mavros/state:
+# usv_XX/state:
 #   type: mavros_msgs/msg/State
 #   from_domain: YY
 #
-# usv_XX/mavros/extended_state:
+# usv_XX/extended_state:
 #   type: mavros_msgs/msg/ExtendedState
 #   from_domain: YY
 #
@@ -2768,7 +3002,7 @@ topics:
 #   type: sensor_msgs/msg/BatteryState
 #   from_domain: YY
 #
-# usv_XX/mavros/sys_status:
+# usv_XX/sys_status:
 #   type: mavros_msgs/msg/SysStatus
 #   from_domain: YY
 #   qos:

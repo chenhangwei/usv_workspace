@@ -55,9 +55,8 @@ class StateHandler:
         
         # 使用 QTimer 在 GUI 线程周期性刷新 UI
         self._ui_refresh_timer = QTimer()
-        # 设置为 200ms (5Hz) 以平衡响应速度和性能
-        # 注意：50ms 刷新率在窗口调整大小时会导致卡顿，200ms 足够响应用户操作
-        self._ui_refresh_timer.setInterval(200)  # 200ms = 5Hz 刷新率
+        # 500ms (2Hz) 足够展示艇状态，同时避免多艇运行时频繁重绘拖满 GUI 线程。
+        self._ui_refresh_timer.setInterval(500)
         self._ui_refresh_timer.timeout.connect(self._flush_state_cache_to_ui)
         self._ui_refresh_timer.start()
     

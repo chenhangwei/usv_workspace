@@ -95,6 +95,10 @@ class TableManager:
         """
         try:
             model = self.cluster_table_model
+            sorting_enabled = self.cluster_table_view.isSortingEnabled()
+            self.cluster_table_view.setSortingEnabled(False)
+            self.cluster_table_view.setUpdatesEnabled(False)
+            model.blockSignals(True)
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
             # 用户要求：不在线或断开连接的不要出现在列表里面，启动时也是
@@ -154,6 +158,13 @@ class TableManager:
 
         except Exception as e:
             print(f"更新集群表格失败: {e}")
+        finally:
+            try:
+                model.blockSignals(False)
+                self.cluster_table_view.setUpdatesEnabled(True)
+                self.cluster_table_view.setSortingEnabled(sorting_enabled)
+            except Exception:
+                pass
     
     def update_departed_table(self, state_list, usv_nav_status):
         """
@@ -165,6 +176,10 @@ class TableManager:
         """
         try:
             model = self.departed_table_model
+            sorting_enabled = self.departed_table_view.isSortingEnabled()
+            self.departed_table_view.setSortingEnabled(False)
+            self.departed_table_view.setUpdatesEnabled(False)
+            model.blockSignals(True)
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
             # 用户要求：不在线或断开连接的不要出现在列表里面
@@ -221,6 +236,13 @@ class TableManager:
 
         except Exception as e:
             print(f"更新离群表格失败: {e}")
+        finally:
+            try:
+                model.blockSignals(False)
+                self.departed_table_view.setUpdatesEnabled(True)
+                self.departed_table_view.setSortingEnabled(sorting_enabled)
+            except Exception:
+                pass
     
     def _format_table_cells(self, state, usv_nav_status):
         """

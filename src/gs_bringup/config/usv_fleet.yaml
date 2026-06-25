@@ -32,7 +32,7 @@ usv_fleet:
   # ==================== USV 01 ====================
   usv_01:
     enabled: true                                    # 是否启用
-    hostname: "192.168.68.55"                       # USV 01 机载计算机 IP
+    hostname: "192.168.30.55"                       # USV 01 机载计算机 IP
     username: "chenhangwei"                                  # SSH 用户名
     password: "c3467684"                                    # SSH 密码（用于sudo操作）
     workspace: "/home/chenhangwei/usv_workspace"             # 机载工作空间路径
@@ -40,13 +40,13 @@ usv_fleet:
     namespace: "usv_01"                              # ROS 2 命名空间
     fcu_url: "udp://192.168.10.1:14550@192.168.10.2:14550"          # 飞控串口
     system_id: 1                                     # MAVLink 系统 ID
-    gcs_url: "udp://192.168.68.55:14551@192.168.68.53:14550"      # 地面站通信地址（可选）
+    gcs_url: "udp://192.168.30.55:14551@192.168.30.100:14550"      # 地面站通信地址（可选）
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 02 ====================
   usv_02:
     enabled: true
-    hostname: "192.168.68.54"
+    hostname: "192.168.30.54"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -54,13 +54,13 @@ usv_fleet:
     namespace: "usv_02"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 2
-    gcs_url: "udp://192.168.68.54:14552@192.168.68.53:14560"
+    gcs_url: "udp://192.168.30.54:14552@192.168.30.100:14560"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 03 ====================
   usv_03:
     enabled: true
-    hostname: "192.168.68.52"
+    hostname: "192.168.30.52"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -68,13 +68,13 @@ usv_fleet:
     namespace: "usv_03"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 3
-    gcs_url: "udp://192.168.68.52:14553@192.168.68.53:14570"
+    gcs_url: "udp://192.168.30.52:14553@192.168.30.100:14570"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 04 ====================
   usv_04:
     enabled: true
-    hostname: "192.168.68.57"
+    hostname: "192.168.30.57"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -82,13 +82,13 @@ usv_fleet:
     namespace: "usv_04"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 4
-    gcs_url: "udp://192.168.68.57:14554@192.168.68.53:14580"
+    gcs_url: "udp://192.168.30.57:14554@192.168.30.100:14580"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 05 ====================
   usv_05:
     enabled: true
-    hostname: "192.168.68.58"
+    hostname: "192.168.30.58"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -96,13 +96,13 @@ usv_fleet:
     namespace: "usv_05"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 5
-    gcs_url: "udp://192.168.68.58:14555@192.168.68.53:14590"
+    gcs_url: "udp://192.168.30.58:14555@192.168.30.100:14590"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 06 ====================
   usv_06:
     enabled: true
-    hostname: "192.168.68.62"
+    hostname: "192.168.30.62"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -110,13 +110,13 @@ usv_fleet:
     namespace: "usv_06"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 6
-    gcs_url: "udp://192.168.68.62:14556@192.168.68.53:14591"
+    gcs_url: "udp://192.168.30.62:14556@192.168.30.100:14591"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 07 ====================
   usv_07:
     enabled: true
-    hostname: "192.168.68.60"
+    hostname: "192.168.30.60"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -124,13 +124,13 @@ usv_fleet:
     namespace: "usv_07"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 7
-    gcs_url: "udp://192.168.68.60:14557@192.168.68.53:14592"
+    gcs_url: "udp://192.168.30.60:14557@192.168.30.100:14592"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 08 ====================
   usv_08:
     enabled: true
-    hostname: "192.168.68.63"
+    hostname: "192.168.30.63"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -138,13 +138,13 @@ usv_fleet:
     namespace: "usv_08"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 8
-    gcs_url: "udp://192.168.68.63:14558@192.168.68.53:14593"
+    gcs_url: "udp://192.168.30.63:14558@192.168.30.100:14593"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 09 ====================
   usv_09:
     enabled: true
-    hostname: "192.168.68.64"
+    hostname: "192.168.30.64"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -152,13 +152,13 @@ usv_fleet:
     namespace: "usv_09"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 9
-    gcs_url: "udp://192.168.68.64:14559@192.168.68.53:14594"
+    gcs_url: "udp://192.168.30.64:14559@192.168.30.100:14594"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
     
   # ==================== USV 10 ====================
   usv_10:
     enabled: true
-    hostname: "192.168.68.65"
+    hostname: "192.168.30.65"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -166,13 +166,13 @@ usv_fleet:
     namespace: "usv_10"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 10
-    gcs_url: "udp://192.168.68.65:14560@192.168.68.53:14595"
+    gcs_url: "udp://192.168.30.65:14560@192.168.30.100:14595"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
 
   # ==================== USV 11 ====================
   usv_11:
     enabled: true
-    hostname: "192.168.68.66"
+    hostname: "192.168.30.66"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -180,13 +180,13 @@ usv_fleet:
     namespace: "usv_11"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 11
-    gcs_url: "udp://192.168.68.66:14561@192.168.68.53:14596"
+    gcs_url: "udp://192.168.30.66:14561@192.168.30.100:14596"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
 
   # ==================== USV 12 ====================
   usv_12:
     enabled: true
-    hostname: "192.168.68.67"
+    hostname: "192.168.30.67"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -194,13 +194,13 @@ usv_fleet:
     namespace: "usv_12"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 12
-    gcs_url: "udp://192.168.68.67:14562@192.168.68.53:14597"
+    gcs_url: "udp://192.168.30.67:14562@192.168.30.100:14597"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
 
   # ==================== USV 13 ====================
   usv_13:
     enabled: true
-    hostname: "192.168.68.69"
+    hostname: "192.168.30.69"
     username: "chenhangwei"
     password: "c3467684"
     workspace: "/home/chenhangwei/usv_workspace"
@@ -208,7 +208,7 @@ usv_fleet:
     namespace: "usv_13"
     fcu_url: "serial:///dev/ttyACM0:921600"
     system_id: 13
-    gcs_url: "udp://192.168.68.69:14563@192.168.68.53:14598"
+    gcs_url: "udp://192.168.30.69:14563@192.168.30.100:14598"
     fastdds_config: "/home/chenhangwei/fastdds_usv.xml"      # FastDDS 单播配置
 
 # ==================== 启动选项 ====================
