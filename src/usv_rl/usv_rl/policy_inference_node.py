@@ -400,9 +400,9 @@ def parse_args(argv=None):
                         help='Forward-cone blocker distance for online clear-ahead route gate.')
     parser.add_argument('--clear-ahead-route-bearing-deg', type=float, default=35.0,
                         help='Half-angle of the goal-direction forward cone for online clear-ahead route gate.')
-    parser.add_argument('--clear-ahead-route-min-neighbor-separation', type=float, default=3.0,
+    parser.add_argument('--clear-ahead-route-min-neighbor-separation', type=float, default=2.0,
                         help='All-around nearest-neighbor separation required before online clear-ahead route gate can activate.')
-    parser.add_argument('--clear-ahead-route-max-conflict-level', type=float, default=0.05,
+    parser.add_argument('--clear-ahead-route-max-conflict-level', type=float, default=0.30,
                         help='Maximum projection conflict level allowed before online clear-ahead route gate is disabled.')
     parser.add_argument('--clear-ahead-route-linear-blend', type=float, default=0.35,
                         help='Blend factor from RL linear speed toward raw clear-ahead route speed.')
@@ -414,6 +414,26 @@ def parse_args(argv=None):
                         help='Absolute yaw-rate cap used by online clear-ahead route gate.')
     parser.add_argument('--clear-ahead-route-heading-reference', type=float, default=0.55,
                         help='Heading-error magnitude mapped to max omega when raw yaw is unavailable.')
+    parser.add_argument('--disable-turn-governor', action='store_true',
+                        help='Disable the veteran-driver turn governor (heading-error speed cap).')
+    parser.add_argument('--turn-governor-floor', type=float, default=0.45,
+                        help='Turn governor: fraction of cruise kept at 90deg+ heading error (speed cap = cruise*(floor+(1-floor)*cos(he))). 0.45 keeps a gentle arc instead of a spin-in-place (user 2026-07-12).')
+    parser.add_argument('--turn-governor-min-speed', type=float, default=0.14,
+                        help='Turn governor: absolute lower bound of the speed cap (m/s) so the boat always keeps steerage way and turns on an arc.')
+    parser.add_argument('--turn-governor-cruise', type=float, default=0.34,
+                        help='Turn governor: cruise speed reference (m/s) used to compute the cap.')
+    parser.add_argument('--disable-turn-assist', action='store_true',
+                        help='Disable the short-side turn assist (minimum-heading-error steering at waypoint switches).')
+    parser.add_argument('--turn-assist-threshold-deg', type=float, default=45.0,
+                        help='Turn assist engages when |heading error| exceeds this angle (deg).')
+    parser.add_argument('--turn-assist-release-deg', type=float, default=25.0,
+                        help='Turn assist releases when |heading error| drops below this angle (deg, hysteresis).')
+    parser.add_argument('--turn-assist-min-separation', type=float, default=2.0,
+                        help='Turn assist only engages when the nearest neighbour is farther than this (m), so avoidance geometry is never overridden.')
+    parser.add_argument('--turn-assist-max-omega', type=float, default=0.60,
+                        help='Turn assist: absolute yaw-rate command toward the short side (rad/s).')
+    parser.add_argument('--turn-assist-blend', type=float, default=0.85,
+                        help='Turn assist: blend factor from RL omega toward the short-side omega.')
     return parser.parse_args(argv)
 
 
@@ -433,13 +453,23 @@ class PolicyInferenceNode(Node):
         clear_ahead_route_gate: bool = False,
         clear_ahead_route_distance: float = 5.0,
         clear_ahead_route_bearing_deg: float = 35.0,
-        clear_ahead_route_min_neighbor_separation: float = 3.0,
-        clear_ahead_route_max_conflict_level: float = 0.05,
+        clear_ahead_route_min_neighbor_separation: float = 2.0,
+        clear_ahead_route_max_conflict_level: float = 0.30,
         clear_ahead_route_linear_blend: float = 0.35,
         clear_ahead_route_omega_blend: float = 0.85,
         clear_ahead_route_min_speed: float = 0.18,
         clear_ahead_route_max_omega: float = 0.18,
         clear_ahead_route_heading_reference: float = 0.55,
+        turn_governor_enabled: bool = True,
+        turn_governor_floor: float = 0.45,
+        turn_governor_min_speed: float = 0.14,
+        turn_governor_cruise: float = 0.34,
+        turn_assist_enabled: bool = True,
+        turn_assist_threshold_deg: float = 45.0,
+        turn_assist_release_deg: float = 25.0,
+        turn_assist_min_separation: float = 2.0,
+        turn_assist_max_omega: float = 0.60,
+        turn_assist_blend: float = 0.85,
     ):
         resolved_namespace = namespace if namespace.startswith('/') else f'/{namespace}'
         super().__init__('policy_inference_node', namespace=resolved_namespace)
@@ -521,6 +551,58 @@ class PolicyInferenceNode(Node):
         self._clear_ahead_route_linear_blend = max(0.0, min(1.0, float(clear_ahead_route_linear_blend)))
         self._clear_ahead_route_omega_blend = max(0.0, min(1.0, float(clear_ahead_route_omega_blend)))
         self._clear_ahead_route_min_speed = max(0.0, float(clear_ahead_route_min_speed))
+        # fresh628 deployment governor (user 2026-07-12: "得到下一个航点后, 按转弯
+        # 角度调整前进速度, 像老司机一样" / "不允许切换后继续满速直行"):
+        # SITL evidence showed 30/30 waypoint switches at FULL cruise speed
+        # regardless of required turn (3s-after-switch mean speed 0.30-0.35,
+        # sail-away up to 3.2m). The policy observation has NO next-waypoint
+        # preview so it cannot anticipate; this deterministic cap enforces
+        # veteran-driver behaviour at the actuator: cap = cruise *
+        # (floor + (1-floor)*max(0, cos(heading_error))), never below
+        # turn_governor_min_speed (steerage way). he=0 -> full cruise;
+        # he=60deg -> ~0.65*cruise; he>=90deg -> floor. The cap only LIMITS
+        # the RL output (never raises it), so avoidance slowdowns remain.
+        self._turn_governor_enabled = bool(turn_governor_enabled)
+        self._turn_governor_floor = min(1.0, max(0.0, float(turn_governor_floor)))
+        self._turn_governor_min_speed = max(0.0, float(turn_governor_min_speed))
+        self._turn_governor_cruise = max(0.05, float(turn_governor_cruise))
+        # fresh628 short-side turn assist (user 2026-07-12: "应该按最小航向误差的
+        # 转弯方向转向, 而不是转更大的角度"): SITL showed ~50% of waypoint
+        # switches turned the FAR side and low-speed heading oscillation
+        # (net turn 5-30x the required angle). Sign convention verified from
+        # logs: omega SAME sign as heading_error converges (he_dot = -omega_yaw
+        # with he = target_yaw - yaw). When |he| exceeds the threshold and no
+        # neighbour is inside min_separation (avoidance geometry stays RL-owned),
+        # omega is blended toward clamp(he/ref)*max_omega — a steady short-side
+        # turn. Hysteresis: engage above threshold, release below release_deg.
+        self._turn_assist_enabled = bool(turn_assist_enabled)
+        self._turn_assist_threshold = math.radians(max(5.0, float(turn_assist_threshold_deg)))
+        self._turn_assist_release = math.radians(max(2.0, min(float(turn_assist_release_deg), float(turn_assist_threshold_deg))))
+        self._turn_assist_min_separation = max(0.0, float(turn_assist_min_separation))
+        self._turn_assist_max_omega = max(0.05, float(turn_assist_max_omega))
+        self._turn_assist_blend = min(1.0, max(0.0, float(turn_assist_blend)))
+        self._turn_assist_active = False
+        # fresh628 role latch state: neighbour id -> (encounter_type, role).
+        self._role_latch = {}
+        self._role_latch_radius = 2.5
+        self._role_latch_release = 3.5
+        # fresh629 dual-give-way deadlock breaker state (SITL 2026-07-14
+        # 104106): both boats latched give-way in a crossing and crept at the
+        # 0.05 floor for 35s down to 0.15m separation.
+        self._yield_stall_since = None
+        self._yield_stall_logged = False
+        # fresh630 ORBIT-LOCK BREAKER state (SITL 2026-07-15 175946 t=130-250:
+        # 8-figure first encounter locked both boats into a rigid binary orbit
+        # -- sep pinned at 0.42m for 120s while omegas held opposite signs
+        # (-0.5 / +0.6) and both crept at ~0.11 m/s; encounter classifier
+        # returned unset at that range so no COLREGS shaping applied, and the
+        # 50% goal-omega blend of the push-through was too weak to break the
+        # rotational symmetry). Detect "close + separation frozen" and break
+        # the symmetry hard: smaller-ID boat steers to goal at near-full
+        # blend and pushes out, larger-ID boat damps its turn and waits.
+        self._orbit_lock_since = None
+        self._orbit_lock_prev_sep = None
+        self._orbit_lock_logged = False
         self._clear_ahead_route_max_omega = max(0.0, float(clear_ahead_route_max_omega))
         self._clear_ahead_route_heading_reference = max(0.05, float(clear_ahead_route_heading_reference))
         self._clear_ahead_route_logged = False
@@ -1057,9 +1139,9 @@ class PolicyInferenceNode(Node):
                 tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
             dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
             # Per-neighbor COLREGS classification — identical convention to
-            # multi_agent_bridge._build_neighbor_observation (own_speed in the
-            # same world frame as rel_*), so the SITL observation matches the
-            # 15-feature-per-neighbor layout the policy was trained on.
+            # multi_agent_bridge._build_neighbor_observation. fresh628: rel_*
+            # are WORLD-frame; pass own yaw for in-classifier body rotation and
+            # ids for the deterministic strict-complement role tie-break.
             encounter_type_index, role_index = classify_encounter_role(
                 body_x=rel_x,
                 body_y=rel_y,
@@ -1067,7 +1149,28 @@ class PolicyInferenceNode(Node):
                 body_vy=rel_vy,
                 distance=distance,
                 own_speed=speed,
+                ego_id=self._usv_id,
+                neighbor_id=state.usv_id,
+                own_yaw=yaw,
             )
+            # fresh628 ROLE LATCH (SITL 2026-07-12 102710: usv_02/03 closed to
+            # 0.16m at the final vertex): once both boats slowed for mutual
+            # avoidance their speeds dropped below the classifier's motion
+            # thresholds, the roles flickered 2->1->-1 and BOTH kept creeping
+            # toward the shared waypoint -- the mutual-yield deadlock ended in
+            # near-contact. Fix: once a role is assigned inside the latch
+            # radius, KEEP it for that neighbour until separation exceeds the
+            # release radius (hysteresis), regardless of the noisy per-frame
+            # geometry. The engaged pair therefore keeps a stable
+            # master/slave split through the whole close-quarters manoeuvre.
+            latch_key = str(state.usv_id)
+            if distance < self._role_latch_radius:
+                if role_index >= 0:
+                    self._role_latch[latch_key] = (encounter_type_index, role_index)
+                elif latch_key in self._role_latch:
+                    encounter_type_index, role_index = self._role_latch[latch_key]
+            elif distance > self._role_latch_release and latch_key in self._role_latch:
+                del self._role_latch[latch_key]
             neighbors.append(
                 NeighborObservation(
                     usv_id=state.usv_id,
@@ -1316,15 +1419,183 @@ class PolicyInferenceNode(Node):
         linear_x = float(projected_action[0])
         angular_z = float(projected_action[1])
 
+        # Veteran-driver turn governor: speed cap as a function of heading
+        # error (see __init__ comment). Applied FIRST so neighbour-distance
+        # scaling can only lower it further.
+        if self._turn_governor_enabled:
+            he_abs = abs(float(observation.heading_error))
+            cos_gate = max(0.0, math.cos(min(he_abs, math.pi)))
+            cap = self._turn_governor_cruise * (
+                self._turn_governor_floor + (1.0 - self._turn_governor_floor) * cos_gate
+            )
+            cap = max(cap, self._turn_governor_min_speed)
+            if linear_x > cap:
+                linear_x = cap
+
+        # Short-side turn assist: force minimum-heading-error turn direction
+        # when far off-heading and clear of traffic (see __init__ comment).
+        if self._turn_assist_enabled:
+            he = float(observation.heading_error)
+            he_abs = abs(he)
+            clear_of_traffic = observation.min_neighbor_distance() > self._turn_assist_min_separation
+            if self._turn_assist_active:
+                if he_abs < self._turn_assist_release or not clear_of_traffic:
+                    self._turn_assist_active = False
+            elif he_abs > self._turn_assist_threshold and clear_of_traffic:
+                self._turn_assist_active = True
+            if self._turn_assist_active:
+                desired_omega = max(-1.0, min(1.0, he / max(self._turn_assist_release, 1e-3))) * self._turn_assist_max_omega
+                angular_z = (
+                    (1.0 - self._turn_assist_blend) * angular_z
+                    + self._turn_assist_blend * desired_omega
+                )
+
         # Distance-aware speed scaling: reduce linear speed when a neighbour
         # is dangerously close, preventing high-speed collisions.
+        # fresh628 CONVOY-LOCK FIX (SITL 2026-07-12 100541: usv_01/usv_02 locked
+        # at 1.0m for 40s+, BOTH crawling at ~0.12 m/s and drifting off-route
+        # together). Parallel-track proximity classifies as ENC_NONE (no COLREGS
+        # role), and the old SYMMETRIC governor slowed both boats identically —
+        # a stable lock. Now the scaling is ROLE-AWARE: the stand-on boat (or,
+        # when no role exists, the deterministic smaller-ID master) keeps a
+        # 0.75 floor and sails through, while the give-way boat keeps the old
+        # 0.35 floor and falls behind — separation grows and the lock breaks.
         min_neighbor_dist = observation.min_neighbor_distance()
         if min_neighbor_dist < _SPEED_SCALE_DISTANCE:
+            is_master = False
+            nearest = None
+            if observation.neighbors:
+                nearest = min(observation.neighbors, key=lambda n: n.distance)
+            if nearest is not None:
+                role = int(getattr(nearest, 'role_index', -1))
+                if role == 1:
+                    is_master = True
+                elif role == 0:
+                    is_master = False
+                else:
+                    nb_id = str(getattr(nearest, 'usv_id', '') or '')
+                    is_master = bool(nb_id) and str(self._usv_id) < nb_id
+            scale_floor = 0.75 if is_master else _SPEED_SCALE_MIN
             speed_scale = max(
-                _SPEED_SCALE_MIN,
+                scale_floor,
                 min_neighbor_dist / _SPEED_SCALE_DISTANCE,
             )
             linear_x *= speed_scale
+            # Master push-through: the stand-on boat must actually CLEAR the
+            # geometry, not creep alongside the yielding boat (SITL 102710:
+            # both crept at 0.05-0.17 into a 0.16m near-contact). While the
+            # role is engaged and the hulls are not touching, hold the master
+            # at steerage-plus speed so the pair separates quickly.
+            if is_master and min_neighbor_dist > 0.45:
+                linear_x = max(linear_x, 0.18)
+                # fresh629 ESCORT-LOCK FIX (SITL 2026-07-14 113839 t=308-340:
+                # usv_02 pushed through at 0.18 but steered PARALLEL to the
+                # yielding usv_03 for 32s, sailing AWAY from its own goal --
+                # d2g grew 3.7->7.6m at a stable 1.0m separation). Speed alone
+                # does not disengage the pair: while pushing through, also
+                # blend omega toward the goal heading so the master's track
+                # actually diverges from the escort course. Omega has the SAME
+                # sign as heading_error to converge (see turn governor note).
+                # fresh630 tune (SITL 2026-07-15 175946): 0.5 blend lost to the
+                # RL orbit output (|omega| 0.5-0.6) -> raised to 0.85 and the
+                # engage threshold lowered 0.35->0.20 rad.
+                he = float(observation.heading_error)
+                if abs(he) > 0.20:
+                    goal_omega = max(-1.0, min(1.0, he / 0.5)) * 0.45
+                    angular_z = 0.15 * angular_z + 0.85 * goal_omega
+
+            # fresh629 DUAL-GIVE-WAY DEADLOCK BREAKER (SITL 2026-07-14 104106:
+            # usv_01/usv_02 both classified crossing but BOTH latched role 0 =
+            # give-way; the role latch kept the symmetric split until the 3.5m
+            # release so the push-through above never fired, and both boats
+            # crept at the 0.05 floor for 35s down to 0.15m separation). If we
+            # stay close and slow for >3s without being master, fall back to
+            # the deterministic smaller-ID election and push through anyway;
+            # the higher-ID boat keeps yielding, so the pair separates.
+            now_mono = time.monotonic()
+            if min_neighbor_dist < 2.0 and linear_x < 0.12:
+                if self._yield_stall_since is None:
+                    self._yield_stall_since = now_mono
+            else:
+                self._yield_stall_since = None
+                self._yield_stall_logged = False
+            if (
+                not is_master
+                and nearest is not None
+                and self._yield_stall_since is not None
+                and (now_mono - self._yield_stall_since) > 3.0
+                and min_neighbor_dist > 0.45
+            ):
+                nb_id = str(getattr(nearest, 'usv_id', '') or '')
+                if nb_id and str(self._usv_id) < nb_id:
+                    linear_x = max(linear_x, 0.22)
+                    # Same escort-lock fix as the master push-through above:
+                    # steer toward the goal while pushing through, otherwise
+                    # the elected master just escorts the yielding boat.
+                    # fresh630: blend 0.5->0.85, threshold 0.35->0.20 rad.
+                    he = float(observation.heading_error)
+                    if abs(he) > 0.20:
+                        goal_omega = max(-1.0, min(1.0, he / 0.5)) * 0.45
+                        angular_z = 0.15 * angular_z + 0.85 * goal_omega
+                    if not self._yield_stall_logged:
+                        self.get_logger().warning(
+                            f'Dual-give-way stall detected (sep={min_neighbor_dist:.2f}m, '
+                            f'>3s at creep speed): ID election overrides latched role, '
+                            f'{self._usv_id} pushes through past {nb_id}.'
+                        )
+                        self._yield_stall_logged = True
+
+            # fresh630 ORBIT-LOCK BREAKER (SITL 2026-07-15 175946 t=130-250):
+            # two boats in a rigid binary orbit -- separation FROZEN at
+            # 0.42+/-0.02m for 120s, opposite near-constant omegas, both
+            # creeping. The dual-give-way breaker fired (usv_02 reached
+            # 0.20-0.25 at t=190-206) but the pair never separated because
+            # both hulls kept rotating around their common center. Detection
+            # here is SEPARATION-RATE based, not speed based: close (<0.9m)
+            # AND |d(sep)/dt| < 0.04 m/s sustained >4s = orbit lock.
+            # Symmetry break by deterministic ID election:
+            #   smaller ID  -> full goal steering (blend 0.9) + 0.25 m/s out
+            #   larger ID   -> omega damped x0.2, hold 0.06 m/s (stop circling)
+            now_mono2 = time.monotonic()
+            if min_neighbor_dist < 0.9 and nearest is not None:
+                prev = self._orbit_lock_prev_sep
+                self._orbit_lock_prev_sep = (now_mono2, min_neighbor_dist)
+                sep_rate = None
+                if prev is not None and now_mono2 - prev[0] > 1e-3:
+                    sep_rate = abs(min_neighbor_dist - prev[1]) / (now_mono2 - prev[0])
+                if sep_rate is not None and sep_rate < 0.04:
+                    if self._orbit_lock_since is None:
+                        self._orbit_lock_since = now_mono2
+                else:
+                    self._orbit_lock_since = None
+                if (
+                    self._orbit_lock_since is not None
+                    and (now_mono2 - self._orbit_lock_since) > 4.0
+                ):
+                    nb_id2 = str(getattr(nearest, 'usv_id', '') or '')
+                    he2 = float(observation.heading_error)
+                    if nb_id2 and str(self._usv_id) < nb_id2:
+                        # Elected master: hard goal steering, push straight out.
+                        goal_omega2 = max(-1.0, min(1.0, he2 / 0.5)) * 0.60
+                        angular_z = 0.10 * angular_z + 0.90 * goal_omega2
+                        linear_x = max(linear_x, 0.25)
+                    else:
+                        # Elected slave: stop feeding the orbit -- damp the turn
+                        # and hold nearly still until the master clears out.
+                        angular_z *= 0.2
+                        linear_x = min(linear_x, 0.06)
+                    if not self._orbit_lock_logged:
+                        self.get_logger().warning(
+                            f'Orbit lock detected (sep={min_neighbor_dist:.2f}m frozen '
+                            f'>4s): {self._usv_id} '
+                            f'{"pushes out to goal" if nb_id2 and str(self._usv_id) < nb_id2 else "damps turn and waits"} '
+                            f'(peer={nb_id2}).'
+                        )
+                        self._orbit_lock_logged = True
+            else:
+                self._orbit_lock_since = None
+                self._orbit_lock_prev_sep = None
+                self._orbit_lock_logged = False
 
         if self._clear_ahead_route_gate_active(observation):
             raw_linear = max(self._clear_ahead_route_min_speed, float(observation.raw_linear_x))
@@ -1332,7 +1603,13 @@ class PolicyInferenceNode(Node):
             if abs(float(observation.raw_angular_z)) > 1e-4:
                 route_omega = float(observation.raw_angular_z)
             else:
-                route_omega = -max(-1.0, min(1.0, float(observation.heading_error) / self._clear_ahead_route_heading_reference)) * self._clear_ahead_route_max_omega
+                # SIGN FIX (SITL 2026-07-14 135017 usv_02 RUNAWAY): omega must be
+                # the SAME sign as heading_error to converge (he_dot = -omega_yaw,
+                # see turn governor note). The old negative sign made he=180deg a
+                # STABLE equilibrium: when the raw command source died (zeros from
+                # t=483s) this fallback drove the boat straight AWAY from its goal
+                # for 330s at 0.16 m/s until 37m off-field.
+                route_omega = max(-1.0, min(1.0, float(observation.heading_error) / self._clear_ahead_route_heading_reference)) * self._clear_ahead_route_max_omega
             route_omega = max(-self._clear_ahead_route_max_omega, min(self._clear_ahead_route_max_omega, route_omega))
             linear_x = (
                 (1.0 - self._clear_ahead_route_linear_blend) * linear_x
@@ -1388,6 +1665,16 @@ def main(argv=None):
             clear_ahead_route_min_speed=args.clear_ahead_route_min_speed,
             clear_ahead_route_max_omega=args.clear_ahead_route_max_omega,
             clear_ahead_route_heading_reference=args.clear_ahead_route_heading_reference,
+            turn_governor_enabled=not args.disable_turn_governor,
+            turn_governor_floor=args.turn_governor_floor,
+            turn_governor_min_speed=args.turn_governor_min_speed,
+            turn_governor_cruise=args.turn_governor_cruise,
+            turn_assist_enabled=not args.disable_turn_assist,
+            turn_assist_threshold_deg=args.turn_assist_threshold_deg,
+            turn_assist_release_deg=args.turn_assist_release_deg,
+            turn_assist_min_separation=args.turn_assist_min_separation,
+            turn_assist_max_omega=args.turn_assist_max_omega,
+            turn_assist_blend=args.turn_assist_blend,
         )
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

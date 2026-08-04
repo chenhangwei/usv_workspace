@@ -20,6 +20,13 @@ class RewardConfig:
     anticipation_distance: float = 5.0
     conflict_risk_weight: float = 1.5
     conflict_bearing_floor: float = 0.3
+    # Dedicated CPA-based conflict-risk (CRI) knobs. 0 -> legacy fallback
+    # (anticipatory_cpa_time_horizon / max(near_miss, anticipatory_dcpa_target)).
+    # A longer horizon and a wider safe-pass distance make the predictive risk
+    # (and the gates it drives, e.g. clear_ahead) wake up EARLIER, so avoidance
+    # begins while there is still room, instead of after a panic at ~5 m.
+    conflict_risk_time_horizon: float = 0.0
+    conflict_risk_safe_dcpa: float = 0.0
     conflict_brake_weight: float = 1.2
     conflict_progress_scale: float = 0.6
     conflict_resolution_reward_weight: float = 0.9
@@ -30,9 +37,71 @@ class RewardConfig:
     path_deviation_conflict_scale: float = 0.9
     path_deviation_use_unclipped_cte: bool = False
     path_deviation_exclude_overtaking: bool = False
+    # fresh627 path economy: per-step penalty on max(0, travel - progress).
+    # Straight-to-goal motion is free; lateral drift costs 1x travel; moving
+    # AWAY costs ~2x (travel + lost progress). Standing still costs ZERO --
+    # this is what makes "slow down and wait" strictly cheaper than "swing
+    # wide around", per the user's route-first arbiter (2026-07-10).
+    path_inefficiency_penalty_weight: float = 0.0
+    # fresh627 arrival quality: extra bonus at each waypoint pass / final
+    # arrival scaled by (1 - pass_distance/goal_tolerance): full bonus for
+    # threading the center, zero for grazing the acceptance-radius edge.
+    waypoint_pass_quality_bonus: float = 0.0
+    # fresh628 strict master/slave avoidance (user 2026-07-11: "避让一定要有
+    # 主从, 主船快速通过, 从船慢速轻微避让, 风险降低后快速通过"). Gated by
+    # conflict risk and the pair's role labels from classify_encounter_role
+    # (strict one-give-way/one-stand-on complement):
+    #   stand-on: rewarded for HOLDING cruise speed through the encounter
+    #   give-way: rewarded for slowing toward role_giveway_speed while risk is
+    #             high; the gate releases as predicted risk decays, whereupon
+    #             the normal cruise/idle terms drive a prompt resume.
+    role_speed_asymmetry_weight: float = 0.0
+    role_giveway_speed: float = 0.14
+    # fresh628 effective turn-in-place (SITL 2026-07-11: after a waypoint
+    # switch the policy held FULL cruise speed for ~10s with heading error
+    # 135-173 deg, sailing AWAY before a huge U-arc back; 30/30 switches
+    # inefficient). No existing term punishes "full speed while pointing the
+    # wrong way" (turn-speed-coupling only fires while TURNING). This one
+    # taxes forward speed scaled by (1-cos(heading_error)) once |he| exceeds
+    # the threshold: slow-spin-then-go becomes the cheapest transit through
+    # a waypoint switch.
+    wrong_heading_speed_penalty_weight: float = 0.0
+    wrong_heading_speed_threshold_deg: float = 60.0
+    # fresh633 head-to-head fix (SITL 2026-07-24: vessels held bow-on-goal at
+    # <3 m separation with heading error <15 deg for 80-93% of close-range
+    # samples, because the wrong-heading speed tax makes any large avoidance
+    # turn strictly more expensive than braking straight ahead -> bow-to-bow
+    # standoffs). This relief scales the tax DOWN by conflict risk:
+    # effective_weight = ww_w * (1 - relief * min(conflict_risk, 1)).
+    # 0.0 = legacy behaviour (tax always fully applied); 1.0 = tax fully
+    # waived at max conflict, so "keep speed, turn hard away" becomes free
+    # exactly when a neighbor is on a collision course.
+    wrong_heading_conflict_relief: float = 0.0
+    # fresh629 short-side turn internalisation: penalise omega turning the FAR
+    # side while |heading error| is large. sign(he)*omega > 0 is the short
+    # side (converging); this taxes the wrong-signed component so the policy
+    # itself learns minimum-heading-error turn direction and the deployment
+    # turn-assist becomes redundant.
+    far_side_turn_penalty_weight: float = 0.0
+    far_side_turn_threshold_deg: float = 45.0
+    # fresh629 same-goal queue shaping (user: "同时同方向到达同一目标点,
+    # 同航点排队"): when my goal and a neighbour's goal are clustered AND the
+    # neighbour is CLOSER to the shared goal AND physically near me, I am the
+    # queue FOLLOWER: rewarded for holding low speed + separation, penalised
+    # for pressing in. The leader keeps normal progress rewards (no term).
+    goal_queue_weight: float = 0.0
+    goal_queue_cluster_radius: float = 1.5
+    goal_queue_engage_distance: float = 4.0
+    goal_queue_follower_speed: float = 0.12
+    goal_queue_min_separation: float = 1.2
     desired_conflict_speed: float = 0.26
     stop_go_penalty_weight: float = 1.8
     head_on_guidance_distance: float = 5.0
+    # Optional dedicated lookahead for crossing/overtaking starboard guidance.
+    # 0 -> legacy max(anticipation_distance, conflict_distance). A larger value
+    # lets the COLREGS turn reward wake earlier, in step with the extended CRI
+    # horizon, so guidance and risk agree on "start avoiding sooner".
+    crossing_guidance_distance: float = 0.0
     head_on_target_starboard_offset: float = 1.0
     head_on_corridor_reward_weight: float = 2.4
     head_on_centerline_penalty_weight: float = 2.8
@@ -69,6 +138,15 @@ class RewardConfig:
     angular_accel_penalty_weight: float = 0.0
     straight_line_omega_penalty_weight: float = 2.0
     saturated_omega_flip_penalty_weight: float = 0.0
+    # Turn-speed coupling: enforce "obtuse turn -> keep speed, acute turn -> slow
+    # for a tight radius (R=v/omega)". Penalises forward speed in EXCESS of a
+    # turn-appropriate cap derived from |heading_error| to the goal. At/near
+    # alignment the cap is full cruise (no penalty); as the required turn grows
+    # toward 90deg the cap drops to ``turn_speed_coupling_floor`` * cruise.
+    # Conflict-relieved so it never fights an avoidance manoeuvre. Default OFF.
+    turn_speed_coupling_penalty_weight: float = 0.0
+    turn_speed_coupling_floor: float = 0.5
+    turn_speed_coupling_deadband_deg: float = 25.0
     # Penalise forward-speed oscillation (|vx_t - vx_{t-1}|) independent of conflict state.
     forward_speed_change_penalty_weight: float = 0.0
     # Lower saturation threshold for omega-flip detection (default 0.65 is too high).

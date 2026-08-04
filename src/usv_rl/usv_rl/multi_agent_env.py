@@ -43,6 +43,11 @@ class MultiAgentEnvConfig:
     enable_rl_backend: bool = True
     rl_control_mode: str = 'pure'
     action_mode: str = 'full'
+    # fresh600: lower bound of the throttle scale for action_mode='speed_scale'.
+    # In that mode the policy emits a scale in [action_speed_scale_min, 1.0] that
+    # multiplies the nav-layer forward speed, so the craft can ease off to yield
+    # but can never stop or reverse (kills the "stop to avoid" degenerate optimum).
+    action_speed_scale_min: float = 0.25
     max_neighbors: int = 4
     max_agents: int = 3
     cruise_speed: float = 0.4
@@ -231,6 +236,7 @@ class MultiAgentEnv(gym.Env):
         self._previous_actions: Dict[str, np.ndarray] = {}
         self._previous_forward_speeds: Dict[str, float] = {}
         self._previous_conflict_risks: Dict[str, float] = {}
+        self._previous_positions: Dict[str, tuple] = {}
         self._previous_cpa_metrics: Dict[str, Dict[str, Dict[str, float]]] = {}
         self._latest_observations: Dict[str, AgentLocalObservation] = {}
         self._low_speed_recovery_floor_diagnostics: Dict[str, Dict[str, object]] = {}
@@ -254,8 +260,11 @@ class MultiAgentEnv(gym.Env):
         self._ensure_runtime()
 
     def _validate_action_config(self):
-        if self.config.action_mode != 'full':
-            raise ValueError('Pure RL control requires action_mode="full".')
+        if self.config.action_mode not in ('full', 'speed_scale', 'angular_only'):
+            raise ValueError(
+                'Pure RL control requires action_mode in '
+                '{"full", "speed_scale", "angular_only"}.'
+            )
 
     def _pure_linear_speed_limit(self) -> float:
         return max(float(self.config.action_bounds.linear_delta), float(self.config.cruise_speed))
@@ -264,14 +273,23 @@ class MultiAgentEnv(gym.Env):
         return max(float(self.config.action_bounds.angular_delta), float(self.config.max_angular_velocity))
 
     def _policy_action_bounds(self) -> tuple[np.ndarray, np.ndarray]:
-        low = np.asarray([
-            0.0,
-            -self._pure_angular_speed_limit(),
-        ], dtype=np.float32)
-        high = np.asarray([
-            self._pure_linear_speed_limit(),
-            self._pure_angular_speed_limit(),
-        ], dtype=np.float32)
+        omega = self._pure_angular_speed_limit()
+        if self.config.action_mode == 'angular_only':
+            # 1D action: just the angular-velocity command.
+            return (
+                np.asarray([-omega], dtype=np.float32),
+                np.asarray([omega], dtype=np.float32),
+            )
+        if self.config.action_mode == 'speed_scale':
+            # 2D action: [throttle_scale in [s_min, 1.0], omega].
+            scale_min = float(np.clip(self.config.action_speed_scale_min, 0.0, 1.0))
+            return (
+                np.asarray([scale_min, -omega], dtype=np.float32),
+                np.asarray([1.0, omega], dtype=np.float32),
+            )
+        # 'full': 2D action [linear_x in [0, max], omega].
+        low = np.asarray([0.0, -omega], dtype=np.float32)
+        high = np.asarray([self._pure_linear_speed_limit(), omega], dtype=np.float32)
         return low, high
 
     @property
@@ -382,11 +400,20 @@ class MultiAgentEnv(gym.Env):
 
     def project_policy_action(self, agent_id: str, action) -> np.ndarray:
         observation = self._latest_observations.get(agent_id)
+        if self.config.action_mode == 'angular_only':
+            # Promote [omega] -> [0.0, omega] so the shared 2D projector applies
+            # angular smoothing/authority. The linear slot is ignored downstream.
+            arr = np.asarray(action, dtype=np.float32).reshape(-1)
+            action = np.asarray([0.0, arr[0]], dtype=np.float32)
         raw_linear_x = None if observation is None else observation.raw_linear_x
+        # The action handed to the shared projector is always a normalised 2D
+        # [linear-ish, omega] vector (angular_only is promoted above; speed_scale
+        # is natively 2D), and non-full modes consume only the projected omega.
+        # So the projector always runs in 'full' geometry here.
         return project_rl_policy_action(
             action,
             rl_control_mode='pure',
-            action_mode=self.config.action_mode,
+            action_mode='full',
             linear_delta_limit=self._pure_linear_speed_limit(),
             angular_delta_limit=self._pure_angular_speed_limit(),
             raw_linear_x=raw_linear_x,
@@ -411,11 +438,25 @@ class MultiAgentEnv(gym.Env):
         *,
         conflict_level: float,
         goal_proximity: float = 0.0,
+        apply_heading_gate: bool = True,
+        apply_conflict_relief: bool = True,
     ) -> float:
         cruise_speed = max(0.18, self._pure_linear_speed_limit())
-        target_speed = cruise_speed * (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0)))
-        heading_gate = 0.30 + 0.70 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
-        target_speed *= heading_gate
+        # fresh602: in speed_scale/angular_only the RL throttle scale owns ALL
+        # speed modulation, so the actuator path disables the nav-layer conflict
+        # relief (otherwise scale=1.0 still yields cruise*(1-0.55*conflict) and the
+        # craft crawls in every multi-USV conflict -- the fresh601 root cause).
+        # The reward-shaping callers keep relief on (apply_conflict_relief=True).
+        relief = (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0))) if apply_conflict_relief else 1.0
+        target_speed = cruise_speed * relief
+        # fresh601: the heading gate (slow down while turning) belongs to the
+        # full-mode reward heuristic. In speed_scale/angular_only the throttle is
+        # owned by the RL scale action, and gating v_nav on heading error makes a
+        # turning craft crawl (the fresh600 "turn-away-and-never-arrive" stall).
+        # So callers on the actuator path disable it; the reward path keeps it.
+        if apply_heading_gate:
+            heading_gate = 0.30 + 0.70 * max(0.0, math.cos(min(abs(observation.heading_error), math.pi / 2.0)))
+            target_speed *= heading_gate
         if goal_proximity > 0.0:
             target_speed *= max(
                 0.25,
@@ -475,15 +516,53 @@ class MultiAgentEnv(gym.Env):
 
         return float(max(np.hypot(goal.x - spawn.x, goal.y - spawn.y), self.config.goal_tolerance + 1e-3))
 
+    def _goal_proximity(self, observation: AgentLocalObservation) -> float:
+        """Normalised [0,1] proximity to goal (1.0 at goal_tolerance, 0.0 beyond relief)."""
+        relief_distance = max(
+            self.config.goal_tolerance + 1e-3,
+            self.config.goal_proximity_relief_distance,
+        )
+        if observation.distance_to_goal >= relief_distance:
+            return 0.0
+        proximity = (relief_distance - observation.distance_to_goal) / max(
+            relief_distance - self.config.goal_tolerance, 1e-3
+        )
+        return float(min(max(proximity, 0.0), 1.0))
+
+    def _nav_forward_speed(self, observation: Optional[AgentLocalObservation]) -> float:
+        """Nav-layer forward speed (conflict/heading/goal aware, always > 0)."""
+        if observation is None:
+            return max(0.18, self._pure_linear_speed_limit())
+        conflict_level = float(self._projection_conflict_level(observation))
+        goal_proximity = self._goal_proximity(observation)
+        return self._target_forward_speed(
+            observation,
+            conflict_level=conflict_level,
+            goal_proximity=goal_proximity,
+            apply_heading_gate=False,
+            apply_conflict_relief=False,
+        )
+
     def expand_policy_action(self, agent_id: str, action) -> tuple[float, float]:
         projected = self.project_policy_action(agent_id, action)
+        observation = self._latest_observations.get(agent_id)
+
         if self.config.action_mode == 'angular_only':
-            return 0.0, float(projected[0])
+            # RL steers only; nav layer owns forward speed (>0, never reverse).
+            return self._nav_forward_speed(observation), float(projected[1])
+
+        if self.config.action_mode == 'speed_scale':
+            # Throttle scale in [s_min, 1.0] modulates the nav-layer speed; the
+            # craft can ease off to yield but can never stop or reverse.
+            raw = np.asarray(action, dtype=np.float32).reshape(-1)
+            scale_min = float(np.clip(self.config.action_speed_scale_min, 0.0, 1.0))
+            scale = float(np.clip(raw[0], scale_min, 1.0))
+            return scale * self._nav_forward_speed(observation), float(projected[1])
+
         linear_x = float(projected[0])
         angular_z = float(projected[1])
         # Distance-aware speed scaling (mirrors SITL deployment behaviour)
         if self.config.speed_scale_distance > 0.0:
-            observation = self._latest_observations.get(agent_id)
             if observation is not None:
                 min_dist = observation.min_neighbor_distance()
                 if min_dist < self.config.speed_scale_distance:
@@ -1546,31 +1625,94 @@ class MultiAgentEnv(gym.Env):
         return pair_min
 
     def _compute_conflict_risk(self, observation: AgentLocalObservation) -> float:
+        """Predictive collision-risk index (CRI) from DCPA/TCPA (2026-07-01).
+
+        Replaces the previous ``proximity x range_rate x forward_factor``
+        heuristic, which fired on ANY neighbour that was close + closing +
+        ahead, regardless of whether the two tracks actually converge. That
+        made the policy a "frightened bird" that slowed/turned near parallel or
+        time-separated passers. Risk is now driven purely by the PREDICTED
+        closest point of approach:
+
+          * DCPA (how close the two hulls will actually pass), and
+          * TCPA (how soon that closest approach happens),
+
+        extrapolated from relative position/velocity. Consequences:
+
+          * range_rate <= 0 (opening) or TCPA <= 0 (CPA already past)  -> risk 0
+          * predicted pass DCPA >= safe distance (comfortable miss)     -> risk 0
+          * TCPA >= horizon (won't happen for a long time)              -> risk 0
+          * only a soon-AND-close encounter scores high, rising as TCPA
+            shrinks -> "the higher the risk, the earlier we avoid".
+
+        A small physical-proximity floor is kept for the near-contact band
+        where the CPA extrapolation is numerically unstable (e.g. two hulls
+        almost touching at near-zero relative velocity), so protection never
+        drops to zero when we are physically adjacent. The hard collision /
+        near-miss penalties elsewhere use measured ``pair_min`` directly and do
+        not depend on this signal, so the safety net is independent.
+        """
+        reward_cfg = self.config.reward
+        collision_distance = max(1e-3, float(self.config.collision_distance))
+        # Beyond this predicted closest-approach distance, a pass is treated as
+        # comfortable and contributes no risk. Dedicated CRI knob
+        # ``conflict_risk_safe_dcpa`` (0 -> legacy: max(near_miss, dcpa_target));
+        # a larger value asks for a wider comfortable-pass clearance so the
+        # graded risk wakes a little earlier for marginal passes. Always floored
+        # by the near-miss band so the danger zone spans collision..safe.
+        configured_safe = float(getattr(reward_cfg, 'conflict_risk_safe_dcpa', 0.0))
+        if configured_safe <= 0.0:
+            configured_safe = max(
+                float(self.config.near_miss_distance),
+                float(getattr(reward_cfg, 'anticipatory_dcpa_target', 0.0)),
+            )
+        safe_dcpa = max(collision_distance + 1e-3, float(self.config.near_miss_distance), configured_safe)
+        # Look-ahead time (seconds of simulated future). Dedicated CRI knob
+        # ``conflict_risk_time_horizon`` (independent of the anticipatory CPA
+        # reward's horizon). TCPA <= horizon is what temporally (and thereby
+        # spatially) gates the threat: a far neighbour on a collision course
+        # has a large TCPA and is ignored until it becomes imminent. No separate
+        # distance ceiling is used, because that would blind the CPA prediction
+        # to exactly the far-but-dead-ahead threats it exists to catch. A longer
+        # horizon = "look further ahead / avoid earlier" (not "be more afraid",
+        # since the DCPA gate still zeroes comfortable passes).
+        horizon = float(getattr(reward_cfg, 'conflict_risk_time_horizon', 0.0))
+        if horizon <= 0.0:
+            horizon = float(getattr(reward_cfg, 'anticipatory_cpa_time_horizon', 8.0))
+        horizon = max(1.0, horizon)
+        contact_band = 1.5 * collision_distance
+
         max_risk = 0.0
-        conflict_distance = max(
-            self.config.reward.anticipation_distance,
-            self.config.reward.conflict_distance,
-            self.config.collision_distance + 1e-3,
-        )
         for neighbor in observation.neighbors:
-            if neighbor.distance <= 1e-3 or neighbor.distance >= conflict_distance:
+            metrics = self._neighbor_cpa_metrics(neighbor)
+            distance = metrics['distance']
+            if distance <= 1e-3:
                 continue
 
-            range_rate = -(
-                (neighbor.rel_x * neighbor.rel_vx) +
-                (neighbor.rel_y * neighbor.rel_vy)
-            ) / max(neighbor.distance, 1e-3)
-            if range_rate <= 0.0:
-                continue
+            # Physical-proximity floor (near-contact only). Ramps from 0 at
+            # 1.5*collision to 0.5 at contact; never the dominant signal.
+            proximity_floor = 0.0
+            if distance < contact_band:
+                proximity_floor = 0.5 * (contact_band - distance) / max(contact_band, 1e-3)
 
-            bearing_floor = max(0.0, min(1.0, float(self.config.reward.conflict_bearing_floor)))
-            forward_factor = max(0.0, bearing_floor + (1.0 - bearing_floor) * float(np.cos(neighbor.bearing)))
-            if forward_factor <= 0.0:
-                continue
+            cpa_risk = 0.0
+            range_rate = metrics['range_rate']
+            tcpa = metrics['tcpa']
+            dcpa = metrics['dcpa']
+            if (
+                range_rate > 0.02
+                and np.isfinite(tcpa)
+                and 0.0 < tcpa <= horizon
+            ):
+                # DCPA gate: 1 at/inside the collision radius, 0 once the
+                # predicted pass reaches the safe distance.
+                dcpa_gate = (safe_dcpa - dcpa) / max(safe_dcpa - collision_distance, 1e-3)
+                dcpa_gate = max(0.0, min(1.0, dcpa_gate))
+                # TCPA gate: 0 at the horizon, -> 1 as the encounter is imminent.
+                time_gate = max(0.0, min(1.0, (horizon - tcpa) / horizon))
+                cpa_risk = dcpa_gate * time_gate
 
-            proximity = (conflict_distance - neighbor.distance) / conflict_distance
-            neighbor_risk = proximity * range_rate * forward_factor
-            max_risk = max(max_risk, neighbor_risk)
+            max_risk = max(max_risk, cpa_risk, proximity_floor)
 
         return max_risk
 
@@ -1851,6 +1993,7 @@ class MultiAgentEnv(gym.Env):
         lookahead_distance = max(
             self.config.reward.anticipation_distance,
             self.config.reward.conflict_distance,
+            float(getattr(self.config.reward, 'crossing_guidance_distance', 0.0)),
             self.config.collision_distance + 1e-3,
         )
         own_speed = max(0.0, float(observation.speed), float(observation.final_linear_x), float(observation.raw_linear_x))
@@ -2086,12 +2229,23 @@ class MultiAgentEnv(gym.Env):
             namespace: self._compute_conflict_risk(observations[namespace])
             for namespace in self._active_agent_ids
         }
+        self._previous_positions = {
+            namespace: (float(observations[namespace].pose_x), float(observations[namespace].pose_y))
+            for namespace in self._active_agent_ids
+        }
         self._previous_cpa_metrics = {
             namespace: self._collect_cpa_metrics(observations[namespace])
             for namespace in self._active_agent_ids
         }
         self._previous_pair_min: float = float('inf')
-        self._entanglement_steps: int = 0
+        # Per-agent entanglement counters (fresh624): the old single global
+        # counter keyed on fleet-wide pair_min punished ALL agents whenever
+        # ANY pair stayed close -- terrible credit assignment (a far-away boat
+        # got the same penalty as the two orbiting ones). Each agent now
+        # counts only its OWN sustained proximity.
+        self._entanglement_steps: Dict[str, int] = {
+            namespace: 0 for namespace in self._active_agent_ids
+        }
         self._episode_start = time.monotonic()
         self._last_team_progress_time = self._episode_start
         self._best_team_mean_distance = global_state.team_mean_goal_distance
@@ -2119,6 +2273,90 @@ class MultiAgentEnv(gym.Env):
     ) -> MultiAgentRewardBreakdown:
         progress_delta = self._previous_distances[agent_id] - observation.distance_to_goal
         progress = self.config.reward.progress_weight * progress_delta
+
+        # fresh627 path economy: penalise travel that does not shorten the
+        # distance to goal. Stationary waiting is free; lateral swings and
+        # loops pay for every wasted metre.
+        if self.config.reward.path_inefficiency_penalty_weight > 0.0:
+            prev_pos = self._previous_positions.get(agent_id)
+            if prev_pos is not None:
+                travel = math.hypot(
+                    float(observation.pose_x) - prev_pos[0],
+                    float(observation.pose_y) - prev_pos[1],
+                )
+                # Cap one-step travel to reject teleports (respawn/reset noise).
+                if travel < 0.5:
+                    inefficiency = max(0.0, travel - progress_delta)
+                    progress -= self.config.reward.path_inefficiency_penalty_weight * inefficiency
+
+        # fresh628 effective turn: tax forward speed while the bow points the
+        # wrong way. (1-cos) ramps smoothly: he=60deg -> 0.5, he=180deg -> 2.0.
+        # Makes "slow down, spin to the new leg, then accelerate" strictly
+        # cheaper than the observed "full-speed sail-away + U-arc" transient.
+        ww_w = self.config.reward.wrong_heading_speed_penalty_weight
+        if ww_w > 0.0:
+            he_abs = abs(float(observation.heading_error))
+            he_threshold = math.radians(float(self.config.reward.wrong_heading_speed_threshold_deg))
+            if he_abs > he_threshold:
+                wrong_gate = (1.0 - math.cos(he_abs)) - (1.0 - math.cos(he_threshold))
+                # fresh633: waive the tax proportionally to conflict risk so a
+                # large avoidance turn does NOT force a speed drop (root cause
+                # of the SITL 2026-07-24 bow-to-bow standoffs).
+                ww_relief = float(getattr(self.config.reward, 'wrong_heading_conflict_relief', 0.0))
+                ww_scale = 1.0
+                if ww_relief > 0.0:
+                    ww_scale = max(0.0, 1.0 - ww_relief * min(1.0, self._compute_conflict_risk(observation)))
+                progress -= ww_w * ww_scale * max(0.0, wrong_gate) * max(0.0, observation.final_linear_x)
+
+        # fresh629 short-side turn internalisation: tax the far-side omega
+        # component while far off-heading (sign(he)*omega < 0 diverges).
+        fs_w = self.config.reward.far_side_turn_penalty_weight
+        if fs_w > 0.0:
+            he_val = float(observation.heading_error)
+            if abs(he_val) > math.radians(float(self.config.reward.far_side_turn_threshold_deg)):
+                he_sign = 1.0 if he_val > 0.0 else -1.0
+                far_component = max(0.0, -he_sign * float(action[1]))
+                progress -= fs_w * far_component
+
+        # fresh629 same-goal queue shaping: follower holds back while the
+        # leader clears the shared waypoint cluster.
+        gq_w = self.config.reward.goal_queue_weight
+        if gq_w > 0.0 and self._scenario is not None and observation.neighbors:
+            my_goal = self._scenario.agent_goals.get(agent_id)
+            if my_goal is not None and observation.distance_to_goal < self.config.reward.goal_queue_engage_distance:
+                is_follower = False
+                for other_id in self._active_agent_ids:
+                    if other_id == agent_id:
+                        continue
+                    other_goal = self._scenario.agent_goals.get(other_id)
+                    other_obs = self._latest_observations.get(other_id)
+                    if other_goal is None or other_obs is None:
+                        continue
+                    goal_gap = math.hypot(other_goal.x - my_goal.x, other_goal.y - my_goal.y)
+                    if goal_gap > self.config.reward.goal_queue_cluster_radius:
+                        continue
+                    boat_gap = math.hypot(
+                        float(other_obs.pose_x) - float(observation.pose_x),
+                        float(other_obs.pose_y) - float(observation.pose_y),
+                    )
+                    if boat_gap > self.config.reward.goal_queue_engage_distance:
+                        continue
+                    # Leader = closer to its goal; deterministic ID tie-break.
+                    if (other_obs.distance_to_goal < observation.distance_to_goal - 1e-3) or (
+                        abs(other_obs.distance_to_goal - observation.distance_to_goal) <= 1e-3
+                        and str(other_id) < str(agent_id)
+                    ):
+                        is_follower = True
+                        my_sep = boat_gap
+                        break
+                if is_follower:
+                    hold_speed = max(0.05, float(self.config.reward.goal_queue_follower_speed))
+                    queue_forward_speed = max(0.0, float(observation.final_linear_x))
+                    overspeed = max(0.0, queue_forward_speed - hold_speed) / max(hold_speed, 1e-3)
+                    sep_deficit = max(0.0, self.config.reward.goal_queue_min_separation - my_sep) / max(self.config.reward.goal_queue_min_separation, 1e-3)
+                    progress += gq_w * (1.0 - min(1.0, overspeed)) * 0.5
+                    progress -= gq_w * min(1.5, overspeed) * 0.5
+                    progress -= gq_w * sep_deficit
 
         goal_proximity = 0.0
         relief_distance = max(self.config.goal_tolerance + 1e-3, self.config.goal_proximity_relief_distance)
@@ -2239,6 +2477,33 @@ class MultiAgentEnv(gym.Env):
             + self._compute_crossing_overtaking_guidance_reward(observation)
         )
         braking += self._compute_crossing_time_coordination_reward(observation)
+
+        # fresh628 strict master/slave speed asymmetry: the engaged pair's
+        # roles are strictly complementary (classify_encounter_role), so this
+        # term always pushes ONE boat to hold cruise and the OTHER to slow —
+        # never both. Gated by predicted conflict risk so the give-way boat
+        # resumes as soon as the risk decays.
+        role_w = self.config.reward.role_speed_asymmetry_weight
+        if role_w > 0.0 and observation.neighbors:
+            risk_gate = min(1.0, conflict_risk / 0.30)
+            if risk_gate > 0.05:
+                nearest_role = -1
+                nearest_d = float('inf')
+                for nb in observation.neighbors:
+                    if nb.distance < nearest_d and getattr(nb, 'role_index', -1) >= 0:
+                        nearest_d = nb.distance
+                        nearest_role = int(nb.role_index)
+                cruise = max(0.18, self._pure_linear_speed_limit())
+                if nearest_role == 1:
+                    # stand-on (主船): hold cruise speed — reward speed ratio.
+                    braking += role_w * risk_gate * min(1.0, current_forward_speed / cruise)
+                elif nearest_role == 0:
+                    # give-way (从船): slow toward the yield speed — penalise excess.
+                    yield_speed = max(0.05, float(self.config.reward.role_giveway_speed))
+                    overspeed = max(0.0, current_forward_speed - yield_speed) / max(cruise - yield_speed, 1e-3)
+                    braking += role_w * risk_gate * (1.0 - min(1.0, overspeed)) * 0.5
+                    braking -= role_w * risk_gate * min(1.0, overspeed) * 0.5
+
         progress += self._pure_goal_tracking_reward(
             observation,
             conflict_level=conflict_level,
@@ -2267,7 +2532,26 @@ class MultiAgentEnv(gym.Env):
 
         front_clear_gate = self._compute_clear_ahead_gate(observation)
         low_conflict_gate = max(0.0, 1.0 - (min(conflict_risk, 1.0) / 0.45))
-        clear_ahead_gate = front_clear_gate * low_conflict_gate
+        # fresh624 (2026-07-06 SITL star-route evidence): route discipline used
+        # to require a COMPLETELY EMPTY front cone (5m/35deg), so in a dense
+        # shared arena (neighbours <2m for ~65% of the mission) the CTE /
+        # straight-line / omega discipline almost never engaged -- CTE p90 hit
+        # 0.85-0.99m in the 2-5m neighbour band and boats swung wide arcs
+        # instead of hugging the route. With the PREDICTIVE CRI now validated
+        # (parallel / diverging / time-separated tracks score ~0), a neighbour
+        # in the cone that poses no predicted convergence must NOT disable
+        # route discipline. predictive_clear ramps 1 -> 0 over conflict_risk
+        # [0 .. 0.15]; a hard contact guard (inside near_miss_distance) still
+        # forces the old empty-cone requirement so near-contact geometry never
+        # gets "hold your line" shaping. low_conflict_gate keeps the hard zero
+        # above risk 0.45 (fresh619 lesson).
+        nearest_neighbor_distance = min(
+            (n.distance for n in observation.neighbors if n.distance > 1e-3),
+            default=float('inf'),
+        )
+        predictive_clear = max(0.0, 1.0 - min(1.0, conflict_risk / 0.15))
+        contact_guard = 1.0 if nearest_neighbor_distance >= self.config.near_miss_distance else 0.0
+        clear_ahead_gate = low_conflict_gate * max(front_clear_gate, predictive_clear * contact_guard)
         clear_ahead_route_gate = clear_ahead_gate * max(0.0, 1.0 - 0.65 * goal_proximity)
         clear_ahead_heading_penalty = 0.0
         if clear_ahead_route_gate > 0.0:
@@ -2375,11 +2659,14 @@ class MultiAgentEnv(gym.Env):
                 separation_delta = max(0.0, pair_min - prev_pair_min)
                 team += self.config.separation_recovery_weight * separation_delta
 
-        # Entanglement duration penalty: ramps up when any pair stays within
-        # entanglement_distance for longer than the grace period.  Discourages
-        # stable orbital locks where USVs circle each other indefinitely.
+        # Entanglement duration penalty (fresh624: PER-AGENT): ramps up when
+        # THIS agent stays within entanglement_distance of any neighbour for
+        # longer than the grace period.  Discourages stable orbital locks
+        # where USVs circle each other indefinitely, without punishing agents
+        # that are far from the tangle.
         if self.config.entanglement_penalty_weight > 0.0:
-            exceeded = max(0, self._entanglement_steps - self.config.entanglement_grace_steps)
+            own_entangled_steps = self._entanglement_steps.get(agent_id, 0)
+            exceeded = max(0, own_entangled_steps - self.config.entanglement_grace_steps)
             if exceeded > 0:
                 penalty_strength = min(10.0, exceeded / 5.0)
                 team -= self.config.entanglement_penalty_weight * penalty_strength
@@ -2416,12 +2703,23 @@ class MultiAgentEnv(gym.Env):
 
         # Heading convergence reward: positive reward for aligning closely with
         # the goal direction, encouraging straight-line tracking.
-        # Scale down during conflicts so it does not oppose avoidance turns.
-        if self.config.reward.heading_convergence_reward_weight > 0.0:
+        # Hard-gated by low_conflict_gate (same gate as clear_ahead, zero once
+        # conflict_risk >= 0.45) -- heading_scale alone floors at 0.1 and never
+        # fully disengages, which let this reward keep pulling the bow back
+        # toward the goal (i.e. NOT turning) even while a neighbour was
+        # actively closing, directly fighting the COLREGS avoidance-turn
+        # rewards (2026-07-01 fix: measured 8/9 offline collisions in
+        # head_on/crossing/overtaking after this term was added in fresh618).
+        if self.config.reward.heading_convergence_reward_weight > 0.0 and low_conflict_gate > 0.0:
             heading_threshold_rad = math.radians(max(1.0, self.config.reward.heading_convergence_threshold_deg))
             if abs(observation.heading_error) < heading_threshold_rad:
                 convergence_ratio = 1.0 - abs(observation.heading_error) / heading_threshold_rad
-                heading += self.config.reward.heading_convergence_reward_weight * heading_scale * convergence_ratio
+                heading += (
+                    self.config.reward.heading_convergence_reward_weight
+                    * heading_scale
+                    * low_conflict_gate
+                    * convergence_ratio
+                )
 
         # Heading correction direction reward: rewards turning in the
         # direction that reduces heading error (ω sign opposes error sign).
@@ -2440,6 +2738,30 @@ class MultiAgentEnv(gym.Env):
                 * max(0.0, min(1.0, direction_alignment / 0.20))
                 * error_magnitude
             )
+
+        # Turn-speed coupling: "obtuse turn -> keep speed, acute turn -> slow for a
+        # tight radius (R=v/omega)". Penalise forward speed ABOVE a turn-appropriate
+        # cap derived from |heading_error| to the goal. When aligned (gentle/obtuse
+        # leg) the cap is full cruise so full speed costs nothing; as the required
+        # turn grows toward 90deg the cap drops to ``floor*cruise`` so the policy is
+        # pushed to slow down and carve a small radius. Conflict-relieved so it never
+        # suppresses the speed needed to escape an avoidance manoeuvre.
+        if self.config.reward.turn_speed_coupling_penalty_weight > 0.0:
+            abs_he = abs(float(observation.heading_error))
+            deadband = math.radians(max(0.0, self.config.reward.turn_speed_coupling_deadband_deg))
+            if abs_he > deadband:
+                align = math.cos(min(abs_he, math.pi / 2.0))
+                cruise = max(1e-3, self._pure_linear_speed_limit())
+                floor = float(np.clip(self.config.reward.turn_speed_coupling_floor, 0.05, 1.0))
+                speed_cap = cruise * (floor + (1.0 - floor) * align)
+                excess = max(0.0, current_forward_speed - speed_cap)
+                if excess > 0.0:
+                    tsc_relief = max(0.2, 1.0 - min(conflict_risk, 1.0))
+                    heading -= (
+                        self.config.reward.turn_speed_coupling_penalty_weight
+                        * tsc_relief
+                        * (excess / cruise)
+                    )
 
         if team_progress_delta >= 0.0:
             team += self.config.team_progress_weight * team_progress_delta
@@ -2470,6 +2792,14 @@ class MultiAgentEnv(gym.Env):
         if terminated and all_reached:
             terminal += self.config.reward.goal_bonus
             terminal += self.config.team_completion_bonus
+            # fresh627 arrival quality: reward threading the goal center
+            # instead of grazing the acceptance-radius edge.
+            if self.config.reward.waypoint_pass_quality_bonus > 0.0:
+                pass_quality = max(
+                    0.0,
+                    1.0 - observation.distance_to_goal / max(self.config.goal_tolerance, 1e-3),
+                )
+                terminal += self.config.reward.waypoint_pass_quality_bonus * pass_quality
         if truncated:
             remaining_goal_ratio = min(
                 1.0,
@@ -2496,7 +2826,15 @@ class MultiAgentEnv(gym.Env):
             raw_action = actions.get(namespace, self.zero_policy_action())
             projected = self.project_policy_action(namespace, raw_action)
             projected_actions[namespace] = projected
-            command = self.expand_policy_action(namespace, projected)
+            # IMPORTANT: expand_policy_action projects internally and, for
+            # speed_scale/angular_only, reads the THROTTLE SCALE from its raw
+            # action argument. It must therefore receive the RAW action, not the
+            # already-projected one. Passing `projected` double-processed the
+            # scale (clamped-as-linear 1.0->0.34, then 0.34*v_nav) and capped the
+            # craft at cruise^2 ~= 0.116 m/s -- the real cause of the fresh600/601
+            # "crawl". For full mode expand(raw) == expand(projected) (projection
+            # is idempotent on an already-projected command), so this is safe.
+            command = self.expand_policy_action(namespace, raw_action)
             command = self._apply_low_speed_recovery_floor(
                 namespace,
                 command,
@@ -2548,13 +2886,20 @@ class MultiAgentEnv(gym.Env):
         terminated = collision or all_reached
         truncated = elapsed >= self.config.episode_timeout or (time.monotonic() - self._last_team_progress_time) >= self.config.no_progress_timeout
 
-        # Update entanglement counter (once per step, shared across agents)
+        # Update entanglement counters (fresh624: per agent, keyed on the
+        # agent's OWN nearest-neighbour distance so only the boats actually
+        # locked together accrue the penalty).
         if self.config.entanglement_penalty_weight > 0.0:
-            if np.isfinite(pair_min) and pair_min < self.config.entanglement_distance:
-                self._entanglement_steps += 1
-            else:
-                # Decay slowly when separated to remember recent entanglement history
-                self._entanglement_steps = max(0, self._entanglement_steps - 2)
+            for namespace in self._active_agent_ids:
+                own_nearest = min(
+                    (n.distance for n in observations[namespace].neighbors if n.distance > 1e-3),
+                    default=float('inf'),
+                )
+                if np.isfinite(own_nearest) and own_nearest < self.config.entanglement_distance:
+                    self._entanglement_steps[namespace] = self._entanglement_steps.get(namespace, 0) + 1
+                else:
+                    # Decay slowly when separated to remember recent entanglement history
+                    self._entanglement_steps[namespace] = max(0, self._entanglement_steps.get(namespace, 0) - 2)
 
         rewards = {}
         for namespace in self._active_agent_ids:
@@ -2571,6 +2916,7 @@ class MultiAgentEnv(gym.Env):
             )
             rewards[namespace] = breakdown.total
             self._previous_distances[namespace] = observation.distance_to_goal
+            self._previous_positions[namespace] = (float(observation.pose_x), float(observation.pose_y))
             self._previous_actions[namespace] = projected_actions[namespace]
             self._previous_forward_speeds[namespace] = max(0.0, observation.final_linear_x)
             self._previous_conflict_risks[namespace] = self._compute_conflict_risk(observation)
@@ -2583,10 +2929,21 @@ class MultiAgentEnv(gym.Env):
             for namespace in self._active_agent_ids:
                 rewards[namespace] += self.config.waypoint_bonus
                 obs = observations[namespace]
+                # fresh627 arrival quality: intermediate waypoints reward
+                # center-threading the same way the final goal does.
+                if self.config.reward.waypoint_pass_quality_bonus > 0.0:
+                    pass_quality = max(
+                        0.0,
+                        1.0 - obs.distance_to_goal / max(self.config.goal_tolerance, 1e-3),
+                    )
+                    rewards[namespace] += self.config.reward.waypoint_pass_quality_bonus * pass_quality
                 current_x, current_y = float(obs.pose_x), float(obs.pose_y)
                 current_yaw = float(obs.yaw)
-                # Random heading offset ±90° from current heading for the new leg.
-                angle_offset = self._rng.uniform(-math.pi / 2, math.pi / 2)
+                # Random heading offset ±150° from current heading for the new leg.
+                # fresh626: widened from ±90° — the pentagram mission needs 144°
+                # vertex turns, which were outside the old training range and
+                # caused loop/runaway transients at waypoint switches in SITL.
+                angle_offset = self._rng.uniform(-math.pi * 5.0 / 6.0, math.pi * 5.0 / 6.0)
                 new_heading = current_yaw + angle_offset
                 new_goal_x = current_x + self.config.goal_distance * math.cos(new_heading)
                 new_goal_y = current_y + self.config.goal_distance * math.sin(new_heading)

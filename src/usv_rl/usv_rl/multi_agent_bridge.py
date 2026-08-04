@@ -45,6 +45,14 @@ class MultiAgentTrainingBridge(Node):
 
         self._active_scenario: Optional[FleetScenario] = None
         self._scenario_start_time: float = 0.0
+        # fresh629 role latch (train/deploy parity with policy_inference_node):
+        # once a COLREGS role is assigned inside the latch radius, keep it for
+        # that (ego, neighbour) pair until separation exceeds the release
+        # radius. Prevents the low-speed role flicker that caused the fresh628
+        # mutual-yield near-contact (SITL 2026-07-12 102710).
+        self._role_latch: Dict[tuple, tuple] = {}
+        self._role_latch_radius = 2.5
+        self._role_latch_release = 3.5
 
         qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
         qos_reliable = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.RELIABLE)
@@ -181,9 +189,11 @@ class MultiAgentTrainingBridge(Node):
     def activate_scenario(self, scenario: FleetScenario):
         self._active_scenario = scenario
         self._scenario_start_time = time.monotonic()
+        self._role_latch.clear()
 
     def clear_scenario(self):
         self._active_scenario = None
+        self._role_latch.clear()
         for namespace in self._agent_namespaces:
             msg = FleetNeighborPoses()
             msg.header.stamp = self.get_clock().now().to_msg()
@@ -280,9 +290,9 @@ class MultiAgentTrainingBridge(Node):
             for other_namespace, state in current_states.items():
                 if other_namespace == namespace:
                     continue
-                neighbors.append(self._build_neighbor_observation(other_namespace, state, own_x, own_y, own_vx, own_vy, yaw))
+                neighbors.append(self._build_neighbor_observation(other_namespace, state, own_x, own_y, own_vx, own_vy, yaw, ego_id=namespace))
             for state in background_states:
-                neighbors.append(self._build_neighbor_observation(state.usv_id, state, own_x, own_y, own_vx, own_vy, yaw))
+                neighbors.append(self._build_neighbor_observation(state.usv_id, state, own_x, own_y, own_vx, own_vy, yaw, ego_id=namespace))
 
             observations[namespace] = AgentLocalObservation(
                 agent_id=namespace,
@@ -309,6 +319,8 @@ class MultiAgentTrainingBridge(Node):
         own_vx: float,
         own_vy: float,
         own_yaw: float,
+        *,
+        ego_id: str = '',
     ) -> AgentNeighborObservation:
         rel_x = state.x - own_x
         rel_y = state.y - own_y
@@ -334,9 +346,10 @@ class MultiAgentTrainingBridge(Node):
             dcpa = math.hypot(cpa_x, cpa_y)
             tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
         dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
-        # Per-neighbor COLREGS classification (Stage A.2). own_speed in the same
-        # frame as rel_*, mirroring the convention used by multi_agent_env reward
-        # shaping and evaluate_mappo_policy compliance checks.
+        # Per-neighbor COLREGS classification (Stage A.2). fresh628: relative
+        # vectors are WORLD-frame here; pass own_yaw so the classifier rotates
+        # into the ego body frame itself, plus ids for the deterministic
+        # head-on tie-break (strict one-give-way/one-stand-on complement).
         own_speed = math.hypot(own_vx, own_vy)
         encounter_type_index, role_index = classify_encounter_role(
             body_x=rel_x,
@@ -345,7 +358,19 @@ class MultiAgentTrainingBridge(Node):
             body_vy=rel_vy,
             distance=distance,
             own_speed=own_speed,
+            ego_id=ego_id,
+            neighbor_id=source_id,
+            own_yaw=own_yaw,
         )
+        # fresh629 role latch (see __init__).
+        latch_key = (str(ego_id), str(source_id))
+        if distance < self._role_latch_radius:
+            if role_index >= 0:
+                self._role_latch[latch_key] = (encounter_type_index, role_index)
+            elif latch_key in self._role_latch:
+                encounter_type_index, role_index = self._role_latch[latch_key]
+        elif distance > self._role_latch_release and latch_key in self._role_latch:
+            del self._role_latch[latch_key]
         return AgentNeighborObservation(
             source_id=source_id,
             rel_x=rel_x,

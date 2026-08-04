@@ -113,6 +113,9 @@ def extract_report_data(data: list, header_info: dict) -> dict:
                   if isinstance(d.get('heading_error_deg'), (int, float))]
     he_avg = sum(hes_guided)/len(hes_guided) if hes_guided else None
     he_max = max(hes_guided) if hes_guided else None
+    # 直线段航向误差 (与 analyze_nav_log 同口径: |he|<45° 视为直线段)
+    hes_straight = [h for h in hes_guided if h < 45.0]
+    he_straight_avg = sum(hes_straight)/len(hes_straight) if hes_straight else None
 
     mpc = {}
     if 'mpc_solve_time_ms' in data[0]:
@@ -124,9 +127,11 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         }
 
     om_cmds = [d.get('cmd_omega', 0) for d in data if isinstance(d.get('cmd_omega'), (int, float))]
+    _om_avg = sum(abs(o) for o in om_cmds)/len(om_cmds) if om_cmds else 0
     omega = {
-        'avg': sum(abs(o) for o in om_cmds)/len(om_cmds) if om_cmds else 0,
+        'avg': _om_avg,
         'max': max(abs(o) for o in om_cmds) if om_cmds else 0,
+        'std': (math.sqrt(sum((abs(o) - _om_avg)**2 for o in om_cmds)/len(om_cmds)) if om_cmds else 0.4),
     }
     zero_crossings = sum(1 for i in range(1, len(om_cmds)) if om_cmds[i-1]*om_cmds[i] < 0) if len(om_cmds) > 20 else 0
     osc_freq = zero_crossings / (2 * duration) if duration > 0 and zero_crossings > 0 else 0
@@ -298,6 +303,44 @@ def extract_report_data(data: list, header_info: dict) -> dict:
             'avg_speed': sum(spds_g)/len(spds_g) if spds_g else None,
             'guided_pct': len(gg)/len(gdata)*100 if gdata else 0,
         }
+
+        # === 每航段几何指标 (直线贴线优先判定, 2026-07-08) ===
+        # 降采样去高频噪声 (10Hz -> 1Hz)
+        _ds = gdata[::10] + ([gdata[-1]] if (len(gdata) - 1) % 10 else [])
+        _xs = [d.get('pose_x') for d in _ds if isinstance(d.get('pose_x'), (int, float))]
+        _ys = [d.get('pose_y') for d in _ds if isinstance(d.get('pose_y'), (int, float))]
+        _yaws = [d.get('pose_yaw_deg') for d in _ds if isinstance(d.get('pose_yaw_deg'), (int, float))]
+        if len(_xs) >= 3 and len(_xs) == len(_ys):
+            _path = sum(math.hypot(_xs[i+1]-_xs[i], _ys[i+1]-_ys[i]) for i in range(len(_xs)-1))
+            _tx = gdata[0].get('target_x'); _ty = gdata[0].get('target_y')
+            if isinstance(_tx, (int, float)) and isinstance(_ty, (int, float)):
+                _dg_end = gdata[-1].get('distance_to_goal')
+                _dg_end = _dg_end if isinstance(_dg_end, (int, float)) else 0.0
+                _straight = max(1.0, math.hypot(_tx-_xs[0], _ty-_ys[0]) - _dg_end)
+                pg['detour'] = _path / _straight
+        if len(_yaws) >= 3:
+            def _unw(p, c):
+                dd = c - p
+                while dd > 180: dd -= 360
+                while dd < -180: dd += 360
+                return dd
+            _acc = 0.0; _loops = 0; _net = 0.0
+            _peak = 0.0; _sacc = 0.0
+            _t0 = _ds[0].get('timestamp', 0)
+            for _i in range(len(_yaws)-1):
+                _d = _unw(_yaws[_i], _yaws[_i+1])
+                _net += abs(_d)
+                _acc += _d
+                if abs(_acc) >= 360.0:
+                    _loops += 1; _acc = 0.0
+                # 切换后 15s 内的累计回转峰值 (顶点切换瞬态)
+                if _ds[_i+1].get('timestamp', 0) - _t0 <= 15.0:
+                    _sacc += _d
+                    _peak = max(_peak, abs(_sacc))
+            pg['net_turn'] = _net
+            pg['loops'] = _loops
+            pg['switch_peak'] = _peak
+
         wv = [d.get('wifi_rssi_dbm', -100) for d in gdata
               if isinstance(d.get('wifi_rssi_dbm'), (int, float)) and d['wifi_rssi_dbm'] > -100]
         if wv:
@@ -319,19 +362,36 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'mpc_label': '优秀' if mpc.get('avg', 999) < 15 else '正常' if mpc.get('avg', 999) < 30 else '偏高' if mpc.get('avg', 999) < 50 else '过高',
     }
 
-    # ── 雷达图多维评分 (0-100) ──
-    # 路径跟踪: CTE越小越好, <0.05m→100, >0.5m→0
-    radar_tracking = max(0, min(100, 100 - (cte_avg or 0.5) / 0.5 * 100))
-    # 航向控制: 航向误差越小越好, <3°→100, >30°→0
-    radar_heading = max(0, min(100, 100 - (he_avg or 30) / 30 * 100))
+    # ── 雷达图多维评分 (0-100) —— 2026-07-08 用户判定标准 ──
+    # 优先级: ①贴线直线 ②少绕圈/少弧线 ③有效到点(含最终航点) ④散开不缠死 ⑤碰撞仅参考
+    # 路径贴线: CTE均值 ≤0.10m→100, ≥0.80m→0 (原 <0.05 满分过严, 不匹配实船尺度)
+    radar_tracking = max(0, min(100, (1 - ((cte_avg or 0.8) - 0.10) / 0.70) * 100))
+    # 直线走线(少绕弯): 绕圈次数 + 每段绕行率 (detour>1.15 开始扣分)
+    _loops_total = sum(g.get('loops', 0) for g in per_goal)
+    _detours = [g['detour'] for g in per_goal if isinstance(g.get('detour'), (int, float))]
+    _detour_excess = (sum(max(0.0, dv - 1.15) for dv in _detours) / len(_detours)) if _detours else 0.0
+    radar_straight = max(0, min(100, 100 - _loops_total * 30 - _detour_excess * 80))
+    # 切换回转(顶点瞬态): 航点切换后15s内累计回转峰值的最差段
+    # 五角星顶点需 144°: ≤170°=满分(正常转弯), ≥400°=0(选错方向/绕圈)
+    _peaks = [g['switch_peak'] for g in per_goal if isinstance(g.get('switch_peak'), (int, float))]
+    _worst_peak = max(_peaks) if _peaks else 0.0
+    radar_transient = max(0, min(100, (1 - (_worst_peak - 170.0) / (400.0 - 170.0)) * 100))
+    # 航向控制: 直线段航向误差 ≤8°→100, ≥40°→0 (原 <3° 满分过严且误用全程均值含转弯段)
+    radar_heading = max(0, min(100, (1 - ((he_straight_avg if he_straight_avg is not None else 40) - 8.0) / 32.0) * 100))
     # 航行速度: guided均速越接近0.35越好
     radar_speed = min(100, (velocity['guided_avg'] / 0.35) * 100) if velocity['guided_avg'] > 0 else 0
     # 行为平滑: omega std越小越好, <0.05→100, >0.4→0
     omega_std = omega.get('std', 0.4) if omega else 0.4
     radar_smooth = max(0, min(100, 100 - omega_std / 0.4 * 100))
-    # 任务进度: 航点到达率 (arrived + passed)
-    arrived_count = sum(1 for g in per_goal if g.get('arrival') in ('arrived', 'passed'))
-    radar_progress = (arrived_count / len(per_goal) * 100) if per_goal else 0
+    # 到点能力: 中途航点通过率×50 + 最终航点到达×50 (fresh625 最终航点 2/3 失败驱动)
+    if per_goal:
+        _mid = per_goal[:-1]
+        _mid_ok = sum(1 for g in _mid if g.get('arrival') in ('arrived', 'passed'))
+        _mid_score = (_mid_ok / len(_mid) * 100) if _mid else 100.0
+        _final_ok = per_goal[-1].get('arrival') in ('arrived', 'passed')
+        radar_progress = _mid_score * 0.5 + (100.0 if _final_ok else 0.0) * 0.5
+    else:
+        radar_progress = 0
     # 安全避让: 基于邻船最近距离 (全程最小距离越大越安全)
     # 仅在避让交互期间(encounter_type>=0 或 邻船距离<15m)计算最近距离
     # 避让中最近距离越大 = 模型越能维持安全间距
@@ -367,8 +427,8 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     if min_encounter_dist is None:
         radar_safety = 100  # 无避让交互: 单船或全程无会遇
     else:
-        # 碰撞距离0.75m→0分, 安全避让5m→100分
-        radar_safety = max(0, min(100, (min_encounter_dist - 0.75) / (5.0 - 0.75) * 100))
+        # 参考项(碰撞降权, 用户 2026-07-10): ≥0.75m(碰撞阈值外)→100分, ≤0.30m→0分
+        radar_safety = max(0, min(100, (min_encounter_dist - 0.30) / (0.75 - 0.30) * 100))
 
     # 脱离能力: 避让结束后多快拉开距离, 不会粘在一起
     # 检测 encounter 结束时刻 (enc_type从>=0变为-1), 然后计算恢复到脱离距离的用时
@@ -439,6 +499,8 @@ def extract_report_data(data: list, header_info: dict) -> dict:
 
     scoring['radar'] = {
         'tracking': round(radar_tracking, 1),
+        'straight': round(radar_straight, 1),
+        'transient': round(radar_transient, 1),
         'heading': round(radar_heading, 1),
         'speed': round(radar_speed, 1),
         'smooth': round(radar_smooth, 1),
@@ -446,6 +508,16 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'safety': round(radar_safety, 1),
         'disengage': round(radar_disengage, 1),
     }
+
+    # ── 综合评分按 2026-07-08 用户优先级重定权 ──
+    # 贴线 0.30 + 直线 0.20 + 到点 0.25 + 切换回转 0.10 + 平滑 0.05 + 速度 0.05 + 脱离 0.05
+    # (安全避让不计入总分, 仅雷达图参考)
+    total_score = (radar_tracking * 0.30 + radar_straight * 0.20 + radar_progress * 0.25
+                   + radar_transient * 0.10 + radar_smooth * 0.05 + radar_speed * 0.05
+                   + radar_disengage * 0.05)
+    grade = 'A+' if total_score >= 80 else 'A' if total_score >= 70 else 'B' if total_score >= 60 else 'C' if total_score >= 40 else 'D'
+    scoring['total'] = total_score
+    scoring['grade'] = grade
 
     # ── 时间序列 (降采样) ──
     step = max(1, len(data) // 2000)
@@ -757,6 +829,26 @@ body {{
 .replay-canvas-wrap canvas {{
   position:absolute; top:0; left:0; width:100%; height:100%;
 }}
+.replay-toggle-corner {{
+  position:absolute; top:10px; right:10px; z-index:5;
+  display:flex; flex-direction:column; gap:5px; align-items:flex-end;
+  max-width:60%;
+}}
+.replay-toggle-chip {{
+  display:inline-flex; align-items:center; gap:5px;
+  padding:3px 9px; border-radius:12px;
+  background:rgba(13,17,23,0.75); border:1.5px solid var(--border);
+  cursor:pointer; transition:all 0.2s; font-size:0.72rem;
+  backdrop-filter:blur(6px); user-select:none; color:var(--text2);
+  white-space:nowrap;
+}}
+.replay-toggle-chip:hover {{ background:rgba(13,17,23,0.92); }}
+.replay-toggle-chip.active {{
+  color:#e0e0e0; border-color:var(--chip-color,var(--accent));
+  box-shadow:0 0 8px var(--chip-glow,rgba(100,255,218,0.25));
+}}
+.replay-toggle-chip .dot {{ width:8px; height:8px; border-radius:50%; flex:none; }}
+.replay-toggle-chip.active .dot {{ box-shadow:0 0 4px currentColor; }}
 .replay-controls {{
   display:flex; align-items:center; gap:8px; padding:10px 14px;
   background:rgba(0,0,0,0.4); border-top:1px solid var(--border); flex-wrap:wrap;
@@ -844,7 +936,7 @@ body {{
   <div id="compare-area"></div>
   <div class="reading-guide">
     <strong>📊 对比总览阅读指南：</strong><br>
-    • <strong>评分</strong>：综合评分(0-100)，权重: CTE 40% + 航向误差 40% + MPC 10% + 速度 10%。A+≥80, A≥70, B≥60, C≥40, D&lt;40<br>
+    • <strong>评分</strong>：综合评分(0-100)，权重: 贴线30% + 直线20% + 到点25% + 切换回转10% + 平滑/速度/脱离各15%（碰撞不计分）。A+≥80, A≥70, B≥60, C≥40, D&lt;40<br>
     • <strong>均CTE</strong>：横向跟踪偏差均值，&lt;0.1m=优秀，0.1-0.3m=良好，0.3-0.5m=一般，&gt;0.5m=较差<br>
     • <strong>均航向误差</strong>：&lt;5°=优秀，5-10°=良好，10-20°=一般，&gt;20°=较差<br>
     • <strong>GUIDED%</strong>：自动导航模式占比，越高越稳定，低值意味着频繁切为HOLD模式<br>
@@ -857,14 +949,17 @@ body {{
   <div class="section-title"><span class="num">3</span> 多维评估雷达图</div>
   <div id="radar-chart" style="width:100%;height:480px;"></div>
   <div class="reading-guide">
-    <strong>🕸️ 雷达图阅读指南：</strong>六维度综合评估，每个维度 0-100 分，面积越大表现越好。<br>
-    • <strong>路径跟踪</strong>：横向偏差(CTE)精度，&lt;0.05m=满分<br>
-    • <strong>航向控制</strong>：航向误差，&lt;3°=满分<br>
-    • <strong>航行速度</strong>：巡航效率，接近0.35m/s=满分<br>
-    • <strong>行为平滑</strong>：角速度稳定性，低振荡=高分<br>
-    • <strong>任务进度</strong>：航点到达率，100%到达=满分<br>
-    • <strong>安全避让</strong>：避让交互期间与邻船的最近距离，≥5m=满分，≤0.75m=碰撞(0分)，无会遇=满分<br>
-    • <strong>脱离能力</strong>：避让结束后拉开距离的速度，平均脱离时间&lt;3s=满分，&gt;25s=0分，USV不会粘连/纠缠<br>
+    <strong>🕸️ 雷达图阅读指南（按 2026-07-08 判定：贴线直线优先，碰撞仅参考）：</strong>九维度评估，每维 0-100 分，面积越大表现越好。<br>
+    • <strong>路径贴线</strong>：CTE均值，≤0.10m=满分，≥0.80m=0（总分权重 0.30，最高优先级）<br>
+    • <strong>直线走线</strong>：绕圈次数（每次 -30 分）＋每段绕行率（detour&gt;1.15× 开始扣分）（权重 0.20）<br>
+    • <strong>到点能力</strong>：中途航点通过率×50% ＋ 最终航点到达×50%，最终航点失败直接折半（权重 0.25）<br>
+    • <strong>切换回转</strong>：航点切换后 15s 内累计回转峰值（五角星顶点需 144°），≤170°=满分，≥400°=0 即选错方向/绕圈（权重 0.10）<br>
+    • <strong>航向控制</strong>：直线段航向误差，≤8°=满分，≥40°=0（参考维度，不计入总分）<br>
+    • <strong>航行速度</strong>：巡航效率，接近0.35m/s=满分（权重 0.05）<br>
+    • <strong>行为平滑</strong>：角速度稳定性，低振荡=高分（权重 0.05）<br>
+    • <strong>安全间距(参考)</strong>：避让中最近邻船距离，≥0.75m=满分（碰撞阈值外即可），≤0.30m=0分，无会遇=满分。<em>不计入总分，碰撞只报告不作硬判据（除非缠死堆叠）</em><br>
+    • <strong>脱离能力</strong>：避让结束后拉开距离的速度，平均脱离时间&lt;3s=满分，&gt;25s=0分，USV不会粘连/纠缠（权重 0.05）<br>
+    <strong>综合评分</strong>＝贴线0.30＋直线0.20＋到点0.25＋切换回转0.10＋平滑/速度/脱离各 0.05（安全间距不计入）。<br>
     <strong>对比思路：</strong>多USV叠加时，形状差异一目了然，"短板维度"暴露最明显的问题方向。
   </div>
 </div>
@@ -874,6 +969,7 @@ body {{
   <div class="replay-container">
     <div class="replay-canvas-wrap">
       <canvas id="replay-canvas"></canvas>
+      <div class="replay-toggle-corner" id="replay-toggle-corner"></div>
     </div>
     <div class="replay-info" id="replay-info"></div>
     <div class="replay-controls">
@@ -893,6 +989,7 @@ body {{
     <strong>路径重放：</strong>实时回放各USV的航行轨迹。船形图标显示位置和朝向（参考GS导航预览风格）。<br>
     ▶ 播放/暂停 | ⏪⏩ 0.25x~16x变速 | 点击进度条跳转 | ⏮ 重新开始 |
     🟢起点 🔴终点 ⭐目标航点 | 🏷️ 显示/隐藏航点ID | 勾选USV即加入重放<br>
+    画面右上角的小标签可单独开/关每条USV的重放轨迹，与上方“USV 选择器”联动。<br>
     如果日志包含 RL 字段，船体外的青色光环表示该时刻 RL 策略输出正在介入控制。<br>
     到达标识(数据驱动)：🟢绿色=确认到达(distance≤1.5m) | 🟡黄色=偏离到达(距离>1.5m，偏离检测判定已到达) | 🔴红色=未到达
   </div>
@@ -1135,6 +1232,7 @@ function buildSelector() {{
       if(activeUSVs.has(u.idx)) activeUSVs.delete(u.idx);
       else activeUSVs.add(u.idx);
       chip.classList.toggle('active');
+      buildReplayToggle();
       refreshAll();
     }};
     chip.onmouseenter=()=>sfxHover();
@@ -1146,13 +1244,38 @@ function toggleAllUSV() {{
   initAudio(); sfxClick();
   if(activeUSVs.size===USV_LIST.length) activeUSVs.clear();
   else USV_LIST.forEach(u=>activeUSVs.add(u.idx));
-  buildSelector(); refreshAll();
+  buildSelector(); buildReplayToggle(); refreshAll();
+}}
+
+// ═══ 重放面板右上角USV开关 (与上方选择器共享 activeUSVs 状态) ═══
+function buildReplayToggle() {{
+  const el=document.getElementById('replay-toggle-corner');
+  if(!el) return;
+  el.innerHTML='';
+  USV_LIST.forEach(u=>{{
+    const chip=document.createElement('div');
+    chip.className='replay-toggle-chip'+(activeUSVs.has(u.idx)?' active':'');
+    chip.style.setProperty('--chip-color',u.color);
+    chip.style.setProperty('--chip-glow',u.color+'44');
+    chip.innerHTML=`<span class="dot" style="background:${{u.color}}"></span><span>${{u.id}}</span>`;
+    chip.title='显示/隐藏 '+u.id+' 的重放轨迹';
+    chip.onclick=()=>{{
+      initAudio(); sfxClick();
+      if(activeUSVs.has(u.idx)) activeUSVs.delete(u.idx);
+      else activeUSVs.add(u.idx);
+      chip.classList.toggle('active');
+      buildSelector();
+      refreshAll();
+    }};
+    chip.onmouseenter=()=>sfxHover();
+    el.appendChild(chip);
+  }});
 }}
 
 function refreshAll() {{
   buildSummaryCards(); buildCompareTable(); drawRadar(); drawTrajectory(); drawVelocity();
   drawCTE(); drawHE(); drawDistance(); drawControl(); drawMPC(); drawTau(); drawWifi();
-  buildPerGoal(); updateReplayInfo();
+  buildPerGoal(); updateReplayInfo(); renderReplayFrame();
 }}
 
 // ═══ 对比表 ═══
@@ -1198,13 +1321,13 @@ function drawRadar() {{
   if(!el) return;
   const active=getActive();
   if(!active.length) {{ Plotly.purge(el); return; }}
-  const cats=['路径跟踪','航向控制','航行速度','行为平滑','任务进度','安全避让','脱离能力'];
+  const cats=['路径贴线','直线走线','到点能力','切换回转','航向控制','行为平滑','航行速度','安全间距(参考)','脱离能力'];
   const traces=[];
   active.forEach(u=>{{
     const sc=ALL_SUM[u.idx];
     if(!sc||!sc.scoring||!sc.scoring.radar) return;
     const r=sc.scoring.radar;
-    const vals=[r.tracking,r.heading,r.speed,r.smooth,r.progress,r.safety,r.disengage||0];
+    const vals=[r.tracking,r.straight||0,r.progress,r.transient||0,r.heading,r.smooth,r.speed,r.safety,r.disengage||0];
     traces.push({{
       type:'scatterpolar',
       r:[...vals, vals[0]],
@@ -1793,8 +1916,9 @@ function renderReplayFrame() {{
     const tf=replayState._taskFade[tfKey];
     const hasOwnFade=(tf.prevTask!==undefined);
     const ownFading=(hasOwnFade&&tf.fadeStart!==undefined&&t-tf.fadeStart<fadeDur);
-    // 单任务USV: 全局渐隐已完成则不纳入视口
-    if(!hasOwnFade&&globalFadeTime!==null&&globalFadeTime!==undefined&&t-globalFadeTime>=fadeDur) return;
+    // 单任务USV: 仅当自身数据已结束(非仍在并发进行中)且全局渐隐已完成时才不纳入视口
+    const selfEnded=t>ts.time[ts.time.length-1];
+    if(!hasOwnFade&&selfEnded&&globalFadeTime!==null&&globalFadeTime!==undefined&&t-globalFadeTime>=fadeDur) return;
     // 只将当前任务(及渐隐中的旧任务)的轨迹点纳入视口范围
     for(let i=0;i<ts.pose_x.length;i++) {{
       const ti=ts.task_idx?ts.task_idx[i]:0;
@@ -1893,8 +2017,11 @@ function renderReplayFrame() {{
     const tfKey='u'+uK;
     const tf=replayState._taskFade[tfKey];
     const hasOwnTransition=(tf&&tf.prevTask!==undefined);
+    // 只有当该USV自身数据已经结束(不再是并发进行中的伙伴)时,才因为"其他USV切换任务"而渐隐——
+    // 避免仍在实时航行的USV因为另一艘USV内部切换目标段而被误判为"过时旧数据"淡出。
+    const selfEndedForFade=t>ts.time[ts.time.length-1];
     let baseA=1.0;
-    if(!hasOwnTransition&&globalFadeTime!==null&&globalFadeTime!==undefined) {{
+    if(!hasOwnTransition&&selfEndedForFade&&globalFadeTime!==null&&globalFadeTime!==undefined) {{
       const gfe=t-globalFadeTime;
       baseA=gfe>=fadeDur?0:1.0-gfe/fadeDur;
     }}
@@ -2160,7 +2287,7 @@ function renderReplayFrame() {{
 
 // ═══ 初始化 ═══
 function init() {{
-  buildSelector(); refreshAll(); renderReplayFrame();
+  buildSelector(); buildReplayToggle(); refreshAll(); renderReplayFrame();
 
   const observer=new IntersectionObserver((entries)=>{{
     entries.forEach(e=>{{

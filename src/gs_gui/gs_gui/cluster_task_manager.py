@@ -14,6 +14,8 @@
 负责集群任务的创建、执行、暂停和停止
 """
 import xml.etree.ElementTree as ET
+import os
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 
@@ -49,6 +51,43 @@ class ClusterTaskManager:
         
         # 集群任务进度信息
         self.cluster_progress_info = {}
+
+        # 任务文件选择窗口的目录记忆（减少重复扫描大目录）
+        self._last_task_dir = ""
+        self._last_task_file = ""
+        # 复用文件选择对话框，避免每次重建导致的闪隐/抖动
+        self._task_file_dialog = None
+
+    def _default_task_dir(self):
+        """返回默认任务文件目录（按优先级取第一个存在的）"""
+        candidates = [
+            self._last_task_dir,
+            os.path.expanduser("~/usv_workspace/src/Path File"),
+            os.path.expanduser("~/usv_workspace/Path File"),
+        ]
+        for d in candidates:
+            if d and os.path.isdir(d):
+                return d
+        return os.path.expanduser("~")
+
+    def _ensure_task_file_dialog(self):
+        """构建（或复用）任务文件选择对话框。
+
+        提前调用可预热：预先构建控件树并加载目录模型，
+        避免首次打开时边显示边加载导致的卡顿/闪烁。
+        """
+        if self._task_file_dialog is None:
+            dlg = QFileDialog(self.parent_widget)
+            dlg.setNameFilter("XML Files (*.xml)")
+            dlg.setFileMode(QFileDialog.ExistingFile)
+            dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+            dlg.setOption(QFileDialog.DontUseCustomDirectoryIcons, True)
+            dlg.setOption(QFileDialog.DontResolveSymlinks, True)
+            dlg.setViewMode(QFileDialog.List)
+            # 预加载默认目录，让目录模型在后台先填充
+            dlg.setDirectory(self._default_task_dir())
+            self._task_file_dialog = dlg
+        return self._task_file_dialog
     
     def set_update_status_callback(self, callback):
         """设置状态更新回调"""
@@ -216,14 +255,49 @@ class ClusterTaskManager:
     def read_data_from_file(self):
         """从XML文件中读取集群任务数据"""
         # 打开文件对话框，选择XML文件
-        file_dialog = QFileDialog(self.parent_widget)
-        file_dialog.setNameFilter("XML Files (*.xml)")
-        file_dialog.setFileMode(QFileDialog.ExistingFiles)
-        
+        # 性能优化：
+        # 1) 使用 Qt 非原生对话框，避免部分系统文件门户/网络挂载导致卡顿
+        # 2) 关闭自定义目录图标扫描，减少打开时的同步 I/O
+        # 3) 记忆上次目录，避免每次从慢路径重新扫描
+        # 4) 复用对话框实例，避免重复构建造成的“闪一下/隐藏一下”
+        file_dialog = self._ensure_task_file_dialog()
+
+        default_dir = self._default_task_dir()
+        # 仅目录真实变化时才重载，减少显示瞬间的模型刷新抖动
+        current_dir = file_dialog.directory().absolutePath()
+        if os.path.realpath(current_dir) != os.path.realpath(default_dir):
+            file_dialog.setDirectory(default_dir)
+        # 不强制清空上次选择，避免打开瞬间触发额外重绘
+        if self._last_task_file and os.path.isfile(self._last_task_file):
+            file_dialog.selectFile(self._last_task_file)
+
+        # WSLg/合成器兼容：对话框显示后可能未正确映射（需拖动才出现）。
+        # 在 exec_ 的事件循环内延时“轻推”：置顶激活 + 1px 尺寸抖动，
+        # 强制合成器重新映射并全量重绘。
+        def _nudge_dialog():
+            try:
+                if not file_dialog.isVisible():
+                    return
+                file_dialog.raise_()
+                file_dialog.activateWindow()
+                sz = file_dialog.size()
+                file_dialog.resize(sz.width() + 1, sz.height())
+                file_dialog.resize(sz)
+                file_dialog.update()
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _nudge_dialog)
+        QTimer.singleShot(120, _nudge_dialog)
+
         if file_dialog.exec_():
             xml_files = file_dialog.selectedFiles()
             if xml_files:
+                picked_dir = os.path.dirname(xml_files[0])
+                if picked_dir:
+                    self._last_task_dir = picked_dir
                 xml_file = xml_files[0]
+                self._last_task_file = xml_file
                 usv_list = []
                 
                 try:
@@ -417,7 +491,6 @@ class ClusterTaskManager:
                         QMessageBox.information(self.parent_widget, "XML 文件加载报告", info_text)
                         
                         # 更新状态指示器
-                        import os
                         file_name = os.path.basename(xml_file)
                         self._update_status(f"✅ 任务就绪: {file_name} (共 {total_steps} 步)", "ready")
 

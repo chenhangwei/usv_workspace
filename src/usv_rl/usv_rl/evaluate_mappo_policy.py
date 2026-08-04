@@ -563,12 +563,11 @@ def _load_json_payload(model_path: str) -> dict:
 def _require_supported_action_dim(action_dim: int | None, *, model_path: str | None):
     if action_dim is None:
         return
-    if int(action_dim) != 2:
+    if int(action_dim) not in (1, 2):
         source = model_path or 'the selected policy'
         raise RuntimeError(
-            'Pure RL evaluation only supports 2D full-action policies. '
-            f'Received action_dim={int(action_dim)} from {source}. '
-            'Please evaluate a pure policy checkpoint trained with action_mode="full".'
+            'Pure RL evaluation supports 1D (angular_only) or 2D (full/speed_scale) '
+            f'action policies. Received action_dim={int(action_dim)} from {source}.'
         )
 
 
@@ -676,9 +675,9 @@ def _build_env_kwargs_from_checkpoint(
     agent_namespaces = tuple(checkpoint['agent_namespaces'])
     resolved_scenarios = tuple(scenarios) if scenarios else tuple(checkpoint.get('scenarios', MultiAgentScenarioFactory.available()))
     resolved_action_mode = str(checkpoint.get('action_mode', 'full'))
-    if resolved_action_mode != 'full':
+    if resolved_action_mode not in ('full', 'speed_scale', 'angular_only'):
         raise RuntimeError(
-            'Pure RL evaluation only supports checkpoints exported with action_mode="full". '
+            'Pure RL evaluation supports action_mode in {"full", "speed_scale", "angular_only"}. '
             f'Received action_mode="{resolved_action_mode}" from {model_path}.'
         )
     resolved_max_neighbors = int(checkpoint.get('max_neighbors', max(1, int((policy.obs_dim - AgentLocalObservation.ego_feature_size() - ENCOUNTER_TYPE_COUNT) // NEIGHBOR_FEATURE_COUNT))))
@@ -688,6 +687,7 @@ def _build_env_kwargs_from_checkpoint(
         'enable_rl_backend': True,
         'rl_control_mode': 'pure',
         'action_mode': resolved_action_mode,
+        'action_speed_scale_min': float(checkpoint.get('action_speed_scale_min', 0.25)),
         'action_bounds': ActionBounds(**checkpoint.get('action_bounds', {'linear_delta': 0.7, 'angular_delta': 0.6})),
         'max_neighbors': resolved_max_neighbors,
         'max_agents': max(resolved_max_agents, len(agent_namespaces)),
@@ -702,8 +702,8 @@ def _build_env_kwargs_from_checkpoint(
         'episode_timeout': float(episode_timeout) if episode_timeout is not None else float(checkpoint.get('episode_timeout', 45.0)),
         'no_progress_timeout': float(no_progress_timeout) if no_progress_timeout is not None else float(checkpoint.get('no_progress_timeout', 10.0)),
         'min_progress_delta': float(checkpoint.get('min_progress_delta', 0.3)),
-        'collision_distance': float(checkpoint.get('collision_distance', 0.5)),
-        'near_miss_distance': float(checkpoint.get('near_miss_distance', 1.5)),
+        'collision_distance': _env_float('COLLISION_DISTANCE', float(checkpoint.get('collision_distance', 0.5))),
+        'near_miss_distance': _env_float('NEAR_MISS_DISTANCE', float(checkpoint.get('near_miss_distance', 1.5))),
         'scenario_neighbor_speed': float(checkpoint.get('scenario_neighbor_speed', 0.45)),
         'cte_clip_range': _env_float('CTE_CLIP_RANGE', float(checkpoint.get('cte_clip_range', 3.0))),
         'route_progress_cte_gate_start': _env_float('ROUTE_PROGRESS_CTE_GATE_START', float(checkpoint.get('route_progress_cte_gate_start', 0.0))),
@@ -2140,6 +2140,9 @@ def evaluate_policy(
                                     body_vy=bvy,
                                     distance=float(neighbor.distance),
                                     own_speed=own_speed,
+                                    ego_id=agent_id,
+                                    neighbor_id=str(getattr(neighbor, 'source_id', '')),
+                                    own_yaw=float(obs_obj.yaw),
                                 )
                                 if encounter_type == ENC_HEAD_ON:
                                     enc_type = 'head_on'

@@ -50,59 +50,136 @@ def classify_encounter_role(
     body_vy: float,
     distance: float,
     own_speed: float,
+    ego_id: str = '',
+    neighbor_id: str = '',
+    own_yaw: float = None,
 ) -> Tuple[int, int]:
     """Classify the COLREGS encounter type and ego role for a single pair.
 
-    All vectors expressed in the ego body frame:
-      body_x: forward-positive longitudinal offset to neighbor
-      body_y: port-positive lateral offset to neighbor (starboard is negative)
-      body_vx, body_vy: neighbor minus ego velocity, in ego body frame
+    Inputs (fresh628 CONVENTION FIX): both production callers
+    (multi_agent_bridge and policy_inference_node) pass WORLD-frame relative
+    vectors (neighbor minus ego), NOT body-frame as the old docstring
+    claimed — the old classifier silently mis-labelled every pair whose ego
+    heading was not ~east. Pass ``own_yaw`` (ego heading, world frame) and
+    the rotation into the ego body frame happens HERE; ``own_yaw=None``
+    preserves the legacy no-rotation behaviour for old callers.
+      body_x/body_y: relative offset to neighbor (world frame when own_yaw
+        given; ego body frame otherwise)
+      body_vx/body_vy: neighbor velocity minus ego velocity (same frame)
       distance: hypot(body_x, body_y)
       own_speed: ego linear speed (m/s)
+      ego_id / neighbor_id: stable USV identifiers used ONLY as the
+        deterministic tie-break for ambiguous geometry (fresh628).
 
     Returns (encounter_type, role) where:
       encounter_type ∈ {ENC_NONE, ENC_HEAD_ON, ENC_CROSSING, ENC_OVERTAKING}
       role ∈ {ROLE_NONE, ROLE_GIVE_WAY, ROLE_STAND_ON}
 
-    Thresholds mirror evaluate_mappo_policy.py compliance logic exactly
-    (and the strict subset of multi_agent_env.py overtaking_target).
+    fresh628 STRICT ROLE COMPLEMENT (user directive 2026-07-11): for every
+    engaged pair exactly ONE vessel is give-way (从船) and ONE is stand-on
+    (主船) -- never both. Guarantees, per encounter class:
+      * OVERTAKING (Rule 13): role from LONGITUDINAL ORDER -- the vessel
+        astern (the overtaker) gives way, the vessel ahead stands on. The
+        ahead/astern relation is exactly complementary between the two hulls,
+        so the pair can never disagree. This also fixes the old bug where
+        body_x <= 0 returned NONE and the overtaken vessel never learned it
+        was stand-on.
+      * CROSSING (Rule 15): the vessel that sees the other on her STARBOARD
+        side gives way; the other stands on. In converging crossing geometry
+        the starboard relation is complementary.
+      * HEAD-ON (Rule 14 says both give way, but the user's operational rule
+        requires a strict master/slave split): DETERMINISTIC ID TIE-BREAK --
+        lexicographically smaller id stands on (passes fast), larger id
+        gives way. Independent of noisy geometry, so both hulls always agree.
+        The near-reciprocal ambiguous band (|Δψ| in 135°..180°) where noisy
+        starboard tests flip is folded into this tie-break too.
+        fresh634 BAND FIX (SITL 2026-08-03): the band starts at 135° (was
+        150°), matching _HEAD_ON_COURSE_DEG in policy_inference_node. At
+        150° the two hulls' noisy |Δψ| estimates straddled the boundary in
+        oblique head-ons (measured 135°-167° while maneuvering), one hull
+        classified CROSSING/GIVE_WAY and the other HEAD_ON/GIVE_WAY ->
+        mutual yield -> the bow-to-bow standoff loop.
     """
-    if distance <= 1e-3 or body_x <= 0.0:
+    if distance <= 1e-3:
         return ENC_NONE, ROLE_NONE
+    if own_yaw is not None:
+        cos_y = math.cos(own_yaw)
+        sin_y = math.sin(own_yaw)
+        bx = cos_y * body_x + sin_y * body_y
+        by = -sin_y * body_x + cos_y * body_y
+        bvx = cos_y * body_vx + sin_y * body_vy
+        bvy = -sin_y * body_vx + cos_y * body_vy
+        body_x, body_y, body_vx, body_vy = bx, by, bvx, bvy
     closing_speed = -((body_x * body_vx) + (body_y * body_vy)) / max(distance, 1e-3)
-    neighbor_forward_speed = own_speed + body_vx
-    same_lane = body_x > 0.8 and abs(body_y) < 1.5
-    is_overtaking = (
-        same_lane
-        and own_speed > 0.18
-        and body_vx < -0.03
-        and neighbor_forward_speed > 0.05
-        and neighbor_forward_speed < own_speed - 0.02
-    )
-    opposing = neighbor_forward_speed < 0.05
-    lateral_tol = max(1.3, 0.28 * distance)
-    is_head_on = (
-        not is_overtaking
-        and opposing
-        and closing_speed > 0.0
-        and abs(body_y) < lateral_tol
-    )
-    is_crossing = (
-        body_y < -0.35
-        and closing_speed > -0.05
-        and not is_overtaking
-        and not is_head_on
-    )
-    if is_head_on:
-        # Rule 14: both vessels are give-way; symmetric.
-        return ENC_HEAD_ON, ROLE_GIVE_WAY
-    if is_crossing:
-        # Rule 15: neighbor on starboard (body_y < 0) ⇒ ego is give-way.
-        return ENC_CROSSING, ROLE_GIVE_WAY
-    if is_overtaking:
-        # Rule 13: faster vessel approaching from behind a slower one is the
-        # overtaker and must keep clear ⇒ ego is give-way.
-        return ENC_OVERTAKING, ROLE_GIVE_WAY
+    # Reconstruct the neighbour's velocity in the ego body frame: ego travels
+    # (own_speed, 0) in her own frame, rel_v = neighbour_v - ego_v.
+    nb_vx = own_speed + body_vx
+    nb_vy = body_vy
+    nb_speed = math.hypot(nb_vx, nb_vy)
+    both_slow = own_speed < 0.05 and nb_speed < 0.05
+    # fresh634: both_slow only disengages beyond 3m -- a stalled close-quarters
+    # pair must keep its roles so shaping can push the stand-on hull out.
+    if (both_slow and distance > 3.0) or (closing_speed <= 0.0 and distance > 3.0):
+        return ENC_NONE, ROLE_NONE
+    # Relative course of the neighbour w.r.t. ego heading (ego heading = 0 in
+    # her own body frame). |delta| near pi => reciprocal (head-on) courses.
+    delta_psi = math.atan2(nb_vy, nb_vx) if nb_speed > 0.03 else 0.0
+    abs_delta = abs(delta_psi)
+
+    def _tie_break() -> int:
+        # Deterministic, geometry-independent: smaller id stands on.
+        if ego_id and neighbor_id:
+            return ROLE_STAND_ON if str(ego_id) < str(neighbor_id) else ROLE_GIVE_WAY
+        # No ids available (legacy caller): fall back to Rule 14 give-way.
+        return ROLE_GIVE_WAY
+
+    # --- OVERTAKING (Rule 13): near-parallel courses, one clearly faster,
+    # same lane. Role = longitudinal order (strictly complementary).
+    same_lane = abs(body_y) < 1.5
+    near_parallel = abs_delta < (math.pi / 3.0) and nb_speed > 0.05
+    if same_lane and near_parallel:
+        speed_gap = own_speed - nb_speed
+        if body_x > 0.8 and speed_gap > 0.02 and closing_speed > 0.0:
+            # Neighbour ahead and slower; ego is the overtaker.
+            return ENC_OVERTAKING, ROLE_GIVE_WAY
+        if body_x < -0.8 and speed_gap < -0.02:
+            # Neighbour astern and faster; ego is being overtaken.
+            return ENC_OVERTAKING, ROLE_STAND_ON
+
+    # From here on, only vessels ahead of the beam engage COLREGS shaping.
+    if body_x <= 0.0:
+        return ENC_NONE, ROLE_NONE
+
+    # --- HEAD-ON band + ambiguous near-reciprocal band: ID tie-break.
+    # 135° aligns with _HEAD_ON_COURSE_DEG (policy_inference_node) so the
+    # type observation and the role assignment can never disagree.
+    if abs_delta > math.radians(135.0) and closing_speed > 0.0:
+        # fresh634: gate on DCPA instead of ego-frame |body_y| -- the cross
+        # product |rel_pos x rel_vel| is identical from both hulls, while
+        # body_y is measured against each hull's own (avoidance-deflected)
+        # heading and made the two hulls disagree (SITL 2026-08-03: one hull
+        # saw crossing, the other head-on -> mutual give-way standoff).
+        rel_speed = math.hypot(body_vx, body_vy)
+        dcpa = abs(body_x * body_vy - body_y * body_vx) / max(rel_speed, 1e-3)
+        lateral_tol = max(1.3, 0.28 * distance)
+        if dcpa < lateral_tol:
+            return ENC_HEAD_ON, _tie_break()
+
+    # --- CROSSING (Rule 15): converging, other on starboard => give way.
+    if closing_speed > -0.05 and nb_speed > 0.05 and abs_delta > math.radians(20.0):
+        # fresh634: in the near-reciprocal band the starboard rule is
+        # unreliable -- an oblique head-on puts EACH hull on the other's
+        # starboard bow, so Rule 15 hands BOTH hulls GIVE_WAY (SITL
+        # 2026-08-03 mutual-yield standoff). Use the same ID tie-break as
+        # the head-on branch so the roles stay complementary even when the
+        # two hulls disagree about head_on vs crossing.
+        if abs_delta > math.radians(120.0):
+            return ENC_CROSSING, _tie_break()
+        if body_y < -0.35:
+            return ENC_CROSSING, ROLE_GIVE_WAY
+        if body_y > 0.35:
+            return ENC_CROSSING, ROLE_STAND_ON
+
     return ENC_NONE, ROLE_NONE
 
 

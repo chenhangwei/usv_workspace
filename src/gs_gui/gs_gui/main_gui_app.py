@@ -410,6 +410,8 @@ class MainWindow(QMainWindow):
         # ============== 菜单操作 ==============
         self.ui.actionopen.triggered.connect(self.task_manager.read_data_from_file)
         self.ui.actionrviz2.triggered.connect(self.ui_utils.start_rviz)
+        # 空闲时预热任务文件对话框，避免首次打开时卡顿/闪烁
+        QTimer.singleShot(1500, self.task_manager._ensure_task_file_dialog)
         
         # ============== 表格选择信号 ==============
         # 连接集群表格和离群表格的选择改变信号
@@ -2811,6 +2813,11 @@ limitations under the License.
 
 def main(argv=None):
     """主函数"""
+    # WSLg/Wayland 环境下优先使用 wayland 后端：
+    # xcb(XWayland) 后端在 WSLg 下存在对话框闪烁/不重绘（需拖动才显示）问题，
+    # wayland 后端经实测完全稳定（2026-07-10）。用户显式设置时不覆盖。
+    if not os.environ.get("QT_QPA_PLATFORM") and os.environ.get("WAYLAND_DISPLAY"):
+        os.environ["QT_QPA_PLATFORM"] = "wayland"
     app = QApplication(sys.argv)
     ros_signal = ROSSignal()
     main_window = MainWindow(ros_signal)

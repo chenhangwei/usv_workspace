@@ -105,7 +105,9 @@ class MultiAgentScenarioFactory:
         'three_usv_overtaking': 3,
         'two_usv_random_encounter': 2,
         'three_usv_random_encounter': 3,
+        'cluster_escape': 3,
         'pentagram_convergence': 3,
+        'same_goal_queue': 3,
         'five_usv_dense_head_on': 5,
         'five_usv_dense_crossing': 5,
         'five_usv_dense_overtaking': 5,
@@ -140,7 +142,9 @@ class MultiAgentScenarioFactory:
             'three_usv_overtaking',
             'two_usv_random_encounter',
             'three_usv_random_encounter',
+            'cluster_escape',
             'pentagram_convergence',
+            'same_goal_queue',
         )
 
     @staticmethod
@@ -245,8 +249,10 @@ class MultiAgentScenarioFactory:
             # a smooth >1m-radius arc instead of a pivot-in-place.
             first = agent_ids[0]
             local_rng = rng if rng is not None else np.random.default_rng()
-            # Turn magnitude ~45deg..135deg, random port/starboard.
-            turn = float(local_rng.uniform(0.8, 2.4))
+            # Turn magnitude ~45deg..166deg, random port/starboard.
+            # fresh626: upper bound 2.4 -> 2.9 rad to cover the pentagram's
+            # 144-degree vertex turns (previously out of distribution).
+            turn = float(local_rng.uniform(0.8, 2.9))
             if local_rng.uniform() < 0.5:
                 turn = -turn
             gx = float(goal_distance * math.cos(turn))
@@ -525,6 +531,56 @@ class MultiAgentScenarioFactory:
                 active_agent_ids=(first, second, third),
             )
 
+        if kind == 'same_goal_queue':
+            # fresh629 (user 2026-07-12): "同时同方向到达同一个目标点的, 同航点
+            # 排队". 2-3 boats sail PARALLEL, SAME direction, toward goals
+            # clustered within a boat-length of each other — the exact shared-
+            # waypoint convergence that produced the fresh628 SITL 0.16m near-
+            # contact (sess 102710). No COLREGS class covers this geometry, so
+            # the queueing behaviour must be taught: the boat nearest the goal
+            # proceeds, the others hold back (goal_queue reward shaping) and
+            # arrive AFTER it, in order.
+            if len(agent_ids) < 2:
+                raise ValueError('same_goal_queue requires at least 2 agents.')
+            _rng = rng if rng is not None else np.random.default_rng()
+            n = min(3, len(agent_ids))
+            queue_agents = list(agent_ids[:n])
+            heading = float(_rng.uniform(0.0, 2.0 * math.pi))
+            # Shared goal cluster centre ~goal_distance ahead of the line.
+            cx = goal_distance * math.cos(heading)
+            cy = goal_distance * math.sin(heading)
+            # Perpendicular offset direction for the abreast line.
+            px, py = -math.sin(heading), math.cos(heading)
+            lane_gap = float(_rng.uniform(1.2, 2.2))
+            # Stagger start along-track so a natural leader exists sometimes;
+            # sometimes dead-even (hardest case: tie broken only by policy).
+            agent_spawns = {}
+            agent_goals = {}
+            for k, agent_id in enumerate(queue_agents):
+                lat = (k - (n - 1) / 2.0) * lane_gap
+                along = float(_rng.uniform(-1.2, 1.2))
+                agent_spawns[agent_id] = AgentSpawnConfig(
+                    x=lat * px + along * math.cos(heading),
+                    y=lat * py + along * math.sin(heading),
+                    yaw=heading,
+                )
+                # Goals clustered: distinct points 0.5-0.9m apart around the
+                # shared centre so simultaneous occupancy is possible but the
+                # approach corridor is shared.
+                g_lat = (k - (n - 1) / 2.0) * float(_rng.uniform(0.5, 0.9))
+                agent_goals[agent_id] = AgentGoalConfig(
+                    x=cx + g_lat * px,
+                    y=cy + g_lat * py,
+                )
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=70.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=tuple(queue_agents),
+            )
+
         if kind == 'pentagram_convergence':
             # Deployment-replica scenario (5-USV pentagram mission, 2026-06-11
             # SITL analysis): agents sit on the vertices of a regular polygon
@@ -701,6 +757,93 @@ class MultiAgentScenarioFactory:
                     fourth: AgentGoalConfig(x=6.5, y=6.5),
                     fifth: AgentGoalConfig(x=0.0, y=1.0),
                 },
+            )
+
+        if kind == 'cluster_escape':
+            # Deployment-replica START congestion (2026-06-29 SITL): in the star
+            # route mission all 3 USVs spawn within ~0.8-1.0 m of the arena centre
+            # and must immediately disperse to goals in DIFFERENT directions ~goal
+            # away. No existing 3-USV scenario spawns this tight (clear_route ~4.6m,
+            # crossing ~8.5m), so the policy never trained on "face-to-face at start
+            # -> who yields, who goes -> break apart and each take its own route".
+            # That gap caused the low-speed orbital deadlock (3 boats stuck <2m for
+            # the whole run, heading 70-90deg off their goals, never departing).
+            #
+            # Spawns: 3 agents on a tiny circle (radius ~0.5m) so initial pairwise
+            # separation is ~0.7-0.9m (just above collision_distance 0.75). Goals:
+            # radially outward at goal_distance on well-separated bearings so the
+            # required routes fan out (mirrors the star mission). Random global
+            # rotation for variety.
+            if len(agent_ids) < 3:
+                raise ValueError('cluster_escape requires at least 3 agents.')
+            first, second, third = agent_ids[:3]
+            _rng = rng if rng is not None else np.random.default_rng()
+            # fresh623 (2026-07-06 SITL star-route evidence): the deployed fleet
+            # started with pairwise gaps down to ~0.9m in ASYMMETRIC line-ish
+            # configurations, and 2 of 3 boats spent 200-280s spiralling in
+            # place (net turn 4976-6100deg) before dispersing. The fixed
+            # symmetric ring (radius 0.5, pairwise always 0.87m) never showed
+            # the policy an uneven cluster, so it generalized poorly. Now the
+            # ring radius is randomized and each spawn angle gets +/-30deg
+            # jitter, producing lopsided clusters whose tightest pair ranges
+            # right down to just above collision_distance (0.75m). A rejection
+            # loop guards against spawning already-in-collision (which would
+            # terminate the episode at t=0 and teach nothing).
+            rotation = float(_rng.uniform(0.0, 2.0 * math.pi))
+            agents = (first, second, third)
+            min_pair_floor = 0.78
+            for _attempt in range(50):
+                spawn_radius = float(_rng.uniform(0.45, 0.70))
+                spawn_angles = [
+                    rotation + 2.0 * math.pi * k / 3.0 + float(_rng.uniform(-math.pi / 6.0, math.pi / 6.0))
+                    for k in range(3)
+                ]
+                spawn_xy = [
+                    (spawn_radius * math.cos(a), spawn_radius * math.sin(a))
+                    for a in spawn_angles
+                ]
+                min_pair = min(
+                    math.hypot(spawn_xy[i][0] - spawn_xy[j][0], spawn_xy[i][1] - spawn_xy[j][1])
+                    for i in range(3) for j in range(i + 1, 3)
+                )
+                if min_pair >= min_pair_floor:
+                    break
+            else:
+                # Fallback: symmetric ring, pairwise 0.87m (legacy geometry).
+                spawn_radius = 0.5
+                spawn_angles = [rotation + 2.0 * math.pi * k / 3.0 for k in range(3)]
+                spawn_xy = [
+                    (spawn_radius * math.cos(a), spawn_radius * math.sin(a))
+                    for a in spawn_angles
+                ]
+            # Goal bearings: fanned ~120deg apart with PER-AGENT jitter (+/-25deg)
+            # so the escape routes are unevenly spread like the star mission's
+            # first legs (min goal-bearing gap stays >= ~70deg -- dispersal, not
+            # a crossing scenario).
+            agent_spawns = {}
+            agent_goals = {}
+            for k, agent_id in enumerate(agents):
+                sx, sy = spawn_xy[k]
+                goal_ang = (
+                    rotation
+                    + 2.0 * math.pi * k / 3.0
+                    + float(_rng.uniform(-math.pi / 7.2, math.pi / 7.2))
+                )
+                gx = goal_distance * math.cos(goal_ang)
+                gy = goal_distance * math.sin(goal_ang)
+                # Face the goal at spawn so the deadlock isn't trivially avoided by
+                # a lucky initial heading; the challenge is the tight mutual spacing.
+                agent_spawns[agent_id] = AgentSpawnConfig(
+                    x=sx, y=sy, yaw=math.atan2(gy - sy, gx - sx),
+                )
+                agent_goals[agent_id] = AgentGoalConfig(x=gx, y=gy)
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, agent_spawns, agent_goals)
+            return FleetScenario(
+                name=kind,
+                duration=55.0,
+                agent_spawns=agent_spawns,
+                agent_goals=agent_goals,
+                active_agent_ids=agents,
             )
 
         raise ValueError(f'Unsupported multi-agent scenario kind: {kind}')

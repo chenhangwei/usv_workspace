@@ -78,6 +78,13 @@ def generate_launch_description():
         '--device', device,
         '--publish-rate', publish_rate,
         '--max-neighbors', max_neighbors,
+        # fresh628 straight-line fix (2026-07-12): the policy tracks GOAL
+        # BEARING, not the two-waypoint route line, so free-sail CTE held a
+        # steady 0.3-0.7m offset. The clear-ahead route gate blends the output
+        # toward the nav-layer line-tracking command whenever the front cone
+        # is clear (>=3m separation, conflict<0.05), which hugs the original
+        # route exactly as the user requires; RL keeps full control in traffic.
+        '--clear-ahead-route-gate',
     ]
 
     policy_node = Node(

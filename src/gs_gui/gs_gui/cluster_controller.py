@@ -463,6 +463,11 @@ class ClusterController:
                 is_retry = state.retry > 0
                 sent_set = self._lookahead_sent.get(usv_id)
                 if self._lookahead_enabled and sent_set and state.step in sent_set and not is_retry:
+                    # SITL 2026-07-14 130115 双重旋转修复: AckState.received
+                    # 此前从未被置 True，跳过发送后必然 step_timeout 超时 →
+                    # 幽灵重试重发同一 goal → 旋转机动被整段重启 (usv_02 终点
+                    # 转了 2x3 圈)。目标已通过 lookahead 送达机上队列，视为已接收。
+                    state.received = True
                     # 更新 GS 缓存到当前步骤，使反馈匹配能跟踪到 lookahead 步骤
                     la_goal_id = self.node._compute_goal_id(usv_id, state.step)
                     p_g = self._area_to_global(pos)
@@ -569,6 +574,20 @@ class ClusterController:
             
             # 超出任务范围
             if next_step > max_step:
+                break
+            
+            # ========== 同步屏障检查 (SITL 2026-07-14 130115) ==========
+            # 预发送会把下一步塞进 USV 机上队列，USV 到点即自行切换，
+            # 物理上绕过 GS 的 sync 等待 (先到的船不等待其他船)。
+            # 规则: 若从 current_step 到 next_step-1 之间任一步骤要求
+            # sync，则不得跨越该屏障预发送。
+            barrier = False
+            for chk in range(current_step, next_step):
+                chk_data = self._get_target_data(usv_id, chk)
+                if chk_data and chk_data.get('sync', True):
+                    barrier = True
+                    break
+            if barrier:
                 break
             
             # 已经预发送过

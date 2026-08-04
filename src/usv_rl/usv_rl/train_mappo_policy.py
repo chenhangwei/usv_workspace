@@ -60,7 +60,8 @@ def parse_args():
     parser.add_argument('--max-neighbors', type=int, default=4, help='Neighbor slots in local observation encoding.')
     parser.add_argument('--max-agents', type=int, default=3, help='Maximum agents encoded in global state.')
     parser.add_argument('--rl-control-mode', choices=['pure'], default='pure', help='Pure final-command control mode used during training.')
-    parser.add_argument('--action-mode', choices=['full'], default='full', help='Action representation used during training.')
+    parser.add_argument('--action-mode', choices=['full', 'speed_scale', 'angular_only'], default='full', help='Action representation: "full"=[linear,omega]; "speed_scale"=[throttle_scale,omega] (no stop/reverse); "angular_only"=[omega] (nav owns speed).')
+    parser.add_argument('--action-speed-scale-min', type=float, default=0.25, help='Lower bound of the throttle scale for action_mode="speed_scale".')
     parser.add_argument('--linear-delta-limit', type=float, default=default_env.action_bounds.linear_delta, help='Maximum forward command magnitude (m/s).')
     parser.add_argument('--angular-delta-limit', type=float, default=default_env.action_bounds.angular_delta, help='Maximum yaw-rate command magnitude (rad/s).')
     parser.add_argument('--cruise-speed', type=float, default=default_env.cruise_speed, help='Training controller cruise speed limit (m/s).')
@@ -97,6 +98,8 @@ def parse_args():
     parser.add_argument('--anticipation-distance', type=float, default=RewardConfig.anticipation_distance, help='Lookahead distance used for anticipatory conflict shaping.')
     parser.add_argument('--conflict-risk-weight', type=float, default=RewardConfig.conflict_risk_weight, help='Conflict-risk penalty weight.')
     parser.add_argument('--conflict-bearing-floor', type=float, default=RewardConfig.conflict_bearing_floor, help='Minimum bearing factor for closing neighbours in conflict-risk shaping.')
+    parser.add_argument('--conflict-risk-time-horizon', type=float, default=RewardConfig.conflict_risk_time_horizon, help='TCPA look-ahead (s) for the predictive DCPA/TCPA conflict-risk index (0 -> fall back to anticipatory_cpa_time_horizon). Larger = look further ahead / avoid earlier.')
+    parser.add_argument('--conflict-risk-safe-dcpa', type=float, default=RewardConfig.conflict_risk_safe_dcpa, help='Predicted closest-approach distance (m) beyond which a pass is treated as comfortable (0 risk). 0 -> max(near_miss, anticipatory_dcpa_target).')
     parser.add_argument('--conflict-brake-weight', type=float, default=RewardConfig.conflict_brake_weight, help='Conflict braking penalty weight.')
     parser.add_argument('--conflict-progress-scale', type=float, default=RewardConfig.conflict_progress_scale, help='Reduction applied to positive progress reward during unresolved conflict.')
     parser.add_argument('--conflict-resolution-reward-weight', type=float, default=RewardConfig.conflict_resolution_reward_weight, help='Reward weight for reducing conflict risk across consecutive steps.')
@@ -107,9 +110,24 @@ def parse_args():
     parser.add_argument('--path-deviation-conflict-scale', type=float, default=RewardConfig.path_deviation_conflict_scale, help='Additional cross-track tolerance (m) allowed at maximum conflict level.')
     parser.add_argument('--path-deviation-use-unclipped-cte', action='store_true', default=RewardConfig.path_deviation_use_unclipped_cte, help='Compute route-deviation reward with the true CTE instead of the observation-clipped CTE.')
     parser.add_argument('--path-deviation-exclude-overtaking', action='store_true', default=RewardConfig.path_deviation_exclude_overtaking, help='Disable the route-deviation penalty on single_usv_overtaking / two_usv_overtaking scenarios, where passing a slow lead requires leaving the lane.')
+    parser.add_argument('--path-inefficiency-penalty-weight', type=float, default=RewardConfig.path_inefficiency_penalty_weight, help='fresh627: per-step penalty on max(0, travel - progress). Waiting in place is free; lateral swings, detour arcs and loops pay per wasted metre.')
+    parser.add_argument('--waypoint-pass-quality-bonus', type=float, default=RewardConfig.waypoint_pass_quality_bonus, help='fresh627: extra bonus at each waypoint pass / final arrival scaled by (1 - pass_distance/goal_tolerance); full for center-threading, zero for edge-grazing.')
+    parser.add_argument('--role-speed-asymmetry-weight', type=float, default=RewardConfig.role_speed_asymmetry_weight, help='fresh628: strict master/slave speed shaping. Stand-on rewarded for holding cruise; give-way rewarded for slowing to role-giveway-speed while conflict risk is high.')
+    parser.add_argument('--role-giveway-speed', type=float, default=RewardConfig.role_giveway_speed, help='fresh628: target creep speed (m/s) for the give-way vessel during an active encounter.')
+    parser.add_argument('--wrong-heading-speed-penalty-weight', type=float, default=RewardConfig.wrong_heading_speed_penalty_weight, help='fresh628: tax forward speed while |heading error| exceeds the threshold, scaled by (1-cos(he)). Forces slow-spin-then-go at waypoint switches.')
+    parser.add_argument('--wrong-heading-speed-threshold-deg', type=float, default=RewardConfig.wrong_heading_speed_threshold_deg, help='fresh628: heading-error threshold (deg) where the wrong-heading speed tax starts.')
+    parser.add_argument('--wrong-heading-conflict-relief', type=float, default=RewardConfig.wrong_heading_conflict_relief, help='fresh633: waive the wrong-heading speed tax proportionally to conflict risk (0=always taxed, 1=fully waived at max conflict). Unbinds "turn hard" from "slow down" during encounters to prevent bow-to-bow standoffs.')
+    parser.add_argument('--far-side-turn-penalty-weight', type=float, default=RewardConfig.far_side_turn_penalty_weight, help='fresh629: penalise the far-side omega component while |heading error| exceeds the threshold, internalising minimum-heading-error turn direction.')
+    parser.add_argument('--far-side-turn-threshold-deg', type=float, default=RewardConfig.far_side_turn_threshold_deg, help='fresh629: heading-error threshold (deg) for the far-side turn penalty.')
+    parser.add_argument('--goal-queue-weight', type=float, default=RewardConfig.goal_queue_weight, help='fresh629: same-goal queue shaping. Followers of a clustered shared waypoint hold low speed + separation while the leader clears it.')
+    parser.add_argument('--goal-queue-cluster-radius', type=float, default=RewardConfig.goal_queue_cluster_radius, help='fresh629: two goals within this distance (m) count as a shared waypoint cluster.')
+    parser.add_argument('--goal-queue-engage-distance', type=float, default=RewardConfig.goal_queue_engage_distance, help='fresh629: queue shaping engages when boats/goals are within this range (m).')
+    parser.add_argument('--goal-queue-follower-speed', type=float, default=RewardConfig.goal_queue_follower_speed, help='fresh629: follower hold speed (m/s) while queueing.')
+    parser.add_argument('--goal-queue-min-separation', type=float, default=RewardConfig.goal_queue_min_separation, help='fresh629: minimum separation (m) the queue follower must keep from the leader.')
     parser.add_argument('--desired-conflict-speed', type=float, default=RewardConfig.desired_conflict_speed, help='Target forward speed maintained during conflict handling.')
     parser.add_argument('--stop-go-penalty-weight', type=float, default=RewardConfig.stop_go_penalty_weight, help='Penalty weight for rapid stop-go behavior under conflict.')
     parser.add_argument('--head-on-guidance-distance', type=float, default=RewardConfig.head_on_guidance_distance, help='Distance threshold for head-on starboard guidance shaping.')
+    parser.add_argument('--crossing-guidance-distance', type=float, default=RewardConfig.crossing_guidance_distance, help='Optional dedicated lookahead (m) for crossing/overtaking starboard guidance (0 -> legacy max(anticipation_distance, conflict_distance)).')
     parser.add_argument('--head-on-target-starboard-offset', type=float, default=RewardConfig.head_on_target_starboard_offset, help='Desired starboard lateral offset in head-on encounters.')
     parser.add_argument('--head-on-corridor-reward-weight', type=float, default=RewardConfig.head_on_corridor_reward_weight, help='Reward weight for entering the head-on starboard corridor.')
     parser.add_argument('--head-on-centerline-penalty-weight', type=float, default=RewardConfig.head_on_centerline_penalty_weight, help='Penalty weight for staying on the head-on centerline.')
@@ -146,6 +164,9 @@ def parse_args():
     parser.add_argument('--angular-accel-penalty-weight', type=float, default=RewardConfig.angular_accel_penalty_weight, help='Angular acceleration penalty weight for smooth turning.')
     parser.add_argument('--straight-line-omega-penalty-weight', type=float, default=RewardConfig.straight_line_omega_penalty_weight, help='Penalty weight for large angular velocity when heading error is small (prevents S-curve oscillation).')
     parser.add_argument('--saturated-omega-flip-penalty-weight', type=float, default=RewardConfig.saturated_omega_flip_penalty_weight, help='Penalty weight for bang-bang reversals where consecutive angular commands flip sign near saturation.')
+    parser.add_argument('--turn-speed-coupling-penalty-weight', type=float, default=RewardConfig.turn_speed_coupling_penalty_weight, help='Penalty for forward speed above a turn-appropriate cap: obtuse turn keeps speed, acute turn must slow for a tight radius.')
+    parser.add_argument('--turn-speed-coupling-floor', type=float, default=RewardConfig.turn_speed_coupling_floor, help='Min speed fraction of cruise allowed at a 90deg turn (turn-speed coupling).')
+    parser.add_argument('--turn-speed-coupling-deadband-deg', type=float, default=RewardConfig.turn_speed_coupling_deadband_deg, help='Heading-error deadband (deg) below which no turn-speed penalty applies (gentle/obtuse legs keep full speed).')
     parser.add_argument('--forward-speed-change-penalty-weight', type=float, default=RewardConfig.forward_speed_change_penalty_weight, help='Penalty weight for |vx_t - vx_{t-1}| (prevents linear speed oscillation / bang-bang).')
     parser.add_argument('--omega-flip-saturation-threshold', type=float, default=RewardConfig.omega_flip_saturation_threshold, help='Min saturation ratio to trigger omega-flip penalty (lower = catches milder bang-bang). Default 0.65.')
     parser.add_argument('--straight-line-omega-conflict-floor', type=float, default=RewardConfig.straight_line_omega_conflict_floor, help='Minimum conflict gate for straight-line omega penalty (higher = less suppression during conflict). Default 0.1.')
@@ -4467,6 +4488,8 @@ def _build_reward_config(args) -> RewardConfig:
         anticipation_distance=float(args.anticipation_distance),
         conflict_risk_weight=float(args.conflict_risk_weight),
         conflict_bearing_floor=float(args.conflict_bearing_floor),
+        conflict_risk_time_horizon=float(args.conflict_risk_time_horizon),
+        conflict_risk_safe_dcpa=float(args.conflict_risk_safe_dcpa),
         conflict_brake_weight=float(args.conflict_brake_weight),
         conflict_progress_scale=float(args.conflict_progress_scale),
         conflict_resolution_reward_weight=float(args.conflict_resolution_reward_weight),
@@ -4477,9 +4500,24 @@ def _build_reward_config(args) -> RewardConfig:
         path_deviation_conflict_scale=float(args.path_deviation_conflict_scale),
         path_deviation_use_unclipped_cte=bool(args.path_deviation_use_unclipped_cte),
         path_deviation_exclude_overtaking=bool(getattr(args, 'path_deviation_exclude_overtaking', False)),
+        path_inefficiency_penalty_weight=float(getattr(args, 'path_inefficiency_penalty_weight', 0.0)),
+        waypoint_pass_quality_bonus=float(getattr(args, 'waypoint_pass_quality_bonus', 0.0)),
+        role_speed_asymmetry_weight=float(getattr(args, 'role_speed_asymmetry_weight', 0.0)),
+        role_giveway_speed=float(getattr(args, 'role_giveway_speed', RewardConfig.role_giveway_speed)),
+        wrong_heading_speed_penalty_weight=float(getattr(args, 'wrong_heading_speed_penalty_weight', 0.0)),
+        wrong_heading_speed_threshold_deg=float(getattr(args, 'wrong_heading_speed_threshold_deg', RewardConfig.wrong_heading_speed_threshold_deg)),
+        wrong_heading_conflict_relief=float(getattr(args, 'wrong_heading_conflict_relief', 0.0)),
+        far_side_turn_penalty_weight=float(getattr(args, 'far_side_turn_penalty_weight', 0.0)),
+        far_side_turn_threshold_deg=float(getattr(args, 'far_side_turn_threshold_deg', RewardConfig.far_side_turn_threshold_deg)),
+        goal_queue_weight=float(getattr(args, 'goal_queue_weight', 0.0)),
+        goal_queue_cluster_radius=float(getattr(args, 'goal_queue_cluster_radius', RewardConfig.goal_queue_cluster_radius)),
+        goal_queue_engage_distance=float(getattr(args, 'goal_queue_engage_distance', RewardConfig.goal_queue_engage_distance)),
+        goal_queue_follower_speed=float(getattr(args, 'goal_queue_follower_speed', RewardConfig.goal_queue_follower_speed)),
+        goal_queue_min_separation=float(getattr(args, 'goal_queue_min_separation', RewardConfig.goal_queue_min_separation)),
         desired_conflict_speed=float(args.desired_conflict_speed),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),
+        crossing_guidance_distance=float(args.crossing_guidance_distance),
         head_on_target_starboard_offset=float(args.head_on_target_starboard_offset),
         head_on_corridor_reward_weight=float(args.head_on_corridor_reward_weight),
         head_on_centerline_penalty_weight=float(args.head_on_centerline_penalty_weight),
@@ -4516,6 +4554,9 @@ def _build_reward_config(args) -> RewardConfig:
         angular_accel_penalty_weight=float(args.angular_accel_penalty_weight),
         straight_line_omega_penalty_weight=float(args.straight_line_omega_penalty_weight),
         saturated_omega_flip_penalty_weight=float(args.saturated_omega_flip_penalty_weight),
+        turn_speed_coupling_penalty_weight=float(args.turn_speed_coupling_penalty_weight),
+        turn_speed_coupling_floor=float(args.turn_speed_coupling_floor),
+        turn_speed_coupling_deadband_deg=float(args.turn_speed_coupling_deadband_deg),
         forward_speed_change_penalty_weight=float(args.forward_speed_change_penalty_weight),
         omega_flip_saturation_threshold=float(args.omega_flip_saturation_threshold),
         straight_line_omega_conflict_floor=float(args.straight_line_omega_conflict_floor),
@@ -4555,14 +4596,22 @@ def _build_model_metadata(args, agent_namespaces: tuple[str, ...]) -> dict:
         linear_limit = max(float(args.linear_delta_limit), float(args.cruise_speed))
         angular_limit = max(float(args.angular_delta_limit), float(args.max_angular_velocity))
         min_fwd = max(0.0, float(getattr(args, 'min_forward_speed', 0.0)))
-        action_low = np.asarray(
-            [min_fwd, -angular_limit],
-            dtype=np.float32,
-        )
-        action_high = np.asarray(
-            [linear_limit, angular_limit],
-            dtype=np.float32,
-        )
+        if args.action_mode == 'angular_only':
+            action_low = np.asarray([-angular_limit], dtype=np.float32)
+            action_high = np.asarray([angular_limit], dtype=np.float32)
+        elif args.action_mode == 'speed_scale':
+            scale_min = float(np.clip(getattr(args, 'action_speed_scale_min', 0.25), 0.0, 1.0))
+            action_low = np.asarray([scale_min, -angular_limit], dtype=np.float32)
+            action_high = np.asarray([1.0, angular_limit], dtype=np.float32)
+        else:
+            action_low = np.asarray(
+                [min_fwd, -angular_limit],
+                dtype=np.float32,
+            )
+            action_high = np.asarray(
+                [linear_limit, angular_limit],
+                dtype=np.float32,
+            )
     else:
         action_low = np.asarray(
             [-float(args.angular_delta_limit)] if action_dim == 1 else [
@@ -4625,6 +4674,7 @@ def _checkpoint_payload(
         'max_agents': max(len(agent_namespaces), args.max_agents),
         'rl_control_mode': args.rl_control_mode,
         'action_mode': args.action_mode,
+        'action_speed_scale_min': float(getattr(args, 'action_speed_scale_min', 0.25)),
         'episode_timeout': float(args.episode_timeout),
         'no_progress_timeout': float(args.no_progress_timeout),
         'min_progress_delta': float(args.min_progress_delta),
@@ -5586,6 +5636,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'max_agents',
         'rl_control_mode',
         'action_mode',
+        'action_speed_scale_min',
         'episode_timeout',
         'no_progress_timeout',
         'min_progress_delta',
@@ -5931,6 +5982,8 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'anticipation_distance',
         'conflict_risk_weight',
         'conflict_bearing_floor',
+        'conflict_risk_time_horizon',
+        'conflict_risk_safe_dcpa',
         'conflict_brake_weight',
         'conflict_progress_scale',
         'conflict_resolution_reward_weight',
@@ -5939,9 +5992,24 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'path_deviation_penalty_weight',
         'path_deviation_tolerance',
         'path_deviation_conflict_scale',
+        'path_inefficiency_penalty_weight',
+        'waypoint_pass_quality_bonus',
+        'role_speed_asymmetry_weight',
+        'role_giveway_speed',
+        'wrong_heading_speed_penalty_weight',
+        'wrong_heading_speed_threshold_deg',
+        'wrong_heading_conflict_relief',
+        'far_side_turn_penalty_weight',
+        'far_side_turn_threshold_deg',
+        'goal_queue_weight',
+        'goal_queue_cluster_radius',
+        'goal_queue_engage_distance',
+        'goal_queue_follower_speed',
+        'goal_queue_min_separation',
         'desired_conflict_speed',
         'stop_go_penalty_weight',
         'head_on_guidance_distance',
+        'crossing_guidance_distance',
         'head_on_target_starboard_offset',
         'head_on_corridor_reward_weight',
         'head_on_centerline_penalty_weight',
@@ -6198,6 +6266,7 @@ def _create_env(args, agent_namespaces: tuple[str, ...], scenarios: tuple[str, .
             enable_rl_backend=True,
             rl_control_mode=args.rl_control_mode,
             action_mode=args.action_mode,
+            action_speed_scale_min=float(getattr(args, 'action_speed_scale_min', 0.25)),
             action_bounds=ActionBounds(
                 linear_delta=float(args.linear_delta_limit),
                 angular_delta=float(args.angular_delta_limit),

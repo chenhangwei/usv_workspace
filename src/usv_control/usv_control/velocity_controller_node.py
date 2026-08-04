@@ -738,6 +738,10 @@ class VelocityControllerNode(Node):
         self._rotation_initialized = False       # 是否已初始化旋转
         self._rotation_yaw_rate = 0.5            # 旋转角速度 (rad/s)
         self._rotation_goal_id: Optional[int] = None  # 旋转任务的 goal_id
+        # SITL 2026-07-14 130115: GS 幽灵重试在旋转完成后重发同一 goal，
+        # 而 _rotation_goal_id 已清空 → 被当成新任务再转 3 圈。
+        # 记住最近完成的旋转 goal_id，重复收到时直接忽略。
+        self._last_completed_rotation_goal_id: Optional[int] = None
         
         # ==================== 健壮性增强 ====================
         self._last_pose_time: float = 0.0
@@ -1620,6 +1624,18 @@ class VelocityControllerNode(Node):
         
         # ==================== 旋转机动处理 ====================
         if maneuver_type == MANEUVER_TYPE_ROTATE:
+            # 重复 goal 免疫: 该旋转任务已完成过 (GS 重试/丢包重发)，忽略
+            if goal_id == self._last_completed_rotation_goal_id:
+                self.get_logger().info(
+                    f'⚠️ 忽略重复旋转目标 [ID={goal_id}]: 该旋转任务已完成过'
+                )
+                # 重新发布完成结果，让 GS 正常推进
+                result = NavigationResult()
+                result.goal_id = goal_id
+                result.success = True
+                result.message = 'Rotation already completed (duplicate goal ignored)'
+                self.result_pub.publish(result)
+                return
             # 检查是否是新的旋转任务
             if goal_id != self._rotation_goal_id:
                 self._rotation_goal_id = goal_id
@@ -4362,6 +4378,8 @@ class VelocityControllerNode(Node):
             self._publish_velocity_command(VelocityCommand.stop())
             self._rotation_active = False
             self._rotation_initialized = False
+            # 记住已完成的旋转 goal_id，免疫 GS 重试重发的重复目标
+            self._last_completed_rotation_goal_id = self._rotation_goal_id
             self.get_logger().info(
                 f'✅ 旋转完成: 累计={math.degrees(self._rotation_accumulated):.1f}°'
             )
