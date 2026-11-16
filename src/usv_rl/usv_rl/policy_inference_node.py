@@ -20,7 +20,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import Bool, Int8, String
+from std_msgs.msg import Bool, Float32, Int8, String
 
 from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
@@ -40,7 +40,7 @@ _ENCOUNTER_TYPE_NAMES = {'head_on': 0, 'crossing': 1, 'overtaking': 2}
 # entire 5-USV transit, biasing the policy into permanent avoidance mode.
 _ENCOUNTER_DETECT_DISTANCE = 5.0    # metres – classify only when nearest neighbour is closer
 _ENCOUNTER_HOLD_TIME = 2.0          # seconds – minimum time to hold a classification before switching
-_ENCOUNTER_SPEED_THRESHOLD = 0.05   # m/s – below this, course is unreliable
+_ENCOUNTER_SPEED_THRESHOLD = 0.11   # m/s – below this (Gazebo wave bobbing <=0.09 m/s), vessel is holding/static
 _ENCOUNTER_CLOSING_MIN = 0.01      # m/s – require actual closing before flagging an encounter
 
 # ---------- Distance-aware speed scaling constants ----------
@@ -519,8 +519,8 @@ def parse_args(argv=None):
                         help='Turn governor: fraction of cruise kept at 90deg+ heading error (speed cap = cruise*(floor+(1-floor)*cos(he))). 0.45 keeps a gentle arc instead of a spin-in-place (user 2026-07-12).')
     parser.add_argument('--turn-governor-min-speed', type=float, default=0.14,
                         help='Turn governor: absolute lower bound of the speed cap (m/s) so the boat always keeps steerage way and turns on an arc.')
-    parser.add_argument('--turn-governor-cruise', type=float, default=0.34,
-                        help='Turn governor: cruise speed reference (m/s) used to compute the cap.')
+    parser.add_argument('--turn-governor-cruise', type=float, default=0.60,
+                        help='Turn governor: default cruise speed reference (m/s), dynamically overridden by /set_velocity_cruise_speed.')
     parser.add_argument('--enable-safety-layers', action='store_true',
                         help='Re-enable node post-processing (turn governor/assist, proximity speed scaling, '
                              'push-through, deadlock/orbit breakers, give-way guard, route gate). Off by default.')
@@ -566,6 +566,7 @@ class PolicyInferenceNode(Node):
         turn_governor_floor: float = 0.45,
         turn_governor_min_speed: float = 0.14,
         turn_governor_cruise: float = 0.34,
+        cruise_speed_override: Optional[float] = None,
         turn_assist_enabled: bool = True,
         turn_assist_threshold_deg: float = 45.0,
         turn_assist_release_deg: float = 25.0,
@@ -675,6 +676,9 @@ class PolicyInferenceNode(Node):
         self._turn_governor_floor = min(1.0, max(0.0, float(turn_governor_floor)))
         self._turn_governor_min_speed = max(0.0, float(turn_governor_min_speed))
         self._turn_governor_cruise = max(0.05, float(turn_governor_cruise))
+        self._dynamic_cruise_speed: Optional[float] = (
+            None if cruise_speed_override is None else max(0.05, float(cruise_speed_override))
+        )
         # fresh628 short-side turn assist (user 2026-07-12: "应该按最小航向误差的
         # 转弯方向转向, 而不是转更大的角度"): SITL showed ~50% of waypoint
         # switches turned the FAR side and low-speed heading oscillation
@@ -859,6 +863,7 @@ class PolicyInferenceNode(Node):
         self.create_subscription(PoseStamped, 'local_position/pose_from_gps', self._pose_callback, qos_best_effort)
         self.create_subscription(TwistStamped, 'local_position/velocity_local', self._velocity_callback, qos_best_effort)
         self.create_subscription(NavigationGoal, 'set_usv_nav_goal', self._nav_goal_callback, qos_reliable)
+        self.create_subscription(Float32, 'set_velocity_cruise_speed', self._cruise_speed_callback, qos_reliable)
         self.create_subscription(NavigationResult, 'navigation_result', self._nav_result_callback, qos_reliable)
         self.create_subscription(Bool, 'stop_navigation', self._stop_navigation_callback, qos_reliable)
         self.create_subscription(NavigationFeedback, 'navigation_feedback', self._feedback_callback, qos_best_effort)
@@ -1031,6 +1036,18 @@ class PolicyInferenceNode(Node):
             self._first_velocity_logged = True
 
     def _activate_goal(self, goal_id: int, *, reset_stream_state: bool, nav_mode: Optional[int] = None, target: Optional[Tuple[float, float]] = None, source: str = 'nav_goal'):
+        prev_goal_id = self._active_goal_id
+        prev_route_goal = self._route_goal
+        seamless_pass_through = (
+            reset_stream_state
+            and prev_goal_id is not None
+            and self._navigation_terminal_reason is None
+            and self._pose_msg is not None
+            and self._final_cmd_msg is not None
+            and target is not None
+            and int(goal_id) == int(prev_goal_id) + 1
+            and self._navigation_input_status()['reason'] is None
+        )
         is_new_goal = goal_id != self._active_goal_id
         self._active_goal_id = goal_id
 
@@ -1038,10 +1055,29 @@ class PolicyInferenceNode(Node):
             return
 
         if reset_stream_state:
-            self._feedback_msg = None
-            self._raw_cmd_msg = None
-            self._final_cmd_msg = None
-            self._navigation_inputs.clear()
+            if seamless_pass_through:
+                # Bridge the 0.1s upstream feedback handover on smooth sequential
+                # waypoint switches so the boat enters the arc seamlessly without
+                # a [0.0, 0.0] inhibited brake spike.
+                own_x = float(self._pose_msg.pose.position.x)
+                own_y = float(self._pose_msg.pose.position.y)
+                own_yaw = _quat_to_yaw(self._pose_msg)
+                dx_g, dy_g = float(target[0]) - own_x, float(target[1]) - own_y
+                synth_fb = NavigationFeedback()
+                synth_fb.goal_id = int(goal_id)
+                synth_fb.distance_to_goal = float(math.hypot(dx_g, dy_g))
+                synth_fb.heading_error = float(self._wrap_angle(math.atan2(dy_g, dx_g) - own_yaw))
+                synth_fb.timestamp = self.get_clock().now().to_msg()
+                if self._record_navigation_input('feedback', synth_fb.timestamp):
+                    self._feedback_msg = synth_fb
+                else:
+                    self._feedback_msg = None
+                    self._navigation_inputs.pop('feedback', None)
+            else:
+                self._feedback_msg = None
+                self._raw_cmd_msg = None
+                self._final_cmd_msg = None
+                self._navigation_inputs.clear()
 
         self._ready_logged = False
         self._first_action_logged = False
@@ -1051,14 +1087,27 @@ class PolicyInferenceNode(Node):
         self._waiting_repeat_count = 0
         self._reset_head_on_guard_state()
 
-        # Record route start (current position) and goal for CTE computation.
+        # Record route start and goal for CTE computation.
+        # On sequential multi-waypoint transitions (wp_{k-1} -> wp_k), anchor
+        # _route_start to the previous planned waypoint when within switch radius
+        # so the reference line matches the true Ground Station XML route chord.
         if target is not None:
             self._route_goal = target
             if self._pose_msg is not None:
-                self._route_start = (
+                own_pos = (
                     float(self._pose_msg.pose.position.x),
                     float(self._pose_msg.pose.position.y),
                 )
+                if (
+                    prev_route_goal is not None
+                    and prev_goal_id is not None
+                    and int(goal_id) == int(prev_goal_id) + 1
+                    and math.hypot(own_pos[0] - prev_route_goal[0], own_pos[1] - prev_route_goal[1]) <= 3.0
+                    and math.hypot(target[0] - prev_route_goal[0], target[1] - prev_route_goal[1]) > 1.0
+                ):
+                    self._route_start = prev_route_goal
+                else:
+                    self._route_start = own_pos
             else:
                 self._route_start = None
             # Decide once per goal whether the leg needs virtual sub-goals to
@@ -1230,6 +1279,15 @@ class PolicyInferenceNode(Node):
                 f'First raw velocity command received after {time.monotonic() - self._startup_monotonic:.2f}s.'
             )
             self._first_raw_cmd_logged = True
+
+    def _cruise_speed_callback(self, msg: Float32):
+        speed = float(getattr(msg, 'data', 0.0))
+        if math.isfinite(speed) and speed > 0.05:
+            old = self._dynamic_cruise_speed or self._turn_governor_cruise
+            self._dynamic_cruise_speed = speed
+            self._turn_governor_cruise = speed
+            if abs(speed - old) > 1e-3:
+                self.get_logger().info(f'Updated RL cruise speed from GS: {old:.2f} -> {speed:.2f} m/s.')
 
     def _final_cmd_callback(self, msg: PositionTarget):
         if not self._record_navigation_input('final_command', msg.header.stamp):
@@ -1755,6 +1813,7 @@ class PolicyInferenceNode(Node):
         if isinstance(self._policy, MappoActorPolicyRuntime):
             expanded_action = self._policy.action_contract.expand(
                 action, projected_action, observation.distance_to_goal,
+                cruise_speed_override=self._dynamic_cruise_speed,
             )
         linear_x = float(expanded_action[0])
         angular_z = float(expanded_action[1])
@@ -2083,6 +2142,7 @@ def main(argv=None):
             turn_governor_floor=args.turn_governor_floor,
             turn_governor_min_speed=args.turn_governor_min_speed,
             turn_governor_cruise=args.turn_governor_cruise,
+            cruise_speed_override=args.turn_governor_cruise,
             turn_assist_enabled=not args.disable_turn_assist,
             turn_assist_threshold_deg=args.turn_assist_threshold_deg,
             turn_assist_release_deg=args.turn_assist_release_deg,

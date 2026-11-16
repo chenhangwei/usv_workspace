@@ -125,10 +125,10 @@ class UsvPlotWindow(QWidget):
         self.figure.subplots_adjust(left=0.09, right=0.995, bottom=0.10, top=0.95)
         
         # 创建自定义USV船形顶点 (数据坐标, 1:1 真实尺寸)
-        # USV 实际尺寸: 长度 0.6m, 宽度 0.4m
+        # USV 实际尺寸: 长度 0.6m, 宽度 0.3m (与 Gazebo 0.60m x 0.30m 单体船严格一致)
         # 船形比例: 船头尖端 + 后部凹陷, 指向 x 正方向 (yaw=0)
         self._usv_length = 0.6   # 米
-        self._usv_width = 0.4    # 米
+        self._usv_width = 0.3    # 米
         # 基础顶点 (以重心为原点, 单位: 米)
         # 船头在 +x 方向, 左舷在 +y 方向
         L, W = self._usv_length, self._usv_width

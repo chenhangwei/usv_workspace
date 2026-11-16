@@ -4,7 +4,16 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from usv_comm.telemetry_rate_node import IntervalRequests, SourceFreshness
+from usv_comm.telemetry_rate_node import IntervalRequests, SourceFreshness, needs_rerequest
+
+
+def test_slow_source_triggers_rerequest_only_after_done_and_cooldown():
+    slow = {'pose': {'source_hz': 0.4}, 'velocity': {'source_hz': 12.0}}
+    fast = {'pose': {'source_hz': 12.0}, 'velocity': {'source_hz': 12.0}}
+    assert needs_rerequest(True, slow, 10.0, 30.0, 20.0)
+    assert not needs_rerequest(True, slow, 10.0, 10.0, 20.0)
+    assert not needs_rerequest(False, slow, 10.0, 30.0, 20.0)
+    assert not needs_rerequest(True, fast, 10.0, 30.0, 20.0)
 
 
 def client_with_response(success=True, result=0):

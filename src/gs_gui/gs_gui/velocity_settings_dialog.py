@@ -45,7 +45,7 @@ class VelocitySettingsDialog(QDialog):
         
         # 默认设置
         self.current_settings = current_settings or {
-            'cruise_speed': 0.5,
+            'cruise_speed': 0.6,
             'max_angular_velocity': 0.5,
             'goal_tolerance': 0.5,
             'switch_tolerance': 1.5,
@@ -80,7 +80,7 @@ class VelocitySettingsDialog(QDialog):
         self.cruise_speed_spin.setRange(0.1, 3.0)
         self.cruise_speed_spin.setSingleStep(0.1)
         self.cruise_speed_spin.setDecimals(2)
-        self.cruise_speed_spin.setValue(self.current_settings.get('cruise_speed', 0.5))
+        self.cruise_speed_spin.setValue(self.current_settings.get('cruise_speed', 0.6))
         self.cruise_speed_spin.setSuffix(" m/s")
         self.cruise_speed_spin.setToolTip("默认巡航速度，USV 追踪路径时的目标速度")
         speed_layout.addRow("巡航速度:", self.cruise_speed_spin)
@@ -191,7 +191,7 @@ class VelocitySettingsDialog(QDialog):
     
     def _reset_to_default(self):
         """恢复默认设置"""
-        self.cruise_speed_spin.setValue(0.5)
+        self.cruise_speed_spin.setValue(0.6)
         self.max_angular_spin.setValue(0.5)
         self.goal_tolerance_spin.setValue(0.5)
         self.switch_tolerance_spin.setValue(1.5)

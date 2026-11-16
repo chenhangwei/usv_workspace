@@ -19,6 +19,7 @@ Example:
 
 from __future__ import annotations
 
+import os
 import argparse
 import json
 import math
@@ -88,6 +89,16 @@ def parse_args():
     p.add_argument('--teacher-giveway-smooth', action='store_true')
     p.add_argument('--teacher-duck-offset', type=float, default=0.0)
     p.add_argument('--teacher-duck-slow', type=float, default=0.25)
+    p.add_argument('--teacher-duck-smooth', action='store_true')
+    p.add_argument('--teacher-duck-release', type=float, default=8.0)
+    p.add_argument('--teacher-convoy-distance', type=float, default=0.0)
+    p.add_argument('--teacher-turn-omega-limit', type=float, default=0.0)
+    p.add_argument('--teacher-avoid-heading', type=float, default=0.0)
+    p.add_argument('--teacher-avoid-clearance', type=float, default=0.0)
+    p.add_argument('--teacher-tandem-clean', action='store_true')
+    p.add_argument('--teacher-static-hull', action='store_true')
+    p.add_argument('--teacher-park-slow', type=float, default=0.0)
+    p.add_argument('--teacher-omega-deadband-comp', type=float, default=0.0)
     p.add_argument('--teacher-close-range-distance', type=float, default=3.2,
                    help='Teacher close-range avoidance ramp start (m).')
     p.add_argument('--teacher-escape-distance', type=float, default=1.35,
@@ -225,7 +236,7 @@ def _build_env(args, scenarios) -> MultiAgentEnv:
         cruise_speed=float(args.cruise_speed),
         max_angular_velocity=float(args.max_angular_velocity),
         sim_tau_linear=1.5 if (args.sitl_dynamics or args.sitl_dynamics_v2) else float(args.sim_tau_linear),
-        sim_tau_angular=0.5 if args.sitl_dynamics_v2 else (0.75 if args.sitl_dynamics else float(args.sim_tau_angular)),
+        sim_tau_angular=float(os.environ.get('SIM_TAU_ANG', '0.5')) if args.sitl_dynamics_v2 else (0.75 if args.sitl_dynamics else float(args.sim_tau_angular)),
         sim_yaw_gain_low=1.0 if args.sitl_dynamics_v2 else (0.55 if args.sitl_dynamics else 1.0),
         sim_yaw_gain_high=1.0 if args.sitl_dynamics_v2 else (0.25 if args.sitl_dynamics else 1.0),
         sim_yaw_rate_limit=0.5 if args.sitl_dynamics_v2 else (0.35 if args.sitl_dynamics else 0.0),
@@ -294,6 +305,16 @@ def main():
         giveway_smooth=bool(args.teacher_giveway_smooth),
         duck_offset=float(args.teacher_duck_offset),
         duck_slow=float(args.teacher_duck_slow),
+        duck_smooth=bool(args.teacher_duck_smooth),
+        duck_release=float(args.teacher_duck_release),
+        convoy_distance=float(args.teacher_convoy_distance),
+        turn_omega_limit=float(args.teacher_turn_omega_limit),
+        avoid_heading=float(args.teacher_avoid_heading),
+        avoid_clearance=float(args.teacher_avoid_clearance),
+        tandem_clean=bool(args.teacher_tandem_clean),
+        static_hull=bool(args.teacher_static_hull),
+        park_slow=float(args.teacher_park_slow),
+        omega_deadband_comp=float(args.teacher_omega_deadband_comp),
     )
 
     observations_out: list[np.ndarray] = []

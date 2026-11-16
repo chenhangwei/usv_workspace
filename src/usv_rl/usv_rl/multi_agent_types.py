@@ -116,14 +116,18 @@ def classify_encounter_role(
     nb_vx = own_speed + body_vx
     nb_vy = body_vy
     nb_speed = math.hypot(nb_vx, nb_vy)
-    both_slow = own_speed < 0.05 and nb_speed < 0.05
+    # Gazebo wave bobbing induces 0.02-0.09 m/s GPS velocity jitter on HOLD vessels;
+    # 0.11 m/s cleanly separates parked/holding hulls from maneuvering vessels (>=0.22 m/s),
+    # preventing per-frame OVERTAKING <-> CROSSING <-> NONE one-hot flickering.
+    static_thresh = 0.11
+    both_slow = own_speed < static_thresh and nb_speed < static_thresh
     # fresh634: both_slow only disengages beyond 3m -- a stalled close-quarters
     # pair must keep its roles so shaping can push the stand-on hull out.
     if (both_slow and distance > 3.0) or (closing_speed <= 0.0 and distance > 3.0):
         return ENC_NONE, ROLE_NONE
     # Relative course of the neighbour w.r.t. ego heading (ego heading = 0 in
     # her own body frame). |delta| near pi => reciprocal (head-on) courses.
-    delta_psi = math.atan2(nb_vy, nb_vx) if nb_speed > 0.03 else 0.0
+    delta_psi = math.atan2(nb_vy, nb_vx) if nb_speed > static_thresh else 0.0
     abs_delta = abs(delta_psi)
 
     def _tie_break() -> int:
@@ -136,13 +140,13 @@ def classify_encounter_role(
     # --- OVERTAKING (Rule 13): near-parallel courses, one clearly faster,
     # same lane. Role = longitudinal order (strictly complementary).
     same_lane = abs(body_y) < 1.5
-    if nb_speed <= 0.05 and body_x > 0.8 and same_lane and closing_speed > 0.0:
+    if nb_speed <= static_thresh and body_x > 0.5 and same_lane and closing_speed > 0.0:
         # A stationary/near-stationary vessel blocking our lane has no
         # reliable course, but the moving ego still has the sole duty to
         # keep clear.  Leaving this pair unclassified made the policy slow
         # down and drive straight at a holding vessel instead of passing it.
         return ENC_OVERTAKING, ROLE_GIVE_WAY
-    near_parallel = abs_delta < (math.pi / 3.0) and nb_speed > 0.05
+    near_parallel = abs_delta < (math.pi / 3.0) and nb_speed > static_thresh
     if same_lane and near_parallel:
         speed_gap = own_speed - nb_speed
         if body_x > 0.8 and speed_gap > 0.02 and closing_speed > 0.0:
@@ -159,7 +163,7 @@ def classify_encounter_role(
     # --- HEAD-ON band + ambiguous near-reciprocal band: ID tie-break.
     # 135° aligns with _HEAD_ON_COURSE_DEG (policy_inference_node) so the
     # type observation and the role assignment can never disagree.
-    if abs_delta > math.radians(135.0) and closing_speed > 0.0:
+    if nb_speed > static_thresh and abs_delta > math.radians(135.0) and closing_speed > 0.0:
         # fresh634: gate on DCPA instead of ego-frame |body_y| -- the cross
         # product |rel_pos x rel_vel| is identical from both hulls, while
         # body_y is measured against each hull's own (avoidance-deflected)
@@ -172,7 +176,7 @@ def classify_encounter_role(
             return ENC_HEAD_ON, _tie_break()
 
     # --- CROSSING (Rule 15): converging, other on starboard => give way.
-    if closing_speed > -0.05 and nb_speed > 0.05 and abs_delta > math.radians(20.0):
+    if closing_speed > -0.05 and nb_speed > static_thresh and abs_delta > math.radians(20.0):
         # fresh634: in the near-reciprocal band the starboard rule is
         # unreliable -- an oblique head-on puts EACH hull on the other's
         # starboard bow, so Rule 15 hands BOTH hulls GIVE_WAY (SITL

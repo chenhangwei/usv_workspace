@@ -2614,7 +2614,7 @@ limitations under the License.
             # 获取上次的设置
             try:
                 last_settings = {
-                    'cruise_speed': float(self.settings.value('velocity_cruise_speed_last', 0.5)),
+                    'cruise_speed': float(self.settings.value('velocity_cruise_speed_last', 0.6)),
                     'max_angular_velocity': float(self.settings.value('velocity_max_angular_last', 0.5)),
                     'goal_tolerance': float(self.settings.value('velocity_goal_tolerance_last', 0.5)),
                     'switch_tolerance': float(self.settings.value('velocity_switch_tolerance_last', 1.5)),
@@ -2673,7 +2673,7 @@ limitations under the License.
                 target_ids = online_ids
 
             # 下发设置
-            ok_send = self.ros_node.set_velocity_settings(target_ids, settings)
+            ok_send = self.ros_node.set_velocity_settings(target_ids, settings, from_user_dialog=True)
             
             # 构建日志信息
             info_msg = (

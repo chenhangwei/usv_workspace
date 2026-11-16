@@ -83,6 +83,11 @@ class IntervalRequests:
             return f'message={message_id} request error: {exc}'
 
 
+def needs_rerequest(done, sources, minimum_hz, now, not_before):
+    """An ACKed interval request can still leave one SITL instance streaming at ~0.5 Hz; ask again after the cooldown."""
+    return done and now >= not_before and any(s['source_hz'] < minimum_hz for s in sources.values())
+
+
 class SourceFreshness:
     """Measure unique source stamps separately from callbacks and value changes."""
 
@@ -140,6 +145,7 @@ class TelemetryRateNode(Node):
             'requested_rate_hz': 15.0, 'request_timeout_s': 3.0,
             'request_retries': 3, 'service_timeout_s': 60.0,
             'minimum_source_hz': 10.0, 'maximum_source_age_s': 0.25,
+            'rerequest_period_s': 20.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -147,10 +153,13 @@ class TelemetryRateNode(Node):
         if any(not math.isfinite(float(value)) or float(value) <= 0 for value in values.values()):
             raise ValueError('Telemetry rates, timeouts and retries must be positive and finite')
         clients = [self.create_client(CommandLong, name) for name in ('cmd/command', 'mavros/cmd/command')]
-        self.requests = IntervalRequests(
+        self._request_args = (
             clients, values['requested_rate_hz'], values['request_timeout_s'],
             values['request_retries'], values['service_timeout_s'],
         )
+        self.requests = IntervalRequests(*self._request_args)
+        self.rerequest_period = values['rerequest_period_s']
+        self._rerequest_not_before = time.monotonic() + self.rerequest_period
         self.minimum_hz = values['minimum_source_hz']
         self.maximum_age = values['maximum_source_age_s']
         self.sources = {name: SourceFreshness() for name in ('pose', 'velocity')}
@@ -185,6 +194,10 @@ class TelemetryRateNode(Node):
         sources = {name: source.snapshot(now, ros_now, self.minimum_hz, self.maximum_age)
                    for name, source in self.sources.items()}
         healthy = all(source['healthy'] for source in sources.values())
+        if needs_rerequest(self.requests.done, sources, self.minimum_hz, now, self._rerequest_not_before):
+            self.requests = IntervalRequests(*self._request_args)
+            self._rerequest_not_before = now + self.rerequest_period
+            self.get_logger().warning('[rate-request] source rate below minimum, requesting message intervals again')
         status = {
             'timestamp': ros_now, 'namespace': self.get_namespace(),
             'requests_done': self.requests.done,

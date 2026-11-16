@@ -117,6 +117,7 @@ class MultiAgentScenarioFactory:
         'five_usv_dense_overtaking_tight': 5,
         'five_usv_dense_overtaking_merge': 5,
         'mission_pentagram5': 5,
+        'mission_pentagram5_line': 5,
     }
 
     @staticmethod
@@ -650,6 +651,23 @@ class MultiAgentScenarioFactory:
                 agent_goals=agent_goals,
                 active_agent_ids=active_ids,
             )
+
+        if kind == 'mission_pentagram5_line':
+            # Real SITL step 1: boats start in a line along +x (0.4, 10.4, ... m, heading east) and sail 11-46 m to
+            # their vertices; the first boats to arrive park on the routes of the later ones.
+            if len(agent_ids) < 5:
+                raise ValueError('mission_pentagram5_line requires at least 5 agents.')
+            vertices = [(6.0 * math.cos(math.radians(-126.0 + 72.0 * k)),
+                         6.0 * math.sin(math.radians(-126.0 + 72.0 * k))) for k in range(5)]
+            spawns, goals, queues = {}, {}, {}
+            for index, agent_id in enumerate(agent_ids[:5]):
+                route = [vertices[(index + 2 * step) % 5] for step in range(6)]
+                spawns[agent_id] = AgentSpawnConfig(x=0.4 + 10.0 * index, y=0.0, yaw=0.0)
+                goals[agent_id] = AgentGoalConfig(x=route[0][0], y=route[0][1])
+                queues[agent_id] = route[1:]
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, spawns, goals)
+            return FleetScenario(name=kind, duration=900.0, agent_spawns=spawns, agent_goals=goals,
+                                 active_agent_ids=tuple(agent_ids[:5]), mission_waypoints=queues)
 
         if kind == 'mission_pentagram5':
             # Path File/五角星-5-usv-12m-第一步同步.xml: vertices on a 6 m circle, every step each boat

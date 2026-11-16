@@ -42,6 +42,7 @@ def extract_report_data(data: list, header_info: dict) -> dict:
       'schema_description': header_info.get('schema_description', ''),
         'params': header_info.get('params', {}),
         'duration_s': duration,
+        'start_ts': t0,
         'record_count': len(data),
         'guided_count': len(guided),
         'hold_count': len(hold),
@@ -635,6 +636,20 @@ USV_COLORS = [
 ]
 
 
+def _shift_ts(ts: dict, offset: float) -> dict:
+    """把一艘船的时间序列平移到公共时间轴 (邻船序列的时间以观察者自身 t0 为基准, 同样平移)。"""
+    if not ts or abs(offset) < 1e-9:
+        return ts
+    shifted = dict(ts)
+    shifted['time'] = [x + offset for x in ts['time']]
+    if ts.get('neighbors'):
+        shifted['neighbors'] = {
+            nid: {**nb, 'time': [x + offset for x in nb['time']]}
+            for nid, nb in ts['neighbors'].items()
+        }
+    return shifted
+
+
 # ─── 公开接口 ──────────────────────────────────────────────────
 
 def generate_multi_html_report(all_report_data: list, output_path: Path, title: str = ''):
@@ -674,10 +689,16 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
             'wifi_grade': rd['wifi'].get('grade', '') if rd['wifi'] else '',
         })
 
+    # 各船日志起始时刻不同 (如缺少第一步日志), 统一到最早起始时刻
+    _starts = [rd['info'].get('start_ts') for rd in all_report_data]
+    _valid_starts = [s for s in _starts if isinstance(s, (int, float))]
+    global_t0 = min(_valid_starts) if _valid_starts else 0.0
+
     all_ts, all_targets, all_per_goal, all_summaries = {}, {}, {}, {}
     for rd in all_report_data:
         key = str(rd['_idx'])
-        all_ts[key] = rd['ts']
+        _s = rd['info'].get('start_ts')
+        all_ts[key] = _shift_ts(rd['ts'], (_s - global_t0) if isinstance(_s, (int, float)) else 0.0)
         all_targets[key] = rd['targets']
         all_per_goal[key] = rd['per_goal']
         all_summaries[key] = {
@@ -1614,8 +1635,8 @@ function catmull(p0,p1,p2,p3,t) {{
   return 0.5*(2*p1+(-p0+p2)*t+(2*p0-5*p1+4*p2-p3)*t2+(-p0+3*p1-3*p2+p3)*t3);
 }}
 
-// GS导航预览箭头: 0.6m×0.35m, 归一化后 width/length=0.583
-const BOAT_VERTS = [[0.5,0],[-0.5,0.292],[-0.167,0],[-0.5,-0.292]];
+// GS导航预览箭头: 0.60m×0.30m, 归一化后 width/length=0.50
+const BOAT_VERTS = [[0.5,0],[-0.5,0.25],[-0.167,0],[-0.5,-0.25]];
 const BOAT_SCALE = 22;
 
 // 避让类型颜色映射: -1=unset, 0=head_on, 1=crossing, 2=overtaking
@@ -1772,6 +1793,22 @@ function sampleNeighborPos(nb,t) {{
   if(dy>180)dy-=360; if(dy<-180)dy+=360;
   const yaw=(y0+dy*f)*Math.PI/180;
   return {{x:x,y:y,yaw:yaw}};
+}}
+
+// 在其他USV的邻船观测中查找某USV在时刻t的位置, 优先使用观测时间覆盖t的观察者
+function findPeerPos(data,selfD,t) {{
+  const selfId=selfD.usv.id;
+  let best=null, fallback=null;
+  data.forEach(o=>{{
+    if(o.usv.idx===selfD.usv.idx) return;
+    const nb=o.ts.neighbors&&o.ts.neighbors[selfId];
+    if(!nb||!nb.time||!nb.time.length) return;
+    const pos=sampleNeighborPos(nb,t);
+    if(!pos) return;
+    fallback=pos;
+    if(t>=nb.time[0]-2&&t<=nb.time[nb.time.length-1]+2) best=pos;
+  }});
+  return best||fallback;
 }}
 
 function updateReplayInfo() {{
@@ -1937,22 +1974,33 @@ function renderReplayFrame() {{
       }}
     }});
   }});
-  // v16: 将邻居观测位置纳入视口 (已结束USV可能漂移到新位置)
-  data.forEach(dSelf=>{{
-    const selfEndTime=dSelf.ts.time[dSelf.ts.time.length-1];
-    if(t<=selfEndTime) return;
-    const selfId=dSelf.usv.id;
-    data.forEach(dOther=>{{
-      if(dOther.usv.idx===dSelf.usv.idx) return;
-      const nbs=dOther.ts.neighbors;
-      if(!nbs||!nbs[selfId]) return;
-      const pos=sampleNeighborPos(nbs[selfId],t);
-      if(pos) {{
-        if(pos.x<minX)minX=pos.x; if(pos.x>maxX)maxX=pos.x;
-        if(pos.y<minY)minY=pos.y; if(pos.y>maxY)maxY=pos.y;
-      }}
-    }});
+  // v16: 将邻居观测位置纳入视口 (自身日志尚未开始/已结束的USV，以及无独立日志的静止邻船)
+  const dataIds=new Set(data.map(d=>d.usv.id));
+  const extPeerPos={{}};
+  data.forEach(o=>{{
+    const nbs=o.ts.neighbors; if(!nbs) return;
+    for(const nid in nbs) {{
+      if(dataIds.has(nid)) continue;
+      const nb=nbs[nid];
+      if(!nb||!nb.time||!nb.time.length) continue;
+      const pos=sampleNeighborPos(nb,t);
+      if(pos&&( !(nid in extPeerPos) || (t>=nb.time[0]-2&&t<=nb.time[nb.time.length-1]+2) )) extPeerPos[nid]=pos;
+    }}
   }});
+  data.forEach(dSelf=>{{
+    const sT=dSelf.ts.time;
+    if(t>=sT[0]-0.5&&t<=sT[sT.length-1]) return;
+    const pos=findPeerPos(data,dSelf,t);
+    if(pos) {{
+      if(pos.x<minX)minX=pos.x; if(pos.x>maxX)maxX=pos.x;
+      if(pos.y<minY)minY=pos.y; if(pos.y>maxY)maxY=pos.y;
+    }}
+  }});
+  for(const nid in extPeerPos) {{
+    const pos=extPeerPos[nid];
+    if(pos.x<minX)minX=pos.x; if(pos.x>maxX)maxX=pos.x;
+    if(pos.y<minY)minY=pos.y; if(pos.y>maxY)maxY=pos.y;
+  }}
 
   let rx=(maxX-minX)||1, ry=(maxY-minY)||1;
   const pad=0.15;
@@ -2002,6 +2050,9 @@ function renderReplayFrame() {{
 
   data.forEach(d=>{{
     const ts=d.ts, color=d.usv.color, uK=d.usv.idx, sp=d.sp;
+    // 自身日志尚未开始或已结束超过渐隐期: 若邻船观测里有它的位置, 交给下方幽灵船绘制, 避免残留上一轮旧轨迹与双影船
+    if(t<ts.time[0]-0.5&&findPeerPos(data,d,t)) return;
+    if(t>ts.time[ts.time.length-1]+fadeDur&&findPeerPos(data,d,t)) return;
     let idx=0;
     for(let i=0;i<ts.time.length;i++) {{ if(ts.time[i]<=t) idx=i; else break; }}
 
@@ -2251,32 +2302,36 @@ function renderReplayFrame() {{
     }}
   }});
 
-  // v16: 已结束的USV通过邻居观测数据继续显示位置
-  // 当一个USV自身数据结束后，从其他仍在记录的USV的邻居数据中获取其位置
+  // v16: 自身日志未开始/已结束的USV通过其他USV的邻居观测数据继续显示位置
   data.forEach(dSelf=>{{
     const ts=dSelf.ts;
     const selfEndTime=ts.time[ts.time.length-1];
-    if(t<=selfEndTime) return; // 自身数据未结束，已在上面绘制
-    const selfId=dSelf.usv.id;
-    // 在所有其他USV的邻居数据中查找此USV
-    let bestPos=null;
-    data.forEach(dOther=>{{
-      if(dOther.usv.idx===dSelf.usv.idx) return;
-      const nbs=dOther.ts.neighbors;
-      if(!nbs||!nbs[selfId]) return;
-      const pos=sampleNeighborPos(nbs[selfId],t);
-      if(pos) bestPos=pos;
-    }});
+    const beforeStart=t<ts.time[0]-0.5;
+    if(!beforeStart&&t<=selfEndTime+fadeDur) return; // 自身数据有效或仍在渐隐期，已在上面绘制
+    const bestPos=findPeerPos(data,dSelf,t);
     if(bestPos) {{
       const[canX,canY]=toC(bestPos.x,bestPos.y);
       ctx.globalAlpha=0.55;
       drawBoat(ctx,canX,canY,bestPos.yaw,dSelf.usv.color,BOAT_SCALE);
       ctx.globalAlpha=0.55;
       ctx.fillStyle=dSelf.usv.color; ctx.font='bold 11px Inter,system-ui,sans-serif';
-      ctx.textAlign='center'; ctx.fillText(dSelf.usv.id+'(idle)',canX,canY-BOAT_SCALE-4);
+      ctx.textAlign='center'; ctx.fillText(dSelf.usv.id+(beforeStart?'(无日志)':'(idle)'),canX,canY-BOAT_SCALE-4);
       ctx.globalAlpha=1.0;
     }}
   }});
+  // 无独立日志文件的场内邻船/静止船补绘 (如部分船只参与任务时水面静止停泊的其他船)
+  const EXT_COLORS={{'usv_01':'#2196F3','usv_02':'#F44336','usv_03':'#4CAF50','usv_04':'#FF9800','usv_05':'#9C27B0'}};
+  for(const nid in extPeerPos) {{
+    const pos=extPeerPos[nid];
+    const[canX,canY]=toC(pos.x,pos.y);
+    const ec=EXT_COLORS[nid]||'#90A4AE';
+    ctx.globalAlpha=0.65;
+    drawBoat(ctx,canX,canY,pos.yaw,ec,BOAT_SCALE);
+    ctx.globalAlpha=0.75;
+    ctx.fillStyle=ec; ctx.font='bold 11px Inter,system-ui,sans-serif';
+    ctx.textAlign='center'; ctx.fillText(nid+'(静止)',canX,canY-BOAT_SCALE-4);
+    ctx.globalAlpha=1.0;
+  }}
 
   // 时间文字
   ctx.fillStyle='rgba(100,255,218,0.6)';

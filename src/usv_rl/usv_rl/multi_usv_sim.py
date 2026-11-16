@@ -1,7 +1,8 @@
 import argparse
 import math
+import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import rclpy
@@ -28,6 +29,7 @@ class _SimAgentState:
     target_v: float = 0.0
     target_omega: float = 0.0
     last_cmd_time: float = 0.0
+    cmd_queue: list = field(default_factory=list)
 
 
 @dataclass
@@ -66,6 +68,7 @@ class MultiUsvSimNode(Node):
         self._yaw_rate_limit = float(yaw_rate_limit)
         self._yaw_rate_limit_high = float(yaw_rate_limit_high) or self._yaw_rate_limit
         self._yaw_deadband = float(yaw_deadband)
+        self._cmd_delay = float(os.environ.get('SIM_CMD_DELAY', '0') or 0.0)
         self._command_timeout = 0.6
         self._dr = _DomainRandomizationConfig()
         self._rng = np.random.default_rng()
@@ -114,6 +117,10 @@ class MultiUsvSimNode(Node):
     def _make_cmd_callback(self, namespace: str):
         def _callback(msg: PositionTarget):
             state = self._agent_states[namespace]
+            if self._cmd_delay > 0.0:
+                state.cmd_queue.append((time.monotonic(), float(msg.velocity.x), float(msg.yaw_rate)))
+                state.last_cmd_time = time.monotonic()
+                return
             state.target_v = float(msg.velocity.x)
             state.target_omega = float(msg.yaw_rate)
             state.last_cmd_time = time.monotonic()
@@ -197,6 +204,8 @@ class MultiUsvSimNode(Node):
             if (now - state.last_cmd_time) > self._command_timeout:
                 state.target_v = 0.0
                 state.target_omega = 0.0
+            while state.cmd_queue and now - state.cmd_queue[0][0] >= self._cmd_delay:
+                _, state.target_v, state.target_omega = state.cmd_queue.pop(0)
 
             linear_alpha = min(1.0, self._dt / max(self._tau_linear, 1e-3))
             angular_alpha = min(1.0, self._dt / max(self._tau_angular, 1e-3))

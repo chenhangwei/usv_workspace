@@ -463,6 +463,11 @@ class ClusterController:
                 is_retry = state.retry > 0
                 sent_set = self._lookahead_sent.get(usv_id)
                 if self._lookahead_enabled and sent_set and state.step in sent_set and not is_retry:
+                    # 下发当前航段速度 (优先使用用户在速度设置弹窗设定的速度，否则使用 XML <velocity><value>)
+                    user_speed = getattr(self.node, '_user_cruise_speed_override', None)
+                    seg_velocity = float(user_speed if user_speed is not None else (target_data.get('velocity', 0.0) or 0.0))
+                    if seg_velocity > 0.05:
+                        self.node.set_velocity_settings([usv_id], {'cruise_speed': seg_velocity})
                     # SITL 2026-07-14 130115 双重旋转修复: AckState.received
                     # 此前从未被置 True，跳过发送后必然 step_timeout 超时 →
                     # 幽灵重试重发同一 goal → 旋转机动被整段重启 (usv_02 终点
@@ -513,6 +518,12 @@ class ClusterController:
                 nav_mode = target_data.get('nav_mode', 0)
                 sync_timeout = target_data.get('sync_timeout', 10.0)
                 arrival_quality = target_data.get('arrival_quality_threshold', 0.8)
+
+                # 下发航段速度 (优先使用用户在速度设置弹窗设定的速度，否则使用 XML <velocity><value>)
+                user_speed = getattr(self.node, '_user_cruise_speed_override', None)
+                seg_velocity = float(user_speed if user_speed is not None else (target_data.get('velocity', 0.0) or 0.0))
+                if seg_velocity > 0.05:
+                    self.node.set_velocity_settings([usv_id], {'cruise_speed': seg_velocity})
                 
                 retry_tag = f" (重试{state.retry})" if is_retry else ""
                 self.node.get_logger().info(

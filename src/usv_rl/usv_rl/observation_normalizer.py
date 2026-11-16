@@ -74,10 +74,27 @@ class ObservationNormalizer:
         self.rms.update(obs_batch)
 
     def normalize(self, obs: np.ndarray) -> np.ndarray:
-        obs = np.asarray(obs, dtype=np.float32)
+        obs_arr = np.asarray(obs, dtype=np.float32)
         mean = self.rms.mean.astype(np.float32)
         std = np.sqrt(self.rms.var.astype(np.float32) + self.epsilon)
-        return np.clip((obs - mean) / std, -self.clip, self.clip).astype(np.float32)
+        out = np.clip((obs_arr - mean) / std, -self.clip, self.clip).astype(np.float32)
+        # Preserve the exact neighbor-mask invariant expected by _parse_local_obs (distance > 1e-6 iff slot active):
+        # shift each neighbor slot's normalized distance by its empty-slot (raw=0) baseline + 1e-3 so active
+        # neighbors (raw distance > 0) are strictly positive and empty padded slots (raw distance == 0) are 0.0.
+        dim = obs_arr.shape[-1]
+        for ego_dim in (19, 17, 12, 11, 10):
+            for nb_dim in (15, 10, 6):
+                rem = dim - ego_dim
+                if rem > 0 and (rem % nb_dim == 0 or (rem >= 3 and (rem - 3) % nb_dim == 0)):
+                    n_slots = (rem if rem % nb_dim == 0 else rem - 3) // nb_dim
+                    for k in range(n_slots):
+                        d_idx = ego_dim + k * nb_dim + 4
+                        raw_d = obs_arr[..., d_idx]
+                        z0 = float(-mean[d_idx] / std[d_idx])
+                        shifted = np.maximum(out[..., d_idx] - z0 + 1e-3, 1e-3)
+                        out[..., d_idx] = np.where(raw_d > 1e-6, shifted, 0.0)
+                    return out
+        return out
 
     def state_dict(self) -> dict:
         d = self.rms.state_dict()

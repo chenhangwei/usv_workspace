@@ -179,6 +179,31 @@ topics:
     type: std_msgs/msg/Float32
     from_domain: 11
     reversed: true
+
+  usv_01/set_nav_switch_threshold:
+    type: std_msgs/msg/Float32
+    from_domain: 11
+    reversed: true
+
+  usv_01/set_velocity_cruise_speed:
+    type: std_msgs/msg/Float32
+    from_domain: 11
+    reversed: true
+
+  usv_01/set_velocity_max_angular:
+    type: std_msgs/msg/Float32
+    from_domain: 11
+    reversed: true
+
+  usv_01/set_velocity_goal_tolerance:
+    type: std_msgs/msg/Float32
+    from_domain: 11
+    reversed: true
+
+  usv_01/set_velocity_switch_tolerance:
+    type: std_msgs/msg/Float32
+    from_domain: 11
+    reversed: true
   
   usv_01/gs_led_command:
     type: std_msgs/msg/String
@@ -366,6 +391,31 @@ topics:
     type: std_msgs/msg/Float32
     from_domain: 12
     reversed: true
+
+  usv_02/set_nav_switch_threshold:
+    type: std_msgs/msg/Float32
+    from_domain: 12
+    reversed: true
+
+  usv_02/set_velocity_cruise_speed:
+    type: std_msgs/msg/Float32
+    from_domain: 12
+    reversed: true
+
+  usv_02/set_velocity_max_angular:
+    type: std_msgs/msg/Float32
+    from_domain: 12
+    reversed: true
+
+  usv_02/set_velocity_goal_tolerance:
+    type: std_msgs/msg/Float32
+    from_domain: 12
+    reversed: true
+
+  usv_02/set_velocity_switch_tolerance:
+    type: std_msgs/msg/Float32
+    from_domain: 12
+    reversed: true
   
   usv_02/gs_led_command:
     type: std_msgs/msg/String
@@ -550,6 +600,31 @@ topics:
     reversed: true
 
   usv_03/set_nav_arrival_threshold:
+    type: std_msgs/msg/Float32
+    from_domain: 13
+    reversed: true
+
+  usv_03/set_nav_switch_threshold:
+    type: std_msgs/msg/Float32
+    from_domain: 13
+    reversed: true
+
+  usv_03/set_velocity_cruise_speed:
+    type: std_msgs/msg/Float32
+    from_domain: 13
+    reversed: true
+
+  usv_03/set_velocity_max_angular:
+    type: std_msgs/msg/Float32
+    from_domain: 13
+    reversed: true
+
+  usv_03/set_velocity_goal_tolerance:
+    type: std_msgs/msg/Float32
+    from_domain: 13
+    reversed: true
+
+  usv_03/set_velocity_switch_tolerance:
     type: std_msgs/msg/Float32
     from_domain: 13
     reversed: true

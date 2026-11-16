@@ -1,5 +1,5 @@
 {
-    "cmake.sourceDirectory": "/home/chenhangwei/usv_workspace/src/common_interfaces",
+    "cmake.sourceDirectory": "/wsl.localhost/Ubuntu-24.04/home/chenhangwei/usv_workspace/src/common_interfaces",
     "python.autoComplete.extraPaths": [
         "/home/chenhangwei/dev_ws/install/usv_drivers/lib/python3.12/site-packages",
         "/home/chenhangwei/dev_ws/install/usv_control/lib/python3.12/site-packages",

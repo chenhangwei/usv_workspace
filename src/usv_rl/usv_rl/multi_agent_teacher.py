@@ -59,6 +59,11 @@ _TEACHER_VEC_HEADER = 10
 _TEACHER_VEC_STRIDE = 6
 
 
+def _smoothstep(x: float) -> float:
+    x = min(max(float(x), 0.0), 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
 def _build_teacher_layout_vector(obs: AgentLocalObservation) -> np.ndarray:
     """Pack a structured multi-agent observation into the flat layout the
     validated single-agent v2 COLREGS heuristic expects."""
@@ -122,10 +127,26 @@ class MultiAgentColregsTeacher:
         duck_offset: float = 0.0,
         duck_slow: float = 0.25,
         omega_deadband_comp: float = 0.0,
+        heading_sqrt_gain: float = 0.0,
+        duck_smooth: bool = False,
+        duck_release: float = 8.0,
+        convoy_distance: float = 0.0,
+        turn_omega_limit: float = 0.0,
+        avoid_heading: float = 0.0,
+        avoid_clearance: float = 0.0,
+        tandem_clean: bool = False,
+        static_hull: bool = False,
+        park_slow: float = 0.0,
+        veteran_flow: bool = False,
+        sleek_direct: bool = False,
+        close_brush: bool = False,
     ) -> None:
         if action_mode not in ('speed_scale', 'full', 'angular_only'):
             raise ValueError(f'unsupported action_mode={action_mode!r}')
         self.action_mode = action_mode
+        self.veteran_flow = bool(veteran_flow)
+        self.sleek_direct = bool(sleek_direct)
+        self.close_brush = bool(close_brush)
         self.cruise_speed = float(cruise_speed)
         self.max_angular_velocity = float(max_angular_velocity)
         self.action_speed_scale_min = float(np.clip(action_speed_scale_min, 0.0, 1.0))
@@ -186,6 +207,28 @@ class MultiAgentColregsTeacher:
         self.duck_offset = float(duck_offset)
         self.duck_slow = float(duck_slow)
         self.omega_deadband_comp = float(omega_deadband_comp)
+        self.heading_sqrt_gain = float(heading_sqrt_gain)
+        self.duck_smooth = bool(duck_smooth)
+        self.duck_release = max(float(duck_release), 1e-3)
+        # >0: same-course hulls closer than this are pushed apart sideways (and the follower eases off) instead of running in tandem.
+        self.convoy_distance = float(convoy_distance)
+        # >0 caps |omega| so a corner is an arc of radius ~speed/limit, not a spot turn.
+        self.turn_omega_limit = float(turn_omega_limit)
+        # >0 (rad): while a conflict is urgent, aim this far off the route toward the pass side so the first yaw command clears the ~0.15 rad/s deadband.
+        self.avoid_heading = float(abs(avoid_heading))
+        # >0 (m): the avoidance bias runs until the predicted CPA puts the hull this far abeam (route frame), so a hull dead ahead on the route is cleared by a full margin.
+        self.avoid_clearance = float(abs(avoid_clearance))
+        # Same-direction hulls never trigger give-way: the follower only eases off, abreast hulls part by a fixed sign, the leader ignores the follower.
+        self.tandem_clean = bool(tandem_clean)
+        # A parked hull is a static obstacle: urgency and pass side come from route-frame geometry only (no relative-speed gate, no yaw-wobble flip).
+        self.static_hull = bool(static_hull)
+        # Extra slowdown fraction (of cruise) while closing on a parked hull, so the boat is slow before it has to turn.
+        self.park_slow = float(abs(park_slow))
+        self._park_near = 0.0
+        self._duck_left = 0.0
+        self._duck_has_cpa = False
+        self._duck_dir = 1.0
+        self._convoy_slow = 0.0
         # False makes labels a function of the current observation (no hidden latch) for behaviour cloning.
         self.threat_latch = bool(threat_latch)
         # Parallel/diverging boats inside the engage radius otherwise keep the dense fallback (starboard bias) on all mission.
@@ -300,9 +343,716 @@ class MultiAgentColregsTeacher:
             closing = rr < -0.01
         return nearest, closing
 
+    def _act_veteran_flow(self, obs: AgentLocalObservation) -> np.ndarray:
+        """Veteran-driver multi-neighbor smooth flow controller.
+
+        Key properties:
+        1. Superposes smooth lateral corridor offsets, heading anticipation, and
+           pass-astern throttle modulation across ALL active neighbors (no single-
+           neighbor argmax jumping in multi-USV convergence or parked-plus-moving traffic).
+        2. Exact route-anchored static-hull geometry (target_cte = (cte - lat_r) + dir * clearance)
+           so a boat already off-route never mistakes its own CTE for hull clearance.
+        3. True crossing pass-astern: right-side crossers trigger smooth yield-behind
+           (starboard bias + moderate throttle ease), NEVER convoy-push escorting.
+        4. Nominal-speed lookahead floor prevents mutual low-speed urgency extinction
+           and hesitation stalls, maintaining brisk steerage and ~0.8 m rounded arcs.
+        """
+        cos_yaw, sin_yaw = math.cos(float(obs.yaw)), math.sin(float(obs.yaw))
+        own_v = max(float(obs.speed), 0.0)
+        he_raw = float(obs.heading_error)
+        phi = float(obs.yaw) + he_raw
+        cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+        cte = float(obs.cross_track_error)
+
+        engage_dist = max(self.giveway_distance, 8.5)
+        clearance_target = max(self.avoid_clearance, 1.85)
+        park_margin = max(1.55, 0.82 * clearance_target)
+        base_offset = max(self.duck_offset, 1.35)
+        head_gain = max(self.avoid_heading, 0.62)
+
+        # Accumulate directional corridor shifts & throttle modulation smoothly
+        pos_cte_target = 0.0   # starboard corridor demand (>0)
+        neg_cte_target = 0.0   # port corridor demand (<0)
+        pos_cte_weight = 0.0
+        neg_cte_weight = 0.0
+        head_bias = 0.0        # >0 biases starboard (-omega), <0 biases port (+omega)
+        slow_frac = 0.0        # fraction of cruise speed to ease off
+        repel_bias = 0.0       # close-quarters smooth hull cushion
+        max_urg = 0.0
+        nearest = float('inf')
+
+        # Nominal forward speed floor so slowing down never blinds CPA lookahead
+        v_nom = max(own_v, 0.32)
+
+        for nb in obs.neighbors:
+            d = float(nb.distance)
+            if d <= 1e-6:
+                continue
+            nearest = min(nearest, d)
+            if d > engage_dist:
+                continue
+
+            rx, ry = float(nb.rel_x), float(nb.rel_y)
+            rvx, rvy = float(nb.rel_vx), float(nb.rel_vy)
+            body_x = cos_yaw * rx + sin_yaw * ry
+            body_y = -sin_yaw * rx + cos_yaw * ry       # >0: port, <0: starboard
+            along_r = cos_phi * rx + sin_phi * ry      # >0: ahead along route
+            lat_r = -sin_phi * rx + cos_phi * ry       # >0: left of us in route frame
+
+            nvx = rvx + own_v * cos_yaw
+            nvy = rvy + own_v * sin_yaw
+            n_speed = math.hypot(nvx, nvy)
+
+            # --- 1. Static / holding hull: route-anchored exact clearance (flip-free watershed) ---
+            if n_speed < 0.09:
+                if along_r < -2.2:
+                    continue
+                # Watershed pushed outside the collision corridor (lat_r ~ -0.95m):
+                # any hull dead-ahead, on port, or up to 0.85m to starboard is passed cleanly on
+                # starboard (+1), eliminating +/-omega sign flips inside the danger zone that
+                # cause a deterministic BC student to average to omega=0.
+                stbd_w = _smoothstep((lat_r + 1.05) / 0.25)  # 1.0 when lat_r >= -0.80, 0.0 when lat_r <= -1.05
+                if along_r >= -0.25:
+                    timing = _smoothstep((engage_dist - along_r) / (0.42 * engage_dist))
+                else:
+                    timing = _smoothstep(1.0 + (along_r + 0.25) / 2.0)
+                nb_cte = cte - lat_r  # exact hull CTE relative to route
+
+                if stbd_w > 1e-4:
+                    clear_s = lat_r
+                    miss_s = _smoothstep((park_margin + 0.45 - clear_s) / 0.85)
+                    u_s = stbd_w * miss_s * timing
+                    if u_s > 1e-4:
+                        max_urg = max(max_urg, u_s)
+                        req_cte_s = nb_cte + park_margin
+                        pos_cte_target = max(pos_cte_target, max(0.0, req_cte_s) * u_s)
+                        pos_cte_weight = max(pos_cte_weight, u_s)
+                        need_s = float(np.clip((park_margin - clear_s) / park_margin, 0.0, 1.0))
+                        near_boost = 1.0 + 0.35 * _smoothstep((4.5 - max(along_r, 0.0)) / 2.5)
+                        head_bias += head_gain * near_boost * u_s * need_s
+                        slow_frac = max(slow_frac, 0.16 * u_s * need_s * _smoothstep((4.2 - max(along_r, 0.0)) / 2.4))
+
+                port_w = 1.0 - stbd_w
+                if port_w > 1e-4:
+                    clear_p = -lat_r  # already > 0.80m when port_w > 0
+                    miss_p = _smoothstep((park_margin + 0.35 - clear_p) / 0.70)
+                    u_p = port_w * miss_p * timing
+                    if u_p > 1e-4:
+                        max_urg = max(max_urg, u_p)
+                        req_cte_p = nb_cte - park_margin
+                        neg_cte_target = min(neg_cte_target, min(0.0, req_cte_p) * u_p)
+                        neg_cte_weight = max(neg_cte_weight, u_p)
+                        need_p = float(np.clip((park_margin - clear_p) / park_margin, 0.0, 1.0))
+                        head_bias -= 0.48 * u_p * need_p
+
+                if d < 2.15 and along_r > -0.65:
+                    prox = _smoothstep((2.15 - d) / 1.25)
+                    p_dir = 1.0 if lat_r >= -0.90 else -1.0
+                    repel_bias += p_dir * 0.42 * prox
+                continue
+
+            # --- 2. Moving neighbor kinematics (actual + nominal-speed lookahead) ---
+            course_body = (nvx * cos_yaw + nvy * sin_yaw) / n_speed
+            course_route = (nvx * cos_phi + nvy * sin_phi) / n_speed
+            lat_vel_body = (-nvx * sin_yaw + nvy * cos_yaw) / n_speed   # >0: moving R->L across bow
+            lat_vel_route = (-nvx * sin_phi + nvy * cos_phi) / n_speed
+
+            # True same-direction convoy ONLY when courses align within ~38 deg (never on 72 deg crossings!)
+            same_w = _smoothstep((min(course_body, course_route) - 0.72) / 0.18)
+            if same_w > 0.0 and d < 2.4:
+                conv = same_w * _smoothstep((2.4 - d) / 1.1)
+                if body_x > 0.15:
+                    slow_frac = max(slow_frac, 0.32 * conv * _smoothstep(body_x / 0.8))
+                if d < 1.65 and body_x > -0.5:
+                    side_dir = 1.0 if body_y >= 0.0 else -1.0
+                    repel_bias += side_dir * 0.25 * conv
+                max_urg = max(max_urg, 0.5 * conv)
+
+            # Lookahead relative velocity using nominal own speed along current heading/route blend
+            rvx_nom = nvx - v_nom * (0.6 * cos_yaw + 0.4 * cos_phi)
+            rvy_nom = nvy - v_nom * (0.6 * sin_yaw + 0.4 * sin_phi)
+            v_sq_real = rvx * rvx + rvy * rvy
+            v_sq_nom = rvx_nom * rvx_nom + rvy_nom * rvy_nom
+
+            tcpa_r = -(rx * rvx + ry * rvy) / v_sq_real if v_sq_real > 1e-4 else -1.0
+            dcpa_r = math.hypot(rx + rvx * max(tcpa_r, 0.0), ry + rvy * max(tcpa_r, 0.0))
+            tcpa_n = -(rx * rvx_nom + ry * rvy_nom) / v_sq_nom if v_sq_nom > 1e-4 else -1.0
+            dcpa_n = math.hypot(rx + rvx_nom * max(tcpa_n, 0.0), ry + rvy_nom * max(tcpa_n, 0.0))
+
+            tcpa = tcpa_n if (tcpa_r <= 0.0 and tcpa_n > 0.0) else (min(tcpa_r, tcpa_n) if (tcpa_r > 0.0 and tcpa_n > 0.0) else tcpa_r)
+            dcpa = min(dcpa_r, dcpa_n)
+
+            # --- 2A. Head-on / oblique head-on (Rule 14: mutual early starboard arc, brisk flow) ---
+            head_on_w = max(
+                _smoothstep((-course_body - 0.42) / 0.30),
+                _smoothstep((-course_route - 0.42) / 0.30),
+            ) * (1.0 - same_w)
+            if head_on_w > 1e-4 and along_r > -2.4:
+                miss_ho = _smoothstep((self.giveway_dcpa - dcpa) / (0.42 * self.giveway_dcpa))
+                if tcpa >= 0.0:
+                    time_ho = _smoothstep((22.0 - tcpa) / 11.0)
+                else:
+                    time_ho = _smoothstep(1.0 + along_r / 2.4)
+                u_ho = head_on_w * miss_ho * time_ho
+                if u_ho > 1e-4:
+                    max_urg = max(max_urg, u_ho)
+                    t_cpa = max(tcpa_n, 0.0)
+                    cpa_left = -sin_phi * (rx + rvx_nom * t_cpa) + cos_phi * (ry + rvy_nom * t_cpa)
+                    need_ho = float(np.clip((clearance_target - cpa_left) / clearance_target, 0.0, 1.0))
+                    # Anchor starboard offset so even off-center oblique lanes part by >= 1.6m
+                    nb_cpa_cte = cte - cpa_left
+                    req_cte = max(base_offset, nb_cpa_cte + 0.85 * clearance_target)
+                    req_cte = min(req_cte, 2.25)
+                    pos_cte_target = max(pos_cte_target, req_cte * u_ho * max(need_ho, 0.35))
+                    pos_cte_weight = max(pos_cte_weight, u_ho)
+                    head_bias += head_gain * u_ho * need_ho
+                    # Veteran driver keeps flow speed (~84-90% cruise) in head-on arcs!
+                    slow_frac = max(slow_frac, 0.14 * u_ho * need_ho)
+
+            # --- 2B. Starboard crossing (Rule 15: pass-astern behind stand-on vessel, zero escort shove) ---
+            cross_stbd_w = max(
+                _smoothstep((lat_vel_body - 0.12) / 0.32),
+                _smoothstep((lat_vel_route - 0.12) / 0.32),
+            ) * (1.0 - same_w) * (1.0 - 0.75 * head_on_w)
+            # Engage when hull is on starboard/bow and has not yet cleared well to our port (>1.35m)
+            if cross_stbd_w > 1e-4 and along_r > -1.2 and lat_r < 1.45:
+                miss_cr = _smoothstep((3.1 - dcpa) / 1.25)
+                time_cr = _smoothstep((18.0 - tcpa) / 9.5) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 2.2)
+                port_clear_fade = _smoothstep((1.45 - lat_r) / 0.75)
+                u_cr = cross_stbd_w * miss_cr * time_cr * port_clear_fade
+                if u_cr > 1e-4:
+                    max_urg = max(max_urg, u_cr)
+                    t_cpa = max(tcpa_n, 0.0)
+                    cpa_left = -sin_phi * (rx + rvx_nom * t_cpa) + cos_phi * (ry + rvy_nom * t_cpa)
+                    need_cr = float(np.clip((1.65 - cpa_left) / 1.65, 0.0, 1.0))
+                    # Aim starboard toward the crosser's stern & ease throttle so it clears ahead cleanly
+                    pos_cte_target = max(pos_cte_target, 1.15 * u_cr * max(need_cr, 0.30))
+                    pos_cte_weight = max(pos_cte_weight, u_cr)
+                    head_bias += 0.56 * u_cr * max(need_cr, 0.25)
+                    slow_frac = max(slow_frac, 0.34 * u_cr * _smoothstep((6.0 - d) / 3.2))
+
+            # --- 2C. Defensive yield for a close port-side crosser already cutting across our bow ---
+            cross_port_w = max(
+                _smoothstep((-lat_vel_body - 0.18) / 0.30),
+                _smoothstep((-lat_vel_route - 0.18) / 0.30),
+            ) * (1.0 - same_w) * (1.0 - head_on_w)
+            if cross_port_w > 1e-4 and d < 3.8 and body_x > 0.0 and lat_r > -1.15:
+                miss_def = _smoothstep((1.65 - dcpa) / 0.70)
+                prox_def = _smoothstep((3.8 - d) / 1.8)
+                u_def = cross_port_w * miss_def * prox_def * _smoothstep((lat_r + 1.15) / 0.75)
+                if u_def > 1e-4:
+                    max_urg = max(max_urg, u_def)
+                    # Ease throttle and tuck slightly toward its stern (port, -cte) instead of ramming its beam
+                    neg_cte_target = min(neg_cte_target, -0.75 * u_def)
+                    neg_cte_weight = max(neg_cte_weight, 0.7 * u_def)
+                    head_bias -= 0.32 * u_def
+                    slow_frac = max(slow_frac, 0.30 * u_def)
+
+            # --- 2D. Close-quarters moving anti-shove cushion (d < 2.2m) ---
+            if d < 2.20 and body_x > -0.50:
+                prox = _smoothstep((2.20 - d) / 1.20)
+                # Default starboard turn unless neighbor is clearly on starboard AND not a starboard-crossing stern pass
+                if body_y >= -0.25 or cross_stbd_w > 0.35 or head_on_w > 0.35:
+                    repel_bias += 0.38 * prox
+                else:
+                    repel_bias -= 0.34 * prox
+
+        self._nearest_distance = nearest
+        self.last_engaged = max_urg > 1e-3 or abs(repel_bias) > 1e-3
+
+        # Combine starboard and port corridor offsets smoothly
+        net_offset = pos_cte_target - abs(neg_cte_target) if (pos_cte_weight >= neg_cte_weight) else (pos_cte_target * 0.4 + neg_cte_target)
+        # Fade back to route cleanly when unobstructed; soften CTE pull-back while actively avoiding
+        eff_cte_gain = self.cte_p_gain * (1.0 - 0.35 * min(1.0, max_urg) * (1.0 - max(pos_cte_weight, neg_cte_weight)))
+        cte_term = eff_cte_gain * (cte - net_offset)
+        if self.cte_term_limit is not None:
+            cte_term = float(np.clip(cte_term, -self.cte_term_limit, self.cte_term_limit))
+
+        total_head_bias = float(np.clip(head_bias + repel_bias, -0.95, 0.95))
+        he_eff = he_raw - total_head_bias
+        heading_term = self.heading_p_gain * he_eff
+
+        omega_cap = self.max_angular_velocity if self.turn_omega_limit <= 0.0 else min(self.max_angular_velocity, self.turn_omega_limit)
+        omega = float(np.clip(heading_term + cte_term, -omega_cap, omega_cap))
+
+        # Never stall below brisk steerage speed during avoidance (scale >= 0.56 unless tight waypoint cornering)
+        slow_frac = float(np.clip(slow_frac, 0.0, 0.42))
+        return self._format_action(omega, self.cruise_speed * slow_frac)
+
+    def _act_sleek_direct(self, obs: AgentLocalObservation) -> np.ndarray:
+        """Sleek-Direct (Point-and-Glide) Veteran Controller (a21).
+
+        Eliminates all redundant S-bends and wide bows while maintaining >1.25 m
+        close-pass margins and ~0.8 m rounded corner arcs:
+        1. Zero backward chord-CTE pull inside a wide +/-2.2m corridor: once a corner
+           turn or pass finishes and the bow points at the goal (he ~ 0), omega = 0
+           (laser-straight glide to goal, zero post-corner S-bend).
+        2. Minimal tangent-angle deflection in the goal line-of-sight frame:
+           deflection = atan2(missing_clearance, forward_range), engaging at <=6.8m
+           and releasing immediately past abeam (along_g < -0.45m).
+        3. Corner-first suppression: while turning a sharp waypoint (|he| > 55 deg)
+           with no immediate neighbor (<2.9m), complete the rounded ~0.8m corner
+           cleanly without mid-turn avoidance overshoot.
+        4. Port-bow crossers use smooth throttle feathering ONLY (zero port steering
+           tail-hook).
+        """
+        cos_yaw, sin_yaw = math.cos(float(obs.yaw)), math.sin(float(obs.yaw))
+        own_v = max(float(obs.speed), 0.0)
+        he_raw = float(obs.heading_error)
+        phi = float(obs.yaw) + he_raw  # exact bearing to current goal / virtual goal
+        cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+        cte = float(obs.cross_track_error)
+
+        engage_dist = max(self.giveway_distance, 7.2)
+        ho_clearance = max(self.avoid_clearance, 1.62)
+        park_margin = max(1.55, 0.96 * ho_clearance)
+        v_nom = max(own_v, 0.32)
+
+        head_bias = 0.0       # >0 turns starboard (-omega), <0 turns port (+omega)
+        slow_frac = 0.0
+        repel_bias = 0.0
+        max_urg = 0.0
+        nearest = float('inf')
+
+        # Suppress distant avoidance heading bias during sharp >55 deg waypoint cornering
+        corner_suppress = 1.0 - 0.80 * _smoothstep((abs(he_raw) - 0.96) / 0.55)
+
+        for nb in obs.neighbors:
+            d = float(nb.distance)
+            if d <= 1e-6:
+                continue
+            nearest = min(nearest, d)
+            if d > engage_dist:
+                continue
+
+            rx, ry = float(nb.rel_x), float(nb.rel_y)
+            rvx, rvy = float(nb.rel_vx), float(nb.rel_vy)
+            body_x = cos_yaw * rx + sin_yaw * ry
+            body_y = -sin_yaw * rx + cos_yaw * ry
+            along_g = cos_phi * rx + sin_phi * ry      # >0: ahead along goal LOS
+            lat_g = -sin_phi * rx + cos_phi * ry       # >0: left of goal LOS
+
+            nvx = rvx + own_v * cos_yaw
+            nvy = rvy + own_v * sin_yaw
+            n_speed = math.hypot(nvx, nvy)
+
+            # --- 1. Static / holding hull: ALWAYS pass on starboard (+1) unless already >1.45m clear on starboard ---
+            if n_speed < 0.09:
+                if along_g < -1.1:
+                    continue
+                # Universal starboard pass eliminates the bimodal port/starboard watershed inside
+                # the danger corridor (`lat_g > -1.45m`), so an unimodal BC network NEVER averages
+                # opposing +/-omega branches to zero! If `lat_g <= -1.45m`, the hull is already >1.45m
+                # clear on our right, so zero action (`omega = 0`) glides straight past safely.
+                stbd_w = _smoothstep((lat_g + 1.55) / 0.20)  # 1.0 for lat_g >= -1.35m, 0.0 for lat_g <= -1.55m
+                if stbd_w > 1e-4:
+                    timing = (
+                        _smoothstep((engage_dist - along_g) / (0.40 * engage_dist))
+                        if along_g >= -0.15
+                        else _smoothstep(1.0 + (along_g + 0.15) / 0.95)
+                    )
+                    need_s = float(np.clip((park_margin - lat_g) / park_margin, 0.0, 1.0))
+                    u_s = stbd_w * _smoothstep((park_margin + 0.30 - lat_g) / 0.68) * timing
+                    if u_s > 1e-4:
+                        max_urg = max(max_urg, u_s)
+                        req_angle = math.atan2(max(0.0, park_margin - lat_g), max(along_g * 0.72, 0.75))
+                        head_bias += min(0.82, 1.32 * req_angle) * u_s
+                        slow_frac = max(slow_frac, 0.18 * u_s * need_s * _smoothstep((4.2 - max(along_g, 0.0)) / 2.2))
+                if d < 2.05 and along_g > -0.40 and lat_g > -1.45:
+                    repel_bias += 0.42 * _smoothstep((2.05 - d) / 1.05)
+                continue
+
+            # --- 2. Moving neighbor kinematics in goal-LOS frame ---
+            course_body = (nvx * cos_yaw + nvy * sin_yaw) / n_speed
+            course_goal = (nvx * cos_phi + nvy * sin_phi) / n_speed
+            lat_vel_body = (-nvx * sin_yaw + nvy * cos_yaw) / n_speed
+            lat_vel_goal = (-nvx * sin_phi + nvy * cos_phi) / n_speed
+
+            same_w = _smoothstep((min(course_body, course_goal) - 0.75) / 0.16)
+            if same_w > 0.0 and d < 2.2:
+                conv = same_w * _smoothstep((2.2 - d) / 1.0)
+                if body_x > 0.15:
+                    slow_frac = max(slow_frac, 0.28 * conv * _smoothstep(body_x / 0.8))
+                if d < 1.55 and body_x > -0.35:
+                    repel_bias += (1.0 if body_y >= 0.0 else -1.0) * 0.22 * conv
+                max_urg = max(max_urg, 0.4 * conv)
+
+            rvx_nom = nvx - v_nom * (0.5 * cos_yaw + 0.5 * cos_phi)
+            rvy_nom = nvy - v_nom * (0.5 * sin_yaw + 0.5 * sin_phi)
+            v_sq_r = rvx * rvx + rvy * rvy
+            v_sq_n = rvx_nom * rvx_nom + rvy_nom * rvy_nom
+            tcpa_r = -(rx * rvx + ry * rvy) / v_sq_r if v_sq_r > 1e-4 else -1.0
+            dcpa_r = math.hypot(rx + rvx * max(tcpa_r, 0.0), ry + rvy * max(tcpa_r, 0.0))
+            tcpa_n = -(rx * rvx_nom + ry * rvy_nom) / v_sq_n if v_sq_n > 1e-4 else -1.0
+            dcpa_n = math.hypot(rx + rvx_nom * max(tcpa_n, 0.0), ry + rvy_nom * max(tcpa_n, 0.0))
+            tcpa = tcpa_n if (tcpa_r <= 0.0 and tcpa_n > 0.0) else (min(tcpa_r, tcpa_n) if (tcpa_r > 0.0 and tcpa_n > 0.0) else tcpa_r)
+            dcpa = min(dcpa_r, dcpa_n)
+
+            eff_sup = 1.0 if d < 2.9 else corner_suppress
+
+            # --- 2A. Head-on / oblique reciprocal: crisp starboard tangent glide ---
+            head_on_w = max(
+                _smoothstep((-course_body - 0.44) / 0.28),
+                _smoothstep((-course_goal - 0.44) / 0.28),
+            ) * (1.0 - same_w)
+            if head_on_w > 1e-4 and along_g > -0.55:
+                miss_ho = _smoothstep((2.45 - dcpa) / 0.95)
+                time_ho = _smoothstep((16.5 - tcpa) / 8.5) if tcpa >= 0.0 else _smoothstep(1.0 + along_g / 0.55)
+                u_ho = head_on_w * miss_ho * time_ho * eff_sup
+                if u_ho > 1e-4:
+                    max_urg = max(max_urg, u_ho)
+                    t_cpa = max(tcpa_n, 0.0)
+                    cpa_left = -sin_phi * (rx + rvx_nom * t_cpa) + cos_phi * (ry + rvy_nom * t_cpa)
+                    deficit = max(0.0, ho_clearance - cpa_left)
+                    req_ang = math.atan2(0.76 * deficit, max(along_g * 0.52, 0.95))
+                    head_bias += min(0.60, 1.22 * req_ang) * u_ho
+                    slow_frac = max(slow_frac, 0.10 * u_ho * float(np.clip(deficit / ho_clearance, 0.0, 1.0)))
+
+            # --- 2B. Starboard crossing: decisive stern-aim + throttle feathering ---
+            cross_stbd_w = max(
+                _smoothstep((lat_vel_body - 0.12) / 0.30),
+                _smoothstep((lat_vel_goal - 0.12) / 0.30),
+            ) * (1.0 - same_w) * (1.0 - 0.75 * head_on_w)
+            if cross_stbd_w > 1e-4 and along_g > -0.60 and lat_g < 1.35:
+                miss_cr = _smoothstep((2.70 - dcpa) / 1.05)
+                time_cr = _smoothstep((16.5 - tcpa) / 8.5) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 1.5)
+                u_cr = cross_stbd_w * miss_cr * time_cr * _smoothstep((1.35 - lat_g) / 0.70) * eff_sup
+                if u_cr > 1e-4:
+                    max_urg = max(max_urg, u_cr)
+                    t_cpa = max(tcpa_n, 0.0)
+                    cpa_left = -sin_phi * (rx + rvx_nom * t_cpa) + cos_phi * (ry + rvy_nom * t_cpa)
+                    need_cr = float(np.clip((1.55 - cpa_left) / 1.55, 0.0, 1.0))
+                    head_bias += 0.52 * u_cr * max(need_cr, 0.25)
+                    slow_frac = max(slow_frac, 0.34 * u_cr * _smoothstep((5.8 - d) / 3.0))
+
+            # --- 2C. Close port-bow crosser: throttle feathering ONLY (zero port tail-hook!) ---
+            cross_port_w = max(
+                _smoothstep((-lat_vel_body - 0.20) / 0.28),
+                _smoothstep((-lat_vel_goal - 0.20) / 0.28),
+            ) * (1.0 - same_w) * (1.0 - head_on_w)
+            if cross_port_w > 1e-4 and d < 3.2 and body_x > 0.0 and lat_g > -0.95:
+                u_def = (
+                    cross_port_w
+                    * _smoothstep((1.45 - dcpa) / 0.58)
+                    * _smoothstep((3.2 - d) / 1.5)
+                    * _smoothstep((lat_g + 0.95) / 0.58)
+                )
+                if u_def > 1e-4:
+                    max_urg = max(max_urg, u_def)
+                    slow_frac = max(slow_frac, 0.28 * u_def)
+
+            # --- 2D. Close hull cushion (<1.90m) ---
+            if d < 1.90 and body_x > -0.35:
+                prox = _smoothstep((1.90 - d) / 0.95)
+                if body_y >= -0.25 or cross_stbd_w > 0.35 or head_on_w > 0.35:
+                    repel_bias += 0.38 * prox
+                else:
+                    repel_bias -= 0.32 * prox
+
+        self._nearest_distance = nearest
+        self.last_engaged = max_urg > 1e-3 or abs(repel_bias) > 1e-3
+
+        # Zero chord-CTE pull inside +/-2.2m corridor; gentle fence only beyond 2.2m
+        fence_cte = 0.0
+        if abs(cte) > 2.2 and abs(he_raw) < 0.65:
+            fence_cte = float(np.clip(0.06 * (cte - math.copysign(2.2, cte)), -0.06, 0.06))
+
+        total_bias = float(np.clip(head_bias + repel_bias, -0.84, 0.84))
+        he_eff = he_raw - total_bias
+        omega_cap = self.max_angular_velocity if self.turn_omega_limit <= 0.0 else min(self.max_angular_velocity, self.turn_omega_limit)
+        omega = float(np.clip(self.heading_p_gain * he_eff + fence_cte, -omega_cap, omega_cap))
+
+        slow_frac = float(np.clip(slow_frac, 0.0, 0.38))
+        return self._format_action(omega, self.cruise_speed * slow_frac)
+
+    def _act_close_brush(self, obs: AgentLocalObservation) -> np.ndarray:
+        """0.60m x 0.30m Monohull Smart Bilateral Pass-Side & Rounded Constant-Curvature
+        Flow Controller (a28).
+
+        Key physical & geometric guarantees for the 0.60m x 0.30m hull:
+        1. Smart Bilateral Static-Hull Bypass ("该左绕就左绕，该右绕就右绕"):
+           - Geometric watershed centered at `lat_r = -0.08m` (slight COLREGs starboard tie-break
+             only for dead-ahead `lat_r ~ 0` hulls):
+             * `lat_r >= -0.05m` (dead-ahead or port): smooth starboard arc (`pos_off = nb_cte + park_sep`).
+             * `lat_r <= -0.11m` (already on starboard of us, e.g. Pentagram Step 1 `usv_03` at `-0.45m`
+               and Run 3 `usv_02 -> usv_04/05/01` at `-0.23m..-0.87m`): natural shorter PORT glide
+               (`neg_off = nb_cte - park_sep`), never crossing across a starboard hull's bow!
+        2. Green-to-Green Preserving Head-On & Crossing:
+           - Standard COLREGs Rule 14 starboard shift for dead-ahead / port-offset head-ons (`lat_r > -0.42m`).
+           - When oncoming vessels are already safely starboard-separated (`lat_r < -0.52m`), preserve
+             the natural green-to-green port pass instead of S-turning across each other's bows!
+        3. Rounded Constant-Curvature Cornering & Raised-Cosine Avoidance Arcs ("弧度圆润"):
+           - Zero blind pre-waypoint braking (`pre_corner_slow = 0`), keeping polygon/circle waypoints
+             (e.g. 10-gon / Figure-8) flowing at ~95-100% cruise in one continuous circle.
+           - Smooth constant-radius corner law (`R_turn ~ 0.85..1.15m`, `v >= 0.44*cruise`, `|omega| <= 0.48`)
+             eliminates sharp pivot-in-place corners (`R = 0.16..0.25m`) while keeping overshoot low.
+        """
+        def _wrap(a: float) -> float:
+            return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+        cos_yaw, sin_yaw = math.cos(float(obs.yaw)), math.sin(float(obs.yaw))
+        own_v = max(float(obs.speed), 0.0)
+        he_goal = float(obs.heading_error)
+        d2g = max(float(obs.distance_to_goal), 1e-3)
+        raw_cte = float(obs.raw_cross_track_error)
+
+        sin_a = float(np.clip(raw_cte / max(d2g, 0.85), -0.85, 0.85))
+        he_route = _wrap(he_goal - math.asin(sin_a))
+        phi_r = float(obs.yaw) + he_route
+        cos_r, sin_r = math.cos(phi_r), math.sin(phi_r)
+
+        engage_dist = 6.0 if self.giveway_distance <= 0.0 else max(self.giveway_distance, 6.0)
+        park_engage = max(engage_dist, 6.2)
+        ho_sep = 0.90 if self.avoid_clearance <= 0.0 else self.avoid_clearance
+        park_sep = max(0.86, 0.96 * ho_sep)
+        v_nom = max(own_v, 0.36)
+
+        pos_off = 0.0
+        neg_off = 0.0
+        head_nudge = 0.0
+        slow_frac = 0.0
+        repel_bias = 0.0
+        max_urg = 0.0
+        nearest = float('inf')
+        omega_min_guard = -99.0
+        omega_max_guard = +99.0
+
+        corner_sup = 1.0 - 0.30 * _smoothstep((abs(he_route) - 1.05) / 0.55)
+
+        for nb in obs.neighbors:
+            d = float(nb.distance)
+            if d <= 1e-6:
+                continue
+            nearest = min(nearest, d)
+            if d > park_engage:
+                continue
+
+            rx, ry = float(nb.rel_x), float(nb.rel_y)
+            rvx, rvy = float(nb.rel_vx), float(nb.rel_vy)
+            bx = cos_yaw * rx + sin_yaw * ry
+            by = -sin_yaw * rx + cos_yaw * ry           # >0: port, <0: starboard
+            along_r = cos_r * rx + sin_r * ry          # >0: ahead along route
+            lat_r = -sin_r * rx + cos_r * ry           # >0: port of us, <0: starboard of us
+            nb_cte = raw_cte - lat_r                   # >0: neighbor starboard of route, <0: port of route
+
+            nvx = rvx + own_v * cos_yaw
+            nvy = rvy + own_v * sin_yaw
+            nsp = math.hypot(nvx, nvy)
+
+            # --- 1. Static / holding hull: Smart Bilateral Bypass (Watershed at lat_r = -0.08m) ---
+            if nsp < 0.12:
+                # Close body-frame bilateral cushion + inside-turn guard:
+                if d < 1.85 and bx > -0.25 and abs(by) < 0.88:
+                    cush_b = _smoothstep((1.85 - d) / 0.88) * _smoothstep((bx + 0.25) / 0.45) * _smoothstep((0.88 - abs(by)) / 0.30)
+                    if cush_b > 1e-4:
+                        max_urg = max(max_urg, cush_b)
+                        # Push AWAY from whichever bow side the static hull occupies (`by < -0.08` -> port turn!):
+                        side_b = 1.0 if by >= -0.08 else -1.0
+                        repel_bias += side_b * 0.28 * cush_b
+                        if side_b > 0.0:
+                            omega_max_guard = min(omega_max_guard, 0.10 * (1.0 - cush_b))
+                        else:
+                            omega_min_guard = max(omega_min_guard, -0.10 * (1.0 - cush_b))
+                        if bx > 0.08 and abs(by) < 0.58:
+                            slow_frac = max(slow_frac, 0.24 * cush_b)
+
+                if along_r < -0.80:
+                    continue
+
+                # Smooth C2 bell-shaped longitudinal envelope (early gentle entry at 6.2m, smooth return astern)
+                tim = (
+                    _smoothstep((park_engage - along_r) / (0.48 * park_engage))
+                    if along_r >= -0.12
+                    else _smoothstep(1.0 + (along_r + 0.12) / 0.68)
+                )
+                # Geometric bilateral watershed at `lat_r = -0.08m`:
+                # - Dead-ahead (`|lat_r| <= 0.05m`) or port (`lat_r > 0`) -> Starboard bypass (`pos_off`)
+                # - Already on our starboard (`lat_r <= -0.11m`) -> Shorter, natural Port bypass (`neg_off`)!
+                sw = _smoothstep((lat_r + 0.11) / 0.06)       # 1.0 when lat_r >= -0.05m, 0.0 when lat_r <= -0.11m
+                pw = 1.0 - _smoothstep((lat_r + 0.05) / 0.06) # 1.0 when lat_r <= -0.11m, 0.0 when lat_r >= -0.05m
+                lead_bell = _smoothstep((along_r - 0.25) / 1.35) * _smoothstep((park_engage - 0.4 - along_r) / 2.2)
+
+                if sw > 1e-4:
+                    us = sw * _smoothstep((park_sep + 0.30 - lat_r) / 0.52) * tim
+                    if us > 1e-4:
+                        max_urg = max(max_urg, us)
+                        pos_off = max(pos_off, max(0.0, nb_cte + park_sep) * us)
+                        head_nudge += min(0.24, 0.62 * math.atan2(max(0.0, park_sep - lat_r), max(along_r * 0.95, 1.35))) * us * lead_bell
+                        slow_frac = max(slow_frac, 0.10 * us * _smoothstep((2.6 - max(along_r, 0.0)) / 1.5))
+
+                if pw > 1e-4:
+                    clear_p = -lat_r  # distance on starboard already (>0.05m when pw > 0)
+                    up = pw * _smoothstep((park_sep + 0.30 - clear_p) / 0.52) * tim
+                    if up > 1e-4:
+                        max_urg = max(max_urg, up)
+                        neg_off = min(neg_off, min(0.0, nb_cte - park_sep) * up)
+                        head_nudge -= min(0.24, 0.62 * math.atan2(max(0.0, park_sep - clear_p), max(along_r * 0.95, 1.35))) * up * lead_bell
+                        slow_frac = max(slow_frac, 0.10 * up * _smoothstep((2.6 - max(along_r, 0.0)) / 1.5))
+                continue
+
+            if d > engage_dist:
+                continue
+
+            # --- 2. Moving 0.60x0.30m monohull: Bilateral-Aware Smooth Shoulder-Brush ---
+            cb = (nvx * cos_yaw + nvy * sin_yaw) / nsp
+            cr_ = (nvx * cos_r + nvy * sin_r) / nsp
+            lvb = (-nvx * sin_yaw + nvy * cos_yaw) / nsp
+            lvr = (-nvx * sin_r + nvy * cos_r) / nsp
+
+            same_w = _smoothstep((min(cb, cr_) - 0.78) / 0.14)
+            if same_w > 0.0 and d < 1.35:
+                conv = same_w * _smoothstep((1.35 - d) / 0.60)
+                if bx > 0.05:
+                    slow_frac = max(slow_frac, 0.24 * conv)
+                if d < 0.96 and bx > -0.25:
+                    if by >= -0.06:
+                        pos_off = max(pos_off, max(0.0, nb_cte + 0.82) * conv)
+                        repel_bias += 0.15 * conv
+                    else:
+                        neg_off = min(neg_off, min(0.0, nb_cte - 0.82) * conv)
+                        repel_bias -= 0.15 * conv
+                max_urg = max(max_urg, 0.45 * conv)
+
+            rvxn = nvx - v_nom * (0.5 * cos_yaw + 0.5 * cos_r)
+            rvyn = nvy - v_nom * (0.5 * sin_yaw + 0.5 * sin_r)
+            vsqr = rvx * rvx + rvy * rvy
+            vsqn = rvxn * rvxn + rvyn * rvyn
+            tcr = -(rx * rvx + ry * rvy) / vsqr if vsqr > 1e-4 else -1.0
+            tcn = -(rx * rvxn + ry * rvyn) / vsqn if vsqn > 1e-4 else -1.0
+            dcr = math.hypot(rx + rvx * max(tcr, 0.0), ry + rvy * max(tcr, 0.0))
+            dcn = math.hypot(rx + rvxn * max(tcn, 0.0), ry + rvyn * max(tcn, 0.0))
+            tcpa = tcn if (tcr <= 0.0 and tcn > 0.0) else (min(tcr, tcn) if (tcr > 0.0 and tcn > 0.0) else tcr)
+            dcpa = min(dcr, dcn)
+            es = 1.0 if d < 3.6 else corner_sup
+
+            # --- 2A. Head-on: COLREGs Starboard for Center/Port (`lat_r > -1.25m`), Natural Green-to-Green Port Glide (`lat_r <= -1.35m`) ---
+            # Note: On Z-shape / intersecting diagonal legs (`147-160 deg`), an oncoming ship that has already
+            # shifted right on its OWN leg sits at `lat_r ~ -1.0..-1.2m` in our route frame! So keep `stbd_ho`
+            # down to `-1.25m` so both ships establish matching `0.48..0.60m` starboard lanes (`d_min >= 0.88m`),
+            # while when `lat_r <= -1.35m` (already >1.35m green-to-green clear!), ZERO cross-bow right turn occurs!
+            how = _smoothstep((-cr_ - 0.46) / 0.26) * (1.0 - same_w)
+            if how > 1e-4 and along_r > -0.85:
+                along_env = _smoothstep((6.4 - along_r) / 2.2) * _smoothstep((along_r + 0.85) / 1.05)
+                ho_bell = _smoothstep((along_r - 0.75) / 1.45) * _smoothstep((6.5 - along_r) / 1.8)
+                stbd_ho = _smoothstep((1.48 - lat_r) / 0.55) * _smoothstep((lat_r + 1.32) / 0.20)
+                uho_s = how * along_env * stbd_ho * es
+                if uho_s > 1e-4:
+                    max_urg = max(max_urg, uho_s)
+                    lane_ho = min(1.88, max(0.50, (nb_cte + 0.88) if nb_cte > 0.06 else (0.50 + 0.52 * max(0.0, nb_cte))))
+                    pos_off = max(pos_off, lane_ho * uho_s)
+                    need_lat = float(np.clip((ho_sep - lat_r) / ho_sep, 0.0, 1.0))
+                    head_nudge += 0.23 * uho_s * need_lat * ho_bell
+                    slow_frac = max(slow_frac, 0.07 * uho_s * need_lat)
+
+            # --- 2B. Starboard crossing: smooth stern-aim + composed throttle ease (~0.75-0.90m) ---
+            csw = max(_smoothstep((lvb - 0.12) / 0.28), _smoothstep((lvr - 0.12) / 0.28)) * (1.0 - same_w) * (1.0 - 0.80 * how)
+            if csw > 1e-4 and along_r > -0.50 and lat_r < 0.90:
+                ucr = (
+                    csw
+                    * _smoothstep((1.18 - dcpa) / 0.48)
+                    * (_smoothstep((10.5 - tcpa) / 4.8) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 0.9))
+                    * _smoothstep((0.90 - lat_r) / 0.44)
+                    * es
+                )
+                if ucr > 1e-4:
+                    max_urg = max(max_urg, ucr)
+                    stern_cte = max(0.46, raw_cte + 0.24 * _smoothstep((2.8 - d) / 1.4))
+                    pos_off = max(pos_off, min(1.65, stern_cte) * ucr)
+                    head_nudge += 0.20 * ucr * _smoothstep((along_r + 0.10) / 1.25)
+                    slow_frac = max(slow_frac, 0.28 * ucr * _smoothstep((4.0 - d) / 2.1))
+
+            # --- 2C. Port-side neighbor / crosser: bilateral stern/cushion pass ---
+            cpw = max(_smoothstep((-lvb - 0.16) / 0.28), _smoothstep((-lvr - 0.16) / 0.28)) * (1.0 - same_w) * (1.0 - how)
+            if cpw > 1e-4 and d < 2.4 and bx > -0.25:
+                udef = cpw * _smoothstep((1.02 - dcpa) / 0.44) * _smoothstep((2.4 - d) / 1.15)
+                if udef > 1e-4:
+                    max_urg = max(max_urg, udef)
+                    if lat_r >= -0.05:
+                        pos_off = max(pos_off, min(1.65, max(0.0, nb_cte + 0.80)) * udef)
+                    elif lat_r <= -0.18:
+                        neg_off = min(neg_off, max(-1.55, min(0.0, nb_cte - 0.80)) * udef)
+                    slow_frac = max(slow_frac, 0.18 * udef * _smoothstep((bx + 0.10) / 0.70))
+
+            # --- 2D. Smooth bilateral monohull envelope cushion (<1.10m) ---
+            if d < 1.10 and bx > -0.30:
+                ucush = _smoothstep((1.10 - d) / 0.50)
+                max_urg = max(max_urg, ucush)
+                if by >= -0.25 or csw > 0.25 or (how > 0.25 and lat_r > -0.85):
+                    pos_off = max(pos_off, min(1.95, max(0.0, nb_cte + 0.84)) * ucush)
+                    repel_bias += 0.26 * ucush
+                else:
+                    neg_off = min(neg_off, max(-1.85, min(0.0, nb_cte - 0.84)) * ucush)
+                    repel_bias -= 0.24 * ucush
+                if bx > 0.12 and d < 0.88:
+                    slow_frac = max(slow_frac, 0.26 * _smoothstep((0.88 - d) / 0.40))
+
+        self._nearest_distance = nearest
+        self.last_engaged = max_urg > 1e-3 or abs(repel_bias) > 1e-3
+
+        # --- 3. Rounded Constant-Curvature Cornering & Flowing Arc Tracking ---
+        omega_cap = self.max_angular_velocity if self.turn_omega_limit <= 0.0 else min(self.max_angular_velocity, self.turn_omega_limit)
+        if pos_off > 0.0 and neg_off < 0.0:
+            net_off = pos_off if pos_off >= abs(neg_off) else neg_off
+        else:
+            net_off = pos_off + neg_off
+
+        # ZERO blind pre-waypoint deceleration (`pre_corner_slow = 0`)!
+        # Gentle turn-angle speed profile keeps forward speed high (`>= 0.44 * cruise`) so `R = v / |omega| >= 0.65..1.10m`
+        # draws a wide, rounded circular arc instead of a sharp pivot (`R = 0.16..0.25m`):
+        #   0 deg -> 1.00, 35 deg -> 0.95 (Figure-8 stays at full speed!), 90 deg -> 0.67, 150+ deg -> 0.44*cruise
+        he_abs = abs(he_route)
+        half_cos = (0.5 * (1.0 + math.cos(min(he_abs, math.pi)))) ** 1.18
+        arc_slow = (1.0 - 0.44) * (1.0 - half_cos)
+
+        # Rounded corner omega ceiling (`~0.47 rad/s` on open waypoint turns so `R = 0.27/0.47 ~ 0.60..0.95m`,
+        # expanding up to `omega_cap = 0.62` only when close-neighbor urgency demands extra authority):
+        turn_gate = _smoothstep((he_abs - 0.48) / 0.45)
+        smooth_turn_cap = min(omega_cap, 0.47 + 0.15 * _smoothstep((max_urg - 0.25) / 0.55))
+
+        v_eff = 0.50 * own_v + 0.50 * (1.0 - arc_slow) * self.cruise_speed
+        r_arc = v_eff / max(0.88 * smooth_turn_cap, 0.36)
+        turn_sgn = 1.0 if he_route >= 0.0 else -1.0
+        cte_rollout = raw_cte + 0.80 * turn_gate * (
+            0.26 * own_v * math.sin(he_route)
+            + turn_sgn * r_arc * (1.0 - math.cos(min(he_abs, math.pi)))
+        )
+
+        # Smooth, generous lookahead (`2.65m` straight/avoidance -> `1.70m` sharp corners) for flowing C2 arcs;
+        # near +/-180 deg (`he_abs > 2.4 rad`), fade `lb -> 0` so `(1-lb)*he_route + lb*he_los` NEVER wraps across +/-pi!
+        L_lh = (1.0 - turn_gate) * min(2.65, max(1.65, 0.78 * d2g)) + turn_gate * min(2.20, max(1.30, 0.72 * d2g))
+        cte_err = float(np.clip(cte_rollout - net_off, -2.4, 2.4))
+        lb = (1.0 - 0.72 * _smoothstep((he_abs - 1.45) / 0.75)) * (1.0 - _smoothstep((he_abs - 2.35) / 0.45))
+        los_corr = math.atan2(cte_err, L_lh)
+        he_tr = _wrap(he_route + lb * los_corr)
+
+        total_bias = float(np.clip(head_nudge + repel_bias, -0.52, 0.52))
+        gain = 0.64 * (1.0 - turn_gate) + 0.78 * turn_gate
+        omega_target = float(smooth_turn_cap * math.tanh((gain * (he_tr - total_bias)) / max(smooth_turn_cap, 0.20)))
+        if omega_min_guard <= omega_max_guard:
+            omega_target = float(np.clip(omega_target, max(-omega_cap, omega_min_guard), min(omega_cap, omega_max_guard)))
+
+        # Pure memoryless state-to-action map (NO dependence on `obs.final_angular_z`, preventing
+        # causal state-feedback collapse in Behavior Cloning!). Smoothness comes directly from
+        # the continuous C2 bell envelopes, `gain=0.64..0.78` tanh curve, and `smooth_turn_cap=0.47`!
+        omega = omega_target
+        total_slow_frac = float(np.clip(max(slow_frac, arc_slow), 0.0, 0.58))
+
+        saved_gov = self.turn_speed_governor
+        self.turn_speed_governor = False
+        try:
+            return self._format_action(omega, self.cruise_speed * total_slow_frac)
+        finally:
+            self.turn_speed_governor = saved_gov
+
     def act(self, obs: AgentLocalObservation) -> np.ndarray:
         """Produce the teacher action for a single agent's observation."""
         self._last_heading_error = float(obs.heading_error)
+        if self.close_brush:
+            return self._act_close_brush(obs)
+        if self.sleek_direct:
+            return self._act_sleek_direct(obs)
+        if self.veteran_flow:
+            return self._act_veteran_flow(obs)
         if self.conflict_gate:
             threats = self._gated_neighbors(obs)
             self.last_engaged = bool(threats)
@@ -313,18 +1063,38 @@ class MultiAgentColregsTeacher:
         slowdown, starboard_rate = self._avoidance_intent(gated_obs)
         max_omega = self.max_angular_velocity
         if self.duck_offset > 0.0:
+            self._duck_dir, self._convoy_slow = 1.0, 0.0
             urgency = self._duck_urgency(obs)
             nearest, closing = self._nearest_closing(obs)
             self._nearest_distance = nearest
             if closing and nearest < self.escape_distance:
                 urgency = 1.0
-            self.last_engaged = urgency > 0.0
-            offset = self.duck_offset * urgency
+            self.last_engaged = urgency > 0.0 or self._convoy_slow > 0.0
+            clearance_mode = self.avoid_clearance > 0.0 and self._duck_has_cpa
+            need = 1.0
+            if clearance_mode:
+                need = float(np.clip(1.0 - self._duck_dir * self._duck_left / self.avoid_clearance, 0.0, 1.0))
+            offset = self.duck_offset * urgency * self._duck_dir * need
             cte_term = self.cte_p_gain * (float(obs.cross_track_error) - offset)
             if self.cte_term_limit is not None:
                 cte_term = float(np.clip(cte_term, -self.cte_term_limit, self.cte_term_limit))
-            omega = float(np.clip(self.heading_p_gain * float(obs.heading_error) + cte_term, -max_omega, max_omega))
-            return self._format_action(omega, self.cruise_speed * self.duck_slow * urgency)
+            he = float(obs.heading_error)
+            if self.avoid_heading > 0.0 and urgency > 0.0:
+                # The bias fades out as the pass-side offset is reached, so the boat settles on the offset instead of drifting on.
+                if clearance_mode:
+                    progress = 1.0 - need
+                else:
+                    progress = float(obs.cross_track_error) * self._duck_dir / max(self.duck_offset, 1e-3)
+                he -= self.avoid_heading * urgency * float(np.clip(1.0 - progress, 0.0, 1.0)) * self._duck_dir
+            if self.heading_sqrt_gain > 0.0:
+                # Sqrt law keeps small heading errors above the ~0.15 rad/s yaw deadband instead of stalling.
+                heading_term = self.heading_sqrt_gain * math.copysign(math.sqrt(abs(he)), he)
+            else:
+                heading_term = self.heading_p_gain * he
+            omega_cap = max_omega if self.turn_omega_limit <= 0.0 else min(max_omega, self.turn_omega_limit)
+            omega = float(np.clip(heading_term + cte_term, -omega_cap, omega_cap))
+            slow = self.duck_slow * urgency + 0.4 * self._convoy_slow + self.park_slow * self._park_near * urgency
+            return self._format_action(omega, self.cruise_speed * slow)
         if self.giveway_distance > 0.0 and self.giveway_smooth:
             urgency = self._give_way_urgency(obs)
             if urgency is not None:
@@ -390,8 +1160,109 @@ class MultiAgentColregsTeacher:
 
         return self._format_action(omega, slowdown)
 
+    def _duck_urgency_smooth(self, obs: AgentLocalObservation) -> float:
+        """Continuous duck urgency: give-way side from the other hull's course (stable through the encounter), smooth ramp in before CPA and out after it."""
+        cos_yaw, sin_yaw = math.cos(float(obs.yaw)), math.sin(float(obs.yaw))
+        own_v = max(float(obs.speed), 0.0)
+        urgency = 0.0
+        self._duck_dir, self._convoy_slow, self._park_near = 1.0, 0.0, 0.0
+        self._duck_left, self._duck_has_cpa = 0.0, False
+        phi = float(obs.yaw) + float(obs.heading_error)  # route direction ~ bearing to the goal
+        cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+        for nb in obs.neighbors:
+            d = float(nb.distance)
+            if d <= 1e-6 or d > self.giveway_distance:
+                continue
+            rx, ry, rvx, rvy = float(nb.rel_x), float(nb.rel_y), float(nb.rel_vx), float(nb.rel_vy)
+            lateral_pos = -sin_yaw * rx + cos_yaw * ry  # >0: neighbour on our port side
+            nvx, nvy = rvx + own_v * cos_yaw, rvy + own_v * sin_yaw
+            n_speed = math.hypot(nvx, nvy)
+            same_w = 0.0
+            if self.tandem_clean and n_speed >= 0.08:
+                # Soft same-course weight: give-way fades out and convoy fades in together, so noisy velocity cannot flip the regime.
+                same_w = _smoothstep(((nvx * cos_yaw + nvy * sin_yaw) / n_speed - 0.2) / 0.5)
+                # Boats holding station on each other (small relative speed) are in convoy whatever their noisy course estimate says.
+                same_w = max(same_w, _smoothstep((0.25 - math.hypot(rvx, rvy)) / 0.15))
+                if same_w > 0.0 and self.convoy_distance > 0.0 and d < self.convoy_distance:
+                    conv = same_w * _smoothstep((self.convoy_distance - d) / (0.45 * self.convoy_distance))
+                    along_pos = cos_yaw * rx + sin_yaw * ry
+                    ahead_w = _smoothstep(along_pos / 0.6)
+                    self._convoy_slow = max(self._convoy_slow, conv * ahead_w)
+                    push = conv * (1.0 - ahead_w) * _smoothstep((along_pos + 0.6) / 0.3)
+                    if push > urgency:
+                        urgency = push
+                        self._duck_dir = 1.0 if lateral_pos >= 0.0 else -1.0
+                        self._duck_has_cpa = False
+                        self._park_near = 0.0
+            if not self.tandem_clean and self.convoy_distance > 0.0 and d < self.convoy_distance and n_speed >= 0.08:
+                same_course = (nvx * cos_yaw + nvy * sin_yaw) / n_speed
+                conv = _smoothstep((same_course - 0.5) / 0.3) * _smoothstep((self.convoy_distance - d) / (0.45 * self.convoy_distance))
+                if conv > urgency:
+                    urgency = conv
+                    self._duck_dir = 1.0 if lateral_pos > 0.0 else -1.0
+                    ahead = cos_yaw * rx + sin_yaw * ry >= -0.2
+                    self._convoy_slow = conv if ahead else 0.0
+            if self.static_hull and n_speed < 0.08:
+                along_r = cos_phi * rx + sin_phi * ry
+                lat_r = -sin_phi * rx + cos_phi * ry  # >0: hull left of the route
+                miss = _smoothstep((self.giveway_dcpa - abs(lat_r)) / (0.4 * self.giveway_dcpa))
+                if along_r >= 0.0:
+                    timing = _smoothstep((self.giveway_distance - along_r) / (0.4 * self.giveway_distance))
+                else:
+                    timing = _smoothstep(1.0 + along_r / 2.4)
+                candidate = miss * timing
+                if candidate > urgency:
+                    urgency = candidate
+                    self._convoy_slow = 0.0
+                    self._duck_dir = 1.0 if lat_r > -0.6 else -1.0
+                    self._duck_left = lat_r
+                    self._duck_has_cpa = True
+                    self._park_near = _smoothstep((3.2 - along_r) / 2.0) if along_r >= 0.0 else 0.0
+                continue
+            v_sq = rvx * rvx + rvy * rvy
+            if v_sq < 0.12 ** 2:
+                continue
+            parked = n_speed < 0.08
+            if parked:
+                side = 1.0
+            else:
+                along = (nvx * cos_yaw + nvy * sin_yaw) / n_speed
+                lateral = (-nvx * sin_yaw + nvy * cos_yaw) / n_speed
+                along_r = (nvx * cos_phi + nvy * sin_phi) / n_speed
+                lateral_r = (-nvx * sin_phi + nvy * cos_phi) / n_speed
+                # Head-on, or crossing right-to-left (other hull on our starboard): we give way.
+                # Evaluate in both body and route frames so turning to avoid never extinguishes urgency mid-pass.
+                side = max(
+                    _smoothstep((-along - 0.55) / 0.30),
+                    _smoothstep((-along_r - 0.55) / 0.30),
+                    _smoothstep((lateral - 0.1) / 0.4),
+                    _smoothstep((lateral_r - 0.1) / 0.4),
+                )
+            if side <= 0.0:
+                continue
+            tcpa = -(rx * rvx + ry * rvy) / v_sq
+            dcpa = math.hypot(rx + rvx * tcpa, ry + rvy * tcpa)
+            miss = _smoothstep((self.giveway_dcpa - dcpa) / (0.4 * self.giveway_dcpa))
+            if tcpa >= 0.0:
+                timing = _smoothstep((self.giveway_tcpa - tcpa) / (0.6 * self.giveway_tcpa))
+            else:
+                timing = _smoothstep(1.0 + tcpa / self.duck_release)
+            candidate = side * miss * timing * (1.0 - same_w)
+            if candidate > urgency:
+                urgency = candidate
+                self._convoy_slow = 0.0
+                self._park_near = 0.0
+                # A hull that cannot move (HOLD / waiting) must be passed on its clear side; moving give-way stays starboard.
+                self._duck_dir = (1.0 if lateral_pos > -0.6 else -1.0) if parked else 1.0
+                t_cpa = max(tcpa, 0.0)
+                self._duck_left = -sin_phi * (rx + rvx * t_cpa) + cos_phi * (ry + rvy * t_cpa)
+                self._duck_has_cpa = True
+        return urgency
+
     def _duck_urgency(self, obs: AgentLocalObservation) -> float:
         """0..1 ramp over the last giveway_tcpa seconds before CPA with a hull this boat must give way to."""
+        if self.duck_smooth:
+            return self._duck_urgency_smooth(obs)
         cos_yaw, sin_yaw = math.cos(float(obs.yaw)), math.sin(float(obs.yaw))
         urgency = 0.0
         for nb in obs.neighbors:
@@ -406,7 +1277,8 @@ class MultiAgentColregsTeacher:
             own_v = max(float(obs.speed), 0.0)
             nvx, nvy = rvx + own_v * cos_yaw, rvy + own_v * sin_yaw
             head_on = math.hypot(nvx, nvy) > 0.05 and (nvx * cos_yaw + nvy * sin_yaw) < -0.85 * math.hypot(nvx, nvy)
-            if not -112.5 <= bearing <= (40.0 if head_on else 10.0):
+            parked = math.hypot(nvx, nvy) < 0.08  # a parked hull can never give way, whatever side it is on
+            if not -112.5 <= bearing <= (90.0 if parked else (40.0 if head_on else 10.0)):
                 continue
             tcpa = -(rx * rvx + ry * rvy) / v_sq
             dcpa = math.hypot(rx + rvx * tcpa, ry + rvy * tcpa)

@@ -19,19 +19,20 @@ class RuntimeActionContract:
         speed_floor = float(reward.get('conflict_speed_floor', defaults.conflict_speed_floor))
         self.minimum_speed = max(0.08, min(desired_speed, speed_floor))
 
-    def expand(self, action, projected_action, distance_to_goal):
+    def expand(self, action, projected_action, distance_to_goal, cruise_speed_override=None):
         expanded = np.asarray(projected_action, dtype=np.float32).copy()
         if self.action_mode == 'full':
             return expanded
         scale = float(np.clip(action[0], self.scale_min, 1.0))
+        effective_cruise = self.cruise_speed if cruise_speed_override is None else max(0.18, float(cruise_speed_override))
         relief_distance = max(self.goal_tolerance + 1e-3, self.relief_distance)
         proximity = float(np.clip(
             (relief_distance - float(distance_to_goal))
             / max(relief_distance - self.goal_tolerance, 1e-3), 0.0, 1.0,
         ))
-        nav_speed = self.cruise_speed * max(
+        nav_speed = effective_cruise * max(
             0.25, 1.0 - float(np.clip(self.speed_relief, 0.0, 1.0)) * proximity,
         )
-        nav_speed = float(np.clip(nav_speed, self.minimum_speed, self.cruise_speed))
+        nav_speed = float(np.clip(nav_speed, self.minimum_speed, effective_cruise))
         expanded[0] = scale * nav_speed
         return expanded

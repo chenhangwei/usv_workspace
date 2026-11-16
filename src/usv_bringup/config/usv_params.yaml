@@ -241,7 +241,7 @@ mavros:
     tau_speed_threshold_high: 0.50          # 高速阈值 (m/s)
     
     # ==================== 速度参数 ====================
-    cruise_speed: 0.30                      # 巡航速度（m/s）(v14: 0.35→0.30, 全船统一)
+    cruise_speed: 0.60                      # 巡航速度（m/s）(默认空旷巡航 0.60, 地面站可动态调节)
     max_angular_velocity: 0.40              # 最大角速度（rad/s）(v14: 全船统一)
     min_speed: 0.25                         # 最小速度（m/s）(v14: 全船统一, 允许更低速转弯)
     

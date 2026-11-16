@@ -425,7 +425,7 @@ class GroundStationNode(Node):
         
         return all(results.values()) if results else False
 
-    def set_velocity_settings(self, usv_id_list, settings: dict):
+    def set_velocity_settings(self, usv_id_list, settings: dict, *, from_user_dialog: bool = False):
         """批量设置速度控制器参数。
 
         Args:
@@ -447,6 +447,14 @@ class GroundStationNode(Node):
             'goal_tolerance': (self.usv_manager.velocity_goal_tolerance_pubs, 'goal_tolerance'),
             'switch_tolerance': (self.usv_manager.velocity_switch_tolerance_pubs, 'switch_tolerance'),
         }
+
+        if from_user_dialog and 'cruise_speed' in settings:
+            try:
+                cs = float(settings['cruise_speed'])
+                if cs > 0.0:
+                    self._user_cruise_speed_override = cs
+            except (ValueError, TypeError):
+                pass
 
         total_sent = 0
         for param_name, (pubs_dict, settings_key) in param_mapping.items():
