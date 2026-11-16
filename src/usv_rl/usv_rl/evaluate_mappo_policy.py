@@ -260,6 +260,8 @@ class MappoActorPolicy:
         with self._torch.no_grad():
             raw = self._actor(obs_tensor)
             if self._squash_actions:
+                # Same pre-tanh clamp as training and policy_inference_node.
+                raw = raw.clamp(-3.0, 3.0)
                 _half = (self._action_high - self._action_low) / 2.0
                 _mid = (self._action_high + self._action_low) / 2.0
                 action = (self._torch.tanh(raw) * _half + _mid).cpu().numpy()[0]

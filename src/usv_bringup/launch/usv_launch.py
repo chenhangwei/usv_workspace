@@ -874,32 +874,17 @@ def generate_launch_description():
     #       而策略/MPC 以 10Hz 闭环 -> 在过期位姿上控制 -> 兜圈/走反/不到点。
     # 方案: MAVROS 起来后, 通过 cmd/command(CommandLong, MAV_CMD_SET_MESSAGE_INTERVAL=511)
     #       把 GLOBAL_POSITION_INT(33)/LOCAL_POSITION_NED(32)/ATTITUDE(30)/GPS_RAW_INT(24)
-    #       请求到 15Hz (interval 66667us); 带重试直到服务就绪。实测可达 ~8Hz wall。
+    #       请求到 30Hz (interval 33333us); 15Hz 请求实测仅 ~8.2Hz wall，仍需验证实际频率。
     # =========================================================================
-    _rate_boost_script = (
-        'NS="$1"; '
-        'for svc in "/$NS/cmd/command" "/$NS/mavros/cmd/command"; do '
-        '  for attempt in $(seq 1 40); do '
-        '    if ros2 service type "$svc" >/dev/null 2>&1; then '
-        '      ok=1; '
-        '      for mid in 33 32 30 24; do '
-        '        ros2 service call "$svc" mavros_msgs/srv/CommandLong '
-        '"{broadcast: false, command: 511, confirmation: 0, param1: ${mid}.0, param2: 66667.0, param3: 0.0, param4: 0.0, param5: 0.0, param6: 0.0, param7: 0.0}" '
-        '>/dev/null 2>&1 || ok=0; '
-        '      done; '
-        '      if [ "$ok" = "1" ]; then echo "[rate-boost] $NS: MAVLink 33/32/30/24 -> 15Hz 已设置"; exit 0; fi; '
-        '    fi; '
-        '    sleep 3; '
-        '  done; '
-        'done; '
-        'echo "[rate-boost] $NS: 设置消息间隔失败(检查 mavros cmd/command 服务)"'
-    )
     sitl_rate_boost = TimerAction(
         period=12.0,  # 等 MAVROS 连接 SITL 后再请求 (delayed_control_nodes_sitl 在 5s)
         condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'sitl')),
         actions=[
-            ExecuteProcess(
-                cmd=['bash', '-c', _rate_boost_script, 'rate_boost', namespace],
+            Node(
+                package='usv_comm',
+                executable='telemetry_rate_node',
+                namespace=namespace,
+                parameters=[{'requested_rate_hz': 30.0}],
                 output='screen',
                 name='sitl_rate_boost',
             ),

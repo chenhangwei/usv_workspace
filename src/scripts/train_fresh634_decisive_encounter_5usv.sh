@@ -92,23 +92,71 @@ RESUME_FROM="${RESUME_FROM:-}"
 OUTPUT="${OUTPUT:-/mnt/data/checkpoints/usv_rl/fresh634_decisive_encounter_5usv.pt}"
 CKPT_DIR="${CKPT_DIR:-/mnt/data/checkpoints/usv_rl/fresh634_checkpoints}"
 EVAL_DIR="${EVAL_DIR:-/mnt/data/checkpoints/usv_rl/fresh634_eval}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-fresh634}"
+EXPERIMENT_SUMMARY="${EXPERIMENT_SUMMARY:-DECISIVE-ENCOUNTER: conflict-brake 0->0.8, anticipatory-turn NEW (0.8/0.6 @3.5m), avoidance-turn NEW 0.6, role-asymmetry 0.8->2.0, deadlock 0->2.0, smoothness 0.10->0.18}"
 TOTAL_TIMESTEPS="${TOTAL_TIMESTEPS:-800000}"
 ROLLOUT_STEPS="${ROLLOUT_STEPS:-2048}"
 BASE_ROS_DOMAIN_ID="${BASE_ROS_DOMAIN_ID:-296}"
 ACTION_SPEED_SCALE_MIN="${ACTION_SPEED_SCALE_MIN:-0.30}"
+TWO_USV_CROSSING_CURRICULUM_REPEATS="${TWO_USV_CROSSING_CURRICULUM_REPEATS:-0}"
+TWO_USV_HEAD_ON_CURRICULUM_REPEATS="${TWO_USV_HEAD_ON_CURRICULUM_REPEATS:-0}"
+ANTICIPATORY_CPA_TIME_HORIZON="${ANTICIPATORY_CPA_TIME_HORIZON:-8.0}"
+ROLE_STAND_ON_COURSE_HOLD_WEIGHT="${ROLE_STAND_ON_COURSE_HOLD_WEIGHT:-0.0}"
+ANTICIPATORY_TURN_REWARD_WEIGHT="${ANTICIPATORY_TURN_REWARD_WEIGHT:-0.8}"
+ANTICIPATORY_TURN_PENALTY_WEIGHT="${ANTICIPATORY_TURN_PENALTY_WEIGHT:-0.6}"
+ANTICIPATORY_TURN_DISTANCE="${ANTICIPATORY_TURN_DISTANCE:-3.5}"
+ANTICIPATORY_CPA_DISTANCE="${ANTICIPATORY_CPA_DISTANCE:-0.0}"
+ANTICIPATORY_DCPA_TARGET="${ANTICIPATORY_DCPA_TARGET:-1.15}"
+ANTICIPATORY_DCPA_DEFICIT_WEIGHT="${ANTICIPATORY_DCPA_DEFICIT_WEIGHT:-0.0}"
+ANTICIPATORY_DCPA_IMPROVEMENT_WEIGHT="${ANTICIPATORY_DCPA_IMPROVEMENT_WEIGHT:-0.0}"
+ANTICIPATORY_CLOSING_REDUCTION_WEIGHT="${ANTICIPATORY_CLOSING_REDUCTION_WEIGHT:-0.0}"
+ANTICIPATORY_CPA_GIVEWAY_ONLY="${ANTICIPATORY_CPA_GIVEWAY_ONLY:-0}"
+CONFLICT_SPEED_RELIEF="${CONFLICT_SPEED_RELIEF:-0.55}"
+CONFLICT_SPEED_FLOOR="${CONFLICT_SPEED_FLOOR:-0.18}"
+ACTION_SMOOTHNESS_WEIGHT="${ACTION_SMOOTHNESS_WEIGHT:-0.18}"
+ANGULAR_ACCEL_PENALTY_WEIGHT="${ANGULAR_ACCEL_PENALTY_WEIGHT:-0.15}"
+FORWARD_SPEED_CHANGE_PENALTY_WEIGHT="${FORWARD_SPEED_CHANGE_PENALTY_WEIGHT:-0.0}"
+EVAL_TWO_USV_CROSSING="${EVAL_TWO_USV_CROSSING:-0}"
+UPDATE_EPOCHS="${UPDATE_EPOCHS:-10}"
+MINIBATCH_SIZE="${MINIBATCH_SIZE:-256}"
+POLICY_ANCHOR_WEIGHT="${POLICY_ANCHOR_WEIGHT:-1.0}"
+POLICY_ANCHOR_WEIGHT_END="${POLICY_ANCHOR_WEIGHT_END:-0.35}"
+POLICY_ANCHOR_EXCLUDE_CPA_CONFLICT="${POLICY_ANCHOR_EXCLUDE_CPA_CONFLICT:-0}"
+ENTROPY_COEF="${ENTROPY_COEF:-0.01}"
+ENTROPY_COEF_END="${ENTROPY_COEF_END:-0.003}"
+
+CURRICULUM_EXTRA_ARGS=()
+for ((i = 0; i < TWO_USV_CROSSING_CURRICULUM_REPEATS; i++)); do
+  CURRICULUM_EXTRA_ARGS+=(--curriculum-scenario two_usv_crossing)
+done
+for ((i = 0; i < TWO_USV_HEAD_ON_CURRICULUM_REPEATS; i++)); do
+  CURRICULUM_EXTRA_ARGS+=(--curriculum-scenario two_usv_head_on)
+done
+CPA_ROLE_FLAGS=()
+if [[ "$ANTICIPATORY_CPA_GIVEWAY_ONLY" == "1" ]]; then
+  CPA_ROLE_FLAGS+=(--anticipatory-cpa-giveway-only)
+fi
+ANCHOR_EXTRA_FLAGS=()
+if [[ "$POLICY_ANCHOR_EXCLUDE_CPA_CONFLICT" == "1" ]]; then
+  ANCHOR_EXTRA_FLAGS+=(--policy-anchor-exclude-cpa-conflict)
+fi
+CHECKPOINT_EXTRA_EVAL_ARGS=()
+if [[ "$EVAL_TWO_USV_CROSSING" == "1" ]]; then
+  CHECKPOINT_EXTRA_EVAL_ARGS+=(--checkpoint-eval-scenario two_usv_crossing)
+fi
 
 mkdir -p "$(dirname "$OUTPUT")" "$CKPT_DIR" "$EVAL_DIR"
 
 if [[ -n "$RESUME_FROM" ]]; then
   WEIGHT_FLAGS=(--resume-from "$RESUME_FROM")
-  echo "[fresh634] RESUME_FROM=$RESUME_FROM (full resume: weights+optimizer+schedule)"
+  echo "[$EXPERIMENT_NAME] RESUME_FROM=$RESUME_FROM (full resume: weights+optimizer+schedule)"
 else
   WEIGHT_FLAGS=(--load-weights-from "$WARMSTART_FROM")
-  echo "[fresh634] WARMSTART_FROM=$WARMSTART_FROM"
+  echo "[$EXPERIMENT_NAME] WARMSTART_FROM=$WARMSTART_FROM"
 fi
-echo "[fresh634] OUTPUT=$OUTPUT"
-echo "[fresh634] TOTAL_TIMESTEPS=$TOTAL_TIMESTEPS  ROLLOUT_STEPS=$ROLLOUT_STEPS"
-echo "[fresh634] DECISIVE-ENCOUNTER: conflict-brake 0->0.8, anticipatory-turn NEW (0.8/0.6 @3.5m), avoidance-turn NEW 0.6, role-asymmetry 0.8->2.0, deadlock 0->2.0, smoothness 0.10->0.18"
+echo "[$EXPERIMENT_NAME] OUTPUT=$OUTPUT"
+echo "[$EXPERIMENT_NAME] TOTAL_TIMESTEPS=$TOTAL_TIMESTEPS  ROLLOUT_STEPS=$ROLLOUT_STEPS"
+echo "[$EXPERIMENT_NAME] $EXPERIMENT_SUMMARY"
 
 exec /bin/python3 -m usv_rl.train_mappo_policy \
   "${WEIGHT_FLAGS[@]}" \
@@ -164,6 +212,7 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --curriculum-scenario five_usv_dense_crossing \
   --curriculum-scenario five_usv_dense_overtaking \
   --curriculum-scenario five_usv_dense_overtaking \
+  "${CURRICULUM_EXTRA_ARGS[@]}" \
   --max-waypoints-per-episode 6 \
   --waypoint-bonus 10.0 \
   --scenario-spawn-position-std 0.10 \
@@ -204,11 +253,11 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --ppo-policy-loss-scale 1.0 \
   --ppo-value-loss-scale 0.5 \
   --value-coef 0.5 \
-  --update-epochs 10 \
-  --minibatch-size 256 \
+  --update-epochs "$UPDATE_EPOCHS" \
+  --minibatch-size "$MINIBATCH_SIZE" \
   --max-grad-norm 0.5 \
-  --entropy-coef 0.01 \
-  --entropy-coef-end 0.003 \
+  --entropy-coef "$ENTROPY_COEF" \
+  --entropy-coef-end "$ENTROPY_COEF_END" \
   --gamma 0.99 \
   --gae-lambda 0.95 \
   --device cpu \
@@ -238,6 +287,7 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --waypoint-pass-quality-bonus 6.0 \
   --role-speed-asymmetry-weight 2.0 \
   --role-giveway-speed 0.26 \
+  --role-stand-on-course-hold-weight "$ROLE_STAND_ON_COURSE_HOLD_WEIGHT" \
   --wrong-heading-speed-penalty-weight 1.5 \
   --wrong-heading-speed-threshold-deg 35.0 \
   --wrong-heading-conflict-relief 1.0 \
@@ -249,6 +299,8 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --conflict-risk-safe-dcpa 1.5 \
   --conflict-brake-weight 0.8 \
   --desired-conflict-speed 0.26 \
+  --conflict-speed-relief "$CONFLICT_SPEED_RELIEF" \
+  --conflict-speed-floor "$CONFLICT_SPEED_FLOOR" \
   --conflict-progress-scale 0.0 \
   --conflict-resolution-reward-weight 0.9 \
   --conflict-escalation-penalty-weight 0.0 \
@@ -256,9 +308,16 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --speed-distance-coupling-penalty-weight 0.0 \
   --proximity-gradient-penalty-weight 0.0 \
   --avoidance-turn-reward-weight 0.6 \
-  --anticipatory-avoidance-turn-reward-weight 0.8 \
-  --anticipatory-avoidance-turn-penalty-weight 0.6 \
-  --anticipatory-avoidance-turn-distance 3.5 \
+  --anticipatory-avoidance-turn-reward-weight "$ANTICIPATORY_TURN_REWARD_WEIGHT" \
+  --anticipatory-avoidance-turn-penalty-weight "$ANTICIPATORY_TURN_PENALTY_WEIGHT" \
+  --anticipatory-avoidance-turn-distance "$ANTICIPATORY_TURN_DISTANCE" \
+  --anticipatory-cpa-distance "$ANTICIPATORY_CPA_DISTANCE" \
+  --anticipatory-cpa-time-horizon "$ANTICIPATORY_CPA_TIME_HORIZON" \
+  --anticipatory-dcpa-target "$ANTICIPATORY_DCPA_TARGET" \
+  --anticipatory-dcpa-deficit-penalty-weight "$ANTICIPATORY_DCPA_DEFICIT_WEIGHT" \
+  --anticipatory-dcpa-improvement-reward-weight "$ANTICIPATORY_DCPA_IMPROVEMENT_WEIGHT" \
+  --anticipatory-closing-reduction-reward-weight "$ANTICIPATORY_CLOSING_REDUCTION_WEIGHT" \
+  "${CPA_ROLE_FLAGS[@]}" \
   --straight-line-omega-penalty-weight 2.2 \
   --turn-speed-coupling-penalty-weight 0.8 \
   --turn-speed-coupling-floor 0.4 \
@@ -272,8 +331,9 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --clear-ahead-cte-weight 0.45 \
   --clear-ahead-heading-weight 0.45 \
   --clear-ahead-omega-weight 0.45 \
-  --action-smoothness-weight 0.18 \
-  --angular-accel-penalty-weight 0.15 \
+  --action-smoothness-weight "$ACTION_SMOOTHNESS_WEIGHT" \
+  --angular-accel-penalty-weight "$ANGULAR_ACCEL_PENALTY_WEIGHT" \
+  --forward-speed-change-penalty-weight "$FORWARD_SPEED_CHANGE_PENALTY_WEIGHT" \
   --head-on-guidance-distance 7.5 \
   --crossing-guidance-distance 7.5 \
   --head-on-corridor-reward-weight 0.80 \
@@ -346,9 +406,10 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --team-safety-brake-cpa-time-horizon 8.0 \
   --team-safety-brake-cpa-dcpa-target 1.2 \
   --team-safety-brake-cpa-closing-speed-min 0.05 \
-  --policy-anchor-weight 1.0 \
-  --policy-anchor-weight-end 0.35 \
+  --policy-anchor-weight "$POLICY_ANCHOR_WEIGHT" \
+  --policy-anchor-weight-end "$POLICY_ANCHOR_WEIGHT_END" \
   --policy-anchor-exclude-team-safety-brake \
+  "${ANCHOR_EXTRA_FLAGS[@]}" \
   --auto-evaluate-checkpoints \
   --checkpoint-eval-episodes 12 \
   --checkpoint-eval-steps 150 \
@@ -357,5 +418,6 @@ exec /bin/python3 -m usv_rl.train_mappo_policy \
   --checkpoint-eval-scenario five_usv_dense_head_on \
   --checkpoint-eval-scenario five_usv_dense_crossing \
   --checkpoint-eval-scenario five_usv_dense_overtaking \
-  --checkpoint-ranking-json "$CKPT_DIR/fresh634_ranking.json" \
+  "${CHECKPOINT_EXTRA_EVAL_ARGS[@]}" \
+  --checkpoint-ranking-json "$CKPT_DIR/${EXPERIMENT_NAME}_ranking.json" \
   --checkpoint-eval-json-dir "$EVAL_DIR"

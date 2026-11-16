@@ -114,6 +114,7 @@ def parse_args():
     parser.add_argument('--waypoint-pass-quality-bonus', type=float, default=RewardConfig.waypoint_pass_quality_bonus, help='fresh627: extra bonus at each waypoint pass / final arrival scaled by (1 - pass_distance/goal_tolerance); full for center-threading, zero for edge-grazing.')
     parser.add_argument('--role-speed-asymmetry-weight', type=float, default=RewardConfig.role_speed_asymmetry_weight, help='fresh628: strict master/slave speed shaping. Stand-on rewarded for holding cruise; give-way rewarded for slowing to role-giveway-speed while conflict risk is high.')
     parser.add_argument('--role-giveway-speed', type=float, default=RewardConfig.role_giveway_speed, help='fresh628: target creep speed (m/s) for the give-way vessel during an active encounter.')
+    parser.add_argument('--role-stand-on-course-hold-weight', type=float, default=RewardConfig.role_stand_on_course_hold_weight, help='Penalty weight for stand-on yaw rate during a predicted conflict.')
     parser.add_argument('--wrong-heading-speed-penalty-weight', type=float, default=RewardConfig.wrong_heading_speed_penalty_weight, help='fresh628: tax forward speed while |heading error| exceeds the threshold, scaled by (1-cos(he)). Forces slow-spin-then-go at waypoint switches.')
     parser.add_argument('--wrong-heading-speed-threshold-deg', type=float, default=RewardConfig.wrong_heading_speed_threshold_deg, help='fresh628: heading-error threshold (deg) where the wrong-heading speed tax starts.')
     parser.add_argument('--wrong-heading-conflict-relief', type=float, default=RewardConfig.wrong_heading_conflict_relief, help='fresh633: waive the wrong-heading speed tax proportionally to conflict risk (0=always taxed, 1=fully waived at max conflict). Unbinds "turn hard" from "slow down" during encounters to prevent bow-to-bow standoffs.')
@@ -125,6 +126,8 @@ def parse_args():
     parser.add_argument('--goal-queue-follower-speed', type=float, default=RewardConfig.goal_queue_follower_speed, help='fresh629: follower hold speed (m/s) while queueing.')
     parser.add_argument('--goal-queue-min-separation', type=float, default=RewardConfig.goal_queue_min_separation, help='fresh629: minimum separation (m) the queue follower must keep from the leader.')
     parser.add_argument('--desired-conflict-speed', type=float, default=RewardConfig.desired_conflict_speed, help='Target forward speed maintained during conflict handling.')
+    parser.add_argument('--conflict-speed-relief', type=float, default=RewardConfig.conflict_speed_relief, help='fresh636: reward-path target-speed reduction scale under conflict (0=keep cruise, legacy 0.55).')
+    parser.add_argument('--conflict-speed-floor', type=float, default=RewardConfig.conflict_speed_floor, help='fresh636: cap for min(desired_conflict_speed, floor) reward-path speed floor under conflict (legacy 0.18).')
     parser.add_argument('--stop-go-penalty-weight', type=float, default=RewardConfig.stop_go_penalty_weight, help='Penalty weight for rapid stop-go behavior under conflict.')
     parser.add_argument('--head-on-guidance-distance', type=float, default=RewardConfig.head_on_guidance_distance, help='Distance threshold for head-on starboard guidance shaping.')
     parser.add_argument('--crossing-guidance-distance', type=float, default=RewardConfig.crossing_guidance_distance, help='Optional dedicated lookahead (m) for crossing/overtaking starboard guidance (0 -> legacy max(anticipation_distance, conflict_distance)).')
@@ -194,6 +197,7 @@ def parse_args():
     parser.add_argument('--anticipatory-dcpa-deficit-penalty-weight', type=float, default=RewardConfig.anticipatory_dcpa_deficit_penalty_weight, help='Penalty weight for low predicted DCPA before near miss.')
     parser.add_argument('--anticipatory-dcpa-improvement-reward-weight', type=float, default=RewardConfig.anticipatory_dcpa_improvement_reward_weight, help='Reward weight for increasing predicted DCPA across consecutive steps.')
     parser.add_argument('--anticipatory-closing-reduction-reward-weight', type=float, default=RewardConfig.anticipatory_closing_reduction_reward_weight, help='Reward weight for reducing range-closing speed across consecutive steps.')
+    parser.add_argument('--anticipatory-cpa-giveway-only', action='store_true', help='Apply anticipatory CPA shaping only to neighbours for which this agent has the give-way role.')
     parser.add_argument('--anticipatory-yield-speed', type=float, default=RewardConfig.anticipatory_yield_speed, help='Target give-way speed (m/s) for deterministic random-encounter CPA yield roles.')
     parser.add_argument('--anticipatory-yield-speed-penalty-weight', type=float, default=RewardConfig.anticipatory_yield_speed_penalty_weight, help='Penalty weight for give-way agents exceeding anticipatory-yield-speed in low-DCPA random encounters.')
     parser.add_argument('--near-goal-idle-penalty-weight', type=float, default=RewardConfig.near_goal_idle_penalty_weight, help='Dense per-step penalty for near-zero speed when close to (but not at) the goal. Prevents hover-near-goal exploit.')
@@ -254,6 +258,7 @@ def parse_args():
     parser.add_argument('--checkpoint-eval-steps', type=int, default=90, help='Maximum steps per evaluation episode when --auto-evaluate-checkpoints is enabled.')
     parser.add_argument('--checkpoint-eval-scenario', action='append', dest='checkpoint_eval_scenarios', default=None, help='Scenario used for automatic checkpoint evaluation. Repeatable.')
     parser.add_argument('--checkpoint-eval-device', default=None, help='Optional device override for automatic checkpoint evaluation. Defaults to --device.')
+    parser.add_argument('--checkpoint-eval-ros-domain-id', type=int, default=160, help='ROS domain ID reserved for automatic checkpoint evaluation. Must be within the Fast DDS-safe range.')
     parser.add_argument('--checkpoint-ranking-json', help='Optional JSON output path for automatic checkpoint ranking.')
     parser.add_argument('--checkpoint-eval-json-dir', help='Optional directory for per-checkpoint evaluation JSON outputs.')
     parser.add_argument('--log-interval-updates', type=int, default=1, help='Print rollout/update throughput every N policy updates.')
@@ -263,6 +268,8 @@ def parse_args():
     parser.add_argument('--value-loss-huber-delta', type=float, default=0.0, help='If >0, use a Huber-style critic value loss: squared error when |value_error|<=delta, linear beyond. Prevents large collision returns (e.g. -400) from making the critic loss explode. 0 (default) keeps pure squared error.')
     parser.add_argument('--scenario-balanced-loss', action='store_true', help='Weight PPO loss samples inversely to their scenario sample count. Equalizes per-scenario gradient contribution regardless of episode length (anti-forgetting).')
     parser.add_argument('--crossing-imitation-weight', type=float, default=0.0, help='Auxiliary trainer-side action imitation weight for the three_usv_crossing scenario. The final checkpoint remains a single neural MAPPO policy.')
+    parser.add_argument('--min-update-samples', type=int, default=0, help='Skip the gradient update when the rollout collected fewer samples than this (guards the final weights against noisy truncated tail rollouts near total-timesteps). 0 disables.')
+    parser.add_argument('--policy-anchor-only-cpa-conflict', action='store_true', help='Apply the policy anchor ONLY on predicted-CPA conflict samples (inverse of --policy-anchor-exclude-cpa-conflict): lock encounter behaviour, free open-water navigation.')
     parser.add_argument('--crossing-imitation-weight-end', type=float, default=None, help='Final crossing imitation weight for linear annealing. If unset, crossing-imitation-weight stays constant.')
     parser.add_argument('--crossing-imitation-pretrain-epochs', type=int, default=0, help='Extra actor-only imitation epochs after each rollout update. Trainer-side only; final artifact remains one neural MAPPO checkpoint.')
     parser.add_argument('--crossing-imitation-clear-speed', type=float, default=0.32, help='Target forward speed for the highest-priority crossing vessel in the auxiliary imitation loss.')
@@ -564,6 +571,10 @@ def parse_args():
     parser.add_argument('--policy-anchor-crossing-only', action='store_true', help='Apply policy-anchor loss only to three_usv_crossing samples.')
     parser.add_argument('--policy-anchor-exclude-lagging-finish', action='store_true', help='Exclude samples currently targeted by lagging-finish from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-team-safety-brake', action='store_true', help='Exclude samples currently targeted by team-safety-brake from policy-anchor loss.')
+    parser.add_argument('--policy-anchor-exclude-cpa-conflict', action='store_true', help='fresh638: drop the anchor loss on samples with a predicted CPA threat so encounter behaviour can escape the warmstart parent.')
+    parser.add_argument('--policy-anchor-cpa-lookahead-distance', type=float, default=7.0, help='fresh638: neighbor distance ceiling (m) for the anchor CPA-conflict exemption.')
+    parser.add_argument('--policy-anchor-cpa-time-horizon', type=float, default=12.0, help='fresh638: TCPA horizon (s) for the anchor CPA-conflict exemption.')
+    parser.add_argument('--policy-anchor-cpa-dcpa-target', type=float, default=1.4, help='fresh638: DCPA threshold (m) below which a predicted pass counts as conflict for the anchor exemption.')
     parser.add_argument('--policy-anchor-exclude-random-deconflict', action='store_true', help='Exclude samples currently targeted by random-deconflict from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-random-safe-finish', action='store_true', help='Exclude samples currently targeted by random-safe-finish from policy-anchor loss.')
     parser.add_argument('--policy-anchor-exclude-random-goal-hold', action='store_true', help='Exclude samples currently targeted by random-goal-hold from policy-anchor loss.')
@@ -3725,6 +3736,35 @@ def _policy_anchor_loss(
         if brake_mask.shape[0] == sample_count:
             anchor_mask = anchor_mask & (~brake_mask)
 
+    # fresh638: free the policy from the parent anchor exactly where new
+    # avoidance behaviour must be learned. The anchor chain (each generation
+    # MSE-pinned to its warmstart parent at end-weight 0.35) fossilised the
+    # straight-line encounter behaviour across fresh634-637 while every reward
+    # rework fought a losing gradient battle. Open water keeps the anchor
+    # (navigation retention); predicted-CPA conflict samples drop it.
+    if bool(getattr(args, 'policy_anchor_exclude_cpa_conflict', False)) or bool(getattr(args, 'policy_anchor_only_cpa_conflict', False)):
+        cpa_lookahead = max(0.0, float(getattr(args, 'policy_anchor_cpa_lookahead_distance', 7.0)))
+        cpa_horizon = max(0.0, float(getattr(args, 'policy_anchor_cpa_time_horizon', 12.0)))
+        cpa_target = max(0.0, float(getattr(args, 'policy_anchor_cpa_dcpa_target', 1.4)))
+        _, _, _, _, cpa_score, valid_cpa = _neighbor_cpa_threat_features(
+            torch,
+            raw_obs,
+            cpa_lookahead,
+            cpa_horizon,
+            cpa_target,
+            0.02,
+        )
+        conflict_mask = valid_cpa & (cpa_score > 0.0)
+        if conflict_mask.shape[0] == sample_count:
+            if bool(getattr(args, 'policy_anchor_only_cpa_conflict', False)):
+                # fresh641: inverse of exclude — duck arcs (BC) are locked in
+                # conflicts, open-water tracking is freed for the reward stack
+                # to straighten (51427 wanders at |omega| p50 0.18 with no
+                # neighbours in 5m).
+                anchor_mask = anchor_mask & conflict_mask
+            else:
+                anchor_mask = anchor_mask & (~conflict_mask)
+
     if bool(getattr(args, 'policy_anchor_exclude_random_deconflict', False)):
         random_deconflict_mask = _random_deconflict_active_mask(
             torch,
@@ -4504,6 +4544,7 @@ def _build_reward_config(args) -> RewardConfig:
         waypoint_pass_quality_bonus=float(getattr(args, 'waypoint_pass_quality_bonus', 0.0)),
         role_speed_asymmetry_weight=float(getattr(args, 'role_speed_asymmetry_weight', 0.0)),
         role_giveway_speed=float(getattr(args, 'role_giveway_speed', RewardConfig.role_giveway_speed)),
+        role_stand_on_course_hold_weight=float(getattr(args, 'role_stand_on_course_hold_weight', 0.0)),
         wrong_heading_speed_penalty_weight=float(getattr(args, 'wrong_heading_speed_penalty_weight', 0.0)),
         wrong_heading_speed_threshold_deg=float(getattr(args, 'wrong_heading_speed_threshold_deg', RewardConfig.wrong_heading_speed_threshold_deg)),
         wrong_heading_conflict_relief=float(getattr(args, 'wrong_heading_conflict_relief', 0.0)),
@@ -4515,6 +4556,8 @@ def _build_reward_config(args) -> RewardConfig:
         goal_queue_follower_speed=float(getattr(args, 'goal_queue_follower_speed', RewardConfig.goal_queue_follower_speed)),
         goal_queue_min_separation=float(getattr(args, 'goal_queue_min_separation', RewardConfig.goal_queue_min_separation)),
         desired_conflict_speed=float(args.desired_conflict_speed),
+        conflict_speed_relief=float(getattr(args, 'conflict_speed_relief', RewardConfig.conflict_speed_relief)),
+        conflict_speed_floor=float(getattr(args, 'conflict_speed_floor', RewardConfig.conflict_speed_floor)),
         stop_go_penalty_weight=float(args.stop_go_penalty_weight),
         head_on_guidance_distance=float(args.head_on_guidance_distance),
         crossing_guidance_distance=float(args.crossing_guidance_distance),
@@ -4584,6 +4627,7 @@ def _build_reward_config(args) -> RewardConfig:
         anticipatory_dcpa_deficit_penalty_weight=float(args.anticipatory_dcpa_deficit_penalty_weight),
         anticipatory_dcpa_improvement_reward_weight=float(args.anticipatory_dcpa_improvement_reward_weight),
         anticipatory_closing_reduction_reward_weight=float(args.anticipatory_closing_reduction_reward_weight),
+        anticipatory_cpa_giveway_only=bool(args.anticipatory_cpa_giveway_only),
         anticipatory_yield_speed=float(args.anticipatory_yield_speed),
         anticipatory_yield_speed_penalty_weight=float(args.anticipatory_yield_speed_penalty_weight),
         near_goal_idle_penalty_weight=float(args.near_goal_idle_penalty_weight),
@@ -5090,6 +5134,10 @@ def _checkpoint_payload(
         'policy_anchor_crossing_only': bool(getattr(args, 'policy_anchor_crossing_only', False)),
         'policy_anchor_exclude_lagging_finish': bool(getattr(args, 'policy_anchor_exclude_lagging_finish', False)),
         'policy_anchor_exclude_team_safety_brake': bool(getattr(args, 'policy_anchor_exclude_team_safety_brake', False)),
+        'policy_anchor_exclude_cpa_conflict': bool(getattr(args, 'policy_anchor_exclude_cpa_conflict', False)),
+        'policy_anchor_cpa_lookahead_distance': float(getattr(args, 'policy_anchor_cpa_lookahead_distance', 7.0)),
+        'policy_anchor_cpa_time_horizon': float(getattr(args, 'policy_anchor_cpa_time_horizon', 12.0)),
+        'policy_anchor_cpa_dcpa_target': float(getattr(args, 'policy_anchor_cpa_dcpa_target', 1.4)),
         'policy_anchor_exclude_random_deconflict': bool(getattr(args, 'policy_anchor_exclude_random_deconflict', False)),
         'policy_anchor_exclude_random_safe_finish': bool(getattr(args, 'policy_anchor_exclude_random_safe_finish', False)),
         'policy_anchor_exclude_random_goal_hold': bool(getattr(args, 'policy_anchor_exclude_random_goal_hold', False)),
@@ -5996,6 +6044,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'waypoint_pass_quality_bonus',
         'role_speed_asymmetry_weight',
         'role_giveway_speed',
+        'role_stand_on_course_hold_weight',
         'wrong_heading_speed_penalty_weight',
         'wrong_heading_speed_threshold_deg',
         'wrong_heading_conflict_relief',
@@ -6007,6 +6056,8 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'goal_queue_follower_speed',
         'goal_queue_min_separation',
         'desired_conflict_speed',
+        'conflict_speed_relief',
+        'conflict_speed_floor',
         'stop_go_penalty_weight',
         'head_on_guidance_distance',
         'crossing_guidance_distance',
@@ -6063,6 +6114,7 @@ def _apply_resume_configuration(args, payload: dict, cli_overrides: set | None =
         'anticipatory_dcpa_deficit_penalty_weight',
         'anticipatory_dcpa_improvement_reward_weight',
         'anticipatory_closing_reduction_reward_weight',
+        'anticipatory_cpa_giveway_only',
         'anticipatory_yield_speed',
         'anticipatory_yield_speed_penalty_weight',
     )
@@ -6119,9 +6171,13 @@ def _restore_resume_state(torch, device, actor, critic, actor_log_std, optimizer
 
 
 def _eval_ros_domain_id(args) -> int:
-    base = int(getattr(args, 'base_ros_domain_id', 100))
-    workers = max(1, int(getattr(args, 'num_sampler_workers', 1)))
-    return base + workers
+    domain_id = int(getattr(args, 'checkpoint_eval_ros_domain_id', 160))
+    if not 0 <= domain_id <= MAX_FASTDDS_SAFE_DOMAIN_ID:
+        raise ValueError(
+            '--checkpoint-eval-ros-domain-id is outside the Fast DDS-safe range: '
+            f'domain_id={domain_id}, safe_max={MAX_FASTDDS_SAFE_DOMAIN_ID}.'
+        )
+    return domain_id
 
 
 def _eval_subprocess_env(args) -> dict:
@@ -6779,6 +6835,17 @@ def main():
                         break
 
                 if not storage_obs:
+                    if total_steps >= max(0, args.total_timesteps):
+                        break
+                    continue
+
+                # Small-sample gate: truncated tail rollouts (total_timesteps
+                # nearly reached) produce noisy gradient updates that pollute
+                # the final weights (fresh638/639 postmortem).
+                rollout_sample_count = sum(int(np.asarray(batch).shape[0]) for batch in storage_obs)
+                min_update_samples = max(0, int(getattr(args, 'min_update_samples', 0)))
+                if min_update_samples > 0 and rollout_sample_count < min_update_samples:
+                    print(f'[MAPPO] skipping update: rollout sample_count={rollout_sample_count} < min_update_samples={min_update_samples}')
                     if total_steps >= max(0, args.total_timesteps):
                         break
                     continue

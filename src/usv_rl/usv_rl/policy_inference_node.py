@@ -1,4 +1,6 @@
 import argparse
+from collections import deque
+from dataclasses import replace
 import json
 import math
 import os
@@ -10,7 +12,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 import rclpy
-from common_interfaces.msg import FleetNeighborPoses, NavigationFeedback, NavigationGoal
+from common_interfaces.msg import FleetNeighborPoses, NavigationFeedback, NavigationGoal, NavigationResult
 from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import PositionTarget
 from rclpy.executors import ExternalShutdownException
@@ -18,13 +20,16 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import QoSDurabilityPolicy, QoSProfile, QoSReliabilityPolicy
-from std_msgs.msg import Int8, String
+from std_msgs.msg import Bool, Int8, String
 
 from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds
-from .multi_agent_types import ENCOUNTER_TYPE_COUNT, classify_encounter_role
+from .multi_agent_types import ENCOUNTER_TYPE_COUNT, ROLE_GIVE_WAY, classify_encounter_role
 from .observation_normalizer import ObservationNormalizer
 from .policies import load_policy
+from .policy_trace import PolicyTrace
+from .route_frame import LEGACY_FRAME, OBSERVATION_FRAMES, ROUTE_CANONICAL_FRAME, canonical_route_fields, turn_governor_speed_cap
+from .runtime_action_contract import RuntimeActionContract
 from .types import NeighborObservation, NeighborState, UsvObservation, USV_NEIGHBOR_FEATURE_COUNT
 
 _ENCOUNTER_TYPE_NAMES = {'head_on': 0, 'crossing': 1, 'overtaking': 2}
@@ -46,6 +51,17 @@ _HEAD_ON_COURSE_DEG = 135.0         # relative course > this → reciprocal
 _OVERTAKING_COURSE_DEG = 45.0       # relative course < this AND ahead → overtaking
 _OVERTAKING_ASTERN_DEG = 112.5      # |bearing| > this → astern sector
 
+# ---------- Decisive give-way transit guard ----------
+_GIVE_WAY_GUARD_DISTANCE = 5.0       # metres – align with the trained conflict distance
+_GIVE_WAY_STATIC_TURN_FLOOR = 0.16   # rad/s – decisive turn around a holding vessel
+_GIVE_WAY_MOVING_DCPA_TARGET = 0.80  # metres – moving pairs above this predicted CPA need no guard
+_GIVE_WAY_MOVING_TURN_BASE = 0.03    # rad/s – subtle early correction for a moving conflict
+_GIVE_WAY_MOVING_TURN_RISK = 0.06    # rad/s – additional turn for predicted CPA deficit
+_GIVE_WAY_MOVING_TURN_NEAR = 0.03    # rad/s – additional turn as the pair closes
+_GIVE_WAY_MOVING_STEERAGE_SPEED = 0.12  # m/s – keep crossing motion without an abrupt push
+_GIVE_WAY_STEERAGE_SPEED = 0.15      # m/s – avoid a near-stationary close-pass plateau
+_GIVE_WAY_STEERAGE_MIN_DISTANCE = 0.9  # metres – never force forward speed in emergency proximity
+
 # ---------- Virtual sub-goal (long-transit OOD mitigation) constants ----------
 # The fresh520 policy was trained in a ±8 m arena with distance-to-goal ≤ ~16 m.
 # Real missions can issue goals 30-45 m away, pushing pose_x/pose_y and
@@ -57,6 +73,57 @@ _OVERTAKING_ASTERN_DEG = 112.5      # |bearing| > this → astern sector
 _VIRTUAL_LEG_LENGTH = 8.0          # metres – virtual sub-goal lookahead along the route
 _VIRTUAL_GOAL_TRIGGER = 12.0       # metres – enable virtual mode when route is longer
 _POSE_IN_DIST_LIMIT = 9.0          # metres – training arena half-extent for pose features
+
+
+def _give_way_guard_demand(observation, neighbor) -> Tuple[float, bool]:
+    """Return starboard turn floor and static-blocker steerage demand."""
+    if int(getattr(neighbor, 'role_index', -1)) != ROLE_GIVE_WAY:
+        return 0.0, False
+    if not (0.0 < neighbor.distance < _GIVE_WAY_GUARD_DISTANCE):
+        return 0.0, False
+    if abs(float(neighbor.bearing)) >= math.radians(_OVERTAKING_ASTERN_DEG):
+        return 0.0, False
+
+    range_rate = -(
+        neighbor.rel_x * neighbor.rel_vx + neighbor.rel_y * neighbor.rel_vy
+    ) / max(neighbor.distance, 1e-3)
+    if range_rate <= _ENCOUNTER_CLOSING_MIN:
+        return 0.0, False
+
+    own_vx = observation.speed * math.cos(observation.yaw)
+    own_vy = observation.speed * math.sin(observation.yaw)
+    neighbor_speed = math.hypot(own_vx + neighbor.rel_vx, own_vy + neighbor.rel_vy)
+    if neighbor_speed <= _ENCOUNTER_SPEED_THRESHOLD:
+        keep_steerage = neighbor.distance > _GIVE_WAY_STEERAGE_MIN_DISTANCE
+        return _GIVE_WAY_STATIC_TURN_FLOOR, keep_steerage
+
+    relative_speed_sq = neighbor.rel_vx ** 2 + neighbor.rel_vy ** 2
+    if relative_speed_sq <= 1e-6:
+        return 0.0, False
+    tcpa = -(
+        neighbor.rel_x * neighbor.rel_vx + neighbor.rel_y * neighbor.rel_vy
+    ) / relative_speed_sq
+    if tcpa <= 0.0:
+        return 0.0, False
+    dcpa = math.hypot(
+        neighbor.rel_x + neighbor.rel_vx * tcpa,
+        neighbor.rel_y + neighbor.rel_vy * tcpa,
+    )
+    if dcpa >= _GIVE_WAY_MOVING_DCPA_TARGET:
+        return 0.0, False
+
+    dcpa_risk = min(1.0, (_GIVE_WAY_MOVING_DCPA_TARGET - dcpa) / _GIVE_WAY_MOVING_DCPA_TARGET)
+    proximity = min(1.0, max(
+        0.0,
+        (_GIVE_WAY_GUARD_DISTANCE - neighbor.distance)
+        / max(_GIVE_WAY_GUARD_DISTANCE - _GIVE_WAY_STEERAGE_MIN_DISTANCE, 1e-3),
+    ))
+    turn_floor = (
+        _GIVE_WAY_MOVING_TURN_BASE
+        + _GIVE_WAY_MOVING_TURN_RISK * dcpa_risk
+        + _GIVE_WAY_MOVING_TURN_NEAR * proximity
+    )
+    return turn_floor, False
 
 
 def _candidate_workspace_roots() -> list[Path]:
@@ -291,6 +358,13 @@ class MappoActorPolicyRuntime:
             linear_delta=linear_bound,
             angular_delta=angular_bound,
         )
+        self.action_contract = RuntimeActionContract(checkpoint, linear_bound)
+        self.observation_frame = str(checkpoint.get('observation_frame', LEGACY_FRAME))
+        if self.observation_frame not in OBSERVATION_FRAMES:
+            raise RuntimeError(f'Unsupported observation_frame {self.observation_frame!r} in {model_path}.')
+        # Models trained where these features were constant must see the same constants at deployment.
+        self.neutral_conflict_features = bool(checkpoint.get('neutral_conflict_features', False))
+        self.checkpoint_angular_authority_floor = checkpoint.get('angular_authority_floor')
         self.heading_omega_deadband = float(checkpoint.get('heading_omega_deadband', 0.06))
         self.heading_omega_reference = float(checkpoint.get('heading_omega_reference', 0.85))
         self.angular_authority_power = float(checkpoint.get('angular_authority_power', 1.6))
@@ -380,9 +454,32 @@ def _load_runtime_policy(model_path: str, policy_kind: str, device: str):
     raise RuntimeError(f'Unsupported online policy type: {inferred_kind}')
 
 
+def _load_solo_expert(model_path: str, device: str, base) -> 'MappoActorPolicyRuntime':
+    """Load an optional no-neighbour expert that must share the base policy's interface exactly."""
+    if not isinstance(base, MappoActorPolicyRuntime):
+        raise RuntimeError('Solo expert routing requires a MAPPO base policy.')
+    if base.observation_frame != LEGACY_FRAME:
+        raise RuntimeError('The base policy must use the legacy observation frame.')
+    expert = MappoActorPolicyRuntime(_resolve_model_path(model_path), device=device)
+    shared = ('obs_dim', 'action_dim', 'heading_omega_deadband', 'heading_omega_reference',
+              'angular_authority_power', 'angular_accel_limit', 'angular_decel_limit', 'conflict_turn_relief',
+              '_squash_actions')
+    for name in shared:
+        if getattr(expert, name) != getattr(base, name):
+            raise RuntimeError(f'Solo expert {name}={getattr(expert, name)!r} differs from base {getattr(base, name)!r}.')
+    if vars(expert.action_contract) != vars(base.action_contract) or expert.action_bounds != base.action_bounds:
+        raise RuntimeError('Solo expert action contract or bounds differ from the base policy.')
+    for name in ('_sq_action_low', '_sq_action_high'):
+        if hasattr(base, name) and not bool((getattr(expert, name) == getattr(base, name)).all()):
+            raise RuntimeError(f'Solo expert {name} differs from the base policy.')
+    return expert
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description='Run a trained policy online and publish to rl_policy/cmd_vel.')
     parser.add_argument('--model', required=True, help='Path to policy model (.npz for BC, .zip for PPO, .pt for MAPPO).')
+    parser.add_argument('--solo-expert-model', default='',
+                        help='Optional MAPPO actor used only when no neighbour is observed; the base model handles every multi-boat step.')
     parser.add_argument('--policy', choices=['auto', 'bc', 'ppo', 'mappo', 'zero'], default='auto', help='Policy backend.')
     parser.add_argument('--rl-control-mode', choices=['auto', 'pure'], default='pure', help='Deprecated compatibility flag. Only pure final-command policies are supported.')
     parser.add_argument('--namespace', default='usv_03', help='Target USV namespace.')
@@ -390,6 +487,8 @@ def parse_args(argv=None):
     parser.add_argument('--publish-rate', type=float, default=10.0, help='Policy publish rate in Hz.')
     parser.add_argument('--max-neighbors', type=int, default=3, help='Maximum neighbors encoded into the observation vector.')
     parser.add_argument('--disable-controller-param', action='store_true', help='Do not auto-enable rl_policy_enabled on velocity_controller_node.')
+    parser.add_argument('--policy-trace-dir', default='~/usv_logs', help='Directory for per-step policy diagnostics.')
+    parser.add_argument('--disable-policy-trace', action='store_true', help='Disable per-step policy diagnostics.')
     parser.add_argument('--encounter-type', choices=['auto', 'none', 'head_on', 'crossing', 'overtaking'], default='auto',
                         help='Encounter type for models trained with scenario conditioning (fresh54+). '
                              '"auto" classifies dynamically from neighbour geometry each step; '
@@ -422,6 +521,9 @@ def parse_args(argv=None):
                         help='Turn governor: absolute lower bound of the speed cap (m/s) so the boat always keeps steerage way and turns on an arc.')
     parser.add_argument('--turn-governor-cruise', type=float, default=0.34,
                         help='Turn governor: cruise speed reference (m/s) used to compute the cap.')
+    parser.add_argument('--enable-safety-layers', action='store_true',
+                        help='Re-enable node post-processing (turn governor/assist, proximity speed scaling, '
+                             'push-through, deadlock/orbit breakers, give-way guard, route gate). Off by default.')
     parser.add_argument('--disable-turn-assist', action='store_true',
                         help='Disable the short-side turn assist (minimum-heading-error steering at waypoint switches).')
     parser.add_argument('--turn-assist-threshold-deg', type=float, default=45.0,
@@ -470,12 +572,18 @@ class PolicyInferenceNode(Node):
         turn_assist_min_separation: float = 2.0,
         turn_assist_max_omega: float = 0.60,
         turn_assist_blend: float = 0.85,
+        safety_layers_enabled: bool = False,
+        policy_trace_dir: Optional[str] = '~/usv_logs',
+        solo_expert_model: str = '',
     ):
         resolved_namespace = namespace if namespace.startswith('/') else f'/{namespace}'
         super().__init__('policy_inference_node', namespace=resolved_namespace)
         self._namespace = resolved_namespace
         self._usv_id = resolved_namespace.strip('/')
         self._policy = _load_runtime_policy(model_path, policy_kind, device)
+        self._solo_expert = _load_solo_expert(solo_expert_model, device, self._policy) if solo_expert_model else None
+        self._conflict_latched: set[str] = set()
+        self._solo_expert_path = _resolve_model_path(solo_expert_model) if solo_expert_model else None
 
         # ---- Model info logging ----
         resolved_path = _resolve_model_path(model_path)
@@ -534,6 +642,7 @@ class PolicyInferenceNode(Node):
         self._active_goal_id: Optional[int] = None
         self._route_start: Optional[Tuple[float, float]] = None
         self._route_goal: Optional[Tuple[float, float]] = None
+        self._raw_route_inputs: dict = {}
         self._virtual_goal_active = False
         self._first_goal_logged = False
         self._first_active_goal_feedback_logged = False
@@ -582,6 +691,8 @@ class PolicyInferenceNode(Node):
         self._turn_assist_max_omega = max(0.05, float(turn_assist_max_omega))
         self._turn_assist_blend = min(1.0, max(0.0, float(turn_assist_blend)))
         self._turn_assist_active = False
+        # Off = the published command is exactly the model's projected action, as in training.
+        self._safety_layers_enabled = bool(safety_layers_enabled)
         # fresh628 role latch state: neighbour id -> (encounter_type, role).
         self._role_latch = {}
         self._role_latch_radius = 2.5
@@ -603,6 +714,7 @@ class PolicyInferenceNode(Node):
         self._orbit_lock_since = None
         self._orbit_lock_prev_sep = None
         self._orbit_lock_logged = False
+        self._give_way_guard_logged = False
         self._clear_ahead_route_max_omega = max(0.0, float(clear_ahead_route_max_omega))
         self._clear_ahead_route_heading_reference = max(0.05, float(clear_ahead_route_heading_reference))
         self._clear_ahead_route_logged = False
@@ -731,10 +843,24 @@ class PolicyInferenceNode(Node):
         self._raw_cmd_msg: Optional[TwistStamped] = None
         self._final_cmd_msg: Optional[PositionTarget] = None
         self._neighbor_states: Dict[str, NeighborState] = {}
+        self._telemetry_status = None
+        self._telemetry_status_received = None
+        self.declare_parameter('navigation_input_timeout_s', 1.5)
+        self._navigation_input_timeout = float(self.get_parameter('navigation_input_timeout_s').value)
+        if not math.isfinite(self._navigation_input_timeout) or self._navigation_input_timeout <= 0.0:
+            raise ValueError('navigation_input_timeout_s must be positive and finite')
+        self._navigation_inputs = {}
+        self._completed_goal_ids = deque(maxlen=128)
+        self._navigation_terminal_reason = None
+        self._navigation_guard_reason = None
+        self._last_guard_trace = -math.inf
 
+        self.create_subscription(String, 'telemetry/status', self._telemetry_status_callback, qos_reliable)
         self.create_subscription(PoseStamped, 'local_position/pose_from_gps', self._pose_callback, qos_best_effort)
         self.create_subscription(TwistStamped, 'local_position/velocity_local', self._velocity_callback, qos_best_effort)
         self.create_subscription(NavigationGoal, 'set_usv_nav_goal', self._nav_goal_callback, qos_reliable)
+        self.create_subscription(NavigationResult, 'navigation_result', self._nav_result_callback, qos_reliable)
+        self.create_subscription(Bool, 'stop_navigation', self._stop_navigation_callback, qos_reliable)
         self.create_subscription(NavigationFeedback, 'navigation_feedback', self._feedback_callback, qos_best_effort)
         self.create_subscription(NavigationFeedback, 'velocity_controller/feedback', self._feedback_callback, qos_best_effort)
         self.create_subscription(TwistStamped, 'velocity_controller/raw_cmd', self._raw_cmd_callback, qos_best_effort)
@@ -770,6 +896,37 @@ class PolicyInferenceNode(Node):
             model_info_dict['action_bounds'] = {'linear': ab.linear_delta, 'angular': ab.angular_delta}
         if hasattr(self._policy, '_squash_actions'):
             model_info_dict['squash_actions'] = bool(self._policy._squash_actions)
+        model_info_dict['runtime_action_contract_version'] = 1
+        model_info_dict['solo_conflict_features_neutralized'] = True
+        model_info_dict['navigation_input_guard_version'] = 1
+        model_info_dict['navigation_input_timeout_s'] = self._navigation_input_timeout
+        if isinstance(self._policy, MappoActorPolicyRuntime):
+            model_info_dict['action_mode'] = self._policy.action_contract.action_mode
+            model_info_dict['action_contract'] = vars(self._policy.action_contract).copy()
+            model_info_dict['checkpoint_angular_authority_floor'] = self._policy.checkpoint_angular_authority_floor
+        model_info_dict['projection'] = {
+            'control_dt': 1.0 / max(1.0, self._publish_rate),
+            'angular_authority_floor': 0.35,
+            'min_forward_speed_floor': 0.0,
+            **{name: getattr(self._policy, name, None) for name in (
+                'heading_omega_deadband', 'heading_omega_reference', 'angular_authority_power',
+                'angular_accel_limit', 'angular_decel_limit', 'conflict_turn_relief',
+            )},
+        }
+        model_info_dict['solo_expert'] = {
+            'enabled': self._solo_expert is not None,
+            'model_path': self._solo_expert_path,
+            'observation_frame': None if self._solo_expert is None else self._solo_expert.observation_frame,
+            'route': 'solo expert when observation has no neighbours, base model otherwise',
+        }
+        model_info_dict['turn_assist'] = {
+            'enabled': self._turn_assist_enabled,
+            'threshold_rad': self._turn_assist_threshold,
+            'release_rad': self._turn_assist_release,
+            'min_separation': self._turn_assist_min_separation,
+            'max_omega': self._turn_assist_max_omega,
+            'blend': self._turn_assist_blend,
+        }
         try:
             fstat = os.stat(resolved_path)
             model_info_dict['size_bytes'] = fstat.st_size
@@ -781,7 +938,21 @@ class PolicyInferenceNode(Node):
         self._model_info_pub.publish(model_info_msg)
         self.get_logger().info('Published model info on rl_policy/model_info')
 
+        self._policy_trace = None
+        if policy_trace_dir is not None:
+            self._policy_trace = PolicyTrace(
+                policy_trace_dir, self._usv_id,
+                {'namespace': self._namespace, **model_info_dict}, self.get_logger().warning,
+            )
+            if self._policy_trace.enabled:
+                self.get_logger().info(f'Policy trace: {self._policy_trace.path}')
         self._publish_timer = self.create_timer(1.0 / max(1.0, self._publish_rate), self._publish_action)
+
+    def destroy_node(self):
+        trace = getattr(self, '_policy_trace', None)
+        if trace is not None:
+            trace.close()
+        return super().destroy_node()
 
     def _projection_conflict_level(self, observation) -> float:
         if observation is None or not observation.neighbors:
@@ -831,6 +1002,18 @@ class PolicyInferenceNode(Node):
         self._head_on_guard_hold_until = 0.0
         self._head_on_guard_last_update = time.monotonic()
 
+    def _telemetry_status_callback(self, msg: String):
+        try:
+            status = json.loads(msg.data)
+            if not isinstance(status, dict) or not isinstance(status.get('healthy'), bool):
+                raise ValueError('Missing telemetry healthy flag')
+            json.dumps(status, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            self.get_logger().warning(f'Invalid telemetry status: {exc}', throttle_duration_sec=10.0)
+            return
+        self._telemetry_status = status
+        self._telemetry_status_received = time.monotonic()
+
     def _pose_callback(self, msg: PoseStamped):
         self._pose_msg = msg
         if not self._first_pose_logged:
@@ -858,6 +1041,7 @@ class PolicyInferenceNode(Node):
             self._feedback_msg = None
             self._raw_cmd_msg = None
             self._final_cmd_msg = None
+            self._navigation_inputs.clear()
 
         self._ready_logged = False
         self._first_action_logged = False
@@ -911,6 +1095,9 @@ class PolicyInferenceNode(Node):
 
     def _nav_goal_callback(self, msg: NavigationGoal):
         goal_id = int(getattr(msg, 'goal_id', 0))
+        self._navigation_terminal_reason = None
+        if goal_id in self._completed_goal_ids:
+            self._completed_goal_ids.remove(goal_id)
         self._activate_goal(
             goal_id,
             reset_stream_state=True,
@@ -922,7 +1109,93 @@ class PolicyInferenceNode(Node):
             source='set_usv_nav_goal',
         )
 
+    def _record_navigation_input(self, name, stamp):
+        now = time.monotonic()
+        source_stamp = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        if source_stamp <= 0.0 or source_stamp > self.get_clock().now().nanoseconds * 1e-9 + 0.05:
+            return False
+        previous = self._navigation_inputs.get(name)
+        if previous is not None and source_stamp <= previous['stamp']:
+            previous['received'] = now
+            return False
+        self._navigation_inputs[name] = {'stamp': source_stamp, 'received': now, 'updated': now}
+        return True
+
+    def _navigation_input_status(self):
+        now = time.monotonic()
+        ros_now = self.get_clock().now().nanoseconds * 1e-9
+        status = {}
+        reason = self._navigation_terminal_reason
+        if reason is None and self._active_goal_id is None:
+            reason = 'no_active_goal'
+        for name in ('feedback', 'final_command'):
+            sample = self._navigation_inputs.get(name)
+            ages = {
+                'receipt_age_s': None if sample is None else now - sample['received'],
+                'source_update_age_s': None if sample is None else now - sample['updated'],
+                'source_stamp_age_s': None if sample is None else ros_now - sample['stamp'],
+            }
+            fresh = sample is not None and sample['stamp'] > 0.0 and all(
+                -0.05 <= age <= self._navigation_input_timeout for age in ages.values()
+            )
+            status[name] = {**ages, 'fresh': fresh}
+            if reason is None and not fresh:
+                reason = f'{name}_stale_or_missing'
+        if reason is None and (self._feedback_msg is None or int(self._feedback_msg.goal_id) != self._active_goal_id):
+            reason = 'feedback_goal_mismatch'
+        return {'reason': reason, 'inputs': status}
+
+    def _publish_navigation_stop(self, status):
+        message = TwistStamped()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.header.frame_id = 'base_link'
+        self._action_pub.publish(message)
+        self._turn_assist_active = False
+        self._reset_head_on_guard_state()
+        now = time.monotonic()
+        changed = status['reason'] != self._navigation_guard_reason
+        if changed:
+            self.get_logger().warning(f'Policy inhibited: {status["reason"]}; publishing zero command')
+        if self._policy_trace is not None and (changed or now - self._last_guard_trace >= 1.0):
+            self._policy_trace.write({
+                'type': 'inhibited', 'timestamp': self.get_clock().now().nanoseconds * 1e-9,
+                'wall_timestamp': time.time(), 'goal_id': self._active_goal_id,
+                'navigation_input_status': status, 'published_action': [0.0, 0.0],
+            })
+            self._last_guard_trace = now
+        self._navigation_guard_reason = status['reason']
+
+    def _finish_navigation(self, reason):
+        if self._active_goal_id is not None:
+            self._completed_goal_ids.append(self._active_goal_id)
+        self._active_goal_id = None
+        self._feedback_msg = None
+        self._final_cmd_msg = None
+        self._navigation_inputs.clear()
+        self._navigation_terminal_reason = reason
+        self._publish_navigation_stop(self._navigation_input_status())
+
+    def _nav_result_callback(self, msg: NavigationResult):
+        if int(msg.goal_id) != self._active_goal_id:
+            return
+        if msg.success and ('已通过' in msg.message or '通过航点' in msg.message):
+            return
+        self._finish_navigation('navigation_completed' if msg.success else 'navigation_failed')
+
+    def _stop_navigation_callback(self, msg: Bool):
+        if msg.data:
+            self._finish_navigation('navigation_stopped')
+
     def _feedback_callback(self, msg: NavigationFeedback):
+        feedback_goal_id = int(msg.goal_id)
+        if self._navigation_terminal_reason is not None or feedback_goal_id in self._completed_goal_ids:
+            return
+        if self._active_goal_id is not None and feedback_goal_id != self._active_goal_id:
+            return
+        if not math.isfinite(msg.distance_to_goal) or not math.isfinite(msg.heading_error):
+            return
+        if not self._record_navigation_input('feedback', msg.timestamp):
+            return
         self._feedback_msg = msg
         if not self._first_feedback_logged:
             self.get_logger().info(
@@ -959,6 +1232,8 @@ class PolicyInferenceNode(Node):
             self._first_raw_cmd_logged = True
 
     def _final_cmd_callback(self, msg: PositionTarget):
+        if not self._record_navigation_input('final_command', msg.header.stamp):
+            return
         self._final_cmd_msg = msg
         if not self._first_final_cmd_logged:
             self.get_logger().info(
@@ -1200,6 +1475,10 @@ class PolicyInferenceNode(Node):
         obs_pose_y = own_y
         obs_distance_to_goal = float(self._feedback_msg.distance_to_goal)
         obs_heading_error = float(self._feedback_msg.heading_error)
+        self._raw_route_inputs = {
+            'pose_x': own_x, 'pose_y': own_y, 'yaw': yaw,
+            'feedback_distance': obs_distance_to_goal, 'feedback_heading_error': obs_heading_error,
+        }
         if self._route_start is not None and self._route_goal is not None:
             sx, sy = self._route_start
             gx, gy = self._route_goal
@@ -1216,13 +1495,14 @@ class PolicyInferenceNode(Node):
                 cte = max(-3.0, min(3.0, raw_cte))
                 cte_overflow = max(0.0, abs(raw_cte) - 3.0)
                 route_progress = max(0.0, min(1.0, progress_s / route_len))
-                conflict_s = route_len * 0.5
-                to_conflict = conflict_s - progress_s
-                conflict_phase = max(-1.0, min(1.0, (progress_s - conflict_s) / max(0.5 * route_len, 1e-3)))
-                along_speed = max(0.0, speed * math.cos(float(self._feedback_msg.heading_error)), final_linear_x)
-                eta_seconds = max(0.0, to_conflict) / max(along_speed, 0.03)
-                conflict_eta = max(0.0, min(1.0, eta_seconds / 25.0))
-                crossing_priority = {'usv_03': 1.0, 'usv_02': 0.0, 'usv_01': -1.0}.get(self._usv_id, 0.0)
+                if neighbors:
+                    conflict_s = route_len * 0.5
+                    to_conflict = conflict_s - progress_s
+                    conflict_phase = max(-1.0, min(1.0, (progress_s - conflict_s) / max(0.5 * route_len, 1e-3)))
+                    along_speed = max(0.0, speed * math.cos(float(self._feedback_msg.heading_error)), final_linear_x)
+                    eta_seconds = max(0.0, to_conflict) / max(along_speed, 0.03)
+                    conflict_eta = max(0.0, min(1.0, eta_seconds / 25.0))
+                    crossing_priority = {'usv_03': 1.0, 'usv_02': 0.0, 'usv_01': -1.0}.get(self._usv_id, 0.0)
 
                 if self._virtual_goal_active:
                     # Virtual sub-goal: a point on the route line at most
@@ -1367,10 +1647,41 @@ class PolicyInferenceNode(Node):
         # Side sector (22.5°–112.5°): crossing
         return 1  # crossing
 
+    def _neighbor_conflict(self, observation) -> bool:
+        """Predicted conflict (TCPA <= 12 s and DCPA < 1.6 m, or closing within 2.5 m), latched until past CPA and opening."""
+        seen = set()
+        for nb in observation.neighbors:
+            nb_id = str(getattr(nb, 'usv_id', '') or getattr(nb, 'source_id', ''))
+            seen.add(nb_id)
+            d = float(nb.distance)
+            if d <= 1e-6:
+                continue
+            rr = (nb.rel_x * nb.rel_vx + nb.rel_y * nb.rel_vy) / max(d, 1e-3)
+            v_sq = nb.rel_vx * nb.rel_vx + nb.rel_vy * nb.rel_vy
+            tcpa = -(nb.rel_x * nb.rel_vx + nb.rel_y * nb.rel_vy) / v_sq if v_sq >= 1e-6 else 0.0
+            dcpa = math.hypot(nb.rel_x + nb.rel_vx * tcpa, nb.rel_y + nb.rel_vy * tcpa) if tcpa > 0 else d
+            threat = d <= 7.8 and ((d < 2.5 and rr < -0.05) or (0.0 < tcpa <= 12.0 and dcpa < 1.6))
+            if threat:
+                self._conflict_latched.add(nb_id)
+            elif nb_id in self._conflict_latched and (d > 8.4 or (tcpa <= 0.0 and rr > 0.02)):
+                self._conflict_latched.discard(nb_id)
+        self._conflict_latched &= seen
+        return bool(self._conflict_latched)
+
     def _publish_action(self):
         self._maybe_enable_controller_param()
+        navigation_status = self._navigation_input_status()
+        if navigation_status['reason'] is not None:
+            if self._active_goal_id is not None or self._navigation_terminal_reason is not None:
+                self._publish_navigation_stop(navigation_status)
+            self._maybe_log_waiting_for_observation()
+            return
+        if self._navigation_guard_reason is not None:
+            self.get_logger().info('Navigation inputs fresh; resuming policy inference')
+            self._navigation_guard_reason = None
         observation = self._build_observation()
         if observation is None:
+            self._publish_navigation_stop({**navigation_status, 'reason': 'observation_missing'})
             self._maybe_log_waiting_for_observation()
             return
 
@@ -1388,13 +1699,35 @@ class PolicyInferenceNode(Node):
         # observation rather than concatenating a separate one-hot.
         observation.encounter_type_index = enc_idx
         observation_vector = observation.to_vector(self._max_neighbors)
+        if getattr(self._policy, 'neutral_conflict_features', False):
+            observation_vector = replace(
+                observation, conflict_phase=0.0, conflict_eta=1.0, crossing_priority=0.0,
+                crossing_eta_gap=1.0, encounter_type_index=-1).to_vector(self._max_neighbors)
 
         # Publish encounter-type index for downstream logging.
         enc_msg = Int8()
         enc_msg.data = int(enc_idx)
         self._encounter_type_pub.publish(enc_msg)
 
-        action = np.asarray(self._policy.predict(observation_vector), dtype=np.float32).reshape(-1)
+        action_policy = self._policy
+        policy_expert = 'base'
+        canonical_ready = (
+            self._route_start is not None and self._route_goal is not None
+            and math.hypot(self._route_goal[0] - self._route_start[0], self._route_goal[1] - self._route_start[1]) > 1e-6
+        )
+        if self._solo_expert is not None and not self._neighbor_conflict(observation) and (
+                self._solo_expert.observation_frame == LEGACY_FRAME or canonical_ready):
+            action_policy = self._solo_expert
+            policy_expert = 'solo'
+            if self._solo_expert.observation_frame == ROUTE_CANONICAL_FRAME:
+                # The whole post-processing chain then sees the same window the expert was trained on.
+                observation = replace(observation, **canonical_route_fields(
+                    **self._raw_route_inputs, route_start=self._route_start, route_goal=self._route_goal))
+            # The expert only saw open water; non-conflicting traffic stays visible to post-processing only.
+            observation_vector = replace(
+                observation, neighbors=[], conflict_phase=0.0, conflict_eta=1.0, crossing_priority=0.0,
+                crossing_eta_gap=1.0, encounter_type_index=-1).to_vector(self._max_neighbors)
+        action = np.asarray(action_policy.predict(observation_vector), dtype=np.float32).reshape(-1)
         if action.size != 2:
             raise RuntimeError(f'Pure RL mode requires 2D action output, got {action.size}.')
         projected_action = project_rl_policy_action(
@@ -1414,21 +1747,27 @@ class PolicyInferenceNode(Node):
             angular_accel_limit=self._policy.angular_accel_limit,
             angular_decel_limit=self._policy.angular_decel_limit,
             conflict_turn_relief=self._policy.conflict_turn_relief,
+            authority_floor=(0.35 if getattr(self._policy, 'checkpoint_angular_authority_floor', None) is None
+                             else float(self._policy.checkpoint_angular_authority_floor)),
             forward_only=True,
         )
-        linear_x = float(projected_action[0])
-        angular_z = float(projected_action[1])
+        expanded_action = projected_action
+        if isinstance(self._policy, MappoActorPolicyRuntime):
+            expanded_action = self._policy.action_contract.expand(
+                action, projected_action, observation.distance_to_goal,
+            )
+        linear_x = float(expanded_action[0])
+        angular_z = float(expanded_action[1])
+        model_linear_x, model_angular_z = linear_x, angular_z
 
         # Veteran-driver turn governor: speed cap as a function of heading
         # error (see __init__ comment). Applied FIRST so neighbour-distance
         # scaling can only lower it further.
         if self._turn_governor_enabled:
-            he_abs = abs(float(observation.heading_error))
-            cos_gate = max(0.0, math.cos(min(he_abs, math.pi)))
-            cap = self._turn_governor_cruise * (
-                self._turn_governor_floor + (1.0 - self._turn_governor_floor) * cos_gate
+            cap = turn_governor_speed_cap(
+                observation.heading_error, self._turn_governor_cruise,
+                self._turn_governor_floor, self._turn_governor_min_speed,
             )
-            cap = max(cap, self._turn_governor_min_speed)
             if linear_x > cap:
                 linear_x = cap
 
@@ -1625,6 +1964,46 @@ class PolicyInferenceNode(Node):
                 )
                 self._clear_ahead_route_logged = True
 
+        # Static blockers still need a decisive pass, but moving encounters
+        # use a smooth DCPA-based correction.  This avoids pinning ordinary
+        # crossings at one yaw rate when their natural timing already yields
+        # sufficient separation.  Evaluate every give-way neighbour rather
+        # than letting a closer holding vessel hide an approaching moving pair.
+        give_way_guard_active = False
+        give_way_guard_neighbor = None
+        give_way_turn_floor = 0.0
+        keep_static_steerage = False
+        for neighbor in observation.neighbors:
+            turn_floor, keep_steerage = _give_way_guard_demand(observation, neighbor)
+            if turn_floor > give_way_turn_floor:
+                give_way_turn_floor = turn_floor
+                give_way_guard_neighbor = neighbor
+            keep_static_steerage = keep_static_steerage or keep_steerage
+
+        if give_way_turn_floor > 0.0:
+            angular_z = min(angular_z, -give_way_turn_floor)
+            if give_way_guard_neighbor.distance > _GIVE_WAY_STEERAGE_MIN_DISTANCE:
+                linear_x = max(linear_x, _GIVE_WAY_MOVING_STEERAGE_SPEED)
+            give_way_guard_active = True
+        if keep_static_steerage:
+            linear_x = max(linear_x, _GIVE_WAY_STEERAGE_SPEED)
+            give_way_guard_active = True
+
+        if give_way_guard_active and not self._give_way_guard_logged:
+            self.get_logger().info(
+                f'Predictive give-way guard active for {give_way_guard_neighbor.usv_id}: '
+                f'separation={give_way_guard_neighbor.distance:.2f}m, '
+                f'turn_floor={give_way_turn_floor:.3f}rad/s.'
+            )
+            self._give_way_guard_logged = True
+        elif not give_way_guard_active:
+            self._give_way_guard_logged = False
+
+        if not self._safety_layers_enabled:
+            linear_x, angular_z = model_linear_x, model_angular_z
+            give_way_guard_active = False
+            self._turn_assist_active = False
+
         if not self._first_action_logged:
             self.get_logger().info(
                 f'Publishing first pure RL action: linear_x={linear_x:.3f}, angular_z={angular_z:.3f}'
@@ -1637,6 +2016,41 @@ class PolicyInferenceNode(Node):
         msg.twist.linear.x = linear_x
         msg.twist.angular.z = angular_z
         self._action_pub.publish(msg)
+        if self._policy_trace is not None and self._policy_trace.enabled:
+            nearest = observation.min_neighbor_distance()
+            self._policy_trace.write({
+                'type': 'action',
+                'timestamp': float(msg.header.stamp.sec) + float(msg.header.stamp.nanosec) * 1e-9,
+                'wall_timestamp': time.time(),
+                'navigation_input_status': navigation_status,
+                'telemetry_status': self._telemetry_status,
+                'telemetry_status_age_s': (
+                    None if self._telemetry_status_received is None
+                    else time.monotonic() - self._telemetry_status_received
+                ),
+                'goal_id': self._active_goal_id,
+                'route_start': self._route_start,
+                'route_goal': self._route_goal,
+                'virtual_goal_active': self._virtual_goal_active,
+                'heading_error_rad': float(observation.heading_error),
+                'cross_track_error': float(observation.cross_track_error),
+                'raw_cross_track_error': float(observation.raw_cross_track_error),
+                'distance_to_goal': float(observation.distance_to_goal),
+                'feedback_heading_error_rad': float(self._feedback_msg.heading_error),
+                'feedback_distance_to_goal': float(self._feedback_msg.distance_to_goal),
+                'observation_vector': observation_vector.tolist(),
+                'policy_expert': policy_expert,
+                'actor_action': action.tolist(),
+                'projected_action': projected_action.tolist(),
+                'expanded_action': expanded_action.tolist(),
+                'published_action': [linear_x, angular_z],
+                'previous_final_action': [float(observation.final_linear_x), float(observation.final_angular_z)],
+                'turn_assist_active': self._turn_assist_enabled and self._turn_assist_active,
+                'turn_governor_enabled': self._turn_governor_enabled,
+                'give_way_guard_active': give_way_guard_active,
+                'nearest_neighbor_distance': float(nearest) if math.isfinite(nearest) else None,
+                'projection_conflict_level': self._projection_conflict_level(observation),
+            })
 
 
 def main(argv=None):
@@ -1675,6 +2089,9 @@ def main(argv=None):
             turn_assist_min_separation=args.turn_assist_min_separation,
             turn_assist_max_omega=args.turn_assist_max_omega,
             turn_assist_blend=args.turn_assist_blend,
+            safety_layers_enabled=args.enable_safety_layers,
+            policy_trace_dir=None if args.disable_policy_trace else args.policy_trace_dir,
+            solo_expert_model=args.solo_expert_model,
         )
         rclpy.spin(node)
     except (KeyboardInterrupt, ExternalShutdownException):

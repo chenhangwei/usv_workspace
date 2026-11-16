@@ -48,6 +48,8 @@ class FleetScenario:
     agent_goals: Dict[str, AgentGoalConfig]
     active_agent_ids: tuple[str, ...] = field(default_factory=tuple)
     background_tracks: List[BackgroundTrack] = field(default_factory=list)
+    # Per-agent remaining goals advanced asynchronously on arrival (deployment async mission steps).
+    mission_waypoints: Dict[str, List[tuple]] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.active_agent_ids:
@@ -89,6 +91,7 @@ class FleetScenario:
             agent_goals=new_goals,
             active_agent_ids=self.active_agent_ids,
             background_tracks=list(self.background_tracks),
+            mission_waypoints={key: list(value) for key, value in self.mission_waypoints.items()},
         )
 
 
@@ -113,6 +116,7 @@ class MultiAgentScenarioFactory:
         'five_usv_dense_overtaking': 5,
         'five_usv_dense_overtaking_tight': 5,
         'five_usv_dense_overtaking_merge': 5,
+        'mission_pentagram5': 5,
     }
 
     @staticmethod
@@ -205,9 +209,11 @@ class MultiAgentScenarioFactory:
         spawn_position_std: float = 0.0,
         spawn_heading_std: float = 0.0,
         goal_position_std: float = 0.0,
+        waypoint_turn_max_angle: float = 2.9,
     ) -> FleetScenario:
         scenario = MultiAgentScenarioFactory._create_base(
             kind, agent_ids, goal_distance=goal_distance, neighbor_speed=neighbor_speed, rng=rng,
+            waypoint_turn_max_angle=waypoint_turn_max_angle,
         )
         return MultiAgentScenarioFactory._maybe_randomize(
             scenario, rng, spawn_position_std, spawn_heading_std, goal_position_std,
@@ -221,6 +227,7 @@ class MultiAgentScenarioFactory:
         goal_distance: float,
         neighbor_speed: float,
         rng: Optional[np.random.Generator] = None,
+        waypoint_turn_max_angle: float = 2.9,
     ) -> FleetScenario:
         if kind == 'solo_navigation':
             first = agent_ids[0]
@@ -252,7 +259,7 @@ class MultiAgentScenarioFactory:
             # Turn magnitude ~45deg..166deg, random port/starboard.
             # fresh626: upper bound 2.4 -> 2.9 rad to cover the pentagram's
             # 144-degree vertex turns (previously out of distribution).
-            turn = float(local_rng.uniform(0.8, 2.9))
+            turn = float(local_rng.uniform(0.8, max(0.8, min(math.pi, waypoint_turn_max_angle))))
             if local_rng.uniform() < 0.5:
                 turn = -turn
             gx = float(goal_distance * math.cos(turn))
@@ -643,6 +650,24 @@ class MultiAgentScenarioFactory:
                 agent_goals=agent_goals,
                 active_agent_ids=active_ids,
             )
+
+        if kind == 'mission_pentagram5':
+            # Path File/五角星-5-usv-12m-第一步同步.xml: vertices on a 6 m circle, every step each boat
+            # jumps two vertices (11.4 m star chords); steps 2-6 run async after the synced start.
+            if len(agent_ids) < 5:
+                raise ValueError('mission_pentagram5 requires at least 5 agents.')
+            vertices = [(6.0 * math.cos(math.radians(-126.0 + 72.0 * k)),
+                         6.0 * math.sin(math.radians(-126.0 + 72.0 * k))) for k in range(5)]
+            spawns, goals, queues = {}, {}, {}
+            for index, agent_id in enumerate(agent_ids[:5]):
+                route = [vertices[(index + 2 * step) % 5] for step in range(6)]
+                yaw = math.atan2(route[1][1] - route[0][1], route[1][0] - route[0][0])
+                spawns[agent_id] = AgentSpawnConfig(x=route[0][0], y=route[0][1], yaw=yaw)
+                goals[agent_id] = AgentGoalConfig(x=route[1][0], y=route[1][1])
+                queues[agent_id] = route[2:]
+            MultiAgentScenarioFactory._add_spectator_agents(agent_ids, spawns, goals)
+            return FleetScenario(name=kind, duration=600.0, agent_spawns=spawns, agent_goals=goals,
+                                 active_agent_ids=tuple(agent_ids[:5]), mission_waypoints=queues)
 
         if kind == 'five_usv_dense_head_on':
             if len(agent_ids) < 5:

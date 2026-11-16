@@ -52,12 +52,20 @@ class _DomainRandomizationConfig:
 
 class MultiUsvSimNode(Node):
     def __init__(self, agent_namespaces: tuple[str, ...], update_rate: float = 20.0,
-                 tau_linear: float = 0.45, tau_angular: float = 0.25):
+                 tau_linear: float = 0.45, tau_angular: float = 0.25,
+                 yaw_gain_low: float = 1.0, yaw_gain_high: float = 1.0, yaw_rate_limit: float = 0.0,
+                 yaw_rate_limit_high: float = 0.0, yaw_deadband: float = 0.0):
         super().__init__('multi_usv_sim')
         self._agent_namespaces = tuple(agent_namespaces)
         self._dt = 1.0 / max(update_rate, 1.0)
         self._tau_linear = tau_linear
         self._tau_angular = tau_angular
+        # Achieved/commanded yaw rate at 0 and at 0.34 m/s, plus a rate cap (0 = none); fitted to SITL traces.
+        self._yaw_gain_low = float(yaw_gain_low)
+        self._yaw_gain_high = float(yaw_gain_high)
+        self._yaw_rate_limit = float(yaw_rate_limit)
+        self._yaw_rate_limit_high = float(yaw_rate_limit_high) or self._yaw_rate_limit
+        self._yaw_deadband = float(yaw_deadband)
         self._command_timeout = 0.6
         self._dr = _DomainRandomizationConfig()
         self._rng = np.random.default_rng()
@@ -193,7 +201,13 @@ class MultiUsvSimNode(Node):
             linear_alpha = min(1.0, self._dt / max(self._tau_linear, 1e-3))
             angular_alpha = min(1.0, self._dt / max(self._tau_angular, 1e-3))
             state.v += linear_alpha * (state.target_v - state.v)
-            state.omega += angular_alpha * (state.target_omega - state.omega)
+            speed_ratio = min(max(abs(state.v) / 0.34, 0.0), 1.0)
+            commanded = math.copysign(max(abs(state.target_omega) - self._yaw_deadband, 0.0), state.target_omega)
+            yaw_target = commanded * (self._yaw_gain_low + (self._yaw_gain_high - self._yaw_gain_low) * speed_ratio)
+            if self._yaw_rate_limit > 0.0:
+                limit = self._yaw_rate_limit + (self._yaw_rate_limit_high - self._yaw_rate_limit) * speed_ratio
+                yaw_target = max(-limit, min(limit, yaw_target))
+            state.omega += angular_alpha * (yaw_target - state.omega)
 
             # Velocity execution noise (actuator imperfection)
             effective_v = state.v

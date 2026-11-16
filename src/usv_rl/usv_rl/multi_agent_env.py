@@ -14,8 +14,18 @@ from .action_projection import project_policy_action as project_rl_policy_action
 from .config import ActionBounds, RewardConfig
 from .multi_agent_bridge import MultiAgentTrainingBridge
 from .multi_agent_scenarios import AgentGoalConfig, AgentSpawnConfig, MultiAgentScenarioFactory
-from .multi_agent_types import AgentLocalObservation, FleetGlobalState, MultiAgentRewardBreakdown, ENCOUNTER_TYPE_COUNT
+from .multi_agent_types import (
+    AgentLocalObservation,
+    FleetGlobalState,
+    MultiAgentRewardBreakdown,
+    ENCOUNTER_TYPE_COUNT,
+    ENC_HEAD_ON,
+    ROLE_GIVE_WAY,
+    ROLE_STAND_ON,
+)
 from .multi_usv_sim import MultiUsvSimNode
+from .route_frame import LEGACY_FRAME, OBSERVATION_FRAMES, ROUTE_CANONICAL_FRAME, canonical_route_fields
+from .solo_recovery import recovery_reset_scenario
 from usv_control.velocity_controller_node import VelocityControllerNode
 
 try:
@@ -107,6 +117,8 @@ class MultiAgentEnvConfig:
     route_progress_cte_gate_start: float = 0.0
     route_progress_cte_gate_width: float = 0.0
     route_progress_cte_gate_floor: float = 0.25
+    # Policy-facing observation frame; route_canonical_v1 is true-solo only (see route_frame).
+    observation_frame: str = LEGACY_FRAME
     # When enabled, random encounters use the mean active route midpoint as a
     # shared conflict point so priority features follow predicted ETA order.
     random_encounter_route_priority: bool = False
@@ -126,6 +138,11 @@ class MultiAgentEnvConfig:
     # Sim dynamics time constants (first-order velocity filter)
     sim_tau_linear: float = 0.45
     sim_tau_angular: float = 0.25
+    sim_yaw_gain_low: float = 1.0
+    sim_yaw_gain_high: float = 1.0
+    sim_yaw_rate_limit: float = 0.0
+    sim_yaw_rate_limit_high: float = 0.0
+    sim_yaw_deadband: float = 0.0
     # Tau domain randomization: if ranges are set (low>0 and high>low), tau is
     # sampled uniformly each episode reset for sim-to-real robustness.
     dr_tau_linear_low: float = 0.0
@@ -158,6 +175,13 @@ class MultiAgentEnvConfig:
     # new random waypoint instead of terminating.  Trains the policy to
     # handle waypoint transitions (heading snap) within a single episode.
     max_waypoints_per_episode: int = 1
+    # Start-turn range of waypoint_turn (rad) and heading change at in-episode waypoint switches.
+    waypoint_turn_max_angle: float = 2.9
+    waypoint_switch_max_angle: float = math.pi * 5.0 / 6.0
+    # When > 0, every switch turns by exactly this angle (rad), alternating sides (pentagram-style courses).
+    waypoint_switch_fixed_angle: float = 0.0
+    # Deployment stops a boat once its navigation completes; when True an arrived agent is held at zero command.
+    hold_arrived_agents: bool = False
     # Intermediate bonus given each time the agent reaches a waypoint
     # (except the final one, which uses goal_bonus).
     waypoint_bonus: float = 10.0
@@ -220,6 +244,8 @@ class MultiAgentEnv(gym.Env):
 
         self.config = config or MultiAgentEnvConfig()
         self._validate_action_config()
+        if self.config.observation_frame not in OBSERVATION_FRAMES:
+            raise ValueError(f'unknown observation_frame {self.config.observation_frame!r}')
         self._runtime_agent_ids = tuple(self.config.agent_namespaces)
         self._active_agent_ids = self._runtime_agent_ids
         self._episode_index = 0
@@ -244,6 +270,8 @@ class MultiAgentEnv(gym.Env):
         self._initial_team_mean_separation = float('inf')
         self._initial_team_mean_goal_distance = float('inf')
         self._waypoints_completed: Dict[str, int] = {}
+        self._held_agents: set[str] = set()
+        self._mission_queues: dict[str, list] = {}
 
         self.action_dim = 1 if self.config.action_mode == 'angular_only' else 2
         self.action_low, self.action_high = self._policy_action_bounds()
@@ -322,6 +350,11 @@ class MultiAgentEnv(gym.Env):
                 self._runtime_agent_ids,
                 tau_linear=self.config.sim_tau_linear,
                 tau_angular=self.config.sim_tau_angular,
+                yaw_gain_low=self.config.sim_yaw_gain_low,
+                yaw_gain_high=self.config.sim_yaw_gain_high,
+                yaw_rate_limit=self.config.sim_yaw_rate_limit,
+                yaw_rate_limit_high=self.config.sim_yaw_rate_limit_high,
+                yaw_deadband=self.config.sim_yaw_deadband,
             )
             if self.config.domain_randomization:
                 self._sim_node.set_domain_randomization(
@@ -447,7 +480,8 @@ class MultiAgentEnv(gym.Env):
         # relief (otherwise scale=1.0 still yields cruise*(1-0.55*conflict) and the
         # craft crawls in every multi-USV conflict -- the fresh601 root cause).
         # The reward-shaping callers keep relief on (apply_conflict_relief=True).
-        relief = (1.0 - 0.55 * float(np.clip(conflict_level, 0.0, 1.0))) if apply_conflict_relief else 1.0
+        relief_scale = float(np.clip(self.config.reward.conflict_speed_relief, 0.0, 1.0))
+        relief = (1.0 - relief_scale * float(np.clip(conflict_level, 0.0, 1.0))) if apply_conflict_relief else 1.0
         target_speed = cruise_speed * relief
         # fresh601: the heading gate (slow down while turning) belongs to the
         # full-mode reward heuristic. In speed_scale/angular_only the throttle is
@@ -463,7 +497,8 @@ class MultiAgentEnv(gym.Env):
                 1.0 - (float(np.clip(self.config.goal_proximity_speed_relief, 0.0, 1.0)) * goal_proximity),
             )
 
-        minimum_speed = max(0.08, min(self.config.reward.desired_conflict_speed, 0.18))
+        floor = float(self.config.reward.conflict_speed_floor)
+        minimum_speed = max(0.08, min(self.config.reward.desired_conflict_speed, floor))
         return float(np.clip(target_speed, minimum_speed, cruise_speed))
 
     def _pure_goal_tracking_reward(
@@ -1575,6 +1610,25 @@ class MultiAgentEnv(gym.Env):
         self._annotate_route_features_for_observations(observations)
         if global_state is not None:
             self._annotate_route_features_for_observations(global_state.local_observations)
+        if self.config.observation_frame == ROUTE_CANONICAL_FRAME:
+            self._apply_canonical_route_frame(observations)
+
+    def _apply_canonical_route_frame(self, observations: Dict[str, AgentLocalObservation]) -> None:
+        if len(self._active_agent_ids) != 1 or self._scenario is None or self._scenario.background_tracks:
+            raise RuntimeError('route_canonical_v1 observations are only defined for true-solo scenarios')
+        for agent_id, observation in observations.items():
+            if observation.neighbors:
+                raise RuntimeError('route_canonical_v1 observations must not contain neighbours')
+            spawn = self._scenario.agent_spawns[agent_id]
+            goal = self._scenario.agent_goals[agent_id]
+            fields = canonical_route_fields(
+                pose_x=observation.pose_x, pose_y=observation.pose_y, yaw=observation.yaw,
+                feedback_distance=observation.distance_to_goal,
+                feedback_heading_error=observation.heading_error,
+                route_start=(spawn.x, spawn.y), route_goal=(goal.x, goal.y),
+            )
+            for name, value in fields.items():
+                setattr(observation, name, value)
 
     def _annotate_encounter_types(self, observations, global_state):
         scenario_name = self._scenario.name if self._scenario else ''
@@ -1684,6 +1738,10 @@ class MultiAgentEnv(gym.Env):
 
         max_risk = 0.0
         for neighbor in observation.neighbors:
+            # fresh637 P0 fix: conflict risk is role-agnostic. The give-way-only
+            # gate lived here by mistake and blinded the stand-on hull entirely
+            # (zero risk -> no avoidance gradient, dead hold-cruise reward,
+            # dead course-hold penalty; SITL 2026-08-12 0.14m near-contact).
             metrics = self._neighbor_cpa_metrics(neighbor)
             distance = metrics['distance']
             if distance <= 1e-3:
@@ -1774,6 +1832,40 @@ class MultiAgentEnv(gym.Env):
         }
 
     @staticmethod
+    def _nearest_classified_neighbor(observation: AgentLocalObservation):
+        classified = (
+            neighbor
+            for neighbor in observation.neighbors
+            if int(getattr(neighbor, 'role_index', -1)) >= 0
+        )
+        return min(classified, key=lambda neighbor: neighbor.distance, default=None)
+
+    @staticmethod
+    def _nearest_classified_role(observation: AgentLocalObservation) -> int:
+        nearest = MultiAgentEnv._nearest_classified_neighbor(observation)
+        return int(getattr(nearest, 'role_index', -1)) if nearest is not None else -1
+
+    @staticmethod
+    def _stand_on_course_hold_penalty(
+        observation: AgentLocalObservation,
+        omega: float,
+        conflict_risk: float,
+        weight: float,
+    ) -> float:
+        if weight <= 0.0 or conflict_risk <= 0.0:
+            return 0.0
+        nearest = MultiAgentEnv._nearest_classified_neighbor(observation)
+        if nearest is None or int(getattr(nearest, 'role_index', -1)) != ROLE_STAND_ON:
+            return 0.0
+        # Rule 14: in head-on BOTH hulls must turn; never punish the tie-break
+        # stand-on for its starboard arc.
+        if int(getattr(nearest, 'encounter_type_index', -1)) == ENC_HEAD_ON:
+            return 0.0
+        risk_gate = min(1.0, conflict_risk / 0.30)
+        yaw_rate_ratio = min(1.0, abs(float(omega)) / 0.25)
+        return weight * risk_gate * yaw_rate_ratio
+
+    @staticmethod
     def _agent_priority_key(agent_id: str) -> tuple[int, str]:
         text = str(agent_id)
         try:
@@ -1820,6 +1912,15 @@ class MultiAgentEnv(gym.Env):
         cpa_reward = 0.0
 
         for neighbor in observation.neighbors:
+            # fresh637: give-way-only gate belongs HERE (shaping, not risk).
+            # Rule 14 exception: head-on pairs both give way, so the tie-break
+            # stand-on keeps full CPA shaping and turns starboard too.
+            if (
+                reward_cfg.anticipatory_cpa_giveway_only
+                and int(getattr(neighbor, 'encounter_type_index', -1)) != ENC_HEAD_ON
+                and int(getattr(neighbor, 'role_index', -1)) == ROLE_STAND_ON
+            ):
+                continue
             metrics = self._neighbor_cpa_metrics(neighbor)
             distance = metrics['distance']
             if distance <= self.config.collision_distance or distance >= lookahead_distance:
@@ -2168,6 +2269,32 @@ class MultiAgentEnv(gym.Env):
         )
         return coordination_reward - coordination_penalty
 
+    def _advance_mission_waypoints(self, observations, global_state) -> None:
+        advanced = {}
+        for namespace, queue in self._mission_queues.items():
+            observation = observations.get(namespace)
+            if not queue or observation is None or observation.distance_to_goal > self.config.goal_tolerance:
+                continue
+            reached = self._scenario.agent_goals[namespace]
+            # Route line runs from the reached waypoint, as the deployed node does.
+            self._scenario.agent_spawns[namespace] = AgentSpawnConfig(x=reached.x, y=reached.y, yaw=0.0)
+            next_x, next_y = queue.pop(0)
+            self._scenario.agent_goals[namespace] = AgentGoalConfig(x=next_x, y=next_y)
+            self._held_agents.discard(namespace)
+            self._previous_distances[namespace] = math.hypot(next_x - reached.x, next_y - reached.y)
+            advanced[namespace] = (next_x, next_y)
+        if advanced:
+            self._bridge.publish_goals(
+                f'mission_{self._episode_index:04d}_{sum(len(q) for q in self._mission_queues.values())}', advanced)
+            self._last_team_progress_time = time.monotonic()
+            # Stale feedback still reports the reached goal; refresh so hold/termination see the new leg.
+            self._bridge.clear_navigation_feedback()
+            refreshed = self._wait_for_local_observations(timeout=self.config.state_timeout)
+            self._annotate_encounter_types(refreshed, global_state)
+            self._annotate_cross_track_errors(refreshed, global_state)
+            observations.update(refreshed)
+            self._latest_observations = observations
+
     def reset(self, *, seed: Optional[int] = None, options: Optional[dict] = None):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
@@ -2186,6 +2313,7 @@ class MultiAgentEnv(gym.Env):
             spawn_position_std=self.config.scenario_spawn_position_std,
             spawn_heading_std=self.config.scenario_spawn_heading_std,
             goal_position_std=self.config.scenario_goal_position_std,
+            waypoint_turn_max_angle=self.config.waypoint_turn_max_angle,
         )
         self._refresh_active_agent_ids()
 
@@ -2201,8 +2329,19 @@ class MultiAgentEnv(gym.Env):
                 self.config.dr_tau_angular_high if self.config.dr_tau_angular_high > self.config.dr_tau_angular_low else self.config.sim_tau_angular,
             )
 
+        if self.config.enable_rl_backend:
+            # The controller keeps executing the last RL command until its timeout.
+            self._bridge.publish_actions({namespace: (0.0, 0.0) for namespace in self._runtime_agent_ids})
+            time.sleep(0.2)
         self._bridge.reset_episode_state()
-        self._sim_node.reset_agents(self._scenario)
+        reset_scenario = self._scenario
+        if 'solo_recovery_cte' in options:
+            reset_scenario = recovery_reset_scenario(
+                self._scenario, float(options['solo_recovery_cte']),
+                float(options.get('solo_recovery_heading_error', 0.0)),
+                float(options.get('solo_recovery_progress', 0.0)),
+            )
+        self._sim_node.reset_agents(reset_scenario)
         time.sleep(0.3)
         self._bridge.activate_scenario(self._scenario)
         self._bridge.set_rl_backend_enabled(self.config.enable_rl_backend)
@@ -2252,6 +2391,8 @@ class MultiAgentEnv(gym.Env):
         self._initial_team_mean_separation = global_state.team_mean_separation
         self._initial_team_mean_goal_distance = self._scenario_initial_team_mean_goal_distance()
         self._waypoints_completed = {namespace: 0 for namespace in self._active_agent_ids}
+        self._held_agents = set()
+        self._mission_queues = {key: list(value) for key, value in self._scenario.mission_waypoints.items()}
         self._episode_index += 1
 
         active_observations = self._filter_active_observations(observations)
@@ -2487,14 +2628,15 @@ class MultiAgentEnv(gym.Env):
         if role_w > 0.0 and observation.neighbors:
             risk_gate = min(1.0, conflict_risk / 0.30)
             if risk_gate > 0.05:
-                nearest_role = -1
-                nearest_d = float('inf')
-                for nb in observation.neighbors:
-                    if nb.distance < nearest_d and getattr(nb, 'role_index', -1) >= 0:
-                        nearest_d = nb.distance
-                        nearest_role = int(nb.role_index)
+                nearest_nb = self._nearest_classified_neighbor(observation)
+                nearest_role = int(getattr(nearest_nb, 'role_index', -1)) if nearest_nb is not None else -1
+                nearest_enc = int(getattr(nearest_nb, 'encounter_type_index', -1)) if nearest_nb is not None else -1
                 cruise = max(0.18, self._pure_linear_speed_limit())
-                if nearest_role == 1:
+                if nearest_enc == ENC_HEAD_ON and nearest_role >= 0:
+                    # Rule 14 head-on: BOTH hulls keep speed and solve laterally;
+                    # slowing one boat just prolongs the bow-to-bow geometry.
+                    braking += role_w * risk_gate * min(1.0, current_forward_speed / cruise)
+                elif nearest_role == 1:
                     # stand-on (主船): hold cruise speed — reward speed ratio.
                     braking += role_w * risk_gate * min(1.0, current_forward_speed / cruise)
                 elif nearest_role == 0:
@@ -2503,6 +2645,13 @@ class MultiAgentEnv(gym.Env):
                     overspeed = max(0.0, current_forward_speed - yield_speed) / max(cruise - yield_speed, 1e-3)
                     braking += role_w * risk_gate * (1.0 - min(1.0, overspeed)) * 0.5
                     braking -= role_w * risk_gate * min(1.0, overspeed) * 0.5
+
+        braking -= self._stand_on_course_hold_penalty(
+            observation,
+            float(action[1]),
+            conflict_risk,
+            self.config.reward.role_stand_on_course_hold_weight,
+        )
 
         progress += self._pure_goal_tracking_reward(
             observation,
@@ -2845,6 +2994,12 @@ class MultiAgentEnv(gym.Env):
                 command,
                 self._latest_observations.get(namespace),
             )
+            if self.config.hold_arrived_agents:
+                latest = self._latest_observations.get(namespace)
+                if latest is not None and latest.distance_to_goal <= self.config.goal_tolerance:
+                    self._held_agents.add(namespace)
+                if namespace in self._held_agents:
+                    action_map[namespace] = (0.0, 0.0)
 
         if self.config.enable_rl_backend:
             self._bridge.publish_actions(action_map)
@@ -2855,6 +3010,7 @@ class MultiAgentEnv(gym.Env):
         self._annotate_encounter_types(observations, global_state)
         self._annotate_cross_track_errors(observations, global_state)
         self._latest_observations = observations
+        self._advance_mission_waypoints(observations, global_state)
 
         team_progress = 0.0
         for namespace in self._active_agent_ids:
@@ -2867,7 +3023,9 @@ class MultiAgentEnv(gym.Env):
         pair_min = self._effective_pair_min_separation(observations, global_state)
         collision = np.isfinite(pair_min) and pair_min < self.config.collision_distance
         all_reached = all(
-            observations[namespace].distance_to_goal <= self.config.goal_tolerance
+            (observations[namespace].distance_to_goal <= self.config.goal_tolerance
+             or namespace in self._held_agents)
+            and not self._mission_queues.get(namespace)
             for namespace in self._active_agent_ids
         )
 
@@ -2881,6 +3039,7 @@ class MultiAgentEnv(gym.Env):
             if max_completed < self.config.max_waypoints_per_episode:
                 waypoint_transition = True
                 all_reached = False
+                self._held_agents.clear()
 
         elapsed = time.monotonic() - self._episode_start
         terminated = collision or all_reached
@@ -2939,11 +3098,18 @@ class MultiAgentEnv(gym.Env):
                     rewards[namespace] += self.config.reward.waypoint_pass_quality_bonus * pass_quality
                 current_x, current_y = float(obs.pose_x), float(obs.pose_y)
                 current_yaw = float(obs.yaw)
+                if self.config.observation_frame == ROUTE_CANONICAL_FRAME:
+                    # Canonical observations hold route-frame pose/yaw; the new leg needs world coordinates.
+                    current_x, current_y, current_yaw, _ = self._sim_node.get_agent_snapshot(namespace)
                 # Random heading offset ±150° from current heading for the new leg.
                 # fresh626: widened from ±90° — the pentagram mission needs 144°
                 # vertex turns, which were outside the old training range and
                 # caused loop/runaway transients at waypoint switches in SITL.
-                angle_offset = self._rng.uniform(-math.pi * 5.0 / 6.0, math.pi * 5.0 / 6.0)
+                switch_limit = float(self.config.waypoint_switch_max_angle)
+                angle_offset = self._rng.uniform(-switch_limit, switch_limit)
+                if self.config.waypoint_switch_fixed_angle > 0.0:
+                    sign = 1.0 if self._waypoints_completed.get(namespace, 0) % 2 else -1.0
+                    angle_offset = sign * float(self.config.waypoint_switch_fixed_angle)
                 new_heading = current_yaw + angle_offset
                 new_goal_x = current_x + self.config.goal_distance * math.cos(new_heading)
                 new_goal_y = current_y + self.config.goal_distance * math.sin(new_heading)
@@ -2960,6 +3126,12 @@ class MultiAgentEnv(gym.Env):
             )
             self._best_team_mean_distance = self.config.goal_distance
             self._last_team_progress_time = time.monotonic()
+            if self.config.observation_frame == ROUTE_CANONICAL_FRAME:
+                # Deployment withholds action until feedback for the new goal arrives; match that here.
+                self._bridge.clear_navigation_feedback()
+                observations = self._wait_for_local_observations(timeout=self.config.state_timeout)
+                self._annotate_cross_track_errors(observations)
+                self._latest_observations = observations
 
         terminated_dict = {namespace: terminated for namespace in self._active_agent_ids}
         terminated_dict['__all__'] = terminated

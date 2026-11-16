@@ -2175,11 +2175,10 @@ class VelocityControllerNode(Node):
             return VelocityCommand.stop()
 
         if (now_sec - self._rl_policy_last_action_time) > max(0.05, self._rl_policy_action_timeout):
+            self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
             if fallback_to_raw:
-                self._sync_rl_command_shaper(VelocityCommand.stop(), now_sec)
                 return cmd
-            # pure RL 训练中允许保持上一帧策略动作，避免发布频率低于控制频率时被控制器强制归零
-            return self._rl_policy_last_shaped_action.sanitize()
+            return VelocityCommand.stop()
 
         target_action = self._rl_policy_last_action.sanitize()
         pure_action = self._shape_rl_policy_command(target_action, now_sec)

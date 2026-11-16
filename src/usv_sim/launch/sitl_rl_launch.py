@@ -18,6 +18,7 @@ def _launch_policy_node(context, *args, **kwargs):
     disable_controller_param = LaunchConfiguration('disable_controller_param').perform(context)
     rl_encounter_type = LaunchConfiguration('rl_encounter_type').perform(context)
     clear_ahead_route_gate = LaunchConfiguration('clear_ahead_route_gate').perform(context)
+    rl_solo_expert_model = LaunchConfiguration('rl_solo_expert_model').perform(context)
 
     node_args = [
         '--namespace', namespace,
@@ -33,6 +34,8 @@ def _launch_policy_node(context, *args, **kwargs):
         node_args.append('--disable-controller-param')
     if clear_ahead_route_gate.lower() in ('1', 'true', 'yes', 'on'):
         node_args.append('--clear-ahead-route-gate')
+    if rl_solo_expert_model:
+        node_args.extend(['--solo-expert-model', rl_solo_expert_model])
 
     return [
         Node(
@@ -151,6 +154,11 @@ def generate_launch_description():
             'clear_ahead_route_gate',
             default_value='false',
             description='Enable online clear-ahead route gate in policy_inference_node.',
+        ),
+        DeclareLaunchArgument(
+            'rl_solo_expert_model',
+            default_value='',
+            description='Optional MAPPO actor used only on steps with no observed neighbour.',
         ),
         sitl_stack,
         delayed_policy_node,

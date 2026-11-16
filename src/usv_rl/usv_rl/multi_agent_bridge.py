@@ -41,6 +41,8 @@ class MultiAgentTrainingBridge(Node):
         self._neighbor_publishers = {}
         self._rl_action_publishers = {}
         self._goal_id_counter = {namespace: 1000 + index * 1000 for index, namespace in enumerate(self._agent_namespaces)}
+        # None accepts any feedback; -1 blocks all until the next goal is published.
+        self._expected_goal_ids: Dict[str, Optional[int]] = {namespace: None for namespace in self._agent_namespaces}
         self._rl_backend_active = False
 
         self._active_scenario: Optional[FleetScenario] = None
@@ -83,6 +85,9 @@ class MultiAgentTrainingBridge(Node):
 
     def _make_feedback_callback(self, namespace: str):
         def _callback(msg: NavigationFeedback):
+            expected = self._expected_goal_ids[namespace]
+            if expected is not None and int(msg.goal_id) != expected:
+                return
             self._feedback_msgs[namespace] = msg
         return _callback
 
@@ -106,9 +111,15 @@ class MultiAgentTrainingBridge(Node):
 
     def reset_episode_state(self):
         for namespace in self._agent_namespaces:
+            self._expected_goal_ids[namespace] = -1
             self._feedback_msgs[namespace] = None
             self._raw_cmd_msgs[namespace] = None
             self._final_cmd_msgs[namespace] = None
+
+    def clear_navigation_feedback(self):
+        """Drop cached feedback so the next observation waits for the currently expected goal."""
+        for namespace in self._agent_namespaces:
+            self._feedback_msgs[namespace] = None
 
     def wait_for_controllers(self, timeout: float) -> bool:
         return all(client.wait_for_services(timeout_sec=timeout) for client in self._parameter_clients.values())
@@ -155,6 +166,7 @@ class MultiAgentTrainingBridge(Node):
         for namespace, (goal_x, goal_y) in goal_map.items():
             self._goal_id_counter[namespace] += 1
             goal_ids[namespace] = self._goal_id_counter[namespace]
+            self._expected_goal_ids[namespace] = goal_ids[namespace]
             goal = NavigationGoal()
             goal.task_name = f'{task_prefix}_{namespace}'
             goal.goal_id = goal_ids[namespace]

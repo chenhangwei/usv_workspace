@@ -136,6 +136,12 @@ def classify_encounter_role(
     # --- OVERTAKING (Rule 13): near-parallel courses, one clearly faster,
     # same lane. Role = longitudinal order (strictly complementary).
     same_lane = abs(body_y) < 1.5
+    if nb_speed <= 0.05 and body_x > 0.8 and same_lane and closing_speed > 0.0:
+        # A stationary/near-stationary vessel blocking our lane has no
+        # reliable course, but the moving ego still has the sole duty to
+        # keep clear.  Leaving this pair unclassified made the policy slow
+        # down and drive straight at a holding vessel instead of passing it.
+        return ENC_OVERTAKING, ROLE_GIVE_WAY
     near_parallel = abs_delta < (math.pi / 3.0) and nb_speed > 0.05
     if same_lane and near_parallel:
         speed_gap = own_speed - nb_speed

@@ -57,6 +57,9 @@ class RewardConfig:
     #             the normal cruise/idle terms drive a prompt resume.
     role_speed_asymmetry_weight: float = 0.0
     role_giveway_speed: float = 0.14
+    # During a predicted conflict, the stand-on vessel should remain
+    # predictable instead of cancelling the give-way vessel's manoeuvre.
+    role_stand_on_course_hold_weight: float = 0.0
     # fresh628 effective turn-in-place (SITL 2026-07-11: after a waypoint
     # switch the policy held FULL cruise speed for ~10s with heading error
     # 135-173 deg, sailing AWAY before a huge U-arc back; 30/30 switches
@@ -95,6 +98,13 @@ class RewardConfig:
     goal_queue_follower_speed: float = 0.12
     goal_queue_min_separation: float = 1.2
     desired_conflict_speed: float = 0.26
+    # fresh636: reward-path conflict speed shaping. relief scales the target
+    # speed down with conflict risk (legacy hardcoded 0.55 -> crawl at 0.15);
+    # floor caps how low the reward-optimal speed may go (legacy min(desired,
+    # 0.18)). Lower relief + higher floor teach "keep speed, solve with
+    # geometry" instead of the mutual-crawl equilibrium seen in fresh635 SITL.
+    conflict_speed_relief: float = 0.55
+    conflict_speed_floor: float = 0.18
     stop_go_penalty_weight: float = 1.8
     head_on_guidance_distance: float = 5.0
     # Optional dedicated lookahead for crossing/overtaking starboard guidance.
@@ -205,6 +215,7 @@ class RewardConfig:
     anticipatory_dcpa_deficit_penalty_weight: float = 0.0
     anticipatory_dcpa_improvement_reward_weight: float = 0.0
     anticipatory_closing_reduction_reward_weight: float = 0.0
+    anticipatory_cpa_giveway_only: bool = False
     anticipatory_yield_speed: float = 0.10
     anticipatory_yield_speed_penalty_weight: float = 0.0
     # Dense per-step penalty for near-zero speed when close to (but not
