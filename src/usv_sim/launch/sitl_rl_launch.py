@@ -39,7 +39,7 @@ def _launch_policy_node(context, *args, **kwargs):
 
     return [
         Node(
-            package='usv_rl',
+            package='usv_control',
             executable='policy_inference_node',
             name='policy_inference_node',
             namespace=namespace,
@@ -102,7 +102,11 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'rl_policy_model',
-            default_value='',
+            default_value=PathJoinSubstitution([
+                FindPackageShare('usv_control'),
+                'models',
+                'usv_rl_policy.pt',
+            ]),
             description='Absolute or workspace-relative model path for the RL policy.',
         ),
         DeclareLaunchArgument(

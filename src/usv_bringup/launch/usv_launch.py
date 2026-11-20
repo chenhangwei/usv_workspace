@@ -239,6 +239,47 @@ def generate_launch_description():
         default_value='true',
         description='是否启用导航日志收集 (true/false)'
     )
+
+    # RL 策略推理参数（默认随真机启动，使用 a32 最优模型）
+    rl_policy_enabled_arg = DeclareLaunchArgument(
+        'rl_policy_enabled',
+        default_value='true',
+        description='是否启用 RL 避让策略推理节点 (true/false)'
+    )
+    rl_policy_model_arg = DeclareLaunchArgument(
+        'rl_policy_model',
+        default_value=PathJoinSubstitution([
+            FindPackageShare('usv_control'),
+            'models',
+            'usv_rl_policy.pt'
+        ]),
+        description='RL 策略模型路径 (.pt)'
+    )
+    rl_policy_kind_arg = DeclareLaunchArgument(
+        'rl_policy_kind',
+        default_value='mappo',
+        description='RL 策略类型: auto, bc, ppo, mappo, zero'
+    )
+    rl_policy_device_arg = DeclareLaunchArgument(
+        'rl_policy_device',
+        default_value='cpu',
+        description='RL 推理设备: cpu 或 cuda'
+    )
+    rl_publish_rate_arg = DeclareLaunchArgument(
+        'rl_publish_rate',
+        default_value='10.0',
+        description='RL 策略推理发布频率 (Hz)'
+    )
+    rl_max_neighbors_arg = DeclareLaunchArgument(
+        'rl_max_neighbors',
+        default_value='4',
+        description='RL 观测编码的最大邻船数量'
+    )
+    rl_inference_delay_arg = DeclareLaunchArgument(
+        'rl_inference_delay',
+        default_value='15.0',
+        description='硬件模式下等待控制栈就绪后再启动 RL 推理节点的延迟时间 (秒)'
+    )
     
     # 参数文件路径参数
     param_file_arg = DeclareLaunchArgument(
@@ -390,7 +431,7 @@ def generate_launch_description():
         parameters=[param_file, sitl_param_file]
     )
 
-    # 速度控制器节点 (MPC 控制)
+    # 速度控制器节点 (MPC 控制 / RL 策略执行底层)
     # 仅在 usv_params.yaml 中 control_mode='velocity' 时需要启动
     # 可实现无减速的平滑航点跟踪
     velocity_controller_node = Node(
@@ -399,7 +440,47 @@ def generate_launch_description():
         name='velocity_controller_node',
         namespace=namespace,
         output='screen',
-        parameters=[param_file, sitl_param_file]
+        parameters=[
+            param_file,
+            sitl_param_file,
+            {'rl_policy_enabled': LaunchConfiguration('rl_policy_enabled')},
+        ]
+    )
+
+    def _launch_hardware_rl_policy(context, *args, **kwargs):
+        if LaunchConfiguration('simulation_mode').perform(context) != 'hardware':
+            return []
+        if LaunchConfiguration('rl_policy_enabled').perform(context).lower() not in ('1', 'true', 'yes', 'on'):
+            return []
+        ns = LaunchConfiguration('namespace').perform(context)
+        model_path = LaunchConfiguration('rl_policy_model').perform(context)
+        policy_kind = LaunchConfiguration('rl_policy_kind').perform(context)
+        device = LaunchConfiguration('rl_policy_device').perform(context)
+        publish_rate = LaunchConfiguration('rl_publish_rate').perform(context)
+        max_neighbors = LaunchConfiguration('rl_max_neighbors').perform(context)
+        return [
+            Node(
+                package='usv_control',
+                executable='policy_inference_node',
+                name='policy_inference_node',
+                namespace=ns,
+                output='screen',
+                arguments=[
+                    '--namespace', ns,
+                    '--model', model_path,
+                    '--policy', policy_kind,
+                    '--rl-control-mode', 'pure',
+                    '--device', device,
+                    '--publish-rate', publish_rate,
+                    '--max-neighbors', max_neighbors,
+                ],
+            )
+        ]
+
+    delayed_policy_node_hardware = TimerAction(
+        period=LaunchConfiguration('rl_inference_delay'),
+        condition=IfCondition(EqualsSubstitution(LaunchConfiguration('simulation_mode'), 'hardware')),
+        actions=[OpaqueFunction(function=_launch_hardware_rl_policy)],
     )
 
     # 坐标转换节点（XYZ → GPS）（新增）
@@ -920,6 +1001,13 @@ def generate_launch_description():
         target_system_id_arg,
         system_id_arg,
         sitl_param_file_arg,
+        rl_policy_enabled_arg,
+        rl_policy_model_arg,
+        rl_policy_kind_arg,
+        rl_policy_device_arg,
+        rl_publish_rate_arg,
+        rl_max_neighbors_arg,
+        rl_inference_delay_arg,
         #lidar_port_arg,
         effective_config_logger,
         
@@ -929,6 +1017,7 @@ def generate_launch_description():
         mavros_node,               # 飞控通信 - 硬件模式（条件启动）
         delayed_home_node,         # 延迟启动 home 设置
         delayed_control_nodes,     # 延迟启动控制节点
+        delayed_policy_node_hardware,  # 延迟启动 RL 策略推理节点（硬件模式）
         
         # 辅助功能节点（仅硬件模式，SITL 无硬件外设）
         usv_led_node,          # LED控制

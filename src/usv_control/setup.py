@@ -31,6 +31,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models', ['models/usv_rl_policy.pt']),
     ],
     install_requires=[
         'setuptools',
@@ -55,6 +56,7 @@ including path planning, obstacle avoidance, and autonomous navigation functiona
             'velocity_controller_node = usv_control.velocity_controller_node:main',
             'log_collector = usv_control.log_collector:main',
             'formation_follower_node = usv_control.formation_follower_node:main',
+            'policy_inference_node = usv_control.rl_policy.policy_inference_node:main',
         ],
     },
     classifiers=[
