@@ -1458,18 +1458,22 @@ class PolicyInferenceNode(Node):
             while bearing < -math.pi:
                 bearing += 2.0 * math.pi
             rel_speed_sq = (rel_vx * rel_vx) + (rel_vy * rel_vy)
-            if rel_speed_sq > 1e-6:
+            closing_rate = -((rel_x * rel_vx) + (rel_y * rel_vy)) / max(distance, 1e-3)
+            # Smoothly blend out wave-jitter pseudo-TCPA when closing_rate < 0.045 m/s so a
+            # parallel/escorting hull at 6..12m NEVER flips tcpa_norm 1.0 <-> 0.009 on 1 mm/s GPS noise!
+            if rel_speed_sq > 1e-6 and closing_rate > 0.005:
                 tcpa_seconds = -((rel_x * rel_vx) + (rel_y * rel_vy)) / rel_speed_sq
-            else:
-                tcpa_seconds = 1e3
-            if tcpa_seconds <= 0.0:
-                tcpa_norm = 1.0
-                dcpa = distance
-            else:
                 cpa_x = rel_x + rel_vx * tcpa_seconds
                 cpa_y = rel_y + rel_vy * tcpa_seconds
-                dcpa = math.hypot(cpa_x, cpa_y)
-                tcpa_norm = max(0.0, min(1.0, tcpa_seconds / 20.0))
+                dcpa_raw = math.hypot(cpa_x, cpa_y)
+                tcpa_raw = max(0.0, min(1.0, tcpa_seconds / 20.0))
+                t_blend = min(1.0, max(0.0, (closing_rate - 0.005) / 0.040))
+                w_close = t_blend * t_blend * (3.0 - 2.0 * t_blend)
+                tcpa_norm = (1.0 - w_close) * 1.0 + w_close * tcpa_raw
+                dcpa = (1.0 - w_close) * distance + w_close * dcpa_raw
+            else:
+                tcpa_norm = 1.0
+                dcpa = distance
             dcpa_norm = max(0.0, min(1.0, dcpa / 8.0))
             # Per-neighbor COLREGS classification — identical convention to
             # multi_agent_bridge._build_neighbor_observation. fresh628: rel_*

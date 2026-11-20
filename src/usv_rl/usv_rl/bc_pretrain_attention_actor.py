@@ -233,6 +233,10 @@ def main():
     if args.balance_recovery_sides:
         w_np = _balance_recovery_weights(data['observations'], w_np)
     train_w = torch.as_tensor(w_np, dtype=torch.float32, device=device)
+    vw_np = np.asarray(validation.get('sample_weights', np.ones(len(val_obs))), dtype=np.float32).copy()
+    if 'engaged' in validation:
+        vw_np[np.asarray(validation['engaged']).astype(bool)] *= args.engaged_weight
+    val_w = torch.as_tensor(vw_np, dtype=torch.float32, device=device)
     print(f'Loaded train={len(train_obs)} validation={len(val_obs)} action_mode={action_mode} '
           f'squash={squash} normalizer={args.normalizer_mode}', flush=True)
 
@@ -243,9 +247,13 @@ def main():
         out = actor(obs_batch)
         return _squash(out, action_low, action_high) if squash else out
 
+    def eval_val_loss():
+        vpred = predict(val_obs)
+        return float((((vpred - val_act) ** 2).mean(dim=1) * val_w).sum().item() / max(float(val_w.sum().item()), 1e-6))
+
     actor.eval()
     with torch.no_grad():
-        baseline_val = float(torch.nn.functional.mse_loss(predict(val_obs), val_act).item())
+        baseline_val = eval_val_loss()
     best_val = baseline_val
     best_state = {k: v.detach().clone() for k, v in actor.state_dict().items()}
     patience = 0
@@ -278,7 +286,7 @@ def main():
 
         actor.eval()
         with torch.no_grad():
-            val_loss = float(torch.nn.functional.mse_loss(predict(val_obs), val_act).item())
+            val_loss = eval_val_loss()
         if val_loss < best_val - 1e-6:
             best_val = val_loss
             best_state = {k: v.detach().clone() for k, v in actor.state_dict().items()}

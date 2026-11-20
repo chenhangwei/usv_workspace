@@ -110,6 +110,150 @@ def extract_report_data(data: list, header_info: dict) -> dict:
     cte_avg = sum(ctes_guided)/len(ctes_guided) if ctes_guided else None
     cte_max = max(ctes_guided) if ctes_guided else None
 
+    # ── 计算相对原始规划航线 (W_{k-1} -> W_k) 的真实几何横向偏差 true_cte 与出弯过冲 ──
+    planned_legs = {}  # {(task_idx, goal_id): (sx, sy, gx, gy, gl)}
+    last_wp_by_task = {}
+    first_pose_by_task = {}
+    for d in data:
+        tidx = d.get('_task_idx', 0)
+        if tidx not in first_pose_by_task:
+            first_pose_by_task[tidx] = (float(d.get('pose_x', 0)), float(d.get('pose_y', 0)))
+        gid = d.get('goal_id')
+        if isinstance(gid, (int, float)) and int(gid) > 0:
+            gid = int(gid)
+            gkey = (tidx, gid)
+            if gkey not in planned_legs:
+                gx_p = float(d.get('target_x', 0))
+                gy_p = float(d.get('target_y', 0))
+                sx_p, sy_p = last_wp_by_task.get(tidx, first_pose_by_task[tidx])
+                gl_p = math.hypot(gx_p - sx_p, gy_p - sy_p)
+                planned_legs[gkey] = (sx_p, sy_p, gx_p, gy_p, gl_p)
+                last_wp_by_task[tidx] = (gx_p, gy_p)
+
+    true_cte_series = []
+    min_nb_dist_series = []
+    min_nb_id_series = []
+    min_nb_by_peer = {}  # {nid: min_dist}
+    min_nb_overall = None
+    min_nb_peer_id = ''
+    min_nb_time_s = None
+    for idx_d, d in enumerate(data):
+        tidx = d.get('_task_idx', 0)
+        gid = int(d.get('goal_id', 0)) if isinstance(d.get('goal_id'), (int, float)) else 0
+        px, py = float(d.get('pose_x', 0)), float(d.get('pose_y', 0))
+        leg = planned_legs.get((tidx, gid))
+        if leg and leg[4] > 0.25:
+            sx_p, sy_p, gx_p, gy_p, gl_p = leg
+            # 正值=偏航线右侧, 负值=偏航线左侧 (与 PolicyInferenceNode / cross_track_error 符号严格一致)
+            t_cte = ((px - sx_p) * (gy_p - sy_p) - (py - sy_p) * (gx_p - sx_p)) / gl_p
+        else:
+            t_cte = float(d.get('cross_track_error', 0) or 0.0)
+        true_cte_series.append(t_cte)
+
+        best_d = None
+        best_id = ''
+        for slot in range(1, 6):
+            nid = d.get(f'neighbor_{slot}_id')
+            if not nid or (isinstance(nid, str) and not nid.strip()):
+                continue
+            if isinstance(nid, (int, float)) and nid == 0:
+                continue
+            nid_s = str(nid).strip()
+            nx = d.get(f'neighbor_{slot}_x', 0)
+            ny = d.get(f'neighbor_{slot}_y', 0)
+            if isinstance(nx, (int, float)) and isinstance(ny, (int, float)):
+                dd = math.hypot(px - nx, py - ny)
+                if dd > 0.01:
+                    if nid_s not in min_nb_by_peer or dd < min_nb_by_peer[nid_s]:
+                        min_nb_by_peer[nid_s] = dd
+                    if best_d is None or dd < best_d:
+                        best_d = dd
+                        best_id = nid_s
+                    if d.get('flight_mode') == 'GUIDED' and (min_nb_overall is None or dd < min_nb_overall):
+                        min_nb_overall = dd
+                        min_nb_peer_id = nid_s
+                        min_nb_time_s = t[idx_d]
+        min_nb_dist_series.append(best_d)
+        min_nb_id_series.append(best_id)
+
+    # 仅在 GUIDED 且无近距避让 (min_nb_dist >= 2.8m 或无邻船) 时统计纯路径贴线精度，避免合理避让让行被误判为偏航
+    unobstructed_true_ctes = [
+        abs(true_cte_series[i]) for i, d in enumerate(data)
+        if d.get('flight_mode') == 'GUIDED' and (min_nb_dist_series[i] is None or min_nb_dist_series[i] >= 2.8)
+    ]
+    all_guided_true_ctes = [
+        abs(true_cte_series[i]) for i, d in enumerate(data) if d.get('flight_mode') == 'GUIDED'
+    ]
+    eff_ctes = unobstructed_true_ctes if len(unobstructed_true_ctes) >= 20 else (all_guided_true_ctes or ctes_guided)
+    if eff_ctes:
+        s_eff = sorted(eff_ctes)
+        cte_true_avg = sum(s_eff) / len(s_eff)
+        cte_true_p90 = s_eff[int(len(s_eff) * 0.90)]
+    else:
+        cte_true_avg = cte_avg
+        cte_true_p90 = cte_max
+
+    # 统计弯道圆润度与出弯过冲 (Post-turn overshoot & Turn radius / Angular jerk)
+    turn_radii = []
+    ang_jerks = []
+    prev_om_g = None
+    prev_t_g = None
+    for i, d in enumerate(data):
+        if d.get('flight_mode') != 'GUIDED':
+            prev_om_g = None
+            continue
+        spd_i = float(d.get('velocity_speed', 0) or 0)
+        om_act_i = float(d.get('omega_actual', d.get('cmd_omega', 0)) or 0)
+        om_cmd_i = float(d.get('cmd_omega', 0) or 0)
+        if spd_i > 0.10 and abs(om_act_i) > 0.14:
+            turn_radii.append(spd_i / abs(om_act_i))
+        if prev_om_g is not None and prev_t_g is not None:
+            dt_g = d['timestamp'] - prev_t_g
+            if 0.02 <= dt_g <= 0.5:
+                ang_jerks.append(abs(om_cmd_i - prev_om_g) / dt_g)
+        prev_om_g = om_cmd_i
+        prev_t_g = d['timestamp']
+
+    turn_r_med = sorted(turn_radii)[len(turn_radii)//2] if turn_radii else None
+    turn_r_p10 = sorted(turn_radii)[int(len(turn_radii)*0.10)] if turn_radii else None
+    dom_dt_p90 = sorted(ang_jerks)[int(len(ang_jerks)*0.90)] if ang_jerks else 0.0
+
+    # 检测每次航点切换后 (无近船干扰时) 是否冲过新航线到外侧 (出弯外飘量 corner_overshoot)
+    corner_overshoots = []
+    cur_gkey = None
+    init_cte_sgn = 0.0
+    leg_max_ov = 0.0
+    leg_min_nb = 99.0
+    leg_idx_count = 0
+    for i, d in enumerate(data):
+        if d.get('flight_mode') != 'GUIDED':
+            continue
+        gkey = (d.get('_task_idx', 0), int(d.get('goal_id', 0)) if isinstance(d.get('goal_id'), (int, float)) else 0)
+        leg = planned_legs.get(gkey)
+        if gkey != cur_gkey:
+            if cur_gkey is not None and leg_idx_count > 1 and init_cte_sgn != 0.0 and leg_min_nb > 2.8:
+                corner_overshoots.append(leg_max_ov)
+            cur_gkey = gkey
+            leg_idx_count += 1
+            tc0 = true_cte_series[i]
+            init_cte_sgn = (1.0 if tc0 > 0.20 else (-1.0 if tc0 < -0.20 else 0.0)) if (leg and leg[4] > 2.5) else 0.0
+            leg_max_ov = 0.0
+            leg_min_nb = 99.0
+        else:
+            if min_nb_dist_series[i] is not None:
+                leg_min_nb = min(leg_min_nb, min_nb_dist_series[i])
+            if init_cte_sgn != 0.0 and leg:
+                px, py = float(d.get('pose_x', 0)), float(d.get('pose_y', 0))
+                along_i = ((px - leg[0]) * (leg[2] - leg[0]) + (py - leg[1]) * (leg[3] - leg[1])) / max(leg[4], 1e-3)
+                if along_i < min(5.5, leg[4] * 0.75):
+                    ov_i = -init_cte_sgn * true_cte_series[i]
+                    if ov_i > leg_max_ov:
+                        leg_max_ov = ov_i
+    if cur_gkey is not None and leg_idx_count > 1 and init_cte_sgn != 0.0 and leg_min_nb > 2.8:
+        corner_overshoots.append(leg_max_ov)
+    max_corner_overshoot = max(corner_overshoots) if corner_overshoots else 0.0
+    avg_corner_overshoot = (sum(corner_overshoots) / len(corner_overshoots)) if corner_overshoots else 0.0
+
     hes_guided = [abs(d.get('heading_error_deg', 0)) for d in guided
                   if isinstance(d.get('heading_error_deg'), (int, float))]
     he_avg = sum(hes_guided)/len(hes_guided) if hes_guided else None
@@ -348,177 +492,117 @@ def extract_report_data(data: list, header_info: dict) -> dict:
             pg['wifi_avg'] = sum(wv)/len(wv)
         per_goal.append(pg)
 
-    score_cte = max(0, 100 - (cte_avg or 0.5) * 200)
-    score_he = max(0, 100 - (he_avg or 40) * 2.5)
-    score_mpc = max(0, 100 - mpc.get('avg', 66) * 1.5)
-    score_spd = min(100, velocity['guided_avg'] / 0.3 * 100) if velocity['guided_avg'] > 0 else 0
-    total_score = score_cte * 0.4 + score_he * 0.4 + score_mpc * 0.1 + score_spd * 0.1
-    grade = 'A+' if total_score >= 80 else 'A' if total_score >= 70 else 'B' if total_score >= 60 else 'C' if total_score >= 40 else 'D'
+    # ── 老司机八维综合评估体系 (0-100, 适配 0.60m×0.30m 纯 RL 多船/单船导航) ──
+    # 1) 航线贴合 (22%): 无遮挡 GUIDED 真实几何 |CTE| 均值与 P90 (反映直道贴线与转弯后是否偏离原航线)
+    _c_avg = cte_true_avg if cte_true_avg is not None else 0.65
+    _c_p90 = cte_true_p90 if cte_true_p90 is not None else 1.10
+    _s_cte_avg = max(0.0, min(100.0, (1.0 - (_c_avg - 0.06) / (0.60 - 0.06)) * 100.0))
+    _s_cte_p90 = max(0.0, min(100.0, (1.0 - (_c_p90 - 0.18) / (1.05 - 0.18)) * 100.0))
+    radar_tracking = 0.65 * _s_cte_avg + 0.35 * _s_cte_p90
 
-    scoring = {
-        'cte': score_cte, 'he': score_he, 'mpc': score_mpc, 'spd': score_spd,
-        'total': total_score, 'grade': grade,
-        'cte_label': '优秀' if (cte_avg or 999) < 0.1 else '良好' if (cte_avg or 999) < 0.3 else '一般' if (cte_avg or 999) < 0.5 else '较差',
-        'he_label': '优秀' if (he_avg or 999) < 5 else '良好' if (he_avg or 999) < 10 else '一般' if (he_avg or 999) < 20 else '较差',
-        'mpc_label': '优秀' if mpc.get('avg', 999) < 15 else '正常' if mpc.get('avg', 999) < 30 else '偏高' if mpc.get('avg', 999) < 50 else '过高',
-    }
+    # 2) 转向圆润 (16%): 出弯零外飘 + 转弯半径饱满度(拒绝原地拧尖角) + 角加速度平滑度
+    _s_ov = max(0.0, min(100.0, (1.0 - (max_corner_overshoot - 0.10) / (0.85 - 0.10)) * 100.0))
+    if turn_r_p10 is not None:
+        # 0.60m 船模: R_p10 >= 0.48m 圆润满分, <= 0.18m 原地急折 0 分
+        _s_rad = max(0.0, min(100.0, (turn_r_p10 - 0.18) / (0.48 - 0.18) * 100.0))
+    else:
+        _s_rad = 95.0
+    _s_jerk = max(0.0, min(100.0, (1.0 - (dom_dt_p90 - 0.30) / (1.80 - 0.30)) * 100.0))
+    radar_roundness = 0.45 * _s_ov + 0.30 * _s_rad + 0.25 * _s_jerk
 
-    # ── 雷达图多维评分 (0-100) —— 2026-07-08 用户判定标准 ──
-    # 优先级: ①贴线直线 ②少绕圈/少弧线 ③有效到点(含最终航点) ④散开不缠死 ⑤碰撞仅参考
-    # 路径贴线: CTE均值 ≤0.10m→100, ≥0.80m→0 (原 <0.05 满分过严, 不匹配实船尺度)
-    radar_tracking = max(0, min(100, (1 - ((cte_avg or 0.8) - 0.10) / 0.70) * 100))
-    # 直线走线(少绕弯): 绕圈次数 + 每段绕行率 (detour>1.15 开始扣分)
-    _loops_total = sum(g.get('loops', 0) for g in per_goal)
-    _detours = [g['detour'] for g in per_goal if isinstance(g.get('detour'), (int, float))]
-    _detour_excess = (sum(max(0.0, dv - 1.15) for dv in _detours) / len(_detours)) if _detours else 0.0
-    radar_straight = max(0, min(100, 100 - _loops_total * 30 - _detour_excess * 80))
-    # 切换回转(顶点瞬态): 航点切换后15s内累计回转峰值的最差段
-    # 五角星顶点需 144°: ≤170°=满分(正常转弯), ≥400°=0(选错方向/绕圈)
-    _peaks = [g['switch_peak'] for g in per_goal if isinstance(g.get('switch_peak'), (int, float))]
-    _worst_peak = max(_peaks) if _peaks else 0.0
-    radar_transient = max(0, min(100, (1 - (_worst_peak - 170.0) / (400.0 - 170.0)) * 100))
-    # 航向控制: 直线段航向误差 ≤8°→100, ≥40°→0 (原 <3° 满分过严且误用全程均值含转弯段)
-    radar_heading = max(0, min(100, (1 - ((he_straight_avg if he_straight_avg is not None else 40) - 8.0) / 32.0) * 100))
-    # 航行速度: guided均速越接近0.35越好
-    radar_speed = min(100, (velocity['guided_avg'] / 0.35) * 100) if velocity['guided_avg'] > 0 else 0
-    # 行为平滑: omega std越小越好, <0.05→100, >0.4→0
-    omega_std = omega.get('std', 0.4) if omega else 0.4
-    radar_smooth = max(0, min(100, 100 - omega_std / 0.4 * 100))
-    # 到点能力: 中途航点通过率×50 + 最终航点到达×50 (fresh625 最终航点 2/3 失败驱动)
+    # 3) 安全避让 (20%): 0.60×0.30m 船模真实邻船最小质心距 (无邻船单船任务记 100)
+    if min_nb_overall is None:
+        radar_safety = 100.0
+    elif min_nb_overall >= 0.80:
+        radar_safety = 100.0
+    elif min_nb_overall >= 0.60:
+        radar_safety = 82.0 + (min_nb_overall - 0.60) / 0.20 * 18.0
+    elif min_nb_overall >= 0.35:
+        radar_safety = 20.0 + (min_nb_overall - 0.35) / 0.25 * 62.0
+    else:
+        radar_safety = max(0.0, (min_nb_overall - 0.22) / 0.13 * 20.0)
+
+    # 4) 航点达成 (16%): 中途航点通过率×50% + 终点到达×50%
     if per_goal:
         _mid = per_goal[:-1]
         _mid_ok = sum(1 for g in _mid if g.get('arrival') in ('arrived', 'passed'))
-        _mid_score = (_mid_ok / len(_mid) * 100) if _mid else 100.0
+        _mid_score = (_mid_ok / len(_mid) * 100.0) if _mid else 100.0
         _final_ok = per_goal[-1].get('arrival') in ('arrived', 'passed')
         radar_progress = _mid_score * 0.5 + (100.0 if _final_ok else 0.0) * 0.5
+        goals_ok_count = _mid_ok + (1 if _final_ok else 0)
     else:
-        radar_progress = 0
-    # 安全避让: 基于邻船最近距离 (全程最小距离越大越安全)
-    # 仅在避让交互期间(encounter_type>=0 或 邻船距离<15m)计算最近距离
-    # 避让中最近距离越大 = 模型越能维持安全间距
-    min_encounter_dist = None
-    encounter_count = 0
-    for d in data:
-        # 判断是否处于避让交互中
-        enc_type = d.get('rl_encounter_type_index', -1)
-        if isinstance(enc_type, (int, float)):
-            enc_type = int(enc_type)
-        else:
-            enc_type = -1
-        px, py = d.get('pose_x', 0), d.get('pose_y', 0)
-        for slot in range(1, 6):
-            nid = d.get(f'neighbor_{slot}_id')
-            if not nid or (isinstance(nid, str) and not nid.strip()):
-                continue
-            if isinstance(nid, (int, float)) and nid == 0:
-                continue
-            nx = d.get(f'neighbor_{slot}_x', 0)
-            ny = d.get(f'neighbor_{slot}_y', 0)
-            if not (isinstance(nx, (int, float)) and isinstance(ny, (int, float))):
-                continue
-            dist = math.hypot(nx - px, ny - py)
-            if dist < 0.01:
-                continue
-            # 只在避让交互中采样: encounter_type有效 或 距离已进入交互区(<15m)
-            if enc_type < 0 and dist >= 15.0:
-                continue
-            encounter_count += 1
-            if min_encounter_dist is None or dist < min_encounter_dist:
-                min_encounter_dist = dist
-    if min_encounter_dist is None:
-        radar_safety = 100  # 无避让交互: 单船或全程无会遇
-    else:
-        # 参考项(碰撞降权, 用户 2026-07-10): ≥0.75m(碰撞阈值外)→100分, ≤0.30m→0分
-        radar_safety = max(0, min(100, (min_encounter_dist - 0.30) / (0.75 - 0.30) * 100))
+        radar_progress = 0.0
+        goals_ok_count = 0
 
-    # 脱离能力: 避让结束后多快拉开距离, 不会粘在一起
-    # 检测 encounter 结束时刻 (enc_type从>=0变为-1), 然后计算恢复到脱离距离的用时
-    DISENGAGE_DIST = 8.0   # 脱离判定距离 (m)
-    DISENGAGE_MAX_T = 30.0 # 超过此秒数视为脱离失败
-    disengage_times = []
-    prev_enc = -1
-    enc_exit_time = None
-    for d in data:
-        enc_type = d.get('rl_encounter_type_index', -1)
-        if isinstance(enc_type, (int, float)):
-            enc_type = int(enc_type)
-        else:
-            enc_type = -1
-        cur_t = d.get('timestamp', 0)
-        # 检测避让结束: 从>=0切换到-1
-        if prev_enc >= 0 and enc_type < 0:
-            enc_exit_time = cur_t
-        # 避让结束后, 检查是否已脱离
-        if enc_exit_time is not None and enc_type < 0:
-            px, py = d.get('pose_x', 0), d.get('pose_y', 0)
-            all_clear = True
-            has_neighbor = False
-            for slot in range(1, 6):
-                nid = d.get(f'neighbor_{slot}_id')
-                if not nid or (isinstance(nid, str) and not nid.strip()):
-                    continue
-                if isinstance(nid, (int, float)) and nid == 0:
-                    continue
-                nx = d.get(f'neighbor_{slot}_x', 0)
-                ny = d.get(f'neighbor_{slot}_y', 0)
-                if not (isinstance(nx, (int, float)) and isinstance(ny, (int, float))):
-                    continue
-                dist = math.hypot(nx - px, ny - py)
-                if dist < 0.01:
-                    continue
-                has_neighbor = True
-                if dist < DISENGAGE_DIST:
-                    all_clear = False
-                    break
-            elapsed = cur_t - enc_exit_time
-            if all_clear and has_neighbor:
-                disengage_times.append(elapsed)
-                enc_exit_time = None
-            elif elapsed > DISENGAGE_MAX_T:
-                disengage_times.append(DISENGAGE_MAX_T)
-                enc_exit_time = None
-            elif not has_neighbor:
-                disengage_times.append(0)  # 邻船消失: 视为立即脱离
-                enc_exit_time = None
-        # 如果又进入新的encounter, 取消当前脱离计时
-        if enc_type >= 0:
-            if enc_exit_time is not None:
-                disengage_times.append(min(cur_t - enc_exit_time, DISENGAGE_MAX_T))
-            enc_exit_time = None
-        prev_enc = enc_type
-    if enc_exit_time is not None:
-        # 日志末尾仍未脱离
-        last_t = data[-1].get('timestamp', 0)
-        disengage_times.append(min(last_t - enc_exit_time, DISENGAGE_MAX_T))
+    # 5) 绕行效率 (10%): 无死锁绕圈 + 紧凑绕行弧长比 (detour <= 1.12 满分)
+    _loops_total = sum(g.get('loops', 0) for g in per_goal)
+    _detours = [g['detour'] for g in per_goal if isinstance(g.get('detour'), (int, float))]
+    _detour_excess = (sum(max(0.0, dv - 1.12) for dv in _detours) / len(_detours)) if _detours else 0.0
+    _peaks = [g['switch_peak'] for g in per_goal if isinstance(g.get('switch_peak'), (int, float))]
+    _worst_peak = max(_peaks) if _peaks else 0.0
+    _peak_pen = max(0.0, (_worst_peak - 185.0) / 8.0)
+    radar_efficiency = max(0.0, min(100.0, 100.0 - _loops_total * 35.0 - _detour_excess * 95.0 - _peak_pen))
 
-    if not disengage_times:
-        radar_disengage = 100  # 无避让→满分
-    else:
-        avg_disengage = sum(disengage_times) / len(disengage_times)
-        # <3s→100分, >25s→0分
-        radar_disengage = max(0, min(100, (1 - (avg_disengage - 3) / (25 - 3)) * 100))
+    # 6) 航向稳定 (6%): 直道航向误差 + 低过零摆动频率
+    _he_st = he_straight_avg if he_straight_avg is not None else 30.0
+    _s_he = max(0.0, min(100.0, (1.0 - (_he_st - 4.0) / (28.0 - 4.0)) * 100.0))
+    _s_osc = max(0.0, min(100.0, (1.0 - max(0.0, osc_freq - 0.10) / 0.40) * 100.0))
+    radar_heading = 0.70 * _s_he + 0.30 * _s_osc
 
-    scoring['radar'] = {
-        'tracking': round(radar_tracking, 1),
-        'straight': round(radar_straight, 1),
-        'transient': round(radar_transient, 1),
-        'heading': round(radar_heading, 1),
-        'speed': round(radar_speed, 1),
-        'smooth': round(radar_smooth, 1),
-        'progress': round(radar_progress, 1),
-        'safety': round(radar_safety, 1),
-        'disengage': round(radar_disengage, 1),
+    # 7) 巡航效率 (5%): 自适应对比指令巡航速度 (cmd_vx P85 或默认 0.50m/s)
+    _g_cmd_vx = sorted(float(d.get('cmd_vx', 0) or 0) for d in guided if float(d.get('cmd_vx', 0) or 0) > 0.12)
+    _target_cruise = _g_cmd_vx[int(len(_g_cmd_vx) * 0.85)] if _g_cmd_vx else 0.50
+    _target_cruise = max(0.30, min(0.65, _target_cruise))
+    radar_speed = max(0.0, min(100.0, (velocity['guided_avg'] / (_target_cruise * 0.90)) * 100.0)) if velocity['guided_avg'] > 0 else 0.0
+
+    # 8) 控制平顺 (5%): 无饱和正负跳变 + 角速度平滑度
+    _bb_flips = sum(
+        1 for i in range(1, len(om_cmds))
+        if abs(om_cmds[i]) >= 0.52 and abs(om_cmds[i-1]) >= 0.52 and om_cmds[i] * om_cmds[i-1] < 0
+    )
+    _s_bb = max(0.0, 100.0 - _bb_flips * 12.0)
+    radar_smooth = 0.55 * _s_jerk + 0.45 * _s_bb
+
+    total_score = (
+        radar_tracking * 0.22
+        + radar_safety * 0.20
+        + radar_roundness * 0.16
+        + radar_progress * 0.16
+        + radar_efficiency * 0.10
+        + radar_heading * 0.06
+        + radar_speed * 0.05
+        + radar_smooth * 0.05
+    )
+    # 碰撞硬约束: 若最小质心距 < 0.35m (船壳擦碰风险), 总分封顶 68 分 (不高于 B)
+    if min_nb_overall is not None and min_nb_overall < 0.35:
+        total_score = min(total_score, 68.0)
+
+    grade = 'A+' if total_score >= 85 else 'A' if total_score >= 75 else 'B' if total_score >= 62 else 'C' if total_score >= 45 else 'D'
+
+    scoring = {
+        'cte': radar_tracking, 'he': radar_heading, 'mpc': 100.0, 'spd': radar_speed,
+        'total': total_score, 'grade': grade,
+        'cte_label': '优秀' if _c_avg < 0.12 else '良好' if _c_avg < 0.25 else '一般' if _c_avg < 0.45 else '偏高',
+        'he_label': '优秀' if _he_st < 5 else '良好' if _he_st < 10 else '一般' if _he_st < 18 else '偏大',
+        'mpc_label': '优秀' if mpc.get('avg', 0) < 15 else '正常' if mpc.get('avg', 0) < 30 else '偏高',
+        'radar': {
+            'tracking': round(radar_tracking, 1),
+            'roundness': round(radar_roundness, 1),
+            'safety': round(radar_safety, 1),
+            'progress': round(radar_progress, 1),
+            'efficiency': round(radar_efficiency, 1),
+            'heading': round(radar_heading, 1),
+            'speed': round(radar_speed, 1),
+            'smooth': round(radar_smooth, 1),
+        },
     }
 
-    # ── 综合评分按 2026-07-08 用户优先级重定权 ──
-    # 贴线 0.30 + 直线 0.20 + 到点 0.25 + 切换回转 0.10 + 平滑 0.05 + 速度 0.05 + 脱离 0.05
-    # (安全避让不计入总分, 仅雷达图参考)
-    total_score = (radar_tracking * 0.30 + radar_straight * 0.20 + radar_progress * 0.25
-                   + radar_transient * 0.10 + radar_smooth * 0.05 + radar_speed * 0.05
-                   + radar_disengage * 0.05)
-    grade = 'A+' if total_score >= 80 else 'A' if total_score >= 70 else 'B' if total_score >= 60 else 'C' if total_score >= 40 else 'D'
-    scoring['total'] = total_score
-    scoring['grade'] = grade
+    # 构建每任务规划航线折线列表 [(sx,sy), (g1x,g1y), ...] 供前端轨迹图与回放绘制基准线
+    planned_routes = {}  # {str(task_idx): [[x, y], ...]}
+    for (tidx_r, gid_r) in sorted(planned_legs.keys()):
+        sx_p, sy_p, gx_p, gy_p, _ = planned_legs[(tidx_r, gid_r)]
+        pts_r = planned_routes.setdefault(str(tidx_r), [[round(sx_p, 3), round(sy_p, 3)]])
+        pts_r.append([round(gx_p, 3), round(gy_p, 3)])
 
     # ── 时间序列 (降采样) ──
     step = max(1, len(data) // 2000)
@@ -530,6 +614,10 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'cmd_vx': [data[i].get('cmd_vx', 0) for i in range(0, len(data), step)],
         'heading_error': [data[i].get('heading_error_deg', 0) for i in range(0, len(data), step)],
         'cte': [data[i].get('cross_track_error', 0) for i in range(0, len(data), step)],
+        'true_cte': [round(true_cte_series[i], 4) for i in range(0, len(data), step)],
+        'min_nb_dist': [round(min_nb_dist_series[i], 3) if min_nb_dist_series[i] is not None else None for i in range(0, len(data), step)],
+        'min_nb_id': [min_nb_id_series[i] for i in range(0, len(data), step)],
+        'planned_routes': planned_routes,
         'distance': [],
         'flight_mode': [data[i].get('flight_mode', '') for i in range(0, len(data), step)],
         'yaw_deg': [data[i].get('pose_yaw_deg', 0) for i in range(0, len(data), step)],
@@ -597,8 +685,13 @@ def extract_report_data(data: list, header_info: dict) -> dict:
         'info': info, 'sampling': sampling, 'velocity': velocity,
         'targets': targets, 'goal_seq': goal_seq,
         'distance': {'min': min_dist, 'end': distances[-1] if distances else None, 'reach_t': reach_t},
-        'cte': {'avg': cte_avg, 'max': cte_max, 'rms': cte_rms},
-        'heading_error': {'avg': he_avg, 'max': he_max},
+        'cte': {'avg': cte_avg, 'max': cte_max, 'rms': cte_rms, 'true_avg': cte_true_avg, 'true_p90': cte_true_p90},
+        'heading_error': {'avg': he_avg, 'max': he_max, 'straight_avg': he_straight_avg},
+        'corner': {'max_overshoot': max_corner_overshoot, 'avg_overshoot': avg_corner_overshoot,
+                   'r_med': turn_r_med, 'r_p10': turn_r_p10, 'dom_dt_p90': dom_dt_p90},
+        'safety': {'min_dist': min_nb_overall, 'peer_id': min_nb_peer_id, 'time_s': min_nb_time_s,
+                   'by_peer': {k: round(v, 3) for k, v in sorted(min_nb_by_peer.items())}},
+        'goals_ok': goals_ok_count, 'goals_total': len(per_goal),
         'mpc': mpc, 'omega': omega, 'osc_freq': osc_freq,
         'ampc': ampc, 'rl': rl, 'wifi': wifi,
         'per_goal': per_goal, 'scoring': scoring,
@@ -668,6 +761,9 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
     for rd in all_report_data:
         info = rd['info']
         sc = rd['scoring']
+        saf = rd.get('safety', {})
+        cor = rd.get('corner', {})
+        mpc_val = rd['mpc'].get('avg', 0) if rd.get('mpc') else 0
         usv_list.append({
             'idx': rd['_idx'],
             'id': info['usv_id'],
@@ -678,12 +774,20 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
             'score': round(sc['total'], 1),
             'duration': round(info['duration_s'], 1),
             'records': info['record_count'],
-            'targets_n': len(rd['targets']),
+            'targets_n': rd.get('goals_total', len(rd['targets'])),
+            'goals_ok': rd.get('goals_ok', len(rd['targets'])),
             'guided_pct': round(info['guided_pct'], 1),
-            'cte_avg': rd['cte'].get('avg'),
-            'he_avg': rd['heading_error'].get('avg'),
+            'cte_avg': rd['cte'].get('true_avg', rd['cte'].get('avg')),
+            'cte_p90': rd['cte'].get('true_p90'),
+            'he_avg': rd['heading_error'].get('straight_avg', rd['heading_error'].get('avg')),
             'speed_avg': round(rd['velocity']['guided_avg'], 3),
-            'mpc_avg': round(rd['mpc'].get('avg', 0), 1) if rd['mpc'] else None,
+            'min_nb': round(saf['min_dist'], 3) if saf.get('min_dist') is not None else None,
+            'min_nb_peer': saf.get('peer_id', ''),
+            'min_nb_t': round(saf['time_s'], 1) if saf.get('time_s') is not None else None,
+            'max_ov': round(cor.get('max_overshoot', 0), 3),
+            'r_med': round(cor['r_med'], 2) if cor.get('r_med') is not None else None,
+            'r_p10': round(cor['r_p10'], 2) if cor.get('r_p10') is not None else None,
+            'mpc_avg': round(mpc_val, 1) if mpc_val and mpc_val > 0.05 else None,
             'rl_active_pct': round(rd['rl'].get('active_pct', 0), 1) if rd.get('rl') else 0,
             'wifi_avg': round(rd['wifi'].get('avg', -100), 1) if rd['wifi'] else None,
             'wifi_grade': rd['wifi'].get('grade', '') if rd['wifi'] else '',
@@ -698,14 +802,22 @@ def generate_multi_html_report(all_report_data: list, output_path: Path, title: 
     for rd in all_report_data:
         key = str(rd['_idx'])
         _s = rd['info'].get('start_ts')
-        all_ts[key] = _shift_ts(rd['ts'], (_s - global_t0) if isinstance(_s, (int, float)) else 0.0)
+        offset_s = (_s - global_t0) if isinstance(_s, (int, float)) else 0.0
+        all_ts[key] = _shift_ts(rd['ts'], offset_s)
         all_targets[key] = rd['targets']
         all_per_goal[key] = rd['per_goal']
+        saf_shifted = dict(rd.get('safety', {}))
+        if saf_shifted.get('time_s') is not None:
+            saf_shifted['time_s'] = saf_shifted['time_s'] + offset_s
         all_summaries[key] = {
             'scoring': rd['scoring'],
             'velocity': rd['velocity'],
             'cte': rd['cte'],
             'heading_error': rd['heading_error'],
+            'corner': rd.get('corner', {}),
+            'safety': saf_shifted,
+            'goals_ok': rd.get('goals_ok', 0),
+            'goals_total': rd.get('goals_total', 0),
             'mpc': rd['mpc'],
             'omega': rd['omega'],
             'osc_freq': rd['osc_freq'],
@@ -822,14 +934,64 @@ body {{
 .compare-table {{ width:100%; border-collapse:collapse; font-size:0.8rem; }}
 .compare-table th {{
   background:rgba(100,255,218,0.1); color:var(--accent);
-  padding:7px 5px; text-align:center; border-bottom:2px solid var(--border);
-  position:sticky; top:0; z-index:2;
+  padding:8px 6px; text-align:center; border-bottom:2px solid var(--border);
+  position:sticky; top:0; z-index:2; cursor:pointer; user-select:none; white-space:nowrap;
+  transition:background 0.2s;
 }}
+.compare-table th:hover {{ background:rgba(100,255,218,0.2); }}
 .compare-table td {{
-  padding:5px; text-align:center; border-bottom:1px solid rgba(255,255,255,0.05);
+  padding:6px 5px; text-align:center; border-bottom:1px solid rgba(255,255,255,0.05); white-space:nowrap;
 }}
 .compare-table tr:hover td {{ background:rgba(100,255,218,0.05); }}
 .compare-table .best {{ color:#69F0AE; font-weight:700; }}
+.compare-table .warn {{ color:#FFB300; font-weight:600; }}
+.compare-table .danger {{ color:#FF5252; font-weight:700; }}
+.top-nav {{
+  position:sticky; top:0; z-index:900;
+  background:rgba(10,14,23,0.88); backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border); padding:8px 16px;
+  display:flex; align-items:center; justify-content:center; gap:8px; flex-wrap:wrap;
+}}
+.top-nav a {{
+  color:var(--text2); text-decoration:none; font-size:0.76rem;
+  padding:4px 11px; border-radius:14px; border:1px solid rgba(255,255,255,0.08);
+  transition:all 0.2s;
+}}
+.top-nav a:hover {{ color:var(--accent); border-color:var(--accent); background:rgba(100,255,218,0.08); }}
+.kpi-grid {{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(195px,1fr));
+  gap:12px; margin:14px 0 18px;
+}}
+.kpi-card {{
+  background:linear-gradient(145deg,rgba(21,30,48,0.85),rgba(13,19,32,0.85));
+  border:1px solid var(--border); border-radius:12px; padding:14px 16px;
+  position:relative; overflow:hidden; backdrop-filter:blur(10px);
+  transition:transform 0.25s,box-shadow 0.25s;
+}}
+.kpi-card:hover {{ transform:translateY(-2px); box-shadow:0 6px 20px rgba(0,0,0,0.35); }}
+.kpi-card .kpi-label {{ font-size:0.73rem; color:var(--text2); letter-spacing:0.3px; }}
+.kpi-card .kpi-val {{ font-size:1.45rem; font-weight:800; color:var(--accent); margin:4px 0 2px; line-height:1.2; }}
+.kpi-card .kpi-sub {{ font-size:0.71rem; color:var(--text2); }}
+.insight-grid {{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr));
+  gap:10px; margin-bottom:14px;
+}}
+.insight-card {{
+  background:var(--bg-card); border:1px solid var(--border); border-left:4px solid var(--accent);
+  border-radius:10px; padding:10px 14px; font-size:0.77rem;
+}}
+.insight-tags {{ display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }}
+.itag {{
+  padding:2px 8px; border-radius:10px; font-size:0.71rem;
+  background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.1);
+}}
+.itag.ok {{ color:#69F0AE; border-color:rgba(105,240,174,0.35); background:rgba(105,240,174,0.08); }}
+.itag.warn {{ color:#FFD740; border-color:rgba(255,215,64,0.35); background:rgba(255,215,64,0.08); }}
+.itag.err {{ color:#FF5252; border-color:rgba(255,82,82,0.4); background:rgba(255,82,82,0.1); }}
+.radar-wrap {{
+  display:grid; grid-template-columns:1.25fr 1fr; gap:14px; align-items:center;
+}}
+@media (max-width:960px) {{ .radar-wrap {{ grid-template-columns:1fr; }} }}
 .chart-box {{
   background:var(--bg-card); backdrop-filter:blur(12px);
   border:1px solid var(--border); border-radius:12px;
@@ -934,59 +1096,65 @@ body {{
 
 <div class="banner">
   <h1>🚢 {report_title}</h1>
-  <div class="subtitle">{n_usv} 条航行记录 | {now}</div>
+  <div class="subtitle">{n_usv} 艘参演船只 · 0.60m × 0.30m 水密单体船 · 生成时间 {now}</div>
 </div>
+
+<nav class="top-nav">
+  <a href="#s1">🎛️ 船只筛选</a>
+  <a href="#s2">📊 核心看板 & 排行</a>
+  <a href="#s3">🕸️ 八维雷达</a>
+  <a href="#s4">🎬 动态路径回放</a>
+  <a href="#s5">🗺️ 轨迹 & 原始航线</a>
+  <a href="#s5b" id="nav-nb-link">🛡️ 邻船安全距</a>
+  <a href="#s6">🚀 速度 & 控制</a>
+  <a href="#s7">📐 航线偏差 & 航向</a>
+  <a href="#s10">📋 分航点明细</a>
+</nav>
 
 <div class="container">
 
 <div class="section" id="s1">
-  <div class="section-title"><span class="num">1</span> USV 选择器</div>
-  <div style="text-align:center;margin-bottom:6px;">
-    <button class="btn-toggle-all" onclick="toggleAllUSV()">全选 / 反选</button>
+  <div class="section-title"><span class="num">1</span> 参演船只筛选与全局核心看板</div>
+  <div style="text-align:center;margin-bottom:8px;">
+    <button class="btn-toggle-all" onclick="toggleAllUSV()">全选 / 反选全部 USV</button>
   </div>
   <div class="usv-selector" id="usv-selector"></div>
-  <div class="reading-guide">
-    <strong>操作说明：</strong>点击USV标签可显示/隐藏该USV的数据。所有图表和轨迹重放都会联动更新。
-    多选模式下可对比不同USV的航行表现。
-  </div>
+  <div class="kpi-grid" id="kpi-strip"></div>
 </div>
 
 <div class="section" id="s2">
-  <div class="section-title"><span class="num">2</span> 对比总览</div>
+  <div class="section-title"><span class="num">2</span> 智能诊断摘要与多船量化对比表</div>
   <div id="ai-insights"></div>
   <div id="compare-area"></div>
   <div class="reading-guide">
-    <strong>📊 对比总览阅读指南：</strong><br>
-    • <strong>评分</strong>：综合评分(0-100)，权重: 贴线30% + 直线20% + 到点25% + 切换回转10% + 平滑/速度/脱离各15%（碰撞不计分）。A+≥80, A≥70, B≥60, C≥40, D&lt;40<br>
-    • <strong>均CTE</strong>：横向跟踪偏差均值，&lt;0.1m=优秀，0.1-0.3m=良好，0.3-0.5m=一般，&gt;0.5m=较差<br>
-    • <strong>均航向误差</strong>：&lt;5°=优秀，5-10°=良好，10-20°=一般，&gt;20°=较差<br>
-    • <strong>GUIDED%</strong>：自动导航模式占比，越高越稳定，低值意味着频繁切为HOLD模式<br>
-    • 🏆标记=该指标最优者 | 绿色=最佳值 | 点击表头可以排序<br>
-    <strong>🤖 AI分析摘要</strong>自动评估每个USV的导航质量，用✅❗❌标记关键发现，帮助快速定位问题。
+    <strong>📊 量化对比表说明（点击任意表头可升/降序排列）：</strong><br>
+    • <strong>综合评级</strong>：八维加权总分（航线贴合22% + 安全避让20% + 转向圆润16% + 航点达成16% + 绕行效率10% + 航向稳定6% + 巡航效率5% + 控制平顺5%；若发生船壳擦碰风险 &lt;0.35m 则总分封顶 68 分）。A+≥85, A≥75, B≥62, C≥45<br>
+    • <strong>最小船距</strong>：GUIDED 航行期间与动船/静止船的最小质心距（0.60×0.30m 船模：≥0.75m 舒适安全，0.45–0.75m 紧凑贴身，&lt;0.35m 擦碰风险）<br>
+    • <strong>航线 |CTE| (均/P90)</strong>：相对原始规划航线（W<sub>k-1</sub>→W<sub>k</sub>）无避让遮挡段的真实几何横向偏差；<strong>出弯外飘</strong>衡量航点大转弯后是否冲出原始航线外侧
   </div>
 </div>
 
 <div class="section" id="s3">
-  <div class="section-title"><span class="num">3</span> 多维评估雷达图</div>
-  <div id="radar-chart" style="width:100%;height:480px;"></div>
+  <div class="section-title"><span class="num">3</span> “老司机”八维综合评估雷达图</div>
+  <div class="chart-box">
+    <div class="radar-wrap">
+      <div id="radar-chart" style="width:100%;height:460px;"></div>
+      <div id="radar-breakdown"></div>
+    </div>
+  </div>
   <div class="reading-guide">
-    <strong>🕸️ 雷达图阅读指南（按 2026-07-08 判定：贴线直线优先，碰撞仅参考）：</strong>九维度评估，每维 0-100 分，面积越大表现越好。<br>
-    • <strong>路径贴线</strong>：CTE均值，≤0.10m=满分，≥0.80m=0（总分权重 0.30，最高优先级）<br>
-    • <strong>直线走线</strong>：绕圈次数（每次 -30 分）＋每段绕行率（detour&gt;1.15× 开始扣分）（权重 0.20）<br>
-    • <strong>到点能力</strong>：中途航点通过率×50% ＋ 最终航点到达×50%，最终航点失败直接折半（权重 0.25）<br>
-    • <strong>切换回转</strong>：航点切换后 15s 内累计回转峰值（五角星顶点需 144°），≤170°=满分，≥400°=0 即选错方向/绕圈（权重 0.10）<br>
-    • <strong>航向控制</strong>：直线段航向误差，≤8°=满分，≥40°=0（参考维度，不计入总分）<br>
-    • <strong>航行速度</strong>：巡航效率，接近0.35m/s=满分（权重 0.05）<br>
-    • <strong>行为平滑</strong>：角速度稳定性，低振荡=高分（权重 0.05）<br>
-    • <strong>安全间距(参考)</strong>：避让中最近邻船距离，≥0.75m=满分（碰撞阈值外即可），≤0.30m=0分，无会遇=满分。<em>不计入总分，碰撞只报告不作硬判据（除非缠死堆叠）</em><br>
-    • <strong>脱离能力</strong>：避让结束后拉开距离的速度，平均脱离时间&lt;3s=满分，&gt;25s=0分，USV不会粘连/纠缠（权重 0.05）<br>
-    <strong>综合评分</strong>＝贴线0.30＋直线0.20＋到点0.25＋切换回转0.10＋平滑/速度/脱离各 0.05（安全间距不计入）。<br>
-    <strong>对比思路：</strong>多USV叠加时，形状差异一目了然，"短板维度"暴露最明显的问题方向。
+    <strong>🕸️ 八维雷达评估口径（全部基于真实几何轨迹与动力学实测，0–100 分）：</strong><br>
+    • <strong>航线贴合 (22%)</strong>：无近船干扰段相对原始航线真实 |CTE| 均值（≤0.06m 满分）与 P90（≤0.18m 满分），检验直道贴线与出弯归线精度<br>
+    • <strong>安全避让 (20%)</strong>：全程最小邻船质心距 d<sub>min</sub>（≥0.80m 满分，0.60–0.80m 紧凑优良，≤0.30m 归零；单船无会遇记满分）<br>
+    • <strong>转向圆润 (16%)</strong>：出弯零外飘（≤0.10m 满分）+ 转弯半径饱满度（P10 半径 ≥0.48m 满分，杜绝原地拧尖角）+ 角加速度平滑度 |dω/dt|<sub>P90</sub><br>
+    • <strong>航点达成 (16%)</strong>：中途航点通过率×50% + 最终航点精准到达×50%<br>
+    • <strong>绕行效率 (10%)</strong>：零绕圈死锁 + 实际航程/弦长比紧凑度（顺势择优左/右绕行，不走多余大 S 弯）<br>
+    • <strong>航向稳定 (6%)</strong>：直道航向对准度 + 零蛇形过零摆动 &nbsp;|&nbsp; <strong>巡航效率 (5%)</strong>：实际均速与目标巡航速匹配度 &nbsp;|&nbsp; <strong>控制平顺 (5%)</strong>：无饱和正负反转跳变
   </div>
 </div>
 
 <div class="section" id="s4">
-  <div class="section-title"><span class="num">4</span> 路径重放</div>
+  <div class="section-title"><span class="num">4</span> 2D 动态路径回放（含原始航线基准 & 实时近距标尺）</div>
   <div class="replay-container">
     <div class="replay-canvas-wrap">
       <canvas id="replay-canvas"></canvas>
@@ -995,7 +1163,7 @@ body {{
     <div class="replay-info" id="replay-info"></div>
     <div class="replay-controls">
       <button onclick="replayRestart()" title="重新开始">⏮</button>
-      <button id="btn-play" onclick="replayToggle()" title="播放/暂停">▶</button>
+      <button id="btn-play" onclick="replayToggle()" title="播放/暂停 (空格键)">▶</button>
       <button onclick="replaySlower()" title="减速">⏪</button>
       <span class="speed-display" id="speed-display">1.0x</span>
       <button onclick="replayFaster()" title="加速">⏩</button>
@@ -1003,148 +1171,82 @@ body {{
         <div class="fill" id="replay-fill" style="width:0%"></div>
       </div>
       <span class="time-display" id="replay-time">0.0s / 0.0s</span>
-      <button id="btn-goal-labels" onclick="toggleGoalLabels()" title="显示/隐藏目标点ID" style="margin-left:8px;font-size:12px;padding:2px 8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.15);color:#9e9e9e;border-radius:4px;cursor:pointer;">🏷️ 航点ID</button>
+      <button id="btn-plan-route" class="active" onclick="togglePlannedRoute()" title="显示/隐藏原始规划航线基准" style="margin-left:6px;font-size:12px;padding:3px 9px;">📐 原始航线</button>
+      <button id="btn-goal-labels" onclick="toggleGoalLabels()" title="显示/隐藏目标点ID" style="font-size:12px;padding:3px 9px;">🏷️ 航点ID</button>
     </div>
   </div>
   <div class="reading-guide">
-    <strong>路径重放：</strong>实时回放各USV的航行轨迹。船形图标显示位置和朝向（参考GS导航预览风格）。<br>
-    ▶ 播放/暂停 | ⏪⏩ 0.25x~16x变速 | 点击进度条跳转 | ⏮ 重新开始 |
-    🟢起点 🔴终点 ⭐目标航点 | 🏷️ 显示/隐藏航点ID | 勾选USV即加入重放<br>
-    画面右上角的小标签可单独开/关每条USV的重放轨迹，与上方“USV 选择器”联动。<br>
-    如果日志包含 RL 字段，船体外的青色光环表示该时刻 RL 策略输出正在介入控制。<br>
-    到达标识(数据驱动)：🟢绿色=确认到达(distance≤1.5m) | 🟡黄色=偏离到达(距离>1.5m，偏离检测判定已到达) | 🔴红色=未到达
+    <strong>🎬 动态回放增强功能：</strong>支持键盘 <strong>空格</strong> 播放/暂停、<strong>← / →</strong> 快退/快进 2 秒。<br>
+    • <strong>📐 原始航线</strong>（默认开启）：以半透明长虚线绘制规划航点间的理想基准弦线，直观检验转弯弧度是否圆润、出弯是否偏离原始航线<br>
+    • <strong>近距实时标尺</strong>：当任意两船间距进入 <strong>&lt;1.6m</strong> 时自动连线并实时显示精确米数（绿 ≥0.75m / 黄 0.45–0.75m / 红 &lt;0.45m），水面无独立日志的静止船亦自动显影
   </div>
 </div>
 
 <div class="section" id="s5">
-  <div class="section-title"><span class="num">5</span> 航行轨迹对比</div>
+  <div class="section-title"><span class="num">5</span> 航行轨迹与原始规划航线对比</div>
   <div class="chart-box">
-    <div id="chart-traj" style="height:500px;"></div>
+    <div id="chart-traj" style="height:540px;"></div>
   </div>
   <div class="reading-guide">
-    <strong>🗺️ 航行轨迹阅读指南：</strong>各USV以不同颜色显示XY平面轨迹。<br>
-    <strong>图例：</strong>实线=GUIDED(自动导航) | 灰点=HOLD(悬停) | ●绿=起点 | ■红=终点 | ★=目标航点<br>
-    <strong>分析方法：</strong><br>
-    • <strong>理想状态</strong>：轨迹平滑且紧贴航点连线，弯道处无大幅振荡<br>
-    • <strong>蛇形振荡</strong>：弯道处的左右摆动 → 角速度控制器增益过高或tau参数不匹配<br>
-    • <strong>系统性偏移</strong>：直道段持续偏离航线 → CTE控制不足或外部干扰(风/水流)<br>
-    • <strong>对比多USV</strong>：相同路线上不同USV的轨迹分散程度反映一致性<br>
-    💡 鼠标悬停查看坐标 | 滚轮缩放 | 拖拽平移 | 双击重置
+    <strong>🗺️ 轨迹图说明：</strong>实线=GUIDED 实际航迹 | 同色细点划线=原始规划航线基准（点击图例可单独开关）| ★=目标航点 | 灰虚线=场内静止/未选中邻船。
+  </div>
+</div>
+
+<div class="section" id="s5b">
+  <div class="section-title"><span class="num">6</span> 邻船实时安全间距包络</div>
+  <div class="chart-box">
+    <div id="chart-nb-dist" style="height:340px;"></div>
+    <div class="chart-guide">
+      🛡️ 实时显示每艘 USV 与最近邻船（含动船与静止船）的质心距离，悬停可查看最近邻船 ID。绿虚线 0.80m=舒适安全线（净水 ≥0.50m），红虚线 0.35m=0.60×0.30m 船壳安全红线。
+    </div>
   </div>
 </div>
 
 <div class="section" id="s6">
-  <div class="section-title"><span class="num">6</span> 速度对比</div>
+  <div class="section-title"><span class="num">7</span> 速度与转向控制通道分析</div>
   <div class="chart-box">
-    <div id="chart-velocity" style="height:380px;"></div>
+    <div id="chart-velocity" style="height:340px;"></div>
   </div>
-  <div class="reading-guide">
-    <strong>🚀 速度分析阅读指南：</strong>实线=实际速度，虚线=速度指令(cmd_vx)。<br>
-    <strong>分析方法：</strong><br>
-    • <strong>跟踪性能</strong>：实际速度应紧密跟随指令曲线—差距大说明推进器响应不足或过载<br>
-    • <strong>HOLD期间</strong>：速度应接近0—非零说明IMU漂移或GPS跳变<br>
-    • <strong>加减速过渡</strong>：急停/急加速处是否平滑—突变可能导致系统不稳定<br>
-    • <strong>典型值</strong>：GUIDED期间平均速度0.2-0.5 m/s，低于0.1可能推进力不足
+  <div class="chart-box">
+    <div id="chart-control" style="height:360px;"></div>
+    <div class="chart-guide">
+      ⚙️ 实线=最终角速度指令 cmd_omega，圆点线=实际角速度 ω_actual。弯道与避让段曲线呈平滑钟形无毛刺代表转向圆润丝滑。
+    </div>
   </div>
 </div>
 
 <div class="section" id="s7">
-  <div class="section-title"><span class="num">7</span> 误差分析</div>
+  <div class="section-title"><span class="num">8</span> 真实航线横向偏差 (CTE)、航向误差与到点距离</div>
   <div class="chart-box">
     <div id="chart-cte" style="height:330px;"></div>
     <div class="chart-guide">
-      📐 CTE (Cross Track Error) = USV偏离理想航线的垂直距离(m)。正值=偏右，负值=偏左。
-      目标: &lt;0.1m(优秀), &lt;0.3m(良好), &lt;0.5m(一般), &gt;0.5m(较差)。
-      持续同一方向→系统性偏移，高频振荡→控制器需调优。
+      📐 实线=相对原始规划航线 W<sub>k-1</sub>→W<sub>k</sub> 的真实几何横向偏差（正=偏右，负=偏左）；出弯后迅速归零说明无偏航外飘。
     </div>
   </div>
   <div class="chart-box">
-    <div id="chart-he" style="height:330px;"></div>
-    <div class="chart-guide">
-      🧭 航向误差 = USV实际航向与目标航向的差值(°)。
-      转向时出现大峰值正常，关键看直道段的稳态误差。
-      持续大误差+低CTE → USV“蟹行”，磁力计偏差或流角问题。
-    </div>
+    <div id="chart-he" style="height:310px;"></div>
   </div>
   <div class="chart-box">
-    <div id="chart-distance" style="height:300px;"></div>
-    <div class="chart-guide">
-      📏 到达距离 = USV与当前目标航点的实时距离(m)。
-      绿色虚线=1.5m到达阈值，低于此线表示成功到达。
-      距离不降反升→驶过航点未检测或被避障推离。航点切换时距离跳变属正常。
-    </div>
-  </div>
-  <div class="reading-guide">
-    <strong>📊 误差分析综合指南：</strong><br>
-    三张图表分别展示横向偏差(CTE)、航向误差和到达距离，它们共同反映导航精度。<br>
-    • <strong>CTE+HE同时大</strong>：控制器整体性能不佳—检查MPC权重或约束<br>
-    • <strong>CTE小但HE大</strong>：USV在航线上但方向不对—磁力计校准或flow angle问题<br>
-    • <strong>某航点误差突增</strong>：结合距离图确认是否因避障或环境干扰引起
+    <div id="chart-distance" style="height:290px;"></div>
   </div>
 </div>
 
-<div class="section" id="s8">
-  <div class="section-title"><span class="num">8</span> 控制指令</div>
-  <div class="chart-box">
-    <div id="chart-control" style="height:380px;"></div>
-  </div>
-  <div class="reading-guide">
-    <strong>⚙️ 角速度控制阅读指南：</strong>ω_cmd=控制器输出的角速度指令(rad/s)，ω_act=传感器测量的实际角速度。<br>
-    如日志包含 RL 字段，控制图会同时显示 raw / RL / final 三路命令，优先看是谁在主导转向。<br>
-    <strong>分析方法：</strong><br>
-    • <strong>cmd与act差距</strong>：反映舶机/推进器响应延迟(tau值)，差距越小跟踪越好<br>
-    • <strong>高频振荡</strong>：cmd快速正负交替 → 控制器过激，需降低MPC权重或增大预测步长<br>
-    • <strong>零交叉频率</strong>：“左右摆动”现象，频率&gt;0.5Hz需要调参<br>
-    • <strong>饱和(持续最大值)</strong>：推进力不足以满足控制需求，可能需要降低目标速度
-  </div>
-</div>
-
-<div class="section" id="s9">
-  <div class="section-title"><span class="num">9</span> 高级分析</div>
-  <div class="chart-box">
-    <div id="chart-mpc" style="height:280px;"></div>
-    <div class="chart-guide">
-      ⏱ MPC求解时间 = 模型预测控制器每步的计算耗时(ms)。
-      红色虚线=50ms警戒线。&lt;15ms=优秀，15-30ms=正常，30-50ms=偏高，&gt;50ms=过高(可能影响10Hz控制循环)。
-      突增尖峰通常对应航点切换或大角度转向。
-    </div>
+<div class="section" id="s9" style="display:none;">
+  <div class="section-title"><span class="num">9</span> 传统控制器 / 链路附加指标 (MPC · AMPC · WiFi)</div>
+  <div class="chart-box" id="chart-mpc-box" style="display:none;">
+    <div id="chart-mpc" style="height:260px;"></div>
   </div>
   <div class="chart-box" id="chart-tau-box" style="display:none;">
-    <div id="chart-tau" style="height:320px;"></div>
-    <div class="chart-guide">
-      🔄 τ(tau) = 推进器动力学时间常数(s)，反映舶机/推进响应速度。
-      实线=控制器实际使用值，虚线=AMPC在线估计值。两者收敛说明辨识成功。
-      τ过小→控制过激(振荡)，τ过大→控制迟钝(轨迹偏差大)。
-    </div>
+    <div id="chart-tau" style="height:280px;"></div>
   </div>
   <div class="chart-box" id="chart-wifi-box" style="display:none;">
-    <div id="chart-wifi" style="height:280px;"></div>
-    <div class="chart-guide">
-      📶 WiFi RSSI = 与岸基站点的无线信号强度(dBm)。
-      绿线(-50dBm)=优秀，橙线(-70dBm)=弱信号警告。
-      信号弱时遥控/参数更新可能延迟，影响编队同步。信号与距离有关。
-    </div>
-  </div>
-  <div class="reading-guide">
-    <strong>🔬 高级分析综合指南：</strong><br>
-    • <strong>MPC慢+CTE大</strong>：控制器计算不及时，导致轨迹偏差。可减少预测步数或简化约束<br>
-    • <strong>τ不收敛</strong>：AMPC辨识未完成，可能数据不足或环境变化太快<br>
-    • <strong>WiFi信号与航点</strong>：结合轨迹图，某些位置信号差可能影响编队协同
+    <div id="chart-wifi" style="height:260px;"></div>
   </div>
 </div>
 
 <div class="section" id="s10">
-  <div class="section-title"><span class="num">10</span> 每航点统计</div>
+  <div class="section-title"><span class="num">9</span> 分航点导航明细统计</div>
   <div id="per-goal-area"></div>
-  <div class="reading-guide">
-    <strong>📋 每航点统计阅读指南：</strong>按目标航点(G1,G2...)分别统计导航性能。<br>
-    <strong>分析方法：</strong><br>
-    • <strong>最近距离</strong>：✅=确认到达(distance≤1.5m)，☑️=偏离到达(distance>1.5m，偏离检测判定已到达)，❌=未到达<br>
-    • <strong>时长</strong>：各航点耗时，异常长的航点可能存在问题(逆流、避障、GPS跳变)<br>
-    • <strong>均CTE</strong>：与总均CTE对比，找出最差航段 → 定位具体问题区域<br>
-    • <strong>GUIDED%</strong>：低于80%说明该段频繁退出自动导航<br>
-    <strong>对比思路：</strong>多USV在相同航点的表现差异，可发现是环境问题(所有USV都差)还是单船问题(只有某USV差)。
-  </div>
 </div>
 
 </div>
@@ -1293,43 +1395,138 @@ function buildReplayToggle() {{
   }});
 }}
 
+let sortState = {{ key:'idx', asc:true }};
+
 function refreshAll() {{
-  buildSummaryCards(); buildCompareTable(); drawRadar(); drawTrajectory(); drawVelocity();
+  buildKpiStrip(); buildSummaryCards(); buildCompareTable(); drawRadar();
+  drawTrajectory(); drawNeighborDist(); drawVelocity();
   drawCTE(); drawHE(); drawDistance(); drawControl(); drawMPC(); drawTau(); drawWifi();
+  updateLegacySectionVisibility();
   buildPerGoal(); updateReplayInfo(); renderReplayFrame();
 }}
 
-// ═══ 对比表 ═══
+function buildKpiStrip() {{
+  const el=document.getElementById('kpi-strip');
+  if(!el) return;
+  const active=getActive();
+  if(!active.length) {{ el.innerHTML=''; return; }}
+  const totGoals=active.reduce((s,u)=>s+(u.targets_n||0),0);
+  const okGoals=active.reduce((s,u)=>s+(u.goals_ok||0),0);
+  const goalPct=totGoals>0?(okGoals/totGoals*100):100;
+  const avgScore=active.reduce((s,u)=>s+u.score,0)/active.length;
+  const avgGrade=avgScore>=85?'A+':avgScore>=75?'A':avgScore>=62?'B':avgScore>=45?'C':'D';
+
+  const nbShips=active.filter(u=>u.min_nb!==null&&u.min_nb!==undefined);
+  let minNbHtml='单船无会遇', minNbSub='全程独立航行', minNbColor='#69F0AE';
+  if(nbShips.length) {{
+    const worst=nbShips.reduce((a,b)=>a.min_nb<=b.min_nb?a:b);
+    minNbHtml=worst.min_nb.toFixed(2)+' m';
+    minNbSub=worst.id+' ↔ '+(worst.min_nb_peer||'邻船')+(worst.min_nb_t!==null?' (t='+worst.min_nb_t+'s)':'');
+    minNbColor=worst.min_nb>=0.75?'#69F0AE':worst.min_nb>=0.45?'#FFD740':'#FF5252';
+  }}
+
+  const ctes=active.filter(u=>u.cte_avg!==null).map(u=>u.cte_avg);
+  const avgCte=ctes.length?(ctes.reduce((a,b)=>a+b,0)/ctes.length):0;
+  const maxOv=Math.max(0,...active.map(u=>u.max_ov||0));
+  const avgSpd=active.reduce((s,u)=>s+(u.speed_avg||0),0)/active.length;
+  const rMeds=active.filter(u=>u.r_med!==null).map(u=>u.r_med);
+  const avgR=rMeds.length?(rMeds.reduce((a,b)=>a+b,0)/rMeds.length):null;
+
+  el.innerHTML=`
+    <div class="kpi-card">
+      <div class="kpi-label">团队综合评级</div>
+      <div class="kpi-val">${{avgGrade}} <span style="font-size:1rem;font-weight:600;color:var(--text)">(${{avgScore.toFixed(1)}}分)</span></div>
+      <div class="kpi-sub">${{active.length}} 艘活跃船只八维均值</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">航点达成率</div>
+      <div class="kpi-val" style="color:${{goalPct>=99.9?'#69F0AE':'#FFD740'}}">${{okGoals}} / ${{totGoals}} <span style="font-size:0.95rem">(${{goalPct.toFixed(0)}}%)</span></div>
+      <div class="kpi-sub">含中途切换与终点精准到达</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">全场最小邻船质心距</div>
+      <div class="kpi-val" style="color:${{minNbColor}}">${{minNbHtml}}</div>
+      <div class="kpi-sub">${{minNbSub}}</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">纯航线贴合 |CTE|</div>
+      <div class="kpi-val" style="color:${{avgCte<=0.20?'#69F0AE':avgCte<=0.40?'#82B1FF':'#FFD740'}}">${{avgCte.toFixed(3)}} m</div>
+      <div class="kpi-sub">排除近距避让段的原始航线偏差</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">最大出弯外飘量</div>
+      <div class="kpi-val" style="color:${{maxOv<=0.20?'#69F0AE':maxOv<=0.45?'#FFD740':'#FF5252'}}">${{maxOv.toFixed(2)}} m</div>
+      <div class="kpi-sub">衡量转弯后是否冲出原始航线</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">巡航均速 · 中位转弯半径</div>
+      <div class="kpi-val" style="color:var(--accent2)">${{avgSpd.toFixed(2)}} <span style="font-size:0.9rem">m/s</span> · ${{avgR!==null?avgR.toFixed(2)+'m':'—'}}</div>
+      <div class="kpi-sub">GUIDED 实测均速与弯道曲率半径</div>
+    </div>`;
+}}
+
+function sortCompareBy(key) {{
+  initAudio(); sfxClick();
+  if(sortState.key===key) sortState.asc=!sortState.asc;
+  else {{ sortState.key=key; sortState.asc=(key==='id'||key==='cte_avg'||key==='max_ov'||key==='he_avg'); }}
+  buildCompareTable();
+}}
+
+// ═══ 对比表 (支持点击表头排序) ═══
 function buildCompareTable() {{
   const el=document.getElementById('compare-area');
   const active=USV_LIST.filter(u=>activeUSVs.has(u.idx));
   if(!active.length) {{ el.innerHTML='<p style="color:var(--text2);text-align:center">请选择至少一个USV</p>'; return; }}
-  const bestCte=Math.min(...active.map(u=>u.cte_avg||999));
-  const bestHe=Math.min(...active.map(u=>u.he_avg||999));
+  const hasMpc=active.some(u=>u.mpc_avg!==null);
+  const hasWifi=active.some(u=>u.wifi_avg!==null);
+  const sorted=[...active].sort((a,b)=>{{
+    const k=sortState.key;
+    let va=a[k], vb=b[k];
+    if(va===null||va===undefined) va=sortState.asc?1e9:-1e9;
+    if(vb===null||vb===undefined) vb=sortState.asc?1e9:-1e9;
+    if(typeof va==='string') return sortState.asc?va.localeCompare(vb):vb.localeCompare(va);
+    return sortState.asc?(va-vb):(vb-va);
+  }});
+  const bestCte=Math.min(...active.map(u=>u.cte_avg!==null?u.cte_avg:999));
+  const bestNb=Math.max(...active.map(u=>u.min_nb!==null?u.min_nb:-1));
   const bestScore=Math.max(...active.map(u=>u.score));
-  let rows=active.map(u=>{{
+  const arrow=(k)=>sortState.key===k?(sortState.asc?' ▲':' ▼'):'';
+
+  let rows=sorted.map(u=>{{
     const bc=u.cte_avg!==null&&u.cte_avg===bestCte&&active.length>1;
-    const bh=u.he_avg!==null&&u.he_avg===bestHe&&active.length>1;
     const bs=u.score===bestScore&&active.length>1;
+    const bnb=u.min_nb!==null&&u.min_nb===bestNb&&active.length>1;
+    const nbCls=u.min_nb===null?'':(u.min_nb<0.35?'danger':u.min_nb<0.55?'warn':(bnb?'best':''));
+    const nbTxt=u.min_nb!==null?`${{u.min_nb.toFixed(2)}}m <span style="font-size:0.7rem;color:var(--text2)">(${{u.min_nb_peer||'-'}})</span>`:'—';
+    const ovCls=u.max_ov>0.45?'warn':(u.max_ov<=0.18?'best':'');
     return `<tr>
-      <td><span style="color:${{u.color}};font-weight:700">●</span> ${{u.id}}</td>
-      <td style="max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${{u.csv}}">${{u.csv||'-'}}</td>
-      <td>${{u.version}}</td>
-      <td style="color:${{u.color}}">${{u.grade}} (${{u.score}}${{bs?' 🏆':''}})</td>
-      <td>${{u.duration}}s</td><td>${{u.records}}</td><td>${{u.targets_n}}</td>
-      <td>${{u.guided_pct}}%</td>
-      <td class="${{bc?'best':''}}">${{u.cte_avg!==null?u.cte_avg.toFixed(3)+'m':'N/A'}}</td>
-      <td class="${{bh?'best':''}}">${{u.he_avg!==null?u.he_avg.toFixed(1)+'°':'N/A'}}</td>
-      <td>${{u.speed_avg}} m/s</td>
-      <td>${{u.mpc_avg!==null?u.mpc_avg+'ms':'—'}}</td>
-      <td>${{u.wifi_avg!==null?u.wifi_avg+'dBm':'—'}}</td></tr>`;
+      <td><span style="color:${{u.color}};font-weight:700">●</span> <strong>${{u.id}}</strong></td>
+      <td style="color:${{u.color}};font-weight:700">${{u.grade}} (${{u.score.toFixed(1)}}${{bs?' 🏆':''}})</td>
+      <td>${{u.goals_ok}}/${{u.targets_n}}</td>
+      <td class="${{nbCls}}">${{nbTxt}}</td>
+      <td class="${{bc?'best':''}}">${{u.cte_avg!==null?u.cte_avg.toFixed(3)+'m':'N/A'}} <span style="font-size:0.7rem;color:var(--text2)">/ ${{u.cte_p90!==null&&u.cte_p90!==undefined?u.cte_p90.toFixed(2)+'m':'-'}}</span></td>
+      <td class="${{ovCls}}">${{u.max_ov!==undefined?u.max_ov.toFixed(2)+'m':'—'}}</td>
+      <td>${{u.r_med!==null?u.r_med.toFixed(2)+'m':'—'}} <span style="font-size:0.7rem;color:var(--text2)">(P10:${{u.r_p10!==null?u.r_p10.toFixed(2)+'m':'-'}})</span></td>
+      <td>${{u.he_avg!==null?u.he_avg.toFixed(1)+'°':'N/A'}}</td>
+      <td>${{u.speed_avg.toFixed(2)}} m/s</td>
+      <td>${{u.duration}}s <span style="font-size:0.7rem;color:var(--text2)">(G:${{u.guided_pct}}%)</span></td>
+      ${{hasMpc?`<td>${{u.mpc_avg!==null?u.mpc_avg+'ms':'—'}}</td>`:''}}
+      ${{hasWifi?`<td>${{u.wifi_avg!==null?u.wifi_avg+'dBm':'—'}}</td>`:''}}</tr>`;
   }}).join('');
   el.innerHTML=`<div class="chart-box" style="overflow-x:auto">
     <table class="compare-table"><thead><tr>
-      <th>USV</th><th>文件</th><th>版本</th><th>评分</th>
-      <th>时长</th><th>数据</th><th>航点</th><th>GUIDED%</th>
-      <th>均CTE</th><th>均航向误差</th><th>均速</th>
-      <th>MPC</th><th>WiFi</th>
+      <th onclick="sortCompareBy('id')">USV${{arrow('id')}}</th>
+      <th onclick="sortCompareBy('score')">综合评级${{arrow('score')}}</th>
+      <th onclick="sortCompareBy('goals_ok')">航点完成${{arrow('goals_ok')}}</th>
+      <th onclick="sortCompareBy('min_nb')">最小邻船距${{arrow('min_nb')}}</th>
+      <th onclick="sortCompareBy('cte_avg')">航线 |CTE| (均/P90)${{arrow('cte_avg')}}</th>
+      <th onclick="sortCompareBy('max_ov')">出弯外飘${{arrow('max_ov')}}</th>
+      <th onclick="sortCompareBy('r_med')">转弯半径 R${{arrow('r_med')}}</th>
+      <th onclick="sortCompareBy('he_avg')">直道航向差${{arrow('he_avg')}}</th>
+      <th onclick="sortCompareBy('speed_avg')">GUIDED均速${{arrow('speed_avg')}}</th>
+      <th onclick="sortCompareBy('duration')">时长${{arrow('duration')}}</th>
+      ${{hasMpc?`<th onclick="sortCompareBy('mpc_avg')">MPC${{arrow('mpc_avg')}}</th>`:''}}
+      ${{hasWifi?`<th onclick="sortCompareBy('wifi_avg')">WiFi${{arrow('wifi_avg')}}</th>`:''}}
     </tr></thead><tbody>${{rows}}</tbody></table></div>`;
 }}
 
@@ -1339,26 +1536,37 @@ function emptyTrace() {{ return [{{x:[],y:[]}}]; }}
 
 function drawRadar() {{
   const el=document.getElementById('radar-chart');
+  const bd=document.getElementById('radar-breakdown');
   if(!el) return;
   const active=getActive();
-  if(!active.length) {{ Plotly.purge(el); return; }}
-  const cats=['路径贴线','直线走线','到点能力','切换回转','航向控制','行为平滑','航行速度','安全间距(参考)','脱离能力'];
+  if(!active.length) {{ Plotly.purge(el); if(bd) bd.innerHTML=''; return; }}
+  const dims=[
+    ['tracking','航线贴合 (22%)'],
+    ['safety','安全避让 (20%)'],
+    ['roundness','转向圆润 (16%)'],
+    ['progress','航点达成 (16%)'],
+    ['efficiency','绕行效率 (10%)'],
+    ['heading','航向稳定 (6%)'],
+    ['speed','巡航效率 (5%)'],
+    ['smooth','控制平顺 (5%)'],
+  ];
+  const cats=dims.map(d=>d[1]);
   const traces=[];
   active.forEach(u=>{{
     const sc=ALL_SUM[u.idx];
     if(!sc||!sc.scoring||!sc.scoring.radar) return;
     const r=sc.scoring.radar;
-    const vals=[r.tracking,r.straight||0,r.progress,r.transient||0,r.heading,r.smooth,r.speed,r.safety,r.disengage||0];
+    const vals=dims.map(d=>r[d[0]]!==undefined?r[d[0]]:0);
     traces.push({{
       type:'scatterpolar',
       r:[...vals, vals[0]],
       theta:[...cats, cats[0]],
       fill:'toself',
-      fillcolor:(function(h){{const r=parseInt(h.slice(1,3),16),g=parseInt(h.slice(3,5),16),b=parseInt(h.slice(5,7),16);return 'rgba('+r+','+g+','+b+',0.12)';}})(u.color),
+      fillcolor:(function(h){{const rv=parseInt(h.slice(1,3),16),gv=parseInt(h.slice(3,5),16),bv=parseInt(h.slice(5,7),16);return 'rgba('+rv+','+gv+','+bv+',0.14)';}})(u.color),
       line:{{color:u.color, width:2.5}},
-      marker:{{size:5, color:u.color}},
-      name:u.id+' ['+sc.scoring.grade+' '+sc.scoring.total.toFixed(0)+']',
-      hovertemplate:'%{{theta}}: %{{r:.1f}}分<extra>'+u.id+'</extra>',
+      marker:{{size:6, color:u.color}},
+      name:u.id+' ['+sc.scoring.grade+' '+sc.scoring.total.toFixed(1)+']',
+      hovertemplate:'%{{theta}}: <b>%{{r:.1f}}</b> 分<extra>'+u.id+'</extra>',
     }});
   }});
   if(!traces.length) {{ Plotly.purge(el); return; }}
@@ -1366,35 +1574,63 @@ function drawRadar() {{
     polar:{{
       radialaxis:{{
         visible:true, range:[0,100], tickvals:[20,40,60,80,100],
-        tickfont:{{size:10,color:'#888'}},
-        gridcolor:'rgba(255,255,255,0.08)',
+        tickfont:{{size:10,color:'#90A4AE'}},
+        gridcolor:'rgba(255,255,255,0.09)',
       }},
       angularaxis:{{
-        tickfont:{{size:12,color:'#B0BEC5'}},
+        tickfont:{{size:12,color:'#ECEFF1'}},
         gridcolor:'rgba(255,255,255,0.1)',
       }},
       bgcolor:'transparent',
     }},
     showlegend:true,
-    legend:{{font:{{size:11,color:'#B0BEC5'}}, x:1.05, y:1}},
+    legend:{{font:{{size:11,color:'#CFD8DC'}}, orientation:'h', x:0.5, xanchor:'center', y:-0.08}},
     paper_bgcolor:'transparent', plot_bgcolor:'transparent',
-    margin:{{l:60,r:80,t:40,b:40}},
-    font:{{color:'#B0BEC5'}},
+    margin:{{l:65,r:65,t:30,b:55}},
+    font:{{color:'#CFD8DC'}},
   }};
   Plotly.react(el,traces,layout,{{responsive:true,displayModeBar:false}});
+
+  if(bd) {{
+    let ths=active.map(u=>`<th style="color:${{u.color}}">${{u.id}}</th>`).join('');
+    let trs=dims.map(d=>{{
+      let tds=active.map(u=>{{
+        const rv=(ALL_SUM[u.idx]&&ALL_SUM[u.idx].scoring&&ALL_SUM[u.idx].scoring.radar)?ALL_SUM[u.idx].scoring.radar[d[0]]:0;
+        const c=rv>=85?'#69F0AE':rv>=68?'#E0E0E0':rv>=45?'#FFD740':'#FF5252';
+        return `<td style="color:${{c}};font-weight:600">${{rv.toFixed(1)}}</td>`;
+      }}).join('');
+      return `<tr><td style="text-align:left;color:var(--text2)">${{d[1]}}</td>${{tds}}</tr>`;
+    }}).join('');
+    bd.innerHTML=`<div style="overflow-x:auto"><table class="compare-table" style="font-size:0.76rem">
+      <thead><tr><th style="text-align:left">评估维度 (权重)</th>${{ths}}</tr></thead>
+      <tbody>${{trs}}</tbody></table></div>`;
+  }}
 }}
 
 function drawTrajectory() {{
   const traces=[];
   getActive().forEach(u=>{{
     const ts=ALL_TS[u.idx]; if(!ts) return;
+    // 绘制原始规划航线基准折线
+    if(ts.planned_routes) {{
+      Object.keys(ts.planned_routes).forEach((tk,ti)=>{{
+        const pts=ts.planned_routes[tk];
+        if(!pts||pts.length<2) return;
+        traces.push({{
+          x:pts.map(p=>p[0]), y:pts.map(p=>p[1]), mode:'lines',
+          name:u.id+(Object.keys(ts.planned_routes).length>1?' 规划T'+(ti+1):' 规划航线'),
+          line:{{color:u.color,width:1.3,dash:'dashdot'}}, opacity:0.42,
+          hoverinfo:'skip'
+        }});
+      }});
+    }}
     let gx=[],gy=[],hx=[],hy=[];
     for(let i=0;i<ts.pose_x.length;i++) {{
       if(ts.flight_mode[i]==='GUIDED') {{ gx.push(ts.pose_x[i]);gy.push(ts.pose_y[i]); }}
       else {{ hx.push(ts.pose_x[i]);hy.push(ts.pose_y[i]); }}
     }}
-    traces.push({{x:gx,y:gy,mode:'lines',name:u.id+' GUIDED',
-      line:{{color:u.color,width:2}},hovertemplate:u.id+' X:%{{x:.2f}} Y:%{{y:.2f}}'}});
+    traces.push({{x:gx,y:gy,mode:'lines',name:u.id+' 实际航迹',
+      line:{{color:u.color,width:2.3}},hovertemplate:u.id+' X:%{{x:.2f}}m Y:%{{y:.2f}}m'}});
     if(hx.length) traces.push({{x:hx,y:hy,mode:'markers',name:u.id+' HOLD',
       marker:{{color:u.color,size:3,opacity:0.3}},showlegend:false}});
     traces.push({{x:[ts.pose_x[0]],y:[ts.pose_y[0]],mode:'markers',name:u.id+' Start',
@@ -1408,23 +1644,69 @@ function drawTrajectory() {{
       marker:{{color:u.color,size:13,symbol:'star',line:{{width:1,color:'#fff'}}}},
       text:tg.map(t=>u.id+' G'+t.id),textposition:'top center',
       textfont:{{color:u.color,size:8}},showlegend:false}});
-    // v16: 邻居轨迹 (虚线叠加)
+    // v16: 场内未勾选/静止邻船位置或轨迹
     if(ts.neighbors) {{
       Object.keys(ts.neighbors).forEach(nid=>{{
         const nb=ts.neighbors[nid];
-        if(!nb||nb.x.length<5) return;
-        // 检查此邻居是否已经作为独立USV被绘制 (避免重复)
+        if(!nb||nb.x.length<3) return;
         const alreadyActive=getActive().some(a=>a.id===nid);
         if(alreadyActive) return;
-        traces.push({{x:nb.x,y:nb.y,mode:'lines',name:nid+' (neighbor)',
-          line:{{color:u.color,width:1,dash:'dot'}},opacity:0.4,showlegend:true}});
+        const dxSpan=Math.max(...nb.x)-Math.min(...nb.x), dySpan=Math.max(...nb.y)-Math.min(...nb.y);
+        if(Math.hypot(dxSpan,dySpan)<0.45) {{
+          traces.push({{x:[nb.x[0]],y:[nb.y[0]],mode:'markers+text',name:nid+' (静止船)',
+            marker:{{color:'#90A4AE',size:11,symbol:'diamond',line:{{width:1.5,color:'#CFD8DC'}}}},
+            text:[nid+'(静)'],textposition:'bottom center',textfont:{{color:'#B0BEC5',size:9}}}});
+        }} else {{
+          traces.push({{x:nb.x,y:nb.y,mode:'lines',name:nid+' (邻船)',
+            line:{{color:'#90A4AE',width:1.2,dash:'dot'}},opacity:0.5,showlegend:true}});
+        }}
       }});
     }}
   }});
   Plotly.react('chart-traj',traces.length?traces:emptyTrace(),{{
-    ...darkLayout,title:'航行轨迹对比',
+    ...darkLayout,title:'XY 实际航迹 vs 原始规划航线基准',
     xaxis:{{...darkLayout.xaxis,title:'X (m)',scaleanchor:'y'}},
     yaxis:{{...darkLayout.yaxis,title:'Y (m)'}},
+  }},cfg);
+}}
+
+function drawNeighborDist() {{
+  const sec=document.getElementById('s5b');
+  const navLink=document.getElementById('nav-nb-link');
+  const active=getActive();
+  const traces=[];
+  active.forEach(u=>{{
+    const ts=ALL_TS[u.idx];
+    if(!ts||!ts.min_nb_dist||!ts.min_nb_dist.some(v=>v!==null)) return;
+    traces.push({{
+      x:ts.time, y:ts.min_nb_dist, customdata:ts.min_nb_id||[],
+      name:u.id+' 最近邻船距', mode:'lines',
+      line:{{color:u.color,width:1.7}},
+      hovertemplate:u.id+' ↔ %{{customdata}}: <b>%{{y:.2f}}m</b> (t=%{{x:.1f}}s)<extra></extra>'
+    }});
+    const saf=ALL_SUM[u.idx]&&ALL_SUM[u.idx].safety;
+    if(saf&&saf.min_dist!==null&&saf.time_s!==null) {{
+      traces.push({{
+        x:[saf.time_s], y:[saf.min_dist], mode:'markers+text',
+        name:u.id+' CPA', showlegend:false,
+        marker:{{color:saf.min_dist<0.45?'#FF5252':'#FFD740',size:9,symbol:'diamond',line:{{width:1,color:'#fff'}}}},
+        text:[saf.min_dist.toFixed(2)+'m('+saf.peer_id+')'], textposition:'top center',
+        textfont:{{size:9,color:u.color}}, hoverinfo:'skip'
+      }});
+    }}
+  }});
+  const show=traces.length>0;
+  if(sec) sec.style.display=show?'block':'none';
+  if(navLink) navLink.style.display=show?'inline-block':'none';
+  if(!show) return;
+  Plotly.react('chart-nb-dist',traces,{{
+    ...darkLayout, title:'最近邻船质心距随时间变化 (CPA 监控)',
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},
+    yaxis:{{...darkLayout.yaxis,title:'Min Neighbor Distance (m)',rangemode:'tozero'}},
+    shapes:[
+      {{type:'line',x0:0,x1:1,xref:'paper',y0:0.80,y1:0.80,line:{{color:'#69F0AE',width:1.2,dash:'dash'}}}},
+      {{type:'line',x0:0,x1:1,xref:'paper',y0:0.35,y1:0.35,line:{{color:'#FF5252',width:1.5,dash:'dot'}}}},
+    ],
   }},cfg);
 }}
 
@@ -1446,12 +1728,17 @@ function drawCTE() {{
   const traces=[];
   getActive().forEach(u=>{{
     const ts=ALL_TS[u.idx]; if(!ts) return;
-    traces.push({{x:ts.time,y:ts.cte,name:u.id,line:{{color:u.color,width:1.2}},
+    const yCte=ts.true_cte||ts.cte;
+    traces.push({{x:ts.time,y:yCte,name:u.id+' 规划航线CTE',line:{{color:u.color,width:1.4}},
       fill:'tozeroy',fillcolor:u.color+'15'}});
+    if(ts.true_cte&&ts.cte) {{
+      traces.push({{x:ts.time,y:ts.cte,name:u.id+' 局部跟踪器CTE',line:{{color:u.color,width:1,dash:'dot'}},
+        opacity:0.45,visible:'legendonly'}});
+    }}
   }});
   Plotly.react('chart-cte',traces.length?traces:emptyTrace(),{{
-    ...darkLayout,title:'横向偏差 CTE 对比',
-    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'CTE (m)'}},
+    ...darkLayout,title:'真实规划航线横向偏差 CTE (m)',
+    xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'True Route CTE (m)'}},
   }},cfg);
 }}
 
@@ -1487,17 +1774,32 @@ function drawControl() {{
 }}
 
 function drawMPC() {{
+  const active=getActive();
+  const hasMpc=active.some(u=>ALL_TS[u.idx]&&ALL_TS[u.idx].mpc_time&&ALL_TS[u.idx].mpc_time.some(v=>v>0.05));
+  const box=document.getElementById('chart-mpc-box');
+  if(box) box.style.display=hasMpc?'block':'none';
+  if(!hasMpc) return;
   const traces=[];
-  getActive().forEach(u=>{{
+  active.forEach(u=>{{
     const ts=ALL_TS[u.idx]; if(!ts||!ts.mpc_time) return;
     traces.push({{x:ts.time,y:ts.mpc_time,name:u.id,line:{{color:u.color,width:1.2}}}});
   }});
-  Plotly.react('chart-mpc',traces.length?traces:emptyTrace(),{{
+  Plotly.react('chart-mpc',traces,{{
     ...darkLayout,title:'MPC 求解时间',
     xaxis:{{...darkLayout.xaxis,title:'Time (s)'}},yaxis:{{...darkLayout.yaxis,title:'Time (ms)'}},
     shapes:[{{type:'line',x0:0,x1:1,xref:'paper',y0:50,y1:50,
       line:{{color:'#EF5350',width:1.5,dash:'dash'}}}}],
   }},cfg);
+}}
+
+function updateLegacySectionVisibility() {{
+  const s9=document.getElementById('s9');
+  if(!s9) return;
+  const m=document.getElementById('chart-mpc-box');
+  const t=document.getElementById('chart-tau-box');
+  const w=document.getElementById('chart-wifi-box');
+  const anyVisible=[m,t,w].some(b=>b&&b.style.display!=='none');
+  s9.style.display=anyVisible?'block':'none';
 }}
 
 function drawTau() {{
@@ -1549,9 +1851,11 @@ function buildPerGoal() {{
     let rows=pg.map(g=>{{
       const arrSt=g.arrival||'unknown';
       const arr=arrSt==='arrived'||arrSt==='passed'?'✅':arrSt==='diverged'?'☑️':'❌';
+      const detTxt=(g.detour&&g.detour>0)?g.detour.toFixed(2)+'×':'—';
       return `<tr><td>G${{g.id}}</td><td>${{g.duration.toFixed(1)}}s</td>
         <td>${{arr}} ${{g.min_dist!==null?g.min_dist.toFixed(2)+'m':'N/A'}}</td>
         <td>${{g.avg_cte!==null?g.avg_cte.toFixed(3)+'m':'N/A'}}</td>
+        <td>${{detTxt}}</td>
         <td>${{g.avg_he!==null?g.avg_he.toFixed(1)+'°':'N/A'}}</td>
         <td>${{g.avg_speed!==null?g.avg_speed.toFixed(3)+' m/s':'N/A'}}</td>
         <td>${{g.guided_pct.toFixed(0)}}%</td></tr>`;
@@ -1559,50 +1863,51 @@ function buildPerGoal() {{
     html+=`<div class="chart-box">
       <h4 style="color:${{u.color}};margin-bottom:6px">● ${{u.id}}</h4>
       <table class="compare-table"><thead><tr>
-        <th>航点</th><th>时长</th><th>最近距离</th><th>均CTE</th><th>均航向误差</th><th>均速</th><th>GUIDED%</th>
+        <th>航点</th><th>时长</th><th>最近距离</th><th>均CTE</th><th>绕行比</th><th>均航向差</th><th>均速</th><th>GUIDED%</th>
       </tr></thead><tbody>${{rows}}</tbody></table></div>`;
   }});
   el.innerHTML=html;
 }}
 
-// ═══ AI 分析 + 距离图表 ═══
+// ═══ 智能诊断卡片 + 距离图表 ═══
 function buildSummaryCards() {{
   const active=getActive();
   const el=document.getElementById('ai-insights');
   if(!el) return;
   if(!active.length) {{ el.innerHTML=''; return; }}
-  let html='<div class="reading-guide" style="margin-bottom:14px">';
-  html+='<strong>🤖 AI 分析摘要</strong><br>';
+  let html='<div class="insight-grid">';
   active.forEach(u=>{{
     const sum=ALL_SUM[u.idx]; if(!sum) return;
     const sc=sum.scoring;
-    let ins=[];
-    if(sum.cte&&sum.cte.avg!==null) {{
-      if(sum.cte.avg<0.1) ins.push('✅CTE优秀('+sum.cte.avg.toFixed(3)+'m)');
-      else if(sum.cte.avg<0.3) ins.push('CTE良好('+sum.cte.avg.toFixed(3)+'m)');
-      else ins.push('⚠️CTE偏高('+sum.cte.avg.toFixed(3)+'m)');
+    let tags=[];
+    tags.push(`<span class="itag ${{u.goals_ok===u.targets_n?'ok':'warn'}}">🎯 航点 ${{u.goals_ok}}/${{u.targets_n}}</span>`);
+    if(sum.safety&&sum.safety.min_dist!==null&&sum.safety.min_dist!==undefined) {{
+      const md=sum.safety.min_dist;
+      const cls=md>=0.75?'ok':md>=0.42?'warn':'err';
+      tags.push(`<span class="itag ${{cls}}">🛡️ 最小距 ${{md.toFixed(2)}}m (${{sum.safety.peer_id}})</span>`);
     }}
-    if(sum.heading_error&&sum.heading_error.avg!==null) {{
-      if(sum.heading_error.avg>20) ins.push('⚠️航向误差大('+sum.heading_error.avg.toFixed(1)+'°)');
-      else if(sum.heading_error.avg>10) ins.push('航向误差一般('+sum.heading_error.avg.toFixed(1)+'°)');
-      else ins.push('✅航向控制良好('+sum.heading_error.avg.toFixed(1)+'°)');
+    if(u.cte_avg!==null) {{
+      const cls=u.cte_avg<=0.18?'ok':u.cte_avg<=0.38?'':'warn';
+      tags.push(`<span class="itag ${{cls}}">📐 贴线 |CTE| ${{u.cte_avg.toFixed(3)}}m</span>`);
     }}
-    if(sum.mpc&&sum.mpc.avg) {{
-      if(sum.mpc.avg>50) ins.push('❌MPC过慢('+sum.mpc.avg.toFixed(1)+'ms)');
-      else if(sum.mpc.avg>30) ins.push('⚠️MPC偏高('+sum.mpc.avg.toFixed(1)+'ms)');
-      else ins.push('MPC正常('+sum.mpc.avg.toFixed(1)+'ms)');
+    if(u.max_ov!==undefined) {{
+      const cls=u.max_ov<=0.20?'ok':u.max_ov<=0.45?'':'warn';
+      tags.push(`<span class="itag ${{cls}}">↪️ 出弯外飘 ${{u.max_ov.toFixed(2)}}m</span>`);
     }}
-    if(sum.rl&&sum.rl.active_count>0) {{
-      ins.push('🤖RL介入'+sum.rl.active_pct.toFixed(1)+'%');
-      ins.push('|Δv|'+sum.rl.mean_abs_delta_vx.toFixed(3)+'m/s');
-      ins.push('|Δω|'+sum.rl.mean_abs_delta_omega.toFixed(3)+'rad/s');
+    if(u.r_med!==null) {{
+      tags.push(`<span class="itag">⭕ 中位R ${{u.r_med.toFixed(2)}}m</span>`);
     }}
-    if(sum.wifi&&sum.wifi.avg) ins.push('WiFi '+sum.wifi.grade+'('+sum.wifi.avg.toFixed(0)+'dBm)');
-    if(sum.velocity) ins.push('均速'+sum.velocity.guided_avg.toFixed(3)+'m/s');
-    if(sum.ampc&&sum.ampc.tau_final) ins.push('τ→'+sum.ampc.tau_final.toFixed(3)+'s');
-    if(sum.osc_freq&&sum.osc_freq>0.3) ins.push('⚠️ω振荡'+sum.osc_freq.toFixed(2)+'Hz');
-    if(sum.distance&&sum.distance.min!==null) ins.push('最近达标距'+sum.distance.min.toFixed(2)+'m'+(sum.distance.min<=1.5?'✅':'❌'));
-    html+='<span style="color:'+u.color+';font-weight:700">● '+u.id+'</span> ['+sc.grade+' '+sc.total.toFixed(0)+'分] '+ins.join(' | ')+'<br>';
+    if(sum.velocity) tags.push(`<span class="itag">🚀 均速 ${{sum.velocity.guided_avg.toFixed(2)}}m/s</span>`);
+    if(sum.rl&&sum.rl.active_count>0) tags.push(`<span class="itag ok">🤖 纯RL ${{sum.rl.active_pct.toFixed(0)}}%</span>`);
+    if(sum.osc_freq&&sum.osc_freq>0.3) tags.push(`<span class="itag warn">⚠️ ω振荡 ${{sum.osc_freq.toFixed(2)}}Hz</span>`);
+
+    html+=`<div class="insight-card" style="border-left-color:${{u.color}}">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="color:${{u.color}};font-weight:700;font-size:0.88rem">● ${{u.id}}</span>
+        <span style="font-weight:800;color:${{u.color}}">${{sc.grade}} · ${{sc.total.toFixed(1)}} 分</span>
+      </div>
+      <div class="insight-tags">${{tags.join('')}}</div>
+    </div>`;
   }});
   html+='</div>';
   el.innerHTML=html;
@@ -1626,7 +1931,7 @@ function drawDistance() {{
 let replayState = {{
   playing:false, speed:1.0, currentTime:0, maxTime:0,
   lastFrame:0, animId:null, goalReachedFlags:{{}}, goalReachedTime:{{}},
-  _prevGoals:{{}}, showGoalLabels:false
+  _prevGoals:{{}}, showGoalLabels:false, showPlannedRoute:true
 }};
 
 // Catmull-Rom 样条插值: 四点 p0,p1,p2,p3, 参数 t∈[0,1]
@@ -1848,7 +2153,13 @@ function replayToggle() {{
 function replayRestart() {{ initAudio(); sfxClick(); replayState.currentTime=0; replayState.goalReachedFlags={{}}; replayState.goalReachedTime={{}}; replayState._prevGoals={{}}; replayState._taskFade={{}}; replayState._globalFadeTime=null; replayState._vp=null; renderReplayFrame(); updateTimeDisplay(); }}
 function replayFaster() {{ initAudio(); sfxSpeed(); replayState.speed=Math.min(16,replayState.speed*2); document.getElementById('speed-display').textContent=replayState.speed+'x'; }}
 function replaySlower() {{ initAudio(); sfxSpeed(); replayState.speed=Math.max(0.25,replayState.speed/2); document.getElementById('speed-display').textContent=replayState.speed+'x'; }}
-function toggleGoalLabels() {{ replayState.showGoalLabels=!replayState.showGoalLabels; const btn=document.getElementById('btn-goal-labels'); btn.style.background=replayState.showGoalLabels?'rgba(100,255,218,0.15)':'rgba(255,255,255,0.08)'; btn.style.color=replayState.showGoalLabels?'#64ffda':'#9e9e9e'; renderReplayFrame(); }}
+function togglePlannedRoute() {{
+  replayState.showPlannedRoute=!replayState.showPlannedRoute;
+  const btn=document.getElementById('btn-plan-route');
+  if(btn) btn.classList.toggle('active',replayState.showPlannedRoute);
+  renderReplayFrame();
+}}
+function toggleGoalLabels() {{ replayState.showGoalLabels=!replayState.showGoalLabels; const btn=document.getElementById('btn-goal-labels'); if(btn) btn.classList.toggle('active',replayState.showGoalLabels); renderReplayFrame(); }}
 function replaySeek(evt) {{
   initAudio(); sfxClick();
   const bar=document.getElementById('replay-progress');
@@ -2143,9 +2454,24 @@ function renderReplayFrame() {{
     let spTaskEnd=sp.t.length-1;
     for(let i=sp.t.length-1;i>=0;i--) {{ if(sp.t[i]<=taskEndTime) {{ spTaskEnd=i; break; }} }}
 
-    // 已走轨迹 — 只显示当前任务段 (baseA=单任务渐隐, fadeInA=新任务淡入)
+    // 原始规划航线基准折线 — 直观对比转弯弧度与航线贴合度
     const curA=baseA*fadeInA;
-    ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=2; ctx.globalAlpha=0.6*curA;
+    if(replayState.showPlannedRoute && ts.planned_routes && ts.planned_routes[String(curTaskIdx)]) {{
+      const pPts=ts.planned_routes[String(curTaskIdx)];
+      if(pPts.length>=2) {{
+        ctx.save();
+        ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=1.3; ctx.globalAlpha=0.32*curA;
+        ctx.setLineDash([8,5]);
+        pPts.forEach((pt,pi)=>{{
+          const[rxp,ryp]=toC(pt[0],pt[1]);
+          if(pi===0) ctx.moveTo(rxp,ryp); else ctx.lineTo(rxp,ryp);
+        }});
+        ctx.stroke(); ctx.restore();
+      }}
+    }}
+
+    // 已走轨迹 — 只显示当前任务段 (baseA=单任务渐隐, fadeInA=新任务淡入)
+    ctx.beginPath(); ctx.strokeStyle=color; ctx.lineWidth=2.3; ctx.globalAlpha=0.72*curA;
     let spIdx=0;
     for(let i=0;i<sp.t.length;i++) {{ if(sp.t[i]<=t) spIdx=i; else break; }}
     for(let i=spTaskStart;i<=spIdx;i++) {{
@@ -2319,7 +2645,7 @@ function renderReplayFrame() {{
       ctx.globalAlpha=1.0;
     }}
   }});
-  // 无独立日志文件的场内邻船/静止船补绘 (如部分船只参与任务时水面静止停泊的其他船)
+  // 无独立日志文件的场内邻船/静止船补绘
   const EXT_COLORS={{'usv_01':'#2196F3','usv_02':'#F44336','usv_03':'#4CAF50','usv_04':'#FF9800','usv_05':'#9C27B0'}};
   for(const nid in extPeerPos) {{
     const pos=extPeerPos[nid];
@@ -2333,16 +2659,68 @@ function renderReplayFrame() {{
     ctx.globalAlpha=1.0;
   }}
 
+  // 实时近距标尺 (< 1.6m): 自动连线活跃船与所有邻船并标注实时间距
+  const liveHulls=[];
+  data.forEach(d=>{{
+    const ts=d.ts;
+    if(t<ts.time[0]-0.5&&findPeerPos(data,d,t)) {{
+      const pp=findPeerPos(data,d,t); if(pp) liveHulls.push({{id:d.usv.id,x:pp.x,y:pp.y}});
+      return;
+    }}
+    if(t>ts.time[ts.time.length-1]+fadeDur&&findPeerPos(data,d,t)) {{
+      const pp=findPeerPos(data,d,t); if(pp) liveHulls.push({{id:d.usv.id,x:pp.x,y:pp.y}});
+      return;
+    }}
+    const pos=sampleSmoothPos(d.sp,t);
+    if(pos) liveHulls.push({{id:d.usv.id,x:pos.x,y:pos.y}});
+  }});
+  for(const nid in extPeerPos) liveHulls.push({{id:nid,x:extPeerPos[nid].x,y:extPeerPos[nid].y}});
+  for(let i=0;i<liveHulls.length;i++) {{
+    for(let j=i+1;j<liveHulls.length;j++) {{
+      const a=liveHulls[i], b=liveHulls[j];
+      const dd=Math.hypot(a.x-b.x,a.y-b.y);
+      if(dd>0.02 && dd<1.60) {{
+        const[ax,ay]=toC(a.x,a.y), [bx,by]=toC(b.x,b.y);
+        const lc=dd>=0.75?'#69F0AE':dd>=0.45?'#FFD740':'#FF5252';
+        ctx.save();
+        ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by);
+        ctx.strokeStyle=lc; ctx.lineWidth=1.6; ctx.setLineDash([3,3]); ctx.globalAlpha=0.85;
+        ctx.stroke(); ctx.setLineDash([]);
+        const mx=(ax+bx)/2, my=(ay+by)/2;
+        ctx.fillStyle='rgba(10,14,23,0.82)';
+        ctx.fillRect(mx-21,my-9,42,15);
+        ctx.fillStyle=lc; ctx.font='bold 10px Inter,system-ui,sans-serif';
+        ctx.textAlign='center'; ctx.fillText(dd.toFixed(2)+'m',mx,my+2);
+        ctx.restore();
+      }}
+    }}
+  }}
+
   // 时间文字
-  ctx.fillStyle='rgba(100,255,218,0.6)';
+  ctx.fillStyle='rgba(100,255,218,0.75)';
   ctx.font='12px Inter,system-ui,sans-serif';
   ctx.textAlign='left';
-  ctx.fillText('t = '+t.toFixed(1)+'s  |  '+replayState.speed+'x',10,20);
+  ctx.fillText('t = '+t.toFixed(1)+'s  |  '+replayState.speed+'x',12,20);
 }}
 
 // ═══ 初始化 ═══
 function init() {{
   buildSelector(); buildReplayToggle(); refreshAll(); renderReplayFrame();
+
+  document.addEventListener('keydown',(ev)=>{{
+    if(ev.target && (ev.target.tagName==='INPUT'||ev.target.tagName==='TEXTAREA')) return;
+    if(ev.code==='Space') {{ ev.preventDefault(); replayToggle(); }}
+    else if(ev.code==='ArrowRight') {{
+      ev.preventDefault();
+      replayState.currentTime=Math.min(replayState.maxTime,replayState.currentTime+2.0);
+      renderReplayFrame(); updateTimeDisplay();
+    }} else if(ev.code==='ArrowLeft') {{
+      ev.preventDefault();
+      replayState.currentTime=Math.max(0,replayState.currentTime-2.0);
+      replayState.goalReachedFlags={{}};
+      renderReplayFrame(); updateTimeDisplay();
+    }}
+  }});
 
   const observer=new IntersectionObserver((entries)=>{{
     entries.forEach(e=>{{

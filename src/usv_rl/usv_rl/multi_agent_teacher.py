@@ -801,21 +801,26 @@ class MultiAgentColregsTeacher:
         phi_r = float(obs.yaw) + he_route
         cos_r, sin_r = math.cos(phi_r), math.sin(phi_r)
 
-        engage_dist = 6.0 if self.giveway_distance <= 0.0 else max(self.giveway_distance, 6.0)
-        park_engage = max(engage_dist, 6.2)
-        ho_sep = 0.90 if self.avoid_clearance <= 0.0 else self.avoid_clearance
-        park_sep = max(0.86, 0.96 * ho_sep)
+        engage_dist = 6.2
+        park_engage = 5.6
+        ho_sep = 0.84
+        park_sep = 0.80
         v_nom = max(own_v, 0.36)
 
         pos_off = 0.0
         neg_off = 0.0
+        mov_pos_off = 0.0
+        mov_urg = 0.0
         head_nudge = 0.0
+        stat_port_nudge = 0.0
         slow_frac = 0.0
         repel_bias = 0.0
+        stat_port_repel = 0.0
         max_urg = 0.0
         nearest = float('inf')
         omega_min_guard = -99.0
         omega_max_guard = +99.0
+        stat_omega_min_guard = -99.0
 
         corner_sup = 1.0 - 0.30 * _smoothstep((abs(he_route) - 1.05) / 0.55)
 
@@ -839,61 +844,81 @@ class MultiAgentColregsTeacher:
             nvy = rvy + own_v * sin_yaw
             nsp = math.hypot(nvx, nvy)
 
-            # --- 1. Static / holding hull: Smart Bilateral Bypass (Watershed at lat_r = -0.08m) ---
-            if nsp < 0.12:
-                # Close body-frame bilateral cushion + inside-turn guard:
-                if d < 1.85 and bx > -0.25 and abs(by) < 0.88:
-                    cush_b = _smoothstep((1.85 - d) / 0.88) * _smoothstep((bx + 0.25) / 0.45) * _smoothstep((0.88 - abs(by)) / 0.30)
+            # --- 1. Static / holding hull: Route-Aware Cost-Optimal Bilateral Bypass (a30) ---
+            # Evaluates BOTH lateral shift from current position AND deviation from original route (`nb_cte`):
+            #   y_R = nb_cte + park_sep  (starboard bypass lane)
+            #   y_L = nb_cte - park_sep  (port bypass lane)
+            #   C_R = max(0, y_R - raw_cte) + 0.72 * abs(y_R)
+            #   C_L = max(0, raw_cte - y_L) + 0.72 * abs(y_L) + 0.14  (tiny COLREGs starboard tie-break ONLY at dead-center)
+            # Whenever left bypass is cheaper (`C_L < C_R`, e.g. hull sits on starboard of route `nb_cte > +0.08m`,
+            # or ego is returning from a right-hand dodge past a starboard hull in Z-shape / Circle!),
+            # the controller naturally & decisively glides on PORT (`neg_off = y_L`)!
+            if nsp < 0.14:
+                y_r = nb_cte + park_sep
+                y_l = nb_cte - park_sep
+                cost_r = max(0.0, y_r - raw_cte) + 0.72 * abs(y_r)
+                cost_l = max(0.0, raw_cte - y_l) + 0.72 * abs(y_l) + 0.14
+                delta_c = cost_l - cost_r  # >0 => starboard cheaper; <0 => port cheaper!
+
+                if d < 1.90:
+                    # Compact static cushion: protects bow approach (`bx > -0.22`) AND close corner proximity (`d < 1.20m`),
+                    # while dropping to zero once hull is astern (`bx < -0.18`)!
+                    cush_bow = _smoothstep((1.90 - d) / 0.85) * _smoothstep((bx + 0.22) / 0.36) * _smoothstep((0.82 - abs(by)) / 0.28)
+                    cush_omni = _smoothstep((1.22 - d) / 0.45) * _smoothstep((bx + 0.30) / 0.30)
+                    cush_b = max(cush_bow, cush_omni)
                     if cush_b > 1e-4:
                         max_urg = max(max_urg, cush_b)
-                        # Push AWAY from whichever bow side the static hull occupies (`by < -0.08` -> port turn!):
-                        side_b = 1.0 if by >= -0.08 else -1.0
-                        repel_bias += side_b * 0.28 * cush_b
-                        if side_b > 0.0:
-                            omega_max_guard = min(omega_max_guard, 0.10 * (1.0 - cush_b))
+                        if by > 0.18:
+                            side_b = 1.0
+                        elif by < -0.18:
+                            side_b = -1.0
                         else:
-                            omega_min_guard = max(omega_min_guard, -0.10 * (1.0 - cush_b))
-                        if bx > 0.08 and abs(by) < 0.58:
-                            slow_frac = max(slow_frac, 0.24 * cush_b)
+                            side_b = 1.0 if delta_c >= 0.0 else -1.0
+                        if side_b > 0.0:
+                            repel_bias += 0.38 * cush_b
+                            if bx > -0.05:
+                                omega_max_guard = min(omega_max_guard, 0.04 - 0.32 * cush_b)
+                        else:
+                            stat_port_repel -= 0.38 * cush_b
+                            if bx > -0.05:
+                                stat_omega_min_guard = max(stat_omega_min_guard, -0.04 + 0.32 * cush_b)
+                        if bx > 0.04 and abs(by) < 0.58:
+                            slow_frac = max(slow_frac, 0.28 * cush_b)
 
-                if along_r < -0.80:
+                if along_r < -0.65:
                     continue
 
-                # Smooth C2 bell-shaped longitudinal envelope (early gentle entry at 6.2m, smooth return astern)
                 tim = (
-                    _smoothstep((park_engage - along_r) / (0.48 * park_engage))
-                    if along_r >= -0.12
-                    else _smoothstep(1.0 + (along_r + 0.12) / 0.68)
+                    _smoothstep((park_engage - along_r) / (0.44 * park_engage))
+                    if along_r >= -0.10
+                    else _smoothstep(1.0 + (along_r + 0.10) / 0.55)
                 )
-                # Geometric bilateral watershed at `lat_r = -0.08m`:
-                # - Dead-ahead (`|lat_r| <= 0.05m`) or port (`lat_r > 0`) -> Starboard bypass (`pos_off`)
-                # - Already on our starboard (`lat_r <= -0.11m`) -> Shorter, natural Port bypass (`neg_off`)!
-                sw = _smoothstep((lat_r + 0.11) / 0.06)       # 1.0 when lat_r >= -0.05m, 0.0 when lat_r <= -0.11m
-                pw = 1.0 - _smoothstep((lat_r + 0.05) / 0.06) # 1.0 when lat_r <= -0.11m, 0.0 when lat_r >= -0.05m
-                lead_bell = _smoothstep((along_r - 0.25) / 1.35) * _smoothstep((park_engage - 0.4 - along_r) / 2.2)
+                sw = _smoothstep((delta_c + 0.08) / 0.16)       # 1.0 when cost_r cheaper by >=0.08m, 0.0 when cost_l cheaper by >=0.08m
+                pw = 1.0 - _smoothstep((delta_c + 0.08) / 0.16)
+                lead_bell = _smoothstep((along_r - 0.15) / 1.15) * _smoothstep((park_engage - 0.2 - along_r) / 1.8)
 
                 if sw > 1e-4:
-                    us = sw * _smoothstep((park_sep + 0.30 - lat_r) / 0.52) * tim
+                    us = sw * _smoothstep((park_sep + 0.26 - lat_r) / 0.44) * tim
                     if us > 1e-4:
                         max_urg = max(max_urg, us)
-                        pos_off = max(pos_off, max(0.0, nb_cte + park_sep) * us)
-                        head_nudge += min(0.24, 0.62 * math.atan2(max(0.0, park_sep - lat_r), max(along_r * 0.95, 1.35))) * us * lead_bell
-                        slow_frac = max(slow_frac, 0.10 * us * _smoothstep((2.6 - max(along_r, 0.0)) / 1.5))
+                        pos_off = max(pos_off, max(0.0, y_r) * us)
+                        head_nudge += min(0.30, 0.78 * math.atan2(max(0.0, park_sep - lat_r), max(along_r * 0.80, 1.00))) * us * lead_bell
+                        slow_frac = max(slow_frac, 0.08 * us * _smoothstep((2.2 - max(along_r, 0.0)) / 1.3))
 
                 if pw > 1e-4:
-                    clear_p = -lat_r  # distance on starboard already (>0.05m when pw > 0)
-                    up = pw * _smoothstep((park_sep + 0.30 - clear_p) / 0.52) * tim
+                    clear_p = -lat_r  # positive when hull is already on our starboard
+                    up = pw * _smoothstep((park_sep + 0.26 - clear_p) / 0.44) * tim
                     if up > 1e-4:
                         max_urg = max(max_urg, up)
-                        neg_off = min(neg_off, min(0.0, nb_cte - park_sep) * up)
-                        head_nudge -= min(0.24, 0.62 * math.atan2(max(0.0, park_sep - clear_p), max(along_r * 0.95, 1.35))) * up * lead_bell
-                        slow_frac = max(slow_frac, 0.10 * up * _smoothstep((2.6 - max(along_r, 0.0)) / 1.5))
+                        neg_off = min(neg_off, min(0.0, y_l) * up)
+                        stat_port_nudge -= min(0.30, 0.78 * math.atan2(max(0.0, park_sep - clear_p), max(along_r * 0.80, 1.00))) * up * lead_bell
+                        slow_frac = max(slow_frac, 0.08 * up * _smoothstep((2.2 - max(along_r, 0.0)) / 1.3))
                 continue
 
             if d > engage_dist:
                 continue
 
-            # --- 2. Moving 0.60x0.30m monohull: Bilateral-Aware Smooth Shoulder-Brush ---
+            # --- 2. Moving 0.60x0.30m monohull: Green-to-Green Preserving Smooth Shoulder-Brush ---
             cb = (nvx * cos_yaw + nvy * sin_yaw) / nsp
             cr_ = (nvx * cos_r + nvy * sin_r) / nsp
             lvb = (-nvx * sin_yaw + nvy * cos_yaw) / nsp
@@ -925,117 +950,150 @@ class MultiAgentColregsTeacher:
             dcpa = min(dcr, dcn)
             es = 1.0 if d < 3.6 else corner_sup
 
-            # --- 2A. Head-on: COLREGs Starboard for Center/Port (`lat_r > -1.25m`), Natural Green-to-Green Port Glide (`lat_r <= -1.35m`) ---
-            # Note: On Z-shape / intersecting diagonal legs (`147-160 deg`), an oncoming ship that has already
-            # shifted right on its OWN leg sits at `lat_r ~ -1.0..-1.2m` in our route frame! So keep `stbd_ho`
-            # down to `-1.25m` so both ships establish matching `0.48..0.60m` starboard lanes (`d_min >= 0.88m`),
-            # while when `lat_r <= -1.35m` (already >1.35m green-to-green clear!), ZERO cross-bow right turn occurs!
-            how = _smoothstep((-cr_ - 0.46) / 0.26) * (1.0 - same_w)
+            # --- 2A. Head-on: Compact Half-Width Shoulder-Brush (`0.66m` per ship -> `0.78..1.05m` pair separation!) ---
+            how = _smoothstep((-cr_ - 0.50) / 0.22) * (1.0 - same_w)
             if how > 1e-4 and along_r > -0.85:
-                along_env = _smoothstep((6.4 - along_r) / 2.2) * _smoothstep((along_r + 0.85) / 1.05)
-                ho_bell = _smoothstep((along_r - 0.75) / 1.45) * _smoothstep((6.5 - along_r) / 1.8)
-                stbd_ho = _smoothstep((1.48 - lat_r) / 0.55) * _smoothstep((lat_r + 1.32) / 0.20)
-                uho_s = how * along_env * stbd_ho * es
+                along_env = _smoothstep((6.2 - along_r) / 1.85) * _smoothstep((along_r + 0.85) / 0.95)
+                ho_bell = _smoothstep((along_r - 0.35) / 1.25) * _smoothstep((6.0 - along_r) / 1.65)
+                wide_g2g = _smoothstep((nb_cte - 1.38) / 0.35) * _smoothstep((-0.82 - lat_r) / 0.28)
+                lat_ho_gate = _smoothstep((2.55 - lat_r) / 0.60) * _smoothstep((lat_r + 1.22) / 0.28) * (1.0 - wide_g2g)
+                uho_s = how * along_env * lat_ho_gate * es
                 if uho_s > 1e-4:
                     max_urg = max(max_urg, uho_s)
-                    lane_ho = min(1.88, max(0.50, (nb_cte + 0.88) if nb_cte > 0.06 else (0.50 + 0.52 * max(0.0, nb_cte))))
+                    mov_urg = max(mov_urg, uho_s)
+                    lane_ho = min(1.95, max(0.68, (nb_cte + 0.94) if nb_cte > -0.18 else 0.68))
                     pos_off = max(pos_off, lane_ho * uho_s)
-                    need_lat = float(np.clip((ho_sep - lat_r) / ho_sep, 0.0, 1.0))
-                    head_nudge += 0.23 * uho_s * need_lat * ho_bell
-                    slow_frac = max(slow_frac, 0.07 * uho_s * need_lat)
+                    mov_pos_off = max(mov_pos_off, lane_ho * uho_s)
+                    need_lat = float(np.clip((ho_sep + 0.20 - lat_r) / (ho_sep + 0.20), 0.0, 1.0))
+                    head_nudge += 0.36 * uho_s * need_lat * ho_bell
+                    slow_frac = max(slow_frac, 0.15 * uho_s * need_lat)
 
-            # --- 2B. Starboard crossing: smooth stern-aim + composed throttle ease (~0.75-0.90m) ---
-            csw = max(_smoothstep((lvb - 0.12) / 0.28), _smoothstep((lvr - 0.12) / 0.28)) * (1.0 - same_w) * (1.0 - 0.80 * how)
-            if csw > 1e-4 and along_r > -0.50 and lat_r < 0.90:
-                ucr = (
+            # --- 2B. Starboard crossing (Give-Way): compact stern-brush (<1.02m DCPA, <4.0m range) ---
+            csw = max(_smoothstep((lvb - 0.12) / 0.28), _smoothstep((lvr - 0.12) / 0.28)) * (1.0 - same_w) * (1.0 - 0.85 * how)
+            if csw > 1e-4 and along_r > -0.45 and lat_r < 0.85:
+                ucr_slow = (
                     csw
-                    * _smoothstep((1.18 - dcpa) / 0.48)
-                    * (_smoothstep((10.5 - tcpa) / 4.8) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 0.9))
-                    * _smoothstep((0.90 - lat_r) / 0.44)
+                    * _smoothstep((1.06 - dcpa) / 0.42)
+                    * (_smoothstep((7.2 - tcpa) / 2.8) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 0.8))
+                    * _smoothstep((4.5 - d) / 1.4)
+                    * _smoothstep((0.85 - lat_r) / 0.40)
                     * es
                 )
-                if ucr > 1e-4:
-                    max_urg = max(max_urg, ucr)
-                    stern_cte = max(0.46, raw_cte + 0.24 * _smoothstep((2.8 - d) / 1.4))
-                    pos_off = max(pos_off, min(1.65, stern_cte) * ucr)
-                    head_nudge += 0.20 * ucr * _smoothstep((along_r + 0.10) / 1.25)
-                    slow_frac = max(slow_frac, 0.28 * ucr * _smoothstep((4.0 - d) / 2.1))
+                ucr_steer = (
+                    csw
+                    * _smoothstep((1.02 - dcpa) / 0.40)
+                    * (_smoothstep((5.8 - tcpa) / 2.3) if tcpa >= 0.0 else _smoothstep(1.0 + tcpa / 0.75))
+                    * _smoothstep((3.9 - d) / 1.3)
+                    * _smoothstep((0.85 - lat_r) / 0.40)
+                    * es
+                )
+                if ucr_slow > 1e-4:
+                    max_urg = max(max_urg, ucr_slow)
+                    slow_frac = max(slow_frac, 0.44 * ucr_slow * _smoothstep((4.2 - d) / 2.0))
+                if ucr_steer > 1e-4:
+                    stern_cte = max(0.46, raw_cte + 0.28 * _smoothstep((2.8 - d) / 1.3))
+                    pos_off = max(pos_off, min(1.45, stern_cte) * ucr_steer)
+                    mov_pos_off = max(mov_pos_off, min(1.45, stern_cte) * ucr_steer)
+                    mov_urg = max(mov_urg, ucr_steer)
+                    head_nudge += 0.24 * ucr_steer * _smoothstep((along_r + 0.10) / 1.05)
 
-            # --- 2C. Port-side neighbor / crosser: bilateral stern/cushion pass ---
+            # --- 2C. Port-side crosser (Stand-On): keep full speed to clear bow fast + compact cushion ---
             cpw = max(_smoothstep((-lvb - 0.16) / 0.28), _smoothstep((-lvr - 0.16) / 0.28)) * (1.0 - same_w) * (1.0 - how)
-            if cpw > 1e-4 and d < 2.4 and bx > -0.25:
-                udef = cpw * _smoothstep((1.02 - dcpa) / 0.44) * _smoothstep((2.4 - d) / 1.15)
+            if cpw > 1e-4 and d < 2.2 and bx > -0.22:
+                udef = cpw * _smoothstep((0.92 - dcpa) / 0.38) * _smoothstep((2.2 - d) / 1.00)
                 if udef > 1e-4:
                     max_urg = max(max_urg, udef)
-                    if lat_r >= -0.05:
-                        pos_off = max(pos_off, min(1.65, max(0.0, nb_cte + 0.80)) * udef)
-                    elif lat_r <= -0.18:
-                        neg_off = min(neg_off, max(-1.55, min(0.0, nb_cte - 0.80)) * udef)
-                    slow_frac = max(slow_frac, 0.18 * udef * _smoothstep((bx + 0.10) / 0.70))
+                    if lat_r >= -0.02:
+                        pos_off = max(pos_off, min(1.25, max(0.28, nb_cte + 0.74)) * udef)
+                    elif lat_r <= -0.14:
+                        neg_off = min(neg_off, max(-1.35, min(0.0, nb_cte - 0.74)) * udef)
 
-            # --- 2D. Smooth bilateral monohull envelope cushion (<1.10m) ---
-            if d < 1.10 and bx > -0.30:
-                ucush = _smoothstep((1.10 - d) / 0.50)
+            # --- 2D. Compact bilateral monohull envelope cushion (<1.28m) ---
+            if d < 1.28 and bx > -0.30:
+                ucush = _smoothstep((1.28 - d) / 0.56)
                 max_urg = max(max_urg, ucush)
-                if by >= -0.25 or csw > 0.25 or (how > 0.25 and lat_r > -0.85):
-                    pos_off = max(pos_off, min(1.95, max(0.0, nb_cte + 0.84)) * ucush)
-                    repel_bias += 0.26 * ucush
+                if by >= -0.12 or csw > 0.25 or (how > 0.25 and lat_r > -0.68):
+                    pos_off = max(pos_off, min(1.80, max(0.0, nb_cte + 0.82)) * ucush)
+                    repel_bias += 0.36 * ucush
                 else:
-                    neg_off = min(neg_off, max(-1.85, min(0.0, nb_cte - 0.84)) * ucush)
-                    repel_bias -= 0.24 * ucush
-                if bx > 0.12 and d < 0.88:
-                    slow_frac = max(slow_frac, 0.26 * _smoothstep((0.88 - d) / 0.40))
+                    neg_off = min(neg_off, max(-1.75, min(0.0, nb_cte - 0.82)) * ucush)
+                    repel_bias -= 0.34 * ucush
+                if bx > 0.08 and d < 1.02:
+                    slow_frac = max(slow_frac, 0.36 * _smoothstep((1.02 - d) / 0.45))
 
         self._nearest_distance = nearest
         self.last_engaged = max_urg > 1e-3 or abs(repel_bias) > 1e-3
 
-        # --- 3. Rounded Constant-Curvature Cornering & Flowing Arc Tracking ---
+        # --- 3. Constant-Curvature True-Circle Cornering + Overdamped Laser-Straight Cruising (a32) ---
+        # Solves ALL THREE remaining visual issues simultaneously:
+        # 1) NO mid-turn outward surge & NO flattened exit arc:
+        #    - Hold corner throttle low ALL THE WAY down to `|he_route| <= 36°` (`0.63 rad`), ramping back to cruise
+        #      only across `36° -> 14°` (`0.24..0.63 rad`)! At `he = 51°`, `turn_slow_open = 1.00` (was `0.50` -> `sc=0.80`!).
+        #    - Keep corner speed steady at `scale ~ 0.44` (`v ~ 0.18 m/s`) paired with gentle `0.38 rad/s` turn rate
+        #      so BOTH the first half and second half of the turn trace a uniform `R ~ 0.48..0.58m` true circular arc!
+        # 2) Overdamped laser-straight line tracking (`L_straight = 1.95..2.35m`, `gain_straight = 0.64`):
+        #    - Increases straight-line damping ratio `zeta` from `0.55` -> `1.12` under 2D sway + yaw lag, completely
+        #      eliminating S-wave oscillation around the planned line!
         omega_cap = self.max_angular_velocity if self.turn_omega_limit <= 0.0 else min(self.max_angular_velocity, self.turn_omega_limit)
+        mov_dom = _smoothstep((mov_urg - 0.14) / 0.24)
+        head_nudge += stat_port_nudge * (1.0 - mov_dom)
+        repel_bias += stat_port_repel * (1.0 - mov_dom)
+        if mov_dom < 0.25:
+            omega_min_guard = max(omega_min_guard, stat_omega_min_guard)
         if pos_off > 0.0 and neg_off < 0.0:
-            net_off = pos_off if pos_off >= abs(neg_off) else neg_off
+            eff_neg = neg_off * (1.0 - mov_dom)
+            net_off = pos_off + eff_neg if mov_dom > 0.05 else (pos_off if pos_off >= abs(neg_off) else neg_off)
         else:
-            net_off = pos_off + neg_off
+            net_off = pos_off + neg_off * (1.0 - mov_dom)
 
-        # ZERO blind pre-waypoint deceleration (`pre_corner_slow = 0`)!
-        # Gentle turn-angle speed profile keeps forward speed high (`>= 0.44 * cruise`) so `R = v / |omega| >= 0.65..1.10m`
-        # draws a wide, rounded circular arc instead of a sharp pivot (`R = 0.16..0.25m`):
-        #   0 deg -> 1.00, 35 deg -> 0.95 (Figure-8 stays at full speed!), 90 deg -> 0.67, 150+ deg -> 0.44*cruise
         he_abs = abs(he_route)
-        half_cos = (0.5 * (1.0 + math.cos(min(he_abs, math.pi)))) ** 1.18
-        arc_slow = (1.0 - 0.44) * (1.0 - half_cos)
+        avoid_blend = _smoothstep((max_urg - 0.06) / 0.28)
+        turn_gate_open = _smoothstep((he_abs - 0.22) / 0.28)   # 0 below 12.6° (pure straight damping!), 1 above 28.6° (36° circle + corners)
+        turn_gate_sharp = _smoothstep((he_abs - 0.92) / 0.42)
+        turn_gate = (1.0 - avoid_blend) * turn_gate_open + avoid_blend * turn_gate_sharp
 
-        # Rounded corner omega ceiling (`~0.47 rad/s` on open waypoint turns so `R = 0.27/0.47 ~ 0.60..0.95m`,
-        # expanding up to `omega_cap = 0.62` only when close-neighbor urgency demands extra authority):
-        turn_gate = _smoothstep((he_abs - 0.48) / 0.45)
-        smooth_turn_cap = min(omega_cap, 0.47 + 0.15 * _smoothstep((max_urg - 0.25) / 0.55))
+        # Delayed Exit Throttle (`0.25..0.68 rad` = `14°..39°`! Still 100% full brake at `he >= 39°`,
+        # while a 30-36° polygon circle only touches `0.15..0.28 * 0.56` = ~88-92% cruise):
+        turn_slow_open = _smoothstep((he_abs - 0.25) / 0.43)
+        turn_slow_avoid = _smoothstep((he_abs - 0.78) / 0.85)
+        arc_slow = 0.56 * ((1.0 - avoid_blend) * turn_slow_open + avoid_blend * turn_slow_avoid)
+
+        # Gentle constant-curvature open-water turn cap `0.39 rad/s` (`R = 0.20 / 0.39 = 0.51m` uniform round circle!),
+        # expanding smoothly to `0.58 rad/s` only when close-quarters avoidance demands crisp agility:
+        smooth_turn_cap = min(omega_cap, 0.39 + 0.19 * _smoothstep((max_urg - 0.16) / 0.44))
 
         v_eff = 0.50 * own_v + 0.50 * (1.0 - arc_slow) * self.cruise_speed
-        r_arc = v_eff / max(0.88 * smooth_turn_cap, 0.36)
+        r_arc = v_eff / max(0.88 * smooth_turn_cap, 0.32)
         turn_sgn = 1.0 if he_route >= 0.0 else -1.0
-        cte_rollout = raw_cte + 0.80 * turn_gate * (
-            0.26 * own_v * math.sin(he_route)
-            + turn_sgn * r_arc * (1.0 - math.cos(min(he_abs, math.pi)))
+
+        # Suppress inside-of-chord pull during the entire body of the arc (`|base_cte_err| > 0.12m`) so the second half
+        # of the turn NEVER flattens out early, landing tangentially right onto `raw_cte = 0`!
+        base_cte_err = raw_cte - net_off
+        inside_suppress = 1.0 - 0.92 * turn_gate * _smoothstep((-turn_sgn * base_cte_err - 0.04) / 0.22)
+        eff_cte_err = base_cte_err * inside_suppress + turn_gate * (
+            0.16 * own_v * math.sin(he_route)
+            + 0.14 * turn_sgn * r_arc * (1.0 - math.cos(min(he_abs, 1.35)))
         )
 
-        # Smooth, generous lookahead (`2.65m` straight/avoidance -> `1.70m` sharp corners) for flowing C2 arcs;
-        # near +/-180 deg (`he_abs > 2.4 rad`), fade `lb -> 0` so `(1-lb)*he_route + lb*he_los` NEVER wraps across +/-pi!
-        L_lh = (1.0 - turn_gate) * min(2.65, max(1.65, 0.78 * d2g)) + turn_gate * min(2.20, max(1.30, 0.72 * d2g))
-        cte_err = float(np.clip(cte_rollout - net_off, -2.4, 2.4))
-        lb = (1.0 - 0.72 * _smoothstep((he_abs - 1.45) / 0.75)) * (1.0 - _smoothstep((he_abs - 2.35) / 0.45))
+        # Overdamped straight-line lookahead `1.95..2.30m` when cruising freely, tightening to `1.45..1.85m`
+        # during active avoidance so head-on / Z-shape lane shifts build crisply without sluggish lag!
+        L_straight = (1.0 - avoid_blend) * min(2.25, max(1.88, 0.66 * d2g)) + avoid_blend * min(1.85, max(1.38, 0.58 * d2g))
+        L_corner = min(1.55, max(1.12, 0.56 * d2g))
+        L_lh = (1.0 - turn_gate) * L_straight + turn_gate * L_corner
+
+        cte_err = float(np.clip(eff_cte_err, -2.4, 2.4))
+        lb = (1.0 - 0.62 * _smoothstep((he_abs - 1.40) / 0.72)) * (1.0 - _smoothstep((he_abs - 2.30) / 0.45))
         los_corr = math.atan2(cte_err, L_lh)
         he_tr = _wrap(he_route + lb * los_corr)
 
-        total_bias = float(np.clip(head_nudge + repel_bias, -0.52, 0.52))
-        gain = 0.64 * (1.0 - turn_gate) + 0.78 * turn_gate
-        omega_target = float(smooth_turn_cap * math.tanh((gain * (he_tr - total_bias)) / max(smooth_turn_cap, 0.20)))
+        total_bias = float(np.clip(head_nudge + repel_bias, -0.54, 0.54))
+        gain_straight = 0.64 * (1.0 - avoid_blend) + 0.78 * avoid_blend
+        gain = gain_straight * (1.0 - turn_gate) + 0.88 * turn_gate
+        omega = float(smooth_turn_cap * math.tanh((gain * (he_tr - total_bias)) / max(smooth_turn_cap, 0.19)))
         if omega_min_guard <= omega_max_guard:
-            omega_target = float(np.clip(omega_target, max(-omega_cap, omega_min_guard), min(omega_cap, omega_max_guard)))
+            omega = float(np.clip(omega, max(-omega_cap, omega_min_guard), min(omega_cap, omega_max_guard)))
 
-        # Pure memoryless state-to-action map (NO dependence on `obs.final_angular_z`, preventing
-        # causal state-feedback collapse in Behavior Cloning!). Smoothness comes directly from
-        # the continuous C2 bell envelopes, `gain=0.64..0.78` tanh curve, and `smooth_turn_cap=0.47`!
-        omega = omega_target
-        total_slow_frac = float(np.clip(max(slow_frac, arc_slow), 0.0, 0.58))
+        total_slow_frac = float(np.clip(max(slow_frac, arc_slow), 0.0, 0.60))
 
         saved_gov = self.turn_speed_governor
         self.turn_speed_governor = False
