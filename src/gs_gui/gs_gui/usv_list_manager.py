@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv list manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV列表管理模块
 负责管理集群和离群USV列表
@@ -162,3 +173,12 @@ class USVListManager:
         self.usv_online_list = state_list
         self.update_departed_list_status()
         self.update_cluster_list()
+
+    def get_usv_list(self):
+        """
+        获取当前在线 USV 列表
+        
+        Returns:
+            list: 在线 USV 状态列表
+        """
+        return self.usv_online_list

@@ -1,21 +1,27 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of table manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 表格管理模块
 负责集群和离群USV表格的显示和更新
 """
-
-import logging
 from PyQt5.QtGui import QStandardItemModel, QStandardItem
-
-_logger = logging.getLogger("gs_gui.table")
-
 
 
 class TableManager:
     """表格管理器，负责USV表格的创建和更新"""
     
-    # 表格列标题
-    TABLE_HEADERS = ["编号", "当前模式", "连接状态", "武装状态", "引导模式状态", '电压V', '电量%', 
-                     '电池状态', '坐标', '速度', '偏角', '导航状态', '温度']
+    # 表格列标题 (新增 '信号')
+    TABLE_HEADERS = ["编号", "模式", "连接", "信号", "武装", "引导", '电压', '电量', 
+                     '电源', '坐标', '速度', '偏角', '导航', '温度']
     
     # 导航状态常量
     NAV_STATUS_UNKNOWN = "未知"
@@ -91,10 +97,13 @@ class TableManager:
             model = self.cluster_table_model
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
-            online_state_list = [
-                s for s in state_list
-                if isinstance(s, dict) and s.get('connected', False)
-            ]
+            # 用户要求：不在线或断开连接的不要出现在列表里面，启动时也是
+            # 注意：state_list 传入时如果包含离线设备，在这里过滤掉
+            online_state_list = []
+            if state_list:
+                for s in state_list:
+                    if isinstance(s, dict) and s.get('connected', False):
+                        online_state_list.append(s)
 
             # 构建当前表中 namespace -> row 的映射
             current_ns_to_row = {}
@@ -144,7 +153,7 @@ class TableManager:
                         model.setItem(row, col, QStandardItem(str(text)))
 
         except Exception as e:
-            _logger.error(f"更新集群表格失败: {e}")
+            print(f"更新集群表格失败: {e}")
     
     def update_departed_table(self, state_list, usv_nav_status):
         """
@@ -158,10 +167,12 @@ class TableManager:
             model = self.departed_table_model
 
             # 过滤掉离线的 USV（只显示 connected=True 的）
-            online_state_list = [
-                s for s in state_list
-                if isinstance(s, dict) and s.get('connected', False)
-            ]
+            # 用户要求：不在线或断开连接的不要出现在列表里面
+            online_state_list = []
+            if state_list:
+                for s in state_list:
+                    if isinstance(s, dict) and s.get('connected', False):
+                        online_state_list.append(s)
 
             # 当前表中 namespace -> row 映射
             current_ns_to_row = {}
@@ -209,7 +220,7 @@ class TableManager:
                         model.setItem(row, col, QStandardItem(str(text)))
 
         except Exception as e:
-            _logger.error(f"更新离群表格失败: {e}")
+            print(f"更新离群表格失败: {e}")
     
     def _format_table_cells(self, state, usv_nav_status):
         """
@@ -271,10 +282,10 @@ class TableManager:
         nav_text = usv_nav_status.get(ns, self.NAV_STATUS_IDLE)
 
         try:
-            import math
-            temp_raw = state.get('temperature', None)
-            temp_celsius = float(temp_raw) if temp_raw is not None else math.nan
-            temp_text = "Unknown" if math.isnan(temp_celsius) else f"{temp_celsius:.1f}"
+            # 温度值除以1000转换为摄氏度
+            temp_raw = float(state.get('temperature', 0.0))
+            temp_celsius = temp_raw / 1000.0
+            temp_text = f"{temp_celsius:.1f}"
         except Exception:
             temp_text = "Unknown"
 
@@ -282,23 +293,44 @@ class TableManager:
         power_status = state.get('power_supply_status', 0)
         power_status_text = self.map_power_supply_status(power_status)
 
-        # 使用飞控连接状态 (fc_connected) 而不是网络连接状态 (connected)
-        fc_connected = state.get('fc_connected', False)
+        # 信号强度：使用 USV 上报的真实 WiFi RSSI（dBm）分级显示
+        is_connected = state.get('connected', False)
+        wifi_rssi = state.get('wifi_rssi_dbm', -100)
+        wifi_quality = state.get('wifi_link_quality', 0)
+        if is_connected and wifi_rssi > -100:
+            # 基于真实 RSSI 分级显示
+            if wifi_rssi >= -50:
+                signal_text = "▂▃▄▅"   # 优秀 (>= -50 dBm)
+            elif wifi_rssi >= -60:
+                signal_text = "▂▃▄_"   # 良好 (-60 ~ -50 dBm)
+            elif wifi_rssi >= -70:
+                signal_text = "▂▃__"   # 一般 (-70 ~ -60 dBm)
+            elif wifi_rssi >= -80:
+                signal_text = "▂___"   # 较弱 (-80 ~ -70 dBm)
+            else:
+                signal_text = "▂___"   # 极弱 (< -80 dBm)
+            signal_text += f" {wifi_rssi}dBm"
+        elif is_connected:
+            # 已连接但 WiFi RSSI 不可用（可能通过有线连接等）
+            signal_text = "▂▃▄▅ N/A"
+        else:
+            signal_text = "____ 离线"
 
         cells = [
-            ns,
-            state.get('mode', 'Unknown'),
-            str(fc_connected),  # 飞控连接状态
-            str(state.get('armed', 'Unknown')),
-            str(state.get('guided', 'Unknown')),  # 引导模式状态
-            voltage_text,  # 电压V
-            bp_text,  # 电量%
-            power_status_text,  # 电池状态
-            pos_text,  # 坐标
-            vel_text,  # 速度
-            yaw_text,  # 偏角
-            nav_text,  # 导航状态
-            temp_text,  # 温度
+            ns,                             # 编号
+            state.get('mode', 'Unknown'),   # 模式
+            str(state.get('connected', 'Unknown')), # 连接
+            signal_text,                    # 信号 (新增)
+            str(state.get('armed', 'Unknown')),     # 武装
+            str(state.get('guided', 'Unknown')),    # 引导
+            voltage_text,                           # 电压
+            bp_text,                                # 电量
+            power_status_text,                      # 电源
+            pos_text,                               # 坐标
+            vel_text,                               # 速度
+            yaw_text,                               # 偏角
+            nav_text,                               # 导航
+            temp_text,                              # 温度
         ]
         
         return cells

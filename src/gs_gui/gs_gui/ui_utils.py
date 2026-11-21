@@ -1,10 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of ui utils.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 UI工具模块
 负责UI辅助功能，包括信息显示、绘图窗口等
 """
 import weakref
 from collections import deque
-from PyQt5.QtCore import QTimer, QProcess
+from PyQt5.QtCore import QTimer, QProcess, QMetaObject, Qt, Q_ARG
 from gs_gui.usv_plot_window import UsvPlotWindow
 
 
@@ -27,11 +38,21 @@ class UIUtils:
         self._info_max_lines = 500
         self._info_flush_interval_ms = 500
         
+        # 警告缓冲：用于线程安全的警告显示
+        self._warning_buffer = deque()
+        self._warning_max_lines = 200
+        
         # info定时器
         self._info_timer = QTimer()
         self._info_timer.setInterval(self._info_flush_interval_ms)
         self._info_timer.timeout.connect(self._flush_info_buffer)
         self._info_timer.start()
+        
+        # warning定时器（同一频率刷新）
+        self._warning_timer = QTimer()
+        self._warning_timer.setInterval(self._info_flush_interval_ms)
+        self._warning_timer.timeout.connect(self._flush_warning_buffer)
+        self._warning_timer.start()
         
         # USV绘图窗口的弱引用
         self.usv_plot_window_ref = None
@@ -57,30 +78,54 @@ class UIUtils:
     
     def append_warning(self, text: str):
         """
-        将警告文本追加到警告文本框
+        将警告文本放入缓冲，由定时器周期性刷新到 UI（线程安全）
         
         Args:
             text: 警告文本
         """
         try:
-            self.ui.warning_textEdit.append(str(text))
+            self._warning_buffer.append(str(text))
         except Exception:
             pass
     
-    def clear_info(self):
-        """清除信息文本框和缓冲"""
+    def _flush_warning_buffer(self):
+        """定时器回调：把缓冲中的若干行追加到 warning_textEdit"""
         try:
-            self._info_buffer.clear()
-            self.ui.info_textEdit.clear()
+            if not self._warning_buffer:
+                return
+            
+            # 合并若干条消息一次性写入
+            to_write = []
+            max_batch = 20
+            for _ in range(min(max_batch, len(self._warning_buffer))):
+                to_write.append(self._warning_buffer.popleft())
+            
+            for line in to_write:
+                try:
+                    self.ui.warning_textEdit.append(line)
+                except Exception:
+                    pass
+            
+            # 控制最大行数
+            try:
+                doc = self.ui.warning_textEdit.document()
+                if doc is not None:
+                    block_count = doc.blockCount()
+                    if block_count > self._warning_max_lines:
+                        cursor = self.ui.warning_textEdit.textCursor()
+                        cursor.movePosition(cursor.Start)
+                        remove_count = block_count - self._warning_max_lines
+                        for _ in range(remove_count):
+                            cursor.select(cursor.LineUnderCursor)
+                            cursor.removeSelectedText()
+                            cursor.deleteChar()
+            except Exception:
+                pass
         except Exception:
-            pass
-
-    def clear_warning(self):
-        """清除警告文本框"""
-        try:
-            self.ui.warning_textEdit.clear()
-        except Exception:
-            pass
+            try:
+                self._warning_buffer.clear()
+            except Exception:
+                pass
     
     def _flush_info_buffer(self):
         """定时器回调：把缓冲中的若干行追加到 info_textEdit"""
@@ -122,25 +167,45 @@ class UIUtils:
             except Exception:
                 pass
     
+    def get_or_create_plot_window(self, usv_online_list_getter):
+        """
+        获取或创建 USV 绘图窗口实例
+        
+        Args:
+            usv_online_list_getter: 获取在线USV列表的回调函数
+            
+        Returns:
+            UsvPlotWindow: 窗口实例
+        """
+        if self.usv_plot_window_ref and self.usv_plot_window_ref():
+            return self.usv_plot_window_ref()
+        
+        # 如果不存在，创建新窗口并保存弱引用
+        usv_plot_window = UsvPlotWindow(usv_online_list_getter, self.parent_widget)
+        self.usv_plot_window_ref = weakref.ref(usv_plot_window)
+        return usv_plot_window
+
     def show_usv_plot_window(self, usv_online_list_getter):
         """
         显示 USV 绘图窗口
         
         Args:
             usv_online_list_getter: 获取在线USV列表的回调函数
+            
+        Returns:
+            UsvPlotWindow: 窗口实例
         """
-        # 检查是否已经存在绘图窗口实例
-        if self.usv_plot_window_ref and self.usv_plot_window_ref():
-            # 如果存在，将其激活到前台
-            window = self.usv_plot_window_ref()
-            if window:
-                window.raise_()
-                window.activateWindow()
-        else:
-            # 如果不存在，创建新窗口并保存弱引用
-            usv_plot_window = UsvPlotWindow(usv_online_list_getter, self.parent_widget)
-            self.usv_plot_window_ref = weakref.ref(usv_plot_window)
-            usv_plot_window.show()
+        window = self.get_or_create_plot_window(usv_online_list_getter)
+        
+        if not window.isVisible():
+            window.show()
+        
+        if window.isMinimized():
+            window.showNormal()
+            
+        window.raise_()
+        window.activateWindow()
+        return window
     
     def start_rviz(self):
         """启动 RViz2"""
@@ -200,19 +265,16 @@ class UIUtils:
             except Exception:
                 z = None
             
-            # UsvStatus.yaw 单位为弧度；此处转换为度数便于人工读取
             yaw_val = state.get('yaw')
             try:
-                import math
-                yaw_rad = float(yaw_val) if yaw_val is not None else None
-                yaw_deg = math.degrees(yaw_rad) if yaw_rad is not None else None
+                yaw_val = float(yaw_val) if yaw_val is not None else None
             except Exception:
-                yaw_deg = None
+                yaw_val = None
             
             self.ui.usv_x_label.setText(f"{x:.2f}" if x is not None else "Unknown")
             self.ui.usv_y_label.setText(f"{y:.2f}" if y is not None else "Unknown")
             self.ui.usv_z_label.setText(f"{z:.2f}" if z is not None else "Unknown")
-            self.ui.usv_yaw_label.setText(f"{yaw_deg:.1f}°" if yaw_deg is not None else "Unknown")
+            self.ui.usv_yaw_label.setText(f"{yaw_val:.2f}" if yaw_val is not None else "Unknown")
         
         except Exception as e:
             try:

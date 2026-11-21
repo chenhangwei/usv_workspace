@@ -1,8 +1,21 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of cluster task manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 集群任务管理模块
 负责集群任务的创建、执行、暂停和停止
 """
 import xml.etree.ElementTree as ET
+import os
+from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import QFileDialog, QMessageBox
 
 
@@ -24,6 +37,11 @@ class ClusterTaskManager:
         self.append_warning = warning_callback
         self.parent_widget = parent_widget
         
+        # 状态更新回调
+        self.update_status_callback = None
+        # 任务加载回调 (用于更新 2D 预览)
+        self.task_loaded_callback = None
+        
         # 集群任务状态
         self.cluster_task_running = False
         self.cluster_task_paused = False
@@ -33,18 +51,253 @@ class ClusterTaskManager:
         
         # 集群任务进度信息
         self.cluster_progress_info = {}
+
+        # 任务文件选择窗口的目录记忆（减少重复扫描大目录）
+        self._last_task_dir = ""
+        self._last_task_file = ""
+        # 复用文件选择对话框，避免每次重建导致的闪隐/抖动
+        self._task_file_dialog = None
+
+    def _default_task_dir(self):
+        """返回默认任务文件目录（按优先级取第一个存在的）"""
+        candidates = [
+            self._last_task_dir,
+            os.path.expanduser("~/usv_workspace/src/Path File"),
+            os.path.expanduser("~/usv_workspace/Path File"),
+        ]
+        for d in candidates:
+            if d and os.path.isdir(d):
+                return d
+        return os.path.expanduser("~")
+
+    def _ensure_task_file_dialog(self):
+        """构建（或复用）任务文件选择对话框。
+
+        提前调用可预热：预先构建控件树并加载目录模型，
+        避免首次打开时边显示边加载导致的卡顿/闪烁。
+        """
+        if self._task_file_dialog is None:
+            dlg = QFileDialog(self.parent_widget)
+            dlg.setNameFilter("XML Files (*.xml)")
+            dlg.setFileMode(QFileDialog.ExistingFile)
+            dlg.setOption(QFileDialog.DontUseNativeDialog, True)
+            dlg.setOption(QFileDialog.DontUseCustomDirectoryIcons, True)
+            dlg.setOption(QFileDialog.DontResolveSymlinks, True)
+            dlg.setViewMode(QFileDialog.List)
+            # 预加载默认目录，让目录模型在后台先填充
+            dlg.setDirectory(self._default_task_dir())
+            self._task_file_dialog = dlg
+        return self._task_file_dialog
     
+    def set_update_status_callback(self, callback):
+        """设置状态更新回调"""
+        self.update_status_callback = callback
+
+    def set_task_loaded_callback(self, callback):
+        """设置任务加载回调"""
+        self.task_loaded_callback = callback
+
+    def _update_status(self, text, style="normal"):
+        """内部方法：调用回调更新状态"""
+        if self.update_status_callback:
+            self.update_status_callback(text, style)
+
+    def _parse_xml_content(self, xml_file: str) -> list:
+        """
+        纯 XML 解析逻辑，返回解析后的位置列表。
+
+        Args:
+            xml_file: XML 文件路径
+
+        Returns:
+            list: USV 目标点字典列表，按 (step, usv_id) 排序
+        
+        Raises:
+            ET.ParseError, FileNotFoundError, ValueError 等异常
+        """
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+
+        steps = root.findall("step")
+        if not steps:
+            return []
+
+        combined_list = []
+        NAV_MODE_MAP = {
+            'async': 0, '0': 0,
+            'sync': 1, '1': 1,
+            'rotate': 2, '2': 2,
+            'terminal': 3, '3': 3
+        }
+
+        for idx, step in enumerate(steps, start=1):
+            raw_step_number = step.get("number")
+            try:
+                step_number = int(raw_step_number) if raw_step_number is not None else idx
+            except ValueError:
+                step_number = idx
+
+            nav_mode_attr = step.get("nav_mode", "async").lower()
+            step_nav_mode = NAV_MODE_MAP.get(nav_mode_attr, 0)
+
+            explicit_sync = step.get("sync")
+            if explicit_sync is not None:
+                sync_val = (explicit_sync.lower() == "true")
+            else:
+                sync_val = (step_nav_mode != 0)
+
+            step_sync_timeout = float(step.get("sync_timeout", "10.0"))
+            step_arrival_quality = float(step.get("arrival_quality", "0.8"))
+
+            usvs_elem = step.find("usvs")
+            if usvs_elem is None:
+                continue
+
+            for usv in usvs_elem.findall("usv"):
+                usv_id_elem = usv.find("usv_id")
+                pos_x_elem = usv.find("position/x")
+                pos_y_elem = usv.find("position/y")
+                pos_z_elem = usv.find("position/z")
+
+                yaw_val = 0.0
+                use_yaw_val = False
+                maneuver_type = 0
+                maneuver_param = 0.0
+
+                maneuver_node = usv.find("maneuver")
+                if maneuver_node is not None:
+                    m_type = maneuver_node.get("type", "").lower()
+                    if m_type in ["rotate", "spin"]:
+                        maneuver_type = 1
+                        use_yaw_val = True
+                        circles_attr = maneuver_node.get("circles")
+                        direction_attr = maneuver_node.get("direction", "clockwise")
+                        if circles_attr:
+                            try:
+                                maneuver_param = float(circles_attr)
+                                if direction_attr.lower() in ["ccw", "counter_clockwise", "anticlockwise", "left"]:
+                                    maneuver_param = -abs(maneuver_param)
+                                else:
+                                    maneuver_param = abs(maneuver_param)
+                            except ValueError:
+                                pass
+
+                yaw_node = usv.find("yaw")
+                if yaw_node is not None and maneuver_type == 0:
+                    use_attr = yaw_node.get("use")
+                    mode_attr = yaw_node.get("mode")
+                    if (use_attr and use_attr.lower() == "true") or (mode_attr and mode_attr.lower() == "fixed"):
+                        use_yaw_val = True
+                    elif mode_attr and mode_attr.lower() == "auto":
+                        use_yaw_val = False
+                    val_child = yaw_node.find("value")
+                    if val_child is not None and val_child.text:
+                        try:
+                            yaw_val = float(val_child.text)
+                        except ValueError:
+                            pass
+                    elif yaw_node.text and yaw_node.text.strip():
+                        try:
+                            yaw_val = float(yaw_node.text)
+                        except ValueError:
+                            pass
+
+                velocity_elem = usv.find("velocity/value")
+                led_val = usv.get("led", "")
+
+                effective_nav_mode = step_nav_mode
+                if maneuver_type == 1:
+                    effective_nav_mode = 2
+
+                usv_data = {
+                    "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
+                    "position": {
+                        "x": float(pos_x_elem.text) if pos_x_elem is not None and pos_x_elem.text is not None else 0.0,
+                        "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
+                        "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
+                    },
+                    "yaw": yaw_val,
+                    "use_yaw": use_yaw_val,
+                    "maneuver_type": maneuver_type,
+                    "maneuver_param": maneuver_param,
+                    "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
+                    "step": step_number,
+                    "sync": sync_val,
+                    "nav_mode": effective_nav_mode,
+                    "sync_timeout": step_sync_timeout,
+                    "arrival_quality_threshold": step_arrival_quality,
+                    "led": led_val
+                }
+                combined_list.append(usv_data)
+
+        if combined_list:
+            combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
+
+        return combined_list
+
+    def parse_file(self, xml_file: str) -> list:
+        """
+        解析 XML 任务文件并返回位置列表（不触发 GUI 弹窗和状态更新）。
+        供 MissionQueueManager 等外部调用使用。
+
+        Args:
+            xml_file: XML 文件路径
+
+        Returns:
+            list: 解析后的目标点列表，失败返回空列表
+        """
+        try:
+            return self._parse_xml_content(xml_file)
+        except Exception as e:
+            self.append_warning(f"解析文件失败: {e}")
+            return []
+
     def read_data_from_file(self):
         """从XML文件中读取集群任务数据"""
         # 打开文件对话框，选择XML文件
-        file_dialog = QFileDialog(self.parent_widget)
-        file_dialog.setNameFilter("XML Files (*.xml)")
-        file_dialog.setFileMode(QFileDialog.ExistingFiles)
-        
+        # 性能优化：
+        # 1) 使用 Qt 非原生对话框，避免部分系统文件门户/网络挂载导致卡顿
+        # 2) 关闭自定义目录图标扫描，减少打开时的同步 I/O
+        # 3) 记忆上次目录，避免每次从慢路径重新扫描
+        # 4) 复用对话框实例，避免重复构建造成的“闪一下/隐藏一下”
+        file_dialog = self._ensure_task_file_dialog()
+
+        default_dir = self._default_task_dir()
+        # 仅目录真实变化时才重载，减少显示瞬间的模型刷新抖动
+        current_dir = file_dialog.directory().absolutePath()
+        if os.path.realpath(current_dir) != os.path.realpath(default_dir):
+            file_dialog.setDirectory(default_dir)
+        # 不强制清空上次选择，避免打开瞬间触发额外重绘
+        if self._last_task_file and os.path.isfile(self._last_task_file):
+            file_dialog.selectFile(self._last_task_file)
+
+        # WSLg/合成器兼容：对话框显示后可能未正确映射（需拖动才出现）。
+        # 在 exec_ 的事件循环内延时“轻推”：置顶激活 + 1px 尺寸抖动，
+        # 强制合成器重新映射并全量重绘。
+        def _nudge_dialog():
+            try:
+                if not file_dialog.isVisible():
+                    return
+                file_dialog.raise_()
+                file_dialog.activateWindow()
+                sz = file_dialog.size()
+                file_dialog.resize(sz.width() + 1, sz.height())
+                file_dialog.resize(sz)
+                file_dialog.update()
+            except Exception:
+                pass
+
+        QTimer.singleShot(0, _nudge_dialog)
+        QTimer.singleShot(120, _nudge_dialog)
+
         if file_dialog.exec_():
             xml_files = file_dialog.selectedFiles()
             if xml_files:
+                picked_dir = os.path.dirname(xml_files[0])
+                if picked_dir:
+                    self._last_task_dir = picked_dir
                 xml_file = xml_files[0]
+                self._last_task_file = xml_file
                 usv_list = []
                 
                 try:
@@ -73,9 +326,33 @@ class ClusterTaskManager:
                                 f"Step 节点 number='{raw_step_number}' 解析失败，使用顺序值 {idx}"
                             )
 
-                        # 获取 sync 属性，默认为 true
-                        sync_attr = step.get("sync", "true").lower()
-                        sync_val = (sync_attr == "true")
+                        # ========== 导航模式解析 ==========
+                        # 支持的导航模式: async(0), sync(1), rotate(2), terminal(3)
+                        NAV_MODE_MAP = {
+                            'async': 0, '0': 0,
+                            'sync': 1, '1': 1,
+                            'rotate': 2, '2': 2,
+                            'terminal': 3, '3': 3
+                        }
+                        nav_mode_attr = step.get("nav_mode", "async").lower()
+                        step_nav_mode = NAV_MODE_MAP.get(nav_mode_attr, 0)
+                        
+                        # 获取 GS 端步骤间同步属性
+                        # 如果 XML 显式指定了 sync 属性，则使用该值
+                        # 否则根据 nav_mode 自动推导:
+                        #   - nav_mode="async" → sync=false (GS端不等待, USV到达即推进)
+                        #   - nav_mode="sync"  → sync=true  (GS端等待所有USV完成当前step)
+                        #   - nav_mode="rotate"/"terminal" → sync=true
+                        explicit_sync = step.get("sync")
+                        if explicit_sync is not None:
+                            sync_val = (explicit_sync.lower() == "true")
+                        else:
+                            # 自动推导: async模式默认不同步, 其他模式默认同步
+                            sync_val = (step_nav_mode != 0)
+                        
+                        # 同步模式参数
+                        step_sync_timeout = float(step.get("sync_timeout", "10.0"))
+                        step_arrival_quality = float(step.get("arrival_quality", "0.8"))
                         
                         usvs_elem = step.find("usvs")
                         if usvs_elem is None:
@@ -88,14 +365,71 @@ class ClusterTaskManager:
                             pos_x_elem = usv.find("position/x")
                             pos_y_elem = usv.find("position/y")
                             pos_z_elem = usv.find("position/z")
-                            roll_elem = usv.find("roll/value")
-                            pitch_elem = usv.find("pitch/value")
-                            yaw_elem = usv.find("yaw/value")
+                            
+                            # Yaw & Maneuver Parsing Logic
+                            yaw_val = 0.0
+                            use_yaw_val = False
+                            maneuver_type = 0
+                            maneuver_param = 0.0
+                            
+                            # 1. Parse <maneuver> tag (Preferred for actions)
+                            maneuver_node = usv.find("maneuver")
+                            if maneuver_node is not None:
+                                m_type = maneuver_node.get("type", "").lower()
+                                if m_type in ["rotate", "spin"]:
+                                    maneuver_type = 1 # ROTATE
+                                    use_yaw_val = True # Maneuver implies specific yaw control
+                                    
+                                    circles_attr = maneuver_node.get("circles")
+                                    direction_attr = maneuver_node.get("direction", "clockwise") # Default to clockwise
+
+                                    if circles_attr:
+                                        try:
+                                            maneuver_param = float(circles_attr)
+                                            # If logic requires counter-clockwise, negate the param (assuming positive is CW)
+                                            if direction_attr.lower() in ["ccw", "counter_clockwise", "anticlockwise", "left"]:
+                                                maneuver_param = -abs(maneuver_param)
+                                            else:
+                                                maneuver_param = abs(maneuver_param)
+                                        except ValueError:
+                                            self.append_warning(f"Step {step_number} USV {usv_id_elem.text}: circles value '{circles_attr}' invalid")
+
+                            # 2. Parse <yaw> tag (Fallback or Static Heading)
+                            # Only parse if no maneuver overrides it, or if maneuver allows parallel yaw setting (usually not for spin)
+                            yaw_node = usv.find("yaw")
+                            if yaw_node is not None and maneuver_type == 0:
+                                # Check for attribute use="true" or mode="fixed"
+                                use_attr = yaw_node.get("use")
+                                mode_attr = yaw_node.get("mode")
+                                
+                                if (use_attr and use_attr.lower() == "true") or (mode_attr and mode_attr.lower() == "fixed"):
+                                    use_yaw_val = True
+                                elif mode_attr and mode_attr.lower() == "auto":
+                                    use_yaw_val = False
+
+                                # Try to get value from <value> child or direct text
+                                val_child = yaw_node.find("value")
+                                if val_child is not None and val_child.text:
+                                    try:
+                                        yaw_val = float(val_child.text)
+                                    except ValueError:
+                                        pass
+                                elif yaw_node.text and yaw_node.text.strip():
+                                    try:
+                                        yaw_val = float(yaw_node.text)
+                                    except ValueError:
+                                        pass
+
                             velocity_elem = usv.find("velocity/value")
                             
                             # 获取 led 属性
                             led_val = usv.get("led", "")
 
+                            # 如果有旋转机动，自动设置为旋转模式
+                            effective_nav_mode = step_nav_mode
+                            if maneuver_type == 1:  # ROTATE maneuver
+                                effective_nav_mode = 2  # NAV_MODE_ROTATE
+                            
                             usv_data = {
                                 "usv_id": usv_id_elem.text if usv_id_elem is not None else "",
                                 "position": {
@@ -103,20 +437,25 @@ class ClusterTaskManager:
                                     "y": float(pos_y_elem.text) if pos_y_elem is not None and pos_y_elem.text is not None else 0.0,
                                     "z": float(pos_z_elem.text) if pos_z_elem is not None and pos_z_elem.text is not None else 0.0
                                 },
-                                "roll": float(roll_elem.text) if roll_elem is not None and roll_elem.text is not None else 0.0,
-                                "pitch": float(pitch_elem.text) if pitch_elem is not None and pitch_elem.text is not None else 0.0,
-                                "yaw": float(yaw_elem.text) if yaw_elem is not None and yaw_elem.text is not None else 0.0,
+                                "yaw": yaw_val,
+                                "use_yaw": use_yaw_val,
+                                "maneuver_type": maneuver_type,
+                                "maneuver_param": maneuver_param,
                                 "velocity": float(velocity_elem.text) if velocity_elem is not None and velocity_elem.text is not None else 0.0,
                                 "step": step_number,
                                 "sync": sync_val,
+                                "nav_mode": effective_nav_mode,
+                                "sync_timeout": step_sync_timeout,
+                                "arrival_quality_threshold": step_arrival_quality,
                                 "led": led_val
                             }
                             combined_list.append(usv_data)
                             step_usv_count += 1
 
                         if step_usv_count:
-                            sync_str = "同步" if sync_val else "异步"
-                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{sync_str}]")
+                            nav_mode_names = {0: '异步', 1: '同步', 2: '旋转', 3: '终止'}
+                            mode_str = nav_mode_names.get(step_nav_mode, '异步')
+                            step_summaries.append(f"步骤 {step_number}: {step_usv_count} 艘 [{mode_str}]")
 
                     if combined_list:
                         combined_list.sort(key=lambda item: (item.get("step", 0), item.get("usv_id", "")))
@@ -150,6 +489,10 @@ class ClusterTaskManager:
                         
                         # 弹窗显示
                         QMessageBox.information(self.parent_widget, "XML 文件加载报告", info_text)
+                        
+                        # 更新状态指示器
+                        file_name = os.path.basename(xml_file)
+                        self._update_status(f"✅ 任务就绪: {file_name} (共 {total_steps} 步)", "ready")
 
                         self.append_info(
                             f"读取数据成功，共 {usv_count} 艘 USV，涵盖 {total_steps} 个步骤"
@@ -161,6 +504,10 @@ class ClusterTaskManager:
 
                         # 重置任务状态
                         self.cluster_task_running = False
+
+                        # 触发任务加载回调
+                        if self.task_loaded_callback:
+                            self.task_loaded_callback(self.cluster_position_list)
                         self.cluster_task_paused = False
                     else:
                         error_msg = "XML文件中未找到任何 USV 数据"
@@ -197,59 +544,55 @@ class ClusterTaskManager:
                     QMessageBox.critical(self.parent_widget, "未知错误", error_msg)
                     self.cluster_position_list = []
     
-    def toggle_task(self, usv_departed_list, usv_cluster_list=None):
+    def toggle_task(self, usv_departed_list):
         """
         切换集群任务的运行状态：运行/暂停
         
         Args:
             usv_departed_list: 离群USV列表
-            usv_cluster_list: 集群中的USV列表
             
         Returns:
             str: 返回按钮应显示的文本
         """
         if not self.cluster_task_running and not self.cluster_position_list:
             self.append_warning("请先导入集群目标点数据")
+            self._update_status("⚠️ 未加载任务", "warning")
             return self.get_button_text()
         
         # 如果任务未开始且有目标点数据，则开始任务
         if not self.cluster_task_running and self.cluster_position_list:
-            self.start_task(usv_departed_list, usv_cluster_list)
+            self.start_task(usv_departed_list)
         # 如果任务正在运行，则切换暂停状态
         elif self.cluster_task_running:
             if not self.cluster_task_paused:
                 self.cluster_task_paused = True
                 self.append_info("集群任务已暂停")
                 self.ros_signal.cluster_pause_request.emit()
+                self._update_status("⏸️ 任务暂停", "paused")
             else:
                 self.cluster_task_paused = False
                 self.append_info("集群任务已继续")
                 self.ros_signal.cluster_resume_request.emit()
+                self._update_status("🚀 任务继续", "running")
         
         return self.get_button_text()
     
-    def start_task(self, usv_departed_list, usv_cluster_list=None):
+    def start_task(self, usv_departed_list):
         """
         开始执行集群任务
         
         Args:
             usv_departed_list: 离群USV列表
-            usv_cluster_list: 集群中的USV列表（可选）
             
         Returns:
             bool: 任务是否成功启动
         """
-        # 检查集群中是否有 USV
-        if usv_cluster_list is not None and len(usv_cluster_list) == 0:
-            self.append_warning("集群中没有 USV，无法发送目标点")
-            return False
+        self.append_info("开始执行集群目标点任务")
         
         # 检查是否有集群列表
         if not self.cluster_position_list:
             self.append_warning("集群列表为空")
             return False
-        
-        self.append_info("开始执行集群目标点任务")
         
         # 创建副本并过滤掉离群的USV
         filtered_list = self.cluster_position_list.copy()
@@ -261,46 +604,86 @@ class ClusterTaskManager:
             self.append_warning("集群列表为空（所有 USV 均在离群列表中）")
             return False
         
-        try:
-            # 更新 cluster_position_list
-            self.cluster_position_list = filtered_list
-            # 设置任务状态
-            self.cluster_task_running = True
-            self.cluster_task_paused = False
-            # 发送 ROS 信号
-            self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
-            
-            # 统计参与的唯一 USV 数量
-            unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list}
-            usv_count_in_task = len(unique_usvs_in_task)
-            
-            self.append_info(f"集群任务已开始执行，共 {usv_count_in_task} 艘 USV")
-            return True
-        except Exception as e:
-            self.append_warning(f"任务启动失败: {e}")
-            # 出错时重置状态
-            self.cluster_task_running = False
-            self.cluster_task_paused = False
+        # 统计参与的唯一 USV 数量
+        unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list}
+        usv_count_in_task = len(unique_usvs_in_task)
+
+        # 弹窗确认
+        reply = QMessageBox.question(
+            self.parent_widget,
+            "确认执行",
+            f"即将执行 {usv_count_in_task} 个 USV 的集群任务。\n是否继续?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            try:
+                # 更新 cluster_position_list
+                self.cluster_position_list = filtered_list
+                # 设置任务状态
+                self.cluster_task_running = True
+                self.cluster_task_paused = False
+                # 发送 ROS 信号
+                self.ros_signal.cluster_target_point_command.emit(self.cluster_position_list)
+                
+                # 通知 UI 清理任务反馈列表（通过回调或信号）
+                if self.parent_widget and hasattr(self.parent_widget, 'clear_navigation_feedback_table'):
+                    self.parent_widget.clear_navigation_feedback_table()
+                
+                self.append_info(f"集群任务已开始执行，共 {usv_count_in_task} 艘 USV")
+                unique_steps = sorted(list({item.get("step", 0) for item in self.cluster_position_list}))
+                self._update_status(f"🚀 正在执行: 第 {unique_steps[0] if unique_steps else 1} / {len(unique_steps)} 步", "running")
+                return True
+            except Exception as e:
+                QMessageBox.critical(self.parent_widget, "错误", f"任务启动失败: {e}")
+                # 出错时重置状态
+                self.cluster_task_running = False
+                self.cluster_task_paused = False
+                return False
+        else:
+            QMessageBox.information(self.parent_widget, "取消", "任务启动已取消")
             return False
     
     def stop_task(self):
-        """停止集群任务执行"""
+        """停止集群任务执行（含编队模式）"""
+        # 如果编队模式正在运行，先停止编队
+        if self._is_formation_active():
+            self._stop_formation_task()
+            return
+
         # 如果没有正在运行的集群任务，直接返回
         if not self.cluster_task_running:
             self.append_info("当前没有正在运行的集群任务")
             return
         
-        # 直接停止，不需要确认
-        # 发送停止信号给ROS节点
-        self.ros_signal.cluster_stop_request.emit()
+        # 弹窗确认
+        reply = QMessageBox.question(
+            self.parent_widget,
+            "确认停止",
+            "确定要停止当前集群任务吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
         
-        # 重置任务状态
-        self.cluster_task_running = False
-        self.cluster_task_paused = False
-        self.append_info("集群任务已停止")
-        
-        # 清空集群位置列表
-        self.cluster_position_list = []
+        if reply == QMessageBox.Yes:
+            # 发送停止信号给ROS节点
+            self.ros_signal.cluster_stop_request.emit()
+            
+            # 重置任务状态
+            self.cluster_task_running = False
+            self.cluster_task_paused = False
+            self.append_info("集群任务已停止！")
+            self._update_status("⏹ 任务已停止", "stopped")
+            
+            # 保留集群位置列表以便重启
+            # self.cluster_position_list = []
+            
+            # 通知 UI 清理任务反馈列表
+            if self.parent_widget and hasattr(self.parent_widget, 'clear_navigation_feedback_table'):
+                self.parent_widget.clear_navigation_feedback_table()
+        else:
+            self.append_info("取消停止操作")
     
     def is_task_active(self):
         """
@@ -325,6 +708,17 @@ class ClusterTaskManager:
         else:
             return "cluster pause"
     
+
+    # 状态对应的样式表（背景色 + 圆角）
+    STATUS_STYLES = {
+        'running': "QLabel { background-color: #2e7d32; color: white; border-radius: 4px; padding: 2px; }", # 深绿色
+        'paused': "QLabel { background-color: #f9a825; color: black; border-radius: 4px; padding: 2px; }", # 黄色
+        'completed': "QLabel { background-color: #1565c0; color: white; border-radius: 4px; padding: 2px; }", # 深蓝色
+        'idle': "QLabel { background-color: #424242; color: #bdbdbd; border-radius: 4px; padding: 2px; }", # 灰色
+        'ready': "QLabel { background-color: #00838f; color: white; border-radius: 4px; padding: 2px; }", # 青色
+        'stopped': "QLabel { background-color: #c62828; color: white; border-radius: 4px; padding: 2px; }", # 红色
+    }
+
     def update_progress(self, progress_info):
         """
         处理集群任务进度更新
@@ -349,16 +743,31 @@ class ClusterTaskManager:
             'completed': '已完成',
             'idle': '空闲',
         }
-        state_label = state_label_map.get(state, '未知')
+        state_label_cn = state_label_map.get(state, state)
         
-        # 更新标签显示
-        # progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
-        #                 f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
-        #                 f"耗时 {elapsed_time:.1f}s, 状态 {state_label}")
+        # 构造详细日志文本
+        progress_text = (f"集群任务进度: 步骤 {current_step}/{total_steps}, "
+                        f"完成 {acked_usvs}/{total_usvs} 个USV ({ack_rate*100:.1f}%), "
+                        f"耗时 {elapsed_time:.1f}s, 状态 {state_label_cn}")
         
-        # self.append_info(progress_text)
+        self.append_info(progress_text)
         
+        # ============ 更新 UI 状态标签 ============
+        label_text = f"🚀 {state_label_cn}: 第 {current_step} / {total_steps} 步 | {acked_usvs}/{total_usvs} 艘"
+        if state == 'completed':
+            label_text = f"🏁 任务已完成 (共{total_steps}步)"
+        elif state == 'idle':
+            label_text = "⏹ 任务未运行"
+        elif state == 'paused':
+            label_text = f"⏸️ 已暂停: 第 {current_step} / {total_steps} 步"
+
+        # 获取对应的样式并更新标签
+        style_css = self.STATUS_STYLES.get(state, self.STATUS_STYLES.get('idle'))
+        self._update_status(label_text, style_css)
+        # ===============================================
+
         if state == 'running':
+
             self.cluster_task_running = True
             self.cluster_task_paused = False
         elif state == 'paused':
@@ -372,3 +781,132 @@ class ClusterTaskManager:
             if current_step > total_steps or (current_step == total_steps and ack_rate >= 1.0):
                 self.cluster_task_running = False
                 self.cluster_task_paused = False
+
+    # ==================== 编队模式管理方法 ====================
+
+    def _is_formation_active(self):
+        """检查编队模式是否正在运行"""
+        return getattr(self, '_formation_running', False)
+
+    def start_formation(self, group_configs: list):
+        """
+        启动多编队模式
+        
+        编队模式与集群任务共存：
+        - 领队由集群导航任务控制
+        - 跟随者被排除在集群任务之外，由编队控制器管理
+        
+        Args:
+            group_configs: 编队组配置列表，每个元素为 dict
+        """
+        self._formation_running = True
+        self._formation_config = group_configs
+
+        # 发送编队启动信号
+        self.ros_signal.formation_start_request.emit(group_configs)
+
+        # 更新状态
+        from .formation_controller import FormationType
+        type_names = {
+            0: "人字形",
+            1: "横排一字形",
+            2: "菱形",
+            3: "三角形",
+            4: "纵列一字形",
+            5: "S形",
+            6: "护卫",
+        }
+
+        n_groups = len(group_configs)
+        total_usvs = sum(1 + len(g.get('follower_ids', [])) for g in group_configs)
+
+        if n_groups == 1:
+            cfg = group_configs[0]
+            ft = cfg.get('formation_type', 0)
+            type_name = type_names.get(ft, "未知")
+            n_followers = len(cfg.get('follower_ids', []))
+            leader = cfg.get('leader_id', '')
+            self._update_status(
+                f"🔱 编队模式: {type_name} | 领队: {leader} | {n_followers} 艘跟随",
+                "running"
+            )
+            self.append_info(
+                f"编队模式已启动: {type_name}, 领队={leader}, "
+                f"跟随者={', '.join(cfg.get('follower_ids', []))}, "
+                f"间距=({cfg.get('spacing_along', 1.0)}m × {cfg.get('spacing_cross', 1.0)}m)"
+            )
+        else:
+            summaries = []
+            for cfg in group_configs:
+                ft = cfg.get('formation_type', 0)
+                type_name = type_names.get(ft, "未知")
+                leader = cfg.get('leader_id', '')
+                n_f = len(cfg.get('follower_ids', []))
+                summaries.append(f"{cfg.get('group_id', '')}: {type_name}/{leader}→{n_f}跟随")
+            self._update_status(
+                f"🔱 多编队模式: {n_groups} 组 | 共 {total_usvs} 艘 USV",
+                "running"
+            )
+            self.append_info(
+                f"多编队模式已启动: {n_groups} 组, 共 {total_usvs} 艘\n"
+                + "\n".join(f"  {s}" for s in summaries)
+            )
+
+    def _stop_formation_task(self):
+        """停止编队任务"""
+        reply = QMessageBox.question(
+            self.parent_widget,
+            "确认停止编队",
+            "确定要停止当前编队模式吗？\n所有跟随者将切换到 HOLD 模式。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.ros_signal.formation_stop_request.emit()
+            self._formation_running = False
+            self._formation_config = None
+            self.append_info("❌ 编队已解散，所有 USV 已恢复集群任务参与")
+            self._update_status("⏹ 编队已解散", "stopped")
+            # 恢复 stop 按钮文本
+            if self.parent_widget and hasattr(self.parent_widget, 'ui'):
+                self.parent_widget.ui.stop_cluster_task_pushButton.setText("cluster stop")
+            # 清除绘图窗口编队信息
+            if self.parent_widget and hasattr(self.parent_widget, 'usv_plot_window'):
+                self.parent_widget.usv_plot_window.set_formation_info([], [])
+        else:
+            self.append_info("取消停止操作")
+
+    def update_formation_status(self, status_info: dict):
+        """
+        处理编队状态更新
+        
+        Args:
+            status_info: 编队状态信息字典 (来自某个编队组)
+        """
+        status = status_info.get('status', 'unknown')
+        group_id = status_info.get('group_id', '')
+        if status == 'stopped':
+            # 单个组停止不一定全部停止，由外部决定
+            pass
+        elif status == 'running':
+            self._formation_running = True
+            type_name = status_info.get('formation_type_name', '')
+            leader = status_info.get('leader_id', '')
+            n = status_info.get('follower_count', 0)
+            if group_id:
+                self._update_status(
+                    f"🔱 {group_id}: {type_name} | 领队: {leader} | {n} 艘跟随",
+                    "running"
+                )
+            else:
+                self._update_status(
+                    f"🔱 编队运行中: {type_name} | 领队: {leader} | {n} 艘跟随",
+                    "running"
+                )
+
+    def get_button_text_with_formation(self):
+        """获取按钮文本 (编队模式感知)"""
+        if self._is_formation_active():
+            return "停止编队"
+        return self.get_button_text()

@@ -1,0 +1,387 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<cluster type="formation">
+  <step number="1" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>-3.510</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>3.532</x>
+          <y>-4.838</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>5.693</x>
+          <y>1.864</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>-0.014</x>
+          <y>5.990</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>-5.701</x>
+          <y>1.838</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+  <step number="2" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>0.000</x>
+          <y>6.000</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>-5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>-3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+  <step number="3" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>-5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>-3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>-0.000</x>
+          <y>6.000</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+  <step number="4" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>-0.000</x>
+          <y>6.000</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>-5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>-3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+  <step number="5" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>0.000</x>
+          <y>6.000</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>-5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>-3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>3.527</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>5.706</x>
+          <y>1.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+  <step number="6" nav_mode="async">
+    <usvs>
+      <usv led="0">
+        <usv_id>usv_01</usv_id>
+        <position>
+          <x>-3.532</x>
+          <y>-4.838</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_02</usv_id>
+        <position>
+          <x>3.510</x>
+          <y>-4.854</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_03</usv_id>
+        <position>
+          <x>5.701</x>
+          <y>1.838</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_04</usv_id>
+        <position>
+          <x>0.014</x>
+          <y>5.990</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+      <usv led="0">
+        <usv_id>usv_05</usv_id>
+        <position>
+          <x>-5.693</x>
+          <y>1.864</y>
+          <z>0.000</z>
+        </position>
+        <yaw mode="auto" />
+        <velocity>
+          <value>0.500</value>
+        </velocity>
+      </usv>
+    </usvs>
+  </step>
+</cluster>

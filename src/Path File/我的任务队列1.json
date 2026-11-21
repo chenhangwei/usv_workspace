@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "queue_name": "我的任务队列1",
+  "saved_at": "2026-03-09T10:01:21",
+  "tasks": [
+    {
+      "task_id": "49566f17",
+      "task_name": "8字形-8mx24m-白天",
+      "file_path": "/home/chenhangwei/usv_workspace/src/Path File/8字形-8mx24m-白天.xml",
+      "transition_mode": "seamless",
+      "status": "pending"
+    },
+    {
+      "task_id": "f1318638",
+      "task_name": "Z字形-8mx24m-白天",
+      "file_path": "/home/chenhangwei/usv_workspace/src/Path File/Z字形-8mx24m-白天.xml",
+      "transition_mode": "seamless",
+      "status": "pending"
+    },
+    {
+      "task_id": "a868485a",
+      "task_name": "五角星-5-usv-12m-异步",
+      "file_path": "/home/chenhangwei/usv_workspace/src/Path File/五角星-5-usv-12m-异步.xml",
+      "transition_mode": "seamless",
+      "status": "pending"
+    },
+    {
+      "task_id": "91ac23d8",
+      "task_name": "混乱Z字形-8mx20m-白天-异步",
+      "file_path": "/home/chenhangwei/usv_workspace/src/Path File/混乱Z字形-8mx20m-白天-异步.xml",
+      "transition_mode": "seamless",
+      "status": "pending"
+    }
+  ]
+}

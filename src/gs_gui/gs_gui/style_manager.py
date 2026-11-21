@@ -1,14 +1,28 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of style manager.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 样式管理器 - 支持多种主题快速切换
 提供现代化UI主题，增强视觉体验
 """
-
-import logging
+from PyQt5.QtWidgets import QWidget, QApplication
 import os
-from PyQt5.QtWidgets import QWidget
 
-_logger = logging.getLogger("gs_gui.style")
 
+def is_dark_theme() -> bool:
+    """全局辅助：判断当前主题是否为深色"""
+    app = QApplication.instance()
+    if app:
+        return app.property('current_theme') != 'light'
+    return True
 
 
 class StyleManager:
@@ -17,7 +31,7 @@ class StyleManager:
     # 预定义主题
     THEMES = {
         'modern_dark': 'modern_style.qss',  # 现代深色主题（默认）
-        'light': None,  # 浅色主题（未来扩展）
+        'light': 'light_style.qss',  # 浅色主题
         'classic': None,  # 经典主题（禁用样式表）
     }
     
@@ -72,7 +86,7 @@ class StyleManager:
             bool: 是否成功加载
         """
         if theme_name not in self.THEMES:
-            _logger.warning(f"未知主题: {theme_name}，使用默认主题")
+            print(f"⚠ 未知主题: {theme_name}，使用默认主题")
             theme_name = 'modern_dark'
         
         qss_file = self.THEMES[theme_name]
@@ -81,7 +95,8 @@ class StyleManager:
         if qss_file is None:
             self.widget.setStyleSheet("")
             self.current_theme = theme_name
-            _logger.info(f"已切换到主题: {theme_name} (无样式表)")
+            QApplication.instance().setProperty('current_theme', theme_name)
+            print(f"✓ 已切换到主题: {theme_name} (无样式表)")
             return True
         
         # 加载QSS文件
@@ -93,12 +108,13 @@ class StyleManager:
                     stylesheet = f.read()
                     self.widget.setStyleSheet(stylesheet)
                     self.current_theme = theme_name
-                    _logger.info(f"已加载主题: {theme_name}")
+                    QApplication.instance().setProperty('current_theme', theme_name)
+                    print(f"✓ 已加载主题: {theme_name} ({qss_path})")
                     return True
             else:
                 raise FileNotFoundError(f"样式表文件不存在: {qss_path}")
         except Exception as e:
-            _logger.error(f"主题加载失败: {e}")
+            print(f"✗ 主题加载失败: {e}")
             # 使用后备样式
             self._apply_fallback_style()
             return False
@@ -145,7 +161,7 @@ class StyleManager:
             }
         """
         self.widget.setStyleSheet(fallback_qss)
-        _logger.info("已应用后备样式")
+        print("✓ 已应用后备样式")
     
     def toggle_theme(self):
         """在可用主题间切换（用于未来扩展）"""

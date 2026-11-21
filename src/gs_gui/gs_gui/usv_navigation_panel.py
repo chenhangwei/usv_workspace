@@ -1,19 +1,26 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+#
+# Copyright (c) 2026 chenhangwei
+# 
+# This file is part of the USV Workspace project.
+# 
+# Implementation of usv navigation panel.
+#
+# Author: chenhangwei
+# Date: 2026-01-26
 """
 USV 导航信息面板模块
 提供美观、信息丰富的 USV 导航详细信息显示界面
 """
-
-import logging
-import math
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                               QGroupBox, QGridLayout, QFrame, QScrollArea, 
                               QSizePolicy)
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont, QColor
+import math
 from .compass_widget import CompassWidget
-from .angle_utils import rad_to_normalized_deg_0_360
-
-_logger = logging.getLogger("gs_gui.nav_panel")
-
+from gs_gui.style_manager import is_dark_theme
 
 # 兼容性定义
 try:
@@ -24,6 +31,47 @@ except AttributeError:
     AlignRight = Qt.AlignRight  # type: ignore
     AlignLeft = Qt.AlignLeft  # type: ignore
     AlignVCenter = Qt.AlignVCenter  # type: ignore
+
+
+class AngleSmoother:
+    """
+    角度平滑器
+    使用指数移动平均(EMA)处理角度数据，解决 0/360 度跳变问题
+    """
+    def __init__(self, alpha=0.15):
+        self.alpha = alpha
+        self.current_rad = None
+
+    def update(self, target_deg):
+        """
+        更新角度值
+        Args:
+            target_deg: 目标角度（度）
+        Returns:
+            平滑后的角度（度，0-360）
+        """
+        if target_deg is None:
+            return 0.0
+            
+        target_rad = math.radians(target_deg)
+        
+        if self.current_rad is None:
+            self.current_rad = target_rad
+            return target_deg
+            
+        # 计算角度差（使用 atan2 处理周期性，确保是最短路径）
+        # diff 范围是 -pi 到 pi
+        diff = math.atan2(math.sin(target_rad - self.current_rad), 
+                         math.cos(target_rad - self.current_rad))
+        
+        # 更新当前角度
+        self.current_rad += self.alpha * diff
+        
+        # 返回度数 (0-360)
+        return math.degrees(self.current_rad) % 360.0
+
+    def reset(self):
+        self.current_rad = None
 
 
 class UsvNavigationPanel(QWidget):
@@ -46,7 +94,7 @@ class UsvNavigationPanel(QWidget):
     GROUPBOX_STYLE = """
         QGroupBox {
             font-weight: bold;
-            font-size: 14px;
+            font-size: 16px;
             border: 1.5px solid #e67e22;
             border-radius: 5px;
             margin-top: 6px;
@@ -58,6 +106,91 @@ class UsvNavigationPanel(QWidget):
             padding: 0 3px;
         }
     """
+
+    def _get_groupbox_style(self, border_color="#e67e22"):
+        """根据主题返回 QGroupBox 样式"""
+        dark = is_dark_theme()
+        title_color = "#e0e0e0" if dark else "#333333"
+        return f"""
+            QGroupBox {{
+                font-weight: bold;
+                font-size: 16px;
+                border: 1.5px solid {border_color};
+                border-radius: 5px;
+                margin-top: 6px;
+                padding-top: 6px;
+                color: {title_color};
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }}
+        """
+
+    def _get_scrollbar_stylesheet(self):
+        """根据主题返回滚动条样式"""
+        dark = is_dark_theme()
+        if dark:
+            bg = "#2c3e50"
+            handle = "#e67e22"
+            handle_hover = "#f39c12"
+        else:
+            bg = "#e8e8e8"
+            handle = "#b0b0b0"
+            handle_hover = "#909090"
+        return f"""
+            QScrollArea {{
+                border: none;
+                background-color: transparent;
+            }}
+            QScrollBar:vertical {{
+                border: none;
+                background: {bg};
+                width: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {handle};
+                min-height: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                border: none;
+                background: none;
+                height: 0px;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{
+                border: none;
+                background: {bg};
+                height: 10px;
+                margin: 0px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {handle};
+                min-width: 30px;
+                border-radius: 5px;
+            }}
+            QScrollBar::handle:horizontal:hover {{
+                background: {handle_hover};
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                border: none;
+                background: none;
+                width: 0px;
+            }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+                background: none;
+            }}
+        """
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -66,22 +199,53 @@ class UsvNavigationPanel(QWidget):
         self._current_navigation_state = None
         self._current_feedback = None
         
+        # 初始化平滑器 (alpha越小越平滑但延迟越高)
+        self.heading_smoother = AngleSmoother(alpha=0.15)
+        # 误差平滑器 (误差可能在+/-180跳变，也作为角度处理)
+        self.error_smoother = AngleSmoother(alpha=0.15) 
+        
         # 设置主布局（包含滚动区域）
         self._setup_ui()
+
+    def set_theme(self, theme_name):
+        """切换主题时刷新面板内硬编码的样式"""
+        if hasattr(self, '_scroll_area'):
+            self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
+        group_colors = {
+            'velocity_group': '#e67e22',
+            'heading_group': '#3498db',
+            'mission_group': '#27ae60',
+            'feedback_group': '#9b59b6',
+        }
+        for attr, color in group_colors.items():
+            w = getattr(self, attr, None)
+            if w:
+                w.setStyleSheet(self._get_groupbox_style(color))
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        val_color = "#e0e0e0" if dark else "#34495e"
+        for label in getattr(self, '_key_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {key_color}; font-weight: bold; font-size: 16px; min-width: 70px; }}")
+        for label in getattr(self, '_value_labels', []):
+            label.setStyleSheet(f"QLabel {{ color: {val_color}; font-size: 16px; font-weight: 600; }}")
     
     def _setup_ui(self):
         """设置UI布局（带滚动条）"""
+        # 用于 set_theme() 批量刷新
+        self._key_labels = []
+        self._value_labels = []
+
         # 主容器布局（外层）
         main_container_layout = QVBoxLayout(self)
         main_container_layout.setContentsMargins(0, 0, 0, 0)
         main_container_layout.setSpacing(0)
         
         # 创建滚动区域
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)  # 自动调整内容大小
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        scroll_area.setFrameShape(QFrame.Shape.NoFrame)  # 无边框
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         
         # 创建滚动内容容器
         scroll_content = QWidget()
@@ -93,89 +257,37 @@ class UsvNavigationPanel(QWidget):
         content_layout.setSpacing(10)
         
         # ==================== 速度信息组 ====================
-        velocity_group = self._create_velocity_info_group()
-        content_layout.addWidget(velocity_group)
+        self.velocity_group = self._create_velocity_info_group()
+        content_layout.addWidget(self.velocity_group)
         
         # ==================== 航向信息组 ====================
-        heading_group = self._create_heading_info_group()
-        content_layout.addWidget(heading_group)
+        self.heading_group = self._create_heading_info_group()
+        content_layout.addWidget(self.heading_group)
         
         # ==================== 任务信息组 ====================
-        mission_group = self._create_mission_info_group()
-        content_layout.addWidget(mission_group)
+        self.mission_group = self._create_mission_info_group()
+        content_layout.addWidget(self.mission_group)
         
         # ==================== 导航反馈组 ====================
-        feedback_group = self._create_navigation_feedback_group()
-        content_layout.addWidget(feedback_group)
+        self.feedback_group = self._create_navigation_feedback_group()
+        content_layout.addWidget(self.feedback_group)
         
         # 添加弹性空间（自动填充剩余空间）
         content_layout.addStretch()
         
         # 将内容容器设置到滚动区域
-        scroll_area.setWidget(scroll_content)
+        self._scroll_area.setWidget(scroll_content)
         
         # 将滚动区域添加到主布局
-        main_container_layout.addWidget(scroll_area)
+        main_container_layout.addWidget(self._scroll_area)
         
-        # 设置滚动条样式
-        scroll_area.setStyleSheet("""
-            QScrollArea {
-                border: none;
-                background-color: transparent;
-            }
-            QScrollBar:vertical {
-                border: none;
-                background: #2c3e50;
-                width: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical {
-                background: #e67e22;
-                min-height: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: #f39c12;
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                border: none;
-                background: none;
-                height: 0px;
-            }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
-            }
-            
-            QScrollBar:horizontal {
-                border: none;
-                background: #2c3e50;
-                height: 10px;
-                margin: 0px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal {
-                background: #e67e22;
-                min-width: 30px;
-                border-radius: 5px;
-            }
-            QScrollBar::handle:horizontal:hover {
-                background: #f39c12;
-            }
-            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-                border: none;
-                background: none;
-                width: 0px;
-            }
-            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {
-                background: none;
-            }
-        """)
+        # 设置滚动条样式（主题感知）
+        self._scroll_area.setStyleSheet(self._get_scrollbar_stylesheet())
     
     def _create_velocity_info_group(self):
         """创建速度信息组"""
         group = QGroupBox("🚤 速度信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE)
+        group.setStyleSheet(self._get_groupbox_style("#e67e22"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -206,7 +318,7 @@ class UsvNavigationPanel(QWidget):
     def _create_heading_info_group(self):
         """创建航向信息组（带罗盘显示）"""
         group = QGroupBox("🧭 航向信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#3498db"))
+        group.setStyleSheet(self._get_groupbox_style("#3498db"))
         
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
@@ -246,7 +358,7 @@ class UsvNavigationPanel(QWidget):
     def _create_mission_info_group(self):
         """创建任务信息组"""
         group = QGroupBox("📋 任务信息")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#27ae60"))
+        group.setStyleSheet(self._get_groupbox_style("#27ae60"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -274,6 +386,12 @@ class UsvNavigationPanel(QWidget):
         layout.addWidget(self._create_key_label("目标 Z:"), 3, 0)
         layout.addWidget(self.target_z_label, 3, 1)
         layout.addWidget(QLabel("m"), 3, 2)
+
+        # 到达阈值（米）
+        self.arrival_threshold_label = self._create_value_label("--")
+        layout.addWidget(self._create_key_label("到达阈值(设定):"), 4, 0)
+        layout.addWidget(self.arrival_threshold_label, 4, 1)
+        layout.addWidget(QLabel("m"), 4, 2)
         
         layout.setColumnStretch(1, 1)
         group.setLayout(layout)
@@ -282,7 +400,7 @@ class UsvNavigationPanel(QWidget):
     def _create_navigation_feedback_group(self):
         """创建导航反馈组"""
         group = QGroupBox("📡 导航反馈")
-        group.setStyleSheet(self.GROUPBOX_STYLE.replace("#e67e22", "#9b59b6"))
+        group.setStyleSheet(self._get_groupbox_style("#9b59b6"))
         
         layout = QGridLayout()
         layout.setSpacing(5)
@@ -324,14 +442,17 @@ class UsvNavigationPanel(QWidget):
         else:
             alignment = AlignRight | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("""
-            QLabel {
-                color: #7f8c8d;
+        dark = is_dark_theme()
+        key_color = "#b0b0b0" if dark else "#7f8c8d"
+        label.setStyleSheet(f"""
+            QLabel {{
+                color: {key_color};
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 16px;
                 min-width: 70px;
-            }
+            }}
         """)
+        self._key_labels.append(label)
         return label
     
     def _create_value_label(self, text):
@@ -342,13 +463,16 @@ class UsvNavigationPanel(QWidget):
         else:
             alignment = AlignLeft | AlignVCenter
         label.setAlignment(alignment)  # type: ignore[arg-type]
-        label.setStyleSheet("""
-            QLabel {
-                color: #34495e;
-                font-size: 14px;
+        dark = is_dark_theme()
+        val_color = "#e0e0e0" if dark else "#34495e"
+        label.setStyleSheet(f"""
+            QLabel {{
+                color: {val_color};
+                font-size: 16px;
                 font-weight: 600;
-            }
+            }}
         """)
+        self._value_labels.append(label)
         return label
     
     def update_navigation_state(self, state, feedback=None, nav_status=None):
@@ -399,40 +523,71 @@ class UsvNavigationPanel(QWidget):
                 self.total_speed_label.setText("--")
             
             # ==================== 更新航向信息 ====================
-            # 当前航向（UsvStatus.heading 单位为弧度；此处转换为度用于显示/罗盘）
+            # 1. 获取并平滑当前航向
             current_heading = None
             try:
-                heading_rad = float(state.get('heading', 0.0))
-                heading_deg = rad_to_normalized_deg_0_360(heading_rad)
-                current_heading = heading_deg
-                self.current_heading_label.setText(self._format_float(heading_deg, precision=1))
+                raw_heading = float(state.get('heading', 0.0))
+                # 使用平滑器处理
+                current_heading = self.heading_smoother.update(raw_heading)
+                self.current_heading_label.setText(self._format_float(current_heading, precision=1))
             except (ValueError, TypeError):
                 self.current_heading_label.setText("--")
+                self.heading_smoother.reset()
             
-            # 目标航向和航向误差（从导航反馈中获取）
+            # 2. 获取并平滑航向误差，然后计算目标航向
             target_heading = None
             heading_error = None
             
             if feedback is not None and hasattr(feedback, 'heading_error'):
                 try:
-                    heading_error = float(feedback.heading_error)
+                    # 误差也是角度性质的，需要平滑
+                    raw_error = float(feedback.heading_error)
+                    heading_error = raw_error # 显示用的误差可以保持原始值或也平滑
                     
-                    # 计算目标航向 = 当前航向 + 航向误差
+                    # 为了计算稳定的目标航向，我们使用平滑后的误差
+                    # 注意：这里我们单独维护误差的平滑，或者直接用平滑后的航向+原始误差计算目标航向再平滑
+                    # 策略：Target = Smooth(Current) + Smooth(Error)
+                    # 但Error的平滑需要特殊处理，因为它是在0附近震荡。
+                    # 实际上，Error本身就是 Target - Current。
+                    # 如果我们信任 Feedback 中的 Error，那么 Target = Current + Error。
+                    # 为了稳定，我们计算出瞬时 Target，然后对 Target 进行平滑。
+                    
                     if current_heading is not None:
-                        target_heading = current_heading + heading_error
-                        # 归一化到 0-360 度
-                        target_heading = target_heading % 360.0
+                        # 瞬时目标航向
+                        inst_target = raw_heading + raw_error
+                        
+                        # 我们不需要单独平滑 Target，因为如果我们平滑了 Current，
+                        # 且假设 Error 只是控制偏差，直接加会导致 Target 随 Current 波动。
+                        # 正确的做法是：由于 Target 通常是固定的（或者变化很慢），
+                        # 我们应该直接根据 (Current + Error) 计算出 Target，然后对 Target 进行强力平滑。
+                        
+                        # 这里我们复用 error_smoother 来作为 "Target Heading Smoother"
+                        # 改名可能更合适，但为了最小修改，我们直接用它存 Target 的状态
+                        target_heading = self.error_smoother.update(inst_target)
+                        
                         self.target_heading_label.setText(self._format_float(target_heading, precision=1))
                     else:
                         self.target_heading_label.setText("--")
+                        self.error_smoother.reset()
                 except (ValueError, TypeError, AttributeError):
                     self.target_heading_label.setText("--")
+                    self.error_smoother.reset()
             else:
                 self.target_heading_label.setText("--")
+                # 如果没有反馈，重置平滑器状态，避免保留旧值
+                self.error_smoother.reset() 
             
-            # 更新罗盘显示（传递当前航向、目标航向和航向误差）
+            # 更新罗盘显示
             if current_heading is not None:
-                self.compass_widget.set_heading(current_heading, target_heading, heading_error)
+                # 重新计算用于显示的误差 (Target - Current) 以保持一致性
+                display_error = heading_error # 默认显示原始误差
+                if target_heading is not None:
+                    # 计算平滑后的显示误差
+                    diff_rad = math.radians(target_heading) - math.radians(current_heading)
+                    diff_rad = math.atan2(math.sin(diff_rad), math.cos(diff_rad))
+                    display_error = math.degrees(diff_rad)
+                
+                self.compass_widget.set_heading(current_heading, target_heading, display_error)
             else:
                 self.compass_widget.set_heading(0.0)
             
@@ -465,6 +620,20 @@ class UsvNavigationPanel(QWidget):
                 self.target_x_label.setText("--")
                 self.target_y_label.setText("--")
                 self.target_z_label.setText("--")
+
+            # 到达阈值（从 state 中获取）
+            try:
+                threshold = state.get('nav_arrival_threshold', None)
+                if threshold is None:
+                    self.arrival_threshold_label.setText("--")
+                else:
+                    threshold_f = float(threshold)
+                    if threshold_f > 0.0:
+                        self.arrival_threshold_label.setText(self._format_float(threshold_f, precision=2))
+                    else:
+                        self.arrival_threshold_label.setText("--")
+            except Exception:
+                self.arrival_threshold_label.setText("--")
             
             # ==================== 更新导航反馈 ====================
             if feedback is not None:
@@ -500,7 +669,7 @@ class UsvNavigationPanel(QWidget):
                 self._update_nav_status_style("空闲")
                 
         except Exception as e:
-            _logger.error(f"更新 USV 导航面板失败: {e}")
+            print(f"更新 USV 导航面板失败: {e}")
     
     def _clear_display(self):
         """清空显示"""
@@ -519,6 +688,7 @@ class UsvNavigationPanel(QWidget):
         self.target_x_label.setText("--")
         self.target_y_label.setText("--")
         self.target_z_label.setText("--")
+        self.arrival_threshold_label.setText("--")
         
         # 导航反馈
         self.distance_to_goal_label.setText("--")
@@ -527,6 +697,10 @@ class UsvNavigationPanel(QWidget):
         
         self._current_navigation_state = None
         self._current_feedback = None
+        
+        # 重置平滑器
+        self.heading_smoother.reset()
+        self.error_smoother.reset()
     
     def _format_float(self, value, precision=2):
         """格式化浮点数"""
