@@ -8,8 +8,8 @@ __pycache__/
 # Editor/IDE
 .vscode/
 .idea/
+.venv/
+venv/
 build/
 install/
 log/
-*.pyc
-__pycache__/
