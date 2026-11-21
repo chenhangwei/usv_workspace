@@ -13,7 +13,7 @@ from common_interfaces.msg import UsvStatus
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy
 import queue
 import threading
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 import tf2_ros
 from rcl_interfaces.msg import Log
 
@@ -22,6 +22,7 @@ from .usv_manager import UsvManager
 from .cluster_controller import ClusterController
 from .command_processor import CommandProcessor
 from .led_infection import LedInfectionHandler
+from .formation_controller import FormationManager, FormationType
 from .event_decoder import EventDecoder  # 导入事件解码器
 from .px4_command_interface import Px4CommandInterface  # PX4 命令接口
 from .navigation_handler import NavigationHandler  # 导航处理器
@@ -98,6 +99,7 @@ class GroundStationNode(Node):
         self.cluster_controller = ClusterController(self)
         self.command_processor = CommandProcessor(self)
         self.led_infection_handler = LedInfectionHandler(self)
+        self.formation_manager = FormationManager(self)
         
         # 初始化模块化处理器
         self.navigation_handler = NavigationHandler(self, self.usv_manager, signal)
@@ -137,9 +139,18 @@ class GroundStationNode(Node):
 
         # 导航目标信息缓存（用于导航面板显示）
         self._usv_nav_target_cache = ThreadSafeDict()
+        # 导航到达阈值缓存（用于导航面板显示，按 USV 保存最后一次下发值）
+        self._nav_arrival_threshold_cache = ThreadSafeDict()
+        self._user_cruise_speed_override = None
 
-        # 每艇平台模式（来自 usv_fleet.yaml，可缺省为 3d）
+        # 每艇平台模式与异构机型配置（来自 usv_fleet.yaml，可缺省）
         self._usv_platform_mode = ThreadSafeDict()
+        self._usv_vehicle_type = ThreadSafeDict()
+        self._usv_safety_radius = ThreadSafeDict()
+        self._usv_default_altitude = ThreadSafeDict()
+        self._usv_landing_altitude = ThreadSafeDict()
+        self._usv_reach_xy = ThreadSafeDict()
+        self._usv_reach_z = ThreadSafeDict()
         
         # 新增: 基于话题的导航管理
         self._next_goal_id = 1  # 目标ID生成器
@@ -322,6 +333,182 @@ class GroundStationNode(Node):
         self.get_logger().info("接收到集群停止请求")
         self.cluster_controller.stop_cluster_task("GUI 手动停止")
 
+    def set_nav_arrival_threshold(self, usv_id_list, threshold_m):
+        """设置 USV 导航到达阈值（米）。"""
+        try:
+            threshold = float(threshold_m)
+        except Exception:
+            self.get_logger().warn(f"nav_arrival_threshold 非法: {threshold_m}")
+            return False
+        if threshold <= 0.0 or not usv_id_list:
+            return False
+        sent = 0
+        updated_any_state = False
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_arrival_threshold_pubs.get(usv_id)
+            if pub is None:
+                continue
+            msg = Float32()
+            msg.data = threshold
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+                self._nav_arrival_threshold_cache[usv_id] = threshold
+                if usv_id in self.usv_states:
+                    try:
+                        self.usv_states[usv_id]['nav_arrival_threshold'] = threshold
+                        updated_any_state = True
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.get_logger().warn(f"下发 nav_arrival_threshold 到 {usv_id} 失败: {e}")
+        if updated_any_state:
+            try:
+                self.ros_signal.receive_state_list.emit(list(self.usv_states.values()))
+            except Exception:
+                pass
+        return sent > 0
+
+    def set_nav_switch_threshold(self, usv_id_list, threshold_m):
+        """设置 USV 导航切换阈值（米）。"""
+        try:
+            threshold = float(threshold_m)
+        except Exception:
+            return False
+        if threshold <= 0.0 or not usv_id_list:
+            return False
+        sent = 0
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_switch_threshold_pubs.get(usv_id)
+            if pub is None:
+                continue
+            msg = Float32()
+            msg.data = threshold
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+            except Exception as e:
+                self.get_logger().warn(f"下发 nav_switch_threshold 到 {usv_id} 失败: {e}")
+        return sent > 0
+
+    def set_nav_smooth_navigation(self, usv_id_list, enabled: bool):
+        """设置 USV 平滑导航开关。"""
+        if not usv_id_list:
+            return False
+        from std_msgs.msg import Bool
+        sent = 0
+        for usv_id in usv_id_list:
+            pub = self.usv_manager.nav_smooth_navigation_pubs.get(usv_id)
+            if pub is None:
+                continue
+            msg = Bool()
+            msg.data = bool(enabled)
+            try:
+                self.publish_queue.put((pub, msg))
+                sent += 1
+            except Exception as e:
+                self.get_logger().warn(f"下发 smooth_navigation 到 {usv_id} 失败: {e}")
+        return sent > 0
+
+    def set_nav_settings(self, usv_id_list, settings: dict):
+        """批量设置导航参数。"""
+        results = {}
+        if 'nav_arrival_threshold' in settings:
+            results['arrival'] = self.set_nav_arrival_threshold(usv_id_list, settings['nav_arrival_threshold'])
+        if 'switch_threshold' in settings:
+            results['switch'] = self.set_nav_switch_threshold(usv_id_list, settings['switch_threshold'])
+        if 'smooth_navigation' in settings:
+            results['smooth'] = self.set_nav_smooth_navigation(usv_id_list, settings['smooth_navigation'])
+        return all(results.values()) if results else False
+
+    def set_velocity_settings(self, usv_id_list, settings: dict, *, from_user_dialog: bool = False):
+        """批量设置速度控制器参数。"""
+        if not usv_id_list:
+            return False
+        param_mapping = {
+            'cruise_speed': (self.usv_manager.velocity_cruise_speed_pubs, 'cruise_speed'),
+            'max_angular_velocity': (self.usv_manager.velocity_max_angular_pubs, 'max_angular_velocity'),
+            'goal_tolerance': (self.usv_manager.velocity_goal_tolerance_pubs, 'goal_tolerance'),
+            'switch_tolerance': (self.usv_manager.velocity_switch_tolerance_pubs, 'switch_tolerance'),
+        }
+        if from_user_dialog and 'cruise_speed' in settings:
+            try:
+                cs = float(settings['cruise_speed'])
+                if cs > 0.0:
+                    self._user_cruise_speed_override = cs
+            except (ValueError, TypeError):
+                pass
+        total_sent = 0
+        for param_name, (pubs_dict, settings_key) in param_mapping.items():
+            if settings_key not in settings:
+                continue
+            try:
+                value = float(settings[settings_key])
+            except (ValueError, TypeError):
+                continue
+            if value <= 0.0:
+                continue
+            sent = 0
+            for usv_id in usv_id_list:
+                pub = pubs_dict.get(usv_id)
+                if pub is None:
+                    continue
+                msg = Float32()
+                msg.data = value
+                try:
+                    self.publish_queue.put((pub, msg))
+                    sent += 1
+                except Exception as e:
+                    self.get_logger().warn(f"下发 {param_name} 到 {usv_id} 失败: {e}")
+            total_sent += sent
+        return total_sent > 0
+
+    # ==================== 编队模式回调 ====================
+
+    def start_formation_callback(self, group_configs: list):
+        """处理多编队组启动请求（含 3D 载体起飞预高度门控检查）。"""
+        involved_ids = []
+        for g in (group_configs or []):
+            if isinstance(g, dict):
+                lid = str(g.get('leader_id', '')).lstrip('/')
+                if lid:
+                    involved_ids.append(lid)
+                for f in (g.get('follower_ids') or g.get('followers') or []):
+                    fid = str(f.get('follower_id', f) if isinstance(f, dict) else f).lstrip('/')
+                    if fid:
+                        involved_ids.append(fid)
+        ok, reasons = self.validate_3d_cluster_takeoff_ready(involved_ids or None)
+        if not ok:
+            warn_msg = "🚫 3D 载体未达到设定起飞预高度或处于保护锁止，禁止启动编队：\n  • " + "\n  • ".join(reasons)
+            self.get_logger().warn(warn_msg)
+            self.ros_signal.node_warning.emit(warn_msg)
+            return
+
+        if self.formation_manager.is_any_active():
+            self.formation_manager.stop_all("重新配置编队")
+        success = self.formation_manager.configure_groups(group_configs)
+        if success:
+            follower_ids = self.formation_manager.get_all_follower_ids()
+            self.cluster_controller.set_excluded_ids(follower_ids)
+            self.get_logger().info(f"编队已启动，{len(follower_ids)} 艘跟随者已排除在集群任务之外")
+            self.formation_manager.start_all()
+
+    def stop_formation_callback(self):
+        """处理编队停止请求。"""
+        self.formation_manager.stop_all("GUI 手动停止")
+        self.cluster_controller.clear_excluded_ids()
+        self.get_logger().info("编队已停止，集群任务排除列表已清除")
+
+    def change_formation_type_callback(self, formation_type: int):
+        """处理编队队形切换 — 应用到所有活跃组。"""
+        if self.formation_manager.is_any_active():
+            self.formation_manager.update_formation_type_all(FormationType(formation_type))
+
+    def change_formation_spacing_callback(self, along: float, cross: float):
+        """处理编队间距变更 — 应用到所有活跃组。"""
+        if self.formation_manager.is_any_active():
+            self.formation_manager.update_spacing_all(along, cross)
+
     # 在独立线程中异步处理消息发布队列
     def process_publish_queue(self):
         """
@@ -437,11 +624,26 @@ class GroundStationNode(Node):
                         if usv_config.get('enabled', False):
                             usv_ids.append(usv_id)
 
-                        # 读取平台模式（可选）：2d/3d
+                        # 读取平台模式与异构机型参数（可选）
                         try:
                             pm = str(usv_config.get('platform_mode', '')).strip().lower()
                             if pm in ('2d', '3d'):
                                 self._usv_platform_mode[usv_id] = pm
+                            vt = str(usv_config.get('vehicle_type', '')).strip().lower()
+                            if vt:
+                                self._usv_vehicle_type[usv_id] = vt
+                            if 'safety_radius' in usv_config:
+                                self._usv_safety_radius[usv_id] = float(usv_config['safety_radius'])
+                            if 'default_altitude' in usv_config:
+                                self._usv_default_altitude[usv_id] = float(usv_config['default_altitude'])
+                            if 'takeoff_altitude' in usv_config and float(usv_config['takeoff_altitude']) > 0.0:
+                                self._usv_default_altitude[usv_id] = float(usv_config['takeoff_altitude'])
+                            if 'landing_altitude' in usv_config and float(usv_config['landing_altitude']) >= 0.0:
+                                self._usv_landing_altitude[usv_id] = float(usv_config['landing_altitude'])
+                            if 'reach_xy_threshold' in usv_config:
+                                self._usv_reach_xy[usv_id] = float(usv_config['reach_xy_threshold'])
+                            if 'reach_z_threshold' in usv_config:
+                                self._usv_reach_z[usv_id] = float(usv_config['reach_z_threshold'])
                         except Exception:
                             pass
                     
@@ -482,27 +684,28 @@ class GroundStationNode(Node):
 
     # ==================== 基于话题的导航方法 ====================
     
-    def send_nav_goal_via_topic(self, usv_id, x, y, z=0.0, yaw=0.0, timeout=300.0, roll=0.0, pitch=0.0):
+    @staticmethod
+    def _compute_goal_id(usv_id: str, step: int) -> int:
+        """计算确定性 goal_id: usv编号 × 100000 + step步骤号。"""
+        try:
+            usv_num = int(usv_id.split('_')[-1])
+        except (ValueError, IndexError):
+            usv_num = 0
+        return usv_num * 100000 + step
+
+    @staticmethod
+    def _parse_goal_id(goal_id: int) -> tuple:
+        """从 goal_id 解析出 (usv编号, step步骤号)。"""
+        return goal_id // 100000, goal_id % 100000
+
+    def send_nav_goal_via_topic(
+        self, usv_id, x, y, z=0.0, yaw=0.0, use_yaw=False, timeout=300.0,
+        roll=0.0, pitch=0.0, maneuver_type=0, maneuver_param=0.0, step=None,
+        nav_mode=0, sync_timeout=10.0, arrival_quality_threshold=0.8,
+        is_lookahead=False, task_name=''
+    ):
         """
-        通过话题方式向指定USV发送导航目标点 (新版本,替代Action)
-        
-        优势:
-        - 更适合跨Domain通信
-        - 不依赖Action的复杂服务机制
-        - 在Domain Bridge中更容易配置和调试
-        
-        Args:
-            usv_id (str): USV标识符
-            x (float): 目标点X坐标
-            y (float): 目标点Y坐标
-            z (float): 目标点Z坐标
-            yaw (float): 目标偏航角(弧度)
-            timeout (float): 超时时间(秒)
-            roll (float): 目标翻滚角(弧度)
-            pitch (float): 目标俯仰角(弧度)
-        
-        Returns:
-            bool: 发送是否成功
+        通过话题方式向指定USV发送导航目标点（兼容 3D 阈值与编排/同步/机动参数）
         """
         from common_interfaces.msg import NavigationGoal
         from geometry_msgs.msg import PoseStamped
@@ -521,44 +724,68 @@ class GroundStationNode(Node):
             self.ros_signal.nav_status_update.emit(usv_id, "失败")
             return False
         
-        # 生成唯一的目标ID
-        with self._goal_id_lock:
-            goal_id = self._next_goal_id
-            self._next_goal_id += 1
+        # 确定性 Goal ID
+        current_step = step if step is not None else getattr(self, 'run_step', 1)
+        goal_id = self._compute_goal_id(usv_id, current_step)
+        is_retry = False
+        cached = self._usv_nav_target_cache.get(usv_id)
+        if cached and cached.get('goal_id') == goal_id:
+            is_retry = True
         
         # 记录目标ID到USV的映射
         self._goal_to_usv[goal_id] = usv_id
         
+        # 异构立体分层高度回填：若 3D 载具收到 Z=0 的 2D 航点，自动采用机型默认分层高度
+        vt = str(self._usv_vehicle_type.get(usv_id, '')).strip().lower()
+        default_pm = '2d' if vt in ('usv', 'usv_diff', 'usv_boat') else '3d'
+        pm = str(self._usv_platform_mode.get(usv_id, default_pm)).strip().lower()
+        if pm not in ('2d', '3d'):
+            pm = default_pm
+        effective_z = float(z)
+        if pm == '2d':
+            effective_z = 0.0
+        elif pm == '3d' and abs(effective_z) < 1e-3:
+            def_alt = self._usv_default_altitude.get(usv_id, None)
+            if def_alt is not None and float(def_alt) > 0.0:
+                effective_z = float(def_alt)
+
         # 构造目标消息
         goal_msg = NavigationGoal()
         goal_msg.goal_id = goal_id
+        goal_msg.task_name = task_name or ''
         goal_msg.target_pose = PoseStamped()
         goal_msg.target_pose.header.stamp = self.get_clock().now().to_msg()
         goal_msg.target_pose.header.frame_id = 'map'
         goal_msg.target_pose.pose.position.x = float(x)
         goal_msg.target_pose.pose.position.y = float(y)
-        goal_msg.target_pose.pose.position.z = float(z)
+        goal_msg.target_pose.pose.position.z = effective_z
         
         # 设置姿态 (Quaternion)
+        goal_msg.enable_yaw = bool(use_yaw)
         from tf_transformations import quaternion_from_euler
-        q = quaternion_from_euler(float(roll), float(pitch), float(yaw))
+        effective_yaw = float(yaw) if use_yaw or (abs(float(yaw)) > 1e-6) else 0.0
+        q = quaternion_from_euler(float(roll), float(pitch), effective_yaw)
         goal_msg.target_pose.pose.orientation.x = q[0]
         goal_msg.target_pose.pose.orientation.y = q[1]
         goal_msg.target_pose.pose.orientation.z = q[2]
         goal_msg.target_pose.pose.orientation.w = q[3]
-        
-        goal_msg.timeout = timeout
 
-        # 按平台模式下发到达判定阈值
+        goal_msg.maneuver_type = int(maneuver_type)
+        goal_msg.maneuver_param = float(maneuver_param)
+        goal_msg.nav_mode = int(nav_mode)
+        goal_msg.sync_timeout = float(sync_timeout)
+        goal_msg.arrival_quality_threshold = float(arrival_quality_threshold)
+        goal_msg.timeout = float(timeout)
+
+        # 按机型/平台模式下发 3D/2D 到达判定阈值（优先用 usv_fleet.yaml 机型专属阈值）
         try:
-            pm = str(self._usv_platform_mode.get(usv_id, '3d')).strip().lower()
-            if pm not in ('2d', '3d'):
-                pm = '3d'
+            xy_thr = self._usv_reach_xy.get(usv_id, None)
+            if xy_thr is None or float(xy_thr) <= 0.0:
+                xy_thr = float(self.get_parameter(f'nav_reach_xy_threshold_{pm}').value)
+            z_thr = self._usv_reach_z.get(usv_id, None)
+            if z_thr is None or float(z_thr) <= 0.0:
+                z_thr = float(self.get_parameter(f'nav_reach_z_threshold_{pm}').value)
 
-            xy_thr = float(self.get_parameter(f'nav_reach_xy_threshold_{pm}').value)
-            z_thr = float(self.get_parameter(f'nav_reach_z_threshold_{pm}').value)
-
-            # 约定：<=0 表示不指定，USV 端回退本地默认
             goal_msg.reach_xy_threshold = float(xy_thr)
             goal_msg.reach_z_threshold = float(z_thr)
         except Exception:
@@ -570,23 +797,32 @@ class GroundStationNode(Node):
         pub = self.usv_manager.navigation_goal_pubs[usv_id]
         pub.publish(goal_msg)
         
-        # 更新缓存和状态
-        self._usv_nav_target_cache[usv_id] = {
-            'goal_id': goal_id,
-            'x': float(x),
-            'y': float(y),
-            'z': float(z),
-            'yaw': float(yaw),
-            'step': self.run_step,
-            'timestamp': self.get_clock().now().nanoseconds / 1e9
-        }
+        # 更新缓存和状态（预发送时跳过）
+        if not is_lookahead:
+            self._usv_nav_target_cache[usv_id] = {
+                'goal_id': goal_id,
+                'x': float(x),
+                'y': float(y),
+                'z': float(effective_z),
+                'yaw': float(yaw),
+                'use_yaw': bool(use_yaw),
+                'maneuver_type': int(maneuver_type),
+                'maneuver_param': float(maneuver_param),
+                'nav_mode': int(nav_mode),
+                'sync_timeout': float(sync_timeout),
+                'arrival_quality_threshold': float(arrival_quality_threshold),
+                'step': current_step,
+                'timestamp': self.get_clock().now().nanoseconds / 1e9,
+                'paused': False,
+                'reached': False,
+            }
+            self.ros_signal.nav_status_update.emit(usv_id, "执行中")
         
-        # 更新导航状态为执行中
-        self.ros_signal.nav_status_update.emit(usv_id, "执行中")
-        
+        retry_tag = "(重试) " if is_retry else ""
+        lookahead_tag = "📤预发送 " if is_lookahead else "📤 "
         self.get_logger().info(
-            f"📤 {usv_id} 导航目标已发送 [ID={goal_id}]: "
-            f"({x:.1f}, {y:.1f}, {z:.1f}), 超时={timeout:.0f}s")
+            f"{lookahead_tag}{usv_id} 导航目标已发送 {retry_tag}[ID={goal_id}]: "
+            f"({x:.1f}, {y:.1f}, {effective_z:.1f}), 超时={timeout:.0f}s")
         
         return True
 
@@ -653,9 +889,22 @@ class GroundStationNode(Node):
             'xy_distance_to_goal': getattr(msg, 'xy_distance_to_goal', msg.distance_to_goal),
             'z_error': getattr(msg, 'z_error', 0.0),
             'heading_error': msg.heading_error,
-            'estimated_time': msg.estimated_time
+            'estimated_time': msg.estimated_time,
+            'queue_length': getattr(msg, 'queue_length', 0),
+            'queue_capacity': getattr(msg, 'queue_capacity', 0),
+            'smooth_navigation': getattr(msg, 'smooth_navigation', False),
+            'nav_mode': getattr(msg, 'nav_mode', 0),
+            'arrival_quality': getattr(msg, 'arrival_quality', 0.0),
+            'rotate_progress': getattr(msg, 'rotate_progress', 0.0),
         })()
         self.ros_signal.navigation_feedback.emit(usv_id, feedback_obj)
+
+        # 通知集群控制器（用于平滑导航预发送与到达质量确认）
+        if hasattr(self.cluster_controller, 'on_navigation_feedback'):
+            try:
+                self.cluster_controller.on_navigation_feedback(usv_id, msg)
+            except Exception:
+                pass
 
         # 方案A：先导航，再在接近目标时触发一次姿态动作（每艇每step只触发一次）
         try:
@@ -708,6 +957,8 @@ class GroundStationNode(Node):
         
         # 更新状态
         if msg.success:
+            if cached is not None:
+                cached['reached'] = True
             self.ros_signal.nav_status_update.emit(usv_id, "成功")
             self.cluster_controller.mark_usv_goal_result(usv_id, True, goal_step)
             
@@ -794,33 +1045,149 @@ class GroundStationNode(Node):
                     f"  └─ Yaw: {yaw:.2f} rad"
                 )
                 
-                # 支持z坐标
-                self.send_nav_goal_via_topic(usv_id, p_local.get('x', 0.0), p_local.get('y', 0.0), p_local.get('z', 0.0), yaw, 300.0)
+                # 支持z坐标（修复关键字参数传参，避免 300.0 误传入 use_yaw）
+                use_yaw_flag = bool(ns.get('use_yaw', abs(float(yaw)) > 1e-6))
+                self.send_nav_goal_via_topic(
+                    usv_id,
+                    p_local.get('x', 0.0),
+                    p_local.get('y', 0.0),
+                    p_local.get('z', 0.0),
+                    yaw=yaw,
+                    use_yaw=use_yaw_flag,
+                    timeout=300.0,
+                )
         # 捕获异常并记录错误日志
         except Exception as e:
             self.get_logger().error(f"处理离群目标点失败: {e}")
 
-    # 委托给子模块的方法
-    def set_manual_callback(self, msg):
-        self.command_processor.set_manual_callback(msg)
+    def set_single_target_point_callback(self, payload: dict):
+        """
+        从 3D 主态势界面直接发送单艇/多艇三维目标点。
+        支持 coord_frame='local'（地面站可视化 ENU 局部坐标）或 'area'（任务区域坐标）。
+        """
+        try:
+            if not isinstance(payload, dict):
+                return
+            raw_ids = payload.get('usv_ids') or []
+            if isinstance(raw_ids, str):
+                raw_ids = [raw_ids]
+            if not raw_ids and payload.get('usv_id'):
+                raw_ids = [payload.get('usv_id')]
+            usv_ids = [str(uid).lstrip('/') for uid in raw_ids if uid]
+            if not usv_ids:
+                self.get_logger().warning("直发三维目标缺少有效 usv_id")
+                return
 
+            tx = float(payload.get('x', 0.0))
+            ty = float(payload.get('y', 0.0))
+            tz = float(payload.get('z', 0.0))
+            yaw = float(payload.get('yaw', 0.0))
+            use_yaw = bool(payload.get('use_yaw', False))
+            coord_frame = str(payload.get('coord_frame', 'local')).lower()
+            timeout = float(payload.get('timeout', 300.0))
+
+            for usv_id in usv_ids:
+                if coord_frame == 'area':
+                    p_global = self.cluster_controller._area_to_global({'x': tx, 'y': ty, 'z': tz})
+                else:
+                    p_global = {'x': tx, 'y': ty, 'z': tz}
+                p_local = self.cluster_controller._global_to_usv_local(usv_id, p_global)
+                self.send_nav_goal_via_topic(
+                    usv_id,
+                    p_local.get('x', tx),
+                    p_local.get('y', ty),
+                    p_local.get('z', tz),
+                    yaw=yaw,
+                    use_yaw=use_yaw,
+                    timeout=timeout,
+                )
+        except Exception as e:
+            self.get_logger().error(f"直发三维目标点失败: {e}")
+
+    # 委托给子模块的方法 (PX4 模式)
     def set_hold_callback(self, msg):
         self.command_processor.set_hold_callback(msg)
 
-    def set_guided_callback(self, msg):
-        self.command_processor.set_guided_callback(msg)
+    def set_offboard_callback(self, msg):
+        self.command_processor.set_offboard_callback(msg)
 
-    def set_arco_callback(self, msg):
-        self.command_processor.set_arco_callback(msg)
+    def set_stabilized_callback(self, msg):
+        self.command_processor.set_stabilized_callback(msg)
 
-    def set_steering_callback(self, msg):
-        self.command_processor.set_steering_callback(msg)
+    def set_posctl_callback(self, msg):
+        self.command_processor.set_posctl_callback(msg)
+
+    def set_altctl_callback(self, msg):
+        self.command_processor.set_altctl_callback(msg)
 
     def set_arming_callback(self, msg):
         self.command_processor.set_arming_callback(msg)
 
     def set_disarming_callback(self, msg):
         self.command_processor.set_disarming_callback(msg)
+
+    def set_takeoff_callback(self, payload):
+        self.command_processor.set_takeoff_callback(payload)
+
+    def set_land_callback(self, payload):
+        self.command_processor.set_land_callback(payload)
+
+    def is_3d_vehicle(self, usv_id: str) -> bool:
+        """判断指定载具是否为需要垂直起降门控的 3D 载体（飞行球、海豚、飞艇）"""
+        return self.command_processor._is_3d_vehicle(usv_id)
+
+    def get_vehicle_required_takeoff_z(self, usv_id: str) -> float:
+        """获取指定 3D 载具起飞所需达到的预高度（m）"""
+        if not self.is_3d_vehicle(usv_id):
+            return 0.0
+        st = self.usv_states.get(usv_id, {}) or {}
+        for cand in (st.get('takeoff_altitude'), self._usv_default_altitude.get(usv_id), st.get('default_altitude')):
+            try:
+                if cand is not None and float(cand) > 0.0:
+                    return float(cand)
+            except Exception:
+                pass
+        vt = str(st.get('vehicle_type') or self._usv_vehicle_type.get(usv_id, '')).strip().lower()
+        if vt in ('bionic_airship', 'airship'):
+            return 15.0
+        if vt in ('bionic_dolphin', 'dolphin'):
+            return 6.0
+        return 2.0
+
+    def validate_3d_cluster_takeoff_ready(self, usv_ids=None) -> tuple:
+        """
+        检查参与路径程序/集群/编队的 3D 载体（飞行球、海豚、飞艇）是否已起飞到达设定预高度且未处于保护锁止：
+        返回 (ok: bool, reasons: list[str])
+        """
+        if usv_ids is None:
+            usv_ids = [
+                uid for uid, st in self.usv_states.items()
+                if isinstance(st, dict) and st.get('connected', False)
+            ]
+        reasons = []
+        for raw in usv_ids:
+            uid = raw.get('namespace', '').lstrip('/') if isinstance(raw, dict) else str(raw).lstrip('/')
+            if not uid:
+                continue
+            st = self.usv_states.get(uid)
+            if not isinstance(st, dict) or not st.get('connected', False):
+                continue
+            if not self.is_3d_vehicle(uid):
+                continue
+            if bool(st.get('protection_locked', False)):
+                reasons.append(f"{uid}: 处于降落电机保护锁止状态（需手动 Arming 解锁并点击 Takeoff 起飞）")
+                continue
+            if not bool(st.get('armed', False)):
+                reasons.append(f"{uid}: 未解锁（Disarmed，需先解锁并起飞至预高度）")
+                continue
+            req_z = self.get_vehicle_required_takeoff_z(uid)
+            tol_z = min(0.5, max(0.25, float(self._usv_reach_z.get(uid, 0.5)) * 0.5))
+            pos = st.get('position') or {}
+            cur_z = float(pos.get('z', st.get('position_z', 0.0)) or 0.0)
+            # 若机载已汇报 takeoff_ready 且当前高度仍在预高度容差内，或实时高度 >= (req_z - tol_z)，视为已到位
+            if cur_z < (req_z - tol_z):
+                reasons.append(f"{uid}: 当前高度 Z={cur_z:.2f}m 未达到起飞预高度 {req_z:.2f}m（请先点击 Takeoff 起飞到位）")
+        return (len(reasons) == 0, reasons)
 
     def set_cluster_target_point_callback(self, msg):
         self.cluster_controller.set_cluster_target_point_callback(msg)
@@ -1187,8 +1554,22 @@ class GroundStationNode(Node):
         try:
             now_sec = self._now_seconds()
             
-            # 遍历所有 USV，按需更新 augmented 数据
+            # 遍历所有 USV，实时同步三维目标缓存与异构机型元数据，按需更新 augmented 数据
             for usv_id in list(self.usv_states.keys()):
+                st = self.usv_states.get(usv_id)
+                if isinstance(st, dict):
+                    st['nav_target_cache'] = self._usv_nav_target_cache.get(usv_id)
+                    if usv_id in self._usv_vehicle_type:
+                        st['vehicle_type'] = self._usv_vehicle_type[usv_id]
+                    if usv_id in self._usv_platform_mode:
+                        st['platform_mode'] = self._usv_platform_mode[usv_id]
+                    if usv_id in self._usv_default_altitude:
+                        st['default_altitude'] = self._usv_default_altitude[usv_id]
+                        st.setdefault('takeoff_altitude', self._usv_default_altitude[usv_id])
+                    if usv_id in self._usv_landing_altitude:
+                        st['landing_altitude'] = self._usv_landing_altitude[usv_id]
+                    if usv_id in self._usv_current_led_state:
+                        st['led_status'] = self._usv_current_led_state[usv_id]
                 # 检查是否需要更新（有新消息、PreArm 警告变化、传感器状态变化）
                 if self._should_update_augmented_state(usv_id, now_sec):
                     self.augment_state_payload(usv_id)
@@ -1560,7 +1941,10 @@ class GroundStationNode(Node):
                     f"🎲 Random Run: Sending goal to {usv_id} -> "
                     f"pos=({target_x:.2f}, {target_y:.2f}, {target_z:.2f}), yaw={yaw:.2f}"
                 )
-                self.send_nav_goal_via_topic(usv_id, target_x, target_y, target_z, yaw, 300.0, roll, pitch)
+                self.send_nav_goal_via_topic(
+                    usv_id, target_x, target_y, target_z,
+                    yaw=yaw, use_yaw=True, timeout=300.0, roll=roll, pitch=pitch
+                )
 
     # 销毁节点资源
     def destroy_node(self):

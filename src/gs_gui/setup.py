@@ -50,6 +50,7 @@ and convenient operation and management.""",
             'main_gui_app = gs_gui.main_gui_app:main',
             'ground_station_node = gs_gui.ground_station_node:main',
             'cluster_manager_node = gs_gui.cluster_manager_node:main',
+            'apf_neighbor_relay_node = gs_gui.apf_neighbor_relay_node:main',
         ],
     },
     classifiers=[

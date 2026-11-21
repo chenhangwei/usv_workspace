@@ -370,6 +370,23 @@ class MissionQueueManager:
             self.append_warning("队列中没有待执行的任务")
             return
 
+        # 3D 载体起飞预高度门控检查
+        if getattr(self.task_manager, 'pre_start_validator', None) is not None:
+            first_task = self._queue[start_idx]
+            departed_ids = {
+                item.get('namespace') if isinstance(item, dict) else item
+                for item in (self._departed_list or [])
+            }
+            involved_ids = sorted({
+                p.get('usv_id', '') for p in (first_task.position_list or [])
+                if p.get('usv_id', '') and p.get('usv_id', '') not in departed_ids
+            })
+            ok, reasons = self.task_manager.pre_start_validator(involved_ids)
+            if not ok:
+                warn_msg = "🚫 3D 载体未起飞至设定预高度或处于保护锁止，无法启动任务队列：\n  • " + "\n  • ".join(reasons)
+                self.append_warning(warn_msg)
+                return
+
         self._queue_running = True
         self._waiting_confirm = False
         self._current_index = start_idx

@@ -56,7 +56,7 @@ mavros:
 
 "/**/usv_command_node":
   ros__parameters:
-    supported_modes: ['OFFBOARD', 'MANUAL', 'STABILIZED', 'AUTO.LOITER', 'AUTO.MISSION', 'AUTO.RTL', 'POSCTL']
+    supported_modes: ['OFFBOARD', 'HOLD', 'MANUAL', 'STABILIZED', 'AUTO.LOITER', 'AUTO.MISSION', 'AUTO.RTL', 'AUTO.LAND', 'LAND', 'POSCTL']
     service_timeout_sec: 5.0
     arming_command_timeout_sec: 10.0
 

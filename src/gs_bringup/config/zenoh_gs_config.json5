@@ -26,6 +26,8 @@
       "allow": {
         "subscribers": [
           ".*/usv_state",
+          ".*/telemetry/status",
+          ".*/flight_state",
           ".*/fmu/out/vehicle_status",
           ".*/fmu/out/vehicle_status_v1",
           ".*/fmu/out/vehicle_local_position",
@@ -33,16 +35,24 @@
           ".*/fmu/out/vehicle_attitude",
           ".*/fmu/out/failsafe_flags",
           ".*/navigation/feedback",
-          ".*/navigation/result"
+          ".*/navigation/result",
+          ".*/navigation/ack",
+          ".*/formation/follower_status"
         ],
         "publishers": [
           ".*/set_usv_mode",
           ".*/set_usv_arming",
           ".*/set_arm",
+          ".*/takeoff_command",
+          ".*/land_command",
           ".*/set_usv_target_position",
           ".*/clear_target",
+          ".*/stop_navigation",
+          ".*/cancel_navigation",
           ".*/navigation/goal",
           ".*/navigation/clear_target",
+          ".*/formation/config",
+          ".*/formation/leader_state",
           "group_arm_command",
           "group_mode_command",
           "all_arm",

@@ -105,12 +105,14 @@ QPushButton:disabled {
 
 /* 特殊按钮样式 - 危险操作 */
 QPushButton#quit_cluster_pushButton,
+QPushButton#disarming_pushButton,
 QPushButton#departed_disarming_pushButton {
     background-color: #d32f2f;
     border-color: #d32f2f;
 }
 
 QPushButton#quit_cluster_pushButton:hover,
+QPushButton#disarming_pushButton:hover,
 QPushButton#departed_disarming_pushButton:hover {
     background-color: #f44336;
     border-color: #f44336;
@@ -118,6 +120,7 @@ QPushButton#departed_disarming_pushButton:hover {
 
 /* 特殊按钮样式 - 主要操作 */
 QPushButton#add_cluster_pushButton,
+QPushButton#arming_pushButton,
 QPushButton#departed_arming_pushButton,
 QPushButton#send_departed_point_pushButton {
     background-color: #388e3c;
@@ -125,10 +128,38 @@ QPushButton#send_departed_point_pushButton {
 }
 
 QPushButton#add_cluster_pushButton:hover,
+QPushButton#arming_pushButton:hover,
 QPushButton#departed_arming_pushButton:hover,
 QPushButton#send_departed_point_pushButton:hover {
     background-color: #4caf50;
     border-color: #4caf50;
+}
+
+/* 起飞 / 降落按钮样式 */
+QPushButton#takeoff_pushButton,
+QPushButton#departed_takeoff_pushButton {
+    background-color: #0277bd;
+    border-color: #0288d1;
+    color: #ffffff;
+}
+
+QPushButton#takeoff_pushButton:hover,
+QPushButton#departed_takeoff_pushButton:hover {
+    background-color: #039be5;
+    border-color: #29b6f6;
+}
+
+QPushButton#land_pushButton,
+QPushButton#departed_land_pushButton {
+    background-color: #e65100;
+    border-color: #ef6c00;
+    color: #ffffff;
+}
+
+QPushButton#land_pushButton:hover,
+QPushButton#departed_land_pushButton:hover {
+    background-color: #fb8c00;
+    border-color: #ffa726;
 }
 
 /* ==================== 输入框 LineEdit/SpinBox ==================== */

@@ -517,8 +517,8 @@ class FormationController:
                 self._config_pubs[fid] = self.node.create_publisher(
                     FormationConfigMsg, config_topic, qos_transient
                 )
-            # 发送配置
-            self._publish_formation_config(active=True)
+        # 所有发布者就绪后统一发送一次配置
+        self._publish_formation_config(active=True)
 
         # ========== 2. 创建领队状态中转: leader usv_state → follower leader_state ==========
         from common_interfaces.msg import UsvStatus
@@ -711,11 +711,12 @@ class FormationController:
         订阅领队的 usv_state，原样转发到每个跟随者的 formation/leader_state 话题。
         GS 不做任何计算，仅作为 Domain Bridge 的补充中转。
         """
-        # 更新 GS 端监控用的领队状态
-        self.state.leader_position = (msg.position.x, msg.position.y)
-        self.state.leader_yaw = msg.yaw
-        vel = msg.velocity.linear
-        self.state.leader_velocity = math.sqrt(vel.x ** 2 + vel.y ** 2)
+        # 更新 GS 端监控用的领队状态（兼容 PX4 UsvStatus 的 pose / twist 结构）
+        pos = msg.pose.position
+        vel = msg.twist.linear
+        self.state.leader_position = (float(pos.x), float(pos.y))
+        self.state.leader_yaw = float(msg.yaw)
+        self.state.leader_velocity = math.sqrt(float(vel.x) ** 2 + float(vel.y) ** 2)
         self.state.last_leader_update = self._now()
 
         # 转发到每个跟随者

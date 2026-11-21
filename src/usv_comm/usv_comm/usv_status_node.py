@@ -17,8 +17,8 @@ import glob
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
-from std_msgs.msg import Bool, Float32
-from geometry_msgs.msg import Point
+from std_msgs.msg import Bool, Float32, String
+from geometry_msgs.msg import Point, PoseStamped, TwistStamped
 from common_interfaces.msg import UsvStatus
 import psutil
 import time
@@ -116,6 +116,12 @@ class UsvStatusPx4Node(Node):
         # 根据节点命名空间推断 usv_id
         ns_guess = self.get_namespace().lstrip('/') if self.get_namespace() else 'usv_01'
         self.declare_parameter('usv_id', ns_guess)
+        # 仿真多机世界坐标原点偏移（ENU，米）；实机默认为 0.0
+        self.declare_parameter('spawn_offset_x', 0.0)
+        self.declare_parameter('spawn_offset_y', 0.0)
+        self.declare_parameter('spawn_offset_z', 0.0)
+        self.declare_parameter('vehicle_type', '')
+        self.declare_parameter('platform_mode', '')
         
         # 读取参数
         self.target_reach_threshold = self.get_parameter('target_reach_threshold').value
@@ -127,6 +133,11 @@ class UsvStatusPx4Node(Node):
         self.battery_voltage_empty = self.get_parameter('battery_voltage_empty').value
         self.battery_avg_window = self.get_parameter('battery_avg_window').value
         self.usv_id = self.get_parameter('usv_id').value
+        self.spawn_offset_x = float(self.get_parameter('spawn_offset_x').value)
+        self.spawn_offset_y = float(self.get_parameter('spawn_offset_y').value)
+        self.spawn_offset_z = float(self.get_parameter('spawn_offset_z').value)
+        self.vehicle_type = str(self.get_parameter('vehicle_type').value or '').strip().lower()
+        self.platform_mode = str(self.get_parameter('platform_mode').value or '').strip().lower()
 
         # =====================================================================
         # 创建发布者
@@ -134,6 +145,10 @@ class UsvStatusPx4Node(Node):
         self.state_publisher = self.create_publisher(UsvStatus, 'usv_state', 10)
         self.temperature_publisher = self.create_publisher(Float32, 'usv_temperature', 10)
         self.low_voltage_mode_publisher = self.create_publisher(Bool, 'low_voltage_mode', qos_reliable)
+        # ENU 位姿/速度流：供 RL policy_inference_node 与 GS apf_neighbor_relay_node 直接订阅
+        self.local_pose_pub = self.create_publisher(PoseStamped, 'local_position/pose_from_gps', qos_px4)
+        self.local_vel_pub = self.create_publisher(TwistStamped, 'local_position/velocity_local', qos_px4)
+        self.telemetry_status_pub = self.create_publisher(String, 'telemetry/status', qos_reliable)
 
         # =====================================================================
         # 创建订阅者 - PX4 话题
@@ -199,11 +214,16 @@ class UsvStatusPx4Node(Node):
         # =====================================================================
         # 订阅目标点（用于计算距离）
         # =====================================================================
-        from geometry_msgs.msg import PoseStamped
         self.target_sub = self.create_subscription(
             PoseStamped,
             'set_usv_target_position',
             self.target_callback,
+            qos_reliable
+        )
+        self.flight_state_sub = self.create_subscription(
+            String,
+            'flight_state',
+            self.flight_state_callback,
             qos_reliable
         )
 
@@ -211,6 +231,7 @@ class UsvStatusPx4Node(Node):
         # 初始化状态变量
         # =====================================================================
         self.target_point = Point()
+        self.flight_state_info = {}
         self.vehicle_status = None
         self.battery_status = None
         self.local_position = None
@@ -289,9 +310,43 @@ class UsvStatusPx4Node(Node):
         self._check_low_voltage()
 
     def local_position_callback(self, msg: VehicleLocalPosition):
-        """本地位置回调"""
+        """本地位置回调：同步高频发布 ENU 位姿和速度供 RL / 邻船避障使用"""
         self.local_position = msg
         self.last_position_time = time.time()
+
+        stamp = self.get_clock().now().to_msg()
+        pose_msg = PoseStamped()
+        pose_msg.header.stamp = stamp
+        pose_msg.header.frame_id = 'map'
+        pose_msg.pose.position.x = float(msg.y) + self.spawn_offset_x
+        pose_msg.pose.position.y = float(msg.x) + self.spawn_offset_y
+        pose_msg.pose.position.z = float(-msg.z) + self.spawn_offset_z
+
+        if self.attitude is not None:
+            q_w, q_x, q_y, q_z = self._px4_attitude_quat_to_ros_enu_flu(self.attitude.q)
+            pose_msg.pose.orientation.w = float(q_w)
+            pose_msg.pose.orientation.x = float(q_x)
+            pose_msg.pose.orientation.y = float(q_y)
+            pose_msg.pose.orientation.z = float(q_z)
+        else:
+            yaw_enu = math.pi / 2.0 - float(msg.heading) if math.isfinite(float(msg.heading)) else 0.0
+            pose_msg.pose.orientation.w = math.cos(yaw_enu * 0.5)
+            pose_msg.pose.orientation.x = 0.0
+            pose_msg.pose.orientation.y = 0.0
+            pose_msg.pose.orientation.z = math.sin(yaw_enu * 0.5)
+        self.local_pose_pub.publish(pose_msg)
+
+        vel_msg = TwistStamped()
+        vel_msg.header.stamp = stamp
+        vel_msg.header.frame_id = 'map'
+        vel_msg.twist.linear.x = float(msg.vy)
+        vel_msg.twist.linear.y = float(msg.vx)
+        vel_msg.twist.linear.z = float(-msg.vz)
+        if self.attitude is not None and hasattr(self.attitude, 'angular_velocity'):
+            vel_msg.twist.angular.x = float(self.attitude.angular_velocity[0])
+            vel_msg.twist.angular.y = float(-self.attitude.angular_velocity[1])
+            vel_msg.twist.angular.z = float(-self.attitude.angular_velocity[2])
+        self.local_vel_pub.publish(vel_msg)
 
     def attitude_callback(self, msg: VehicleAttitude):
         """姿态回调"""
@@ -306,6 +361,15 @@ class UsvStatusPx4Node(Node):
     def estimator_status_flags_callback(self, msg: EstimatorStatusFlags):
         """估计器状态标志回调 - 提供传感器健康状态"""
         self.estimator_status_flags = msg
+
+    def flight_state_callback(self, msg: String):
+        """同步 usv_control_node 发布的起飞/降落与电机保护锁止状态"""
+        try:
+            data = json.loads(msg.data) if msg and msg.data else {}
+            if isinstance(data, dict):
+                self.flight_state_info = data
+        except Exception:
+            pass
 
     def event_callback(self, msg: Event):
         """PX4 Event 回调 - 处理飞控事件消息（arming denied 等）"""
@@ -520,12 +584,12 @@ class UsvStatusPx4Node(Node):
             msg.battery_percentage = 0.0
             msg.power_supply_status = UsvStatus.POWER_SUPPLY_STATUS_UNKNOWN
         
-        # 位置信息（NED 转 ENU）- 使用 geometry_msgs/Pose
+        # 位置信息（NED 转 ENU，并叠加世界出生点偏移）- 使用 geometry_msgs/Pose
         if self.local_position is not None:
             # PX4 NED -> ROS ENU
-            msg.pose.position.x = float(self.local_position.y)   # East = Y_ned
-            msg.pose.position.y = float(self.local_position.x)   # North = X_ned
-            msg.pose.position.z = float(-self.local_position.z)  # Up = -Down
+            msg.pose.position.x = float(self.local_position.y) + self.spawn_offset_x   # East = Y_ned
+            msg.pose.position.y = float(self.local_position.x) + self.spawn_offset_y   # North = X_ned
+            msg.pose.position.z = float(-self.local_position.z) + self.spawn_offset_z  # Up = -Down
             
             # 速度 - 使用 geometry_msgs/Twist
             msg.twist.linear.x = float(self.local_position.vy)
@@ -537,7 +601,7 @@ class UsvStatusPx4Node(Node):
             msg.heading = (heading + 2.0 * math.pi) % (2.0 * math.pi)
             
             # 高度
-            msg.altitude_relative = float(-self.local_position.z)
+            msg.altitude_relative = float(-self.local_position.z) + self.spawn_offset_z
         
         # 姿态信息
         if self.attitude is not None:
@@ -560,6 +624,15 @@ class UsvStatusPx4Node(Node):
                 msg.twist.angular.x = float(self.attitude.angular_velocity[0])
                 msg.twist.angular.y = float(self.attitude.angular_velocity[1])
                 msg.twist.angular.z = float(self.attitude.angular_velocity[2])
+        elif self.local_position is not None and math.isfinite(float(self.local_position.heading)):
+            # 若 attitude 尚未到达，从 PX4 NED heading (0=北, 顺时针) 推导 ROS ENU yaw (0=东, 逆时针)
+            yaw_enu = math.atan2(
+                math.cos(float(self.local_position.heading)),
+                math.sin(float(self.local_position.heading)),
+            )
+            msg.yaw = float(yaw_enu)
+            msg.pose.orientation.w = math.cos(yaw_enu / 2.0)
+            msg.pose.orientation.z = math.sin(yaw_enu / 2.0)
         
         # 计算到目标点的距离
         msg.distance_to_target = self._calculate_distance_to_target()
@@ -726,6 +799,24 @@ class UsvStatusPx4Node(Node):
         
         # 发布状态
         self.state_publisher.publish(msg)
+        try:
+            tele_payload = {
+                'healthy': bool(msg.connected and msg.data_valid),
+                'usv_id': str(self.usv_id),
+                'vehicle_type': self.vehicle_type,
+                'platform_mode': self.platform_mode,
+                'mode': str(msg.mode),
+                'armed': bool(msg.armed),
+            }
+            if isinstance(self.flight_state_info, dict) and self.flight_state_info:
+                for k in ('flight_action', 'protection_locked', 'takeoff_ready', 'takeoff_altitude', 'landing_altitude'):
+                    if k in self.flight_state_info:
+                        tele_payload[k] = self.flight_state_info[k]
+            tele_msg = String()
+            tele_msg.data = json.dumps(tele_payload, ensure_ascii=False)
+            self.telemetry_status_pub.publish(tele_msg)
+        except Exception:
+            pass
         self.message_count += 1
 
     def publish_temperature(self):

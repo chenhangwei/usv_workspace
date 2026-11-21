@@ -202,30 +202,34 @@
               <item>
                <layout class="QHBoxLayout" name="horizontalLayout_11">
                 <item>
-                 <widget class="QPushButton" name="set_departed_guided_pushButton">
+                 <widget class="QPushButton" name="set_departed_stabilized_pushButton">
                   <property name="text">
-                   <string>Guided</string>
+                   <string>STABILIZED</string>
                   </property>
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="set_departed_manual_pushButton">
+                 <widget class="QPushButton" name="set_departed_hold_pushButton">
                   <property name="text">
-                   <string>Manual</string>
+                   <string>HOLD</string>
+                  </property>
+                 </widget>
+                </item>
+               </layout>
+              </item>
+              <item>
+               <layout class="QHBoxLayout" name="horizontalLayout_departed_flight">
+                <item>
+                 <widget class="QPushButton" name="departed_takeoff_pushButton">
+                  <property name="text">
+                   <string>Takeoff</string>
                   </property>
                  </widget>
                 </item>
                 <item>
-                 <widget class="QPushButton" name="set_departed_ARCO_pushButton">
+                 <widget class="QPushButton" name="departed_land_pushButton">
                   <property name="text">
-                   <string>Arco</string>
-                  </property>
-                 </widget>
-                </item>
-                <item>
-                 <widget class="QPushButton" name="set_departed_Steering_pushButton">
-                  <property name="text">
-                   <string>Steering</string>
+                   <string>Land</string>
                   </property>
                  </widget>
                 </item>
@@ -283,18 +287,56 @@
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="set_guided_pushButton">
+                   <widget class="QPushButton" name="set_stabilized_pushButton">
                     <property name="text">
-                     <string>Guided</string>
+                     <string>STABILIZED</string>
                     </property>
                    </widget>
                   </item>
                   <item>
-                   <widget class="QPushButton" name="set_manual_pushButton">
+                   <widget class="QPushButton" name="set_hold_pushButton">
                     <property name="text">
-                     <string>Manual</string>
+                     <string>HOLD</string>
                     </property>
                    </widget>
+                  </item>
+                 </layout>
+                </item>
+                <item>
+                 <layout class="QHBoxLayout" name="horizontalLayout_cluster_flight">
+                  <item>
+                   <widget class="QPushButton" name="takeoff_pushButton">
+                    <property name="text">
+                     <string>Takeoff</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QLabel" name="takeoff_z_label">
+                    <property name="text">
+                     <string>起飞Z:</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QDoubleSpinBox" name="takeoff_z_doubleSpinBox"/>
+                  </item>
+                  <item>
+                   <widget class="QPushButton" name="land_pushButton">
+                    <property name="text">
+                     <string>Land</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QLabel" name="land_z_label">
+                    <property name="text">
+                     <string>降落Z:</string>
+                    </property>
+                   </widget>
+                  </item>
+                  <item>
+                   <widget class="QDoubleSpinBox" name="land_z_doubleSpinBox"/>
                   </item>
                  </layout>
                 </item>

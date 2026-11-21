@@ -49,12 +49,17 @@ class USVCommandHandler(QObject):
         """从 USV 字典列表中提取命名空间。"""
         return [item['namespace'] for item in usv_list if isinstance(item, dict) and 'namespace' in item]
 
-    def _send_batch_command(self, usv_list: List[Dict[str, Any]], signal: Any, cmd_name: str) -> None:
+    def _send_batch_command(self, usv_list: List[Dict[str, Any]], signal: Any, cmd_name: str, is_departed: bool = False) -> None:
         """通用批量指令发送逻辑。"""
         try:
             namespaces = self._extract_namespaces(usv_list)
             if not namespaces:
-                self.append_info(f"⚠️ 未选中任何 USV，无法发送 {cmd_name}")
+                if is_departed:
+                    self.append_info(
+                        f"⚠️ 【离群列表】为空，无法发送 {cmd_name}。默认载具在【集群列表】中，请使用【cluster command / 3D顶部HUD】按钮，或先选中载具点击 quit cluster 移入离群列表。"
+                    )
+                else:
+                    self.append_info(f"⚠️ 【集群列表】为空，无法发送 {cmd_name}")
                 return
             
             signal.emit(namespaces)
@@ -70,9 +75,6 @@ class USVCommandHandler(QObject):
     def cluster_disarming(self, usv_list: List[Dict[str, Any]]) -> None:
         self._send_batch_command(usv_list, self.ros_signal.disarm_command, "集群加锁")
 
-    def set_cluster_offboard(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.offboard_command, "集群 OFFBOARD")
-
     def set_cluster_hold(self, usv_list: List[Dict[str, Any]]) -> None:
         self._send_batch_command(usv_list, self.ros_signal.hold_command, "集群 HOLD")
 
@@ -80,22 +82,56 @@ class USVCommandHandler(QObject):
         self._send_batch_command(usv_list, self.ros_signal.stabilized_command, "集群 STABILIZED")
 
     def departed_arming(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.arm_command, "离群解锁")
+        self._send_batch_command(usv_list, self.ros_signal.arm_command, "离群解锁", is_departed=True)
 
     def departed_disarming(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.disarm_command, "离群加锁")
-
-    def set_departed_offboard(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.offboard_command, "离群 OFFBOARD")
+        self._send_batch_command(usv_list, self.ros_signal.disarm_command, "离群加锁", is_departed=True)
 
     def set_departed_stabilized(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.stabilized_command, "离群 STABILIZED")
+        self._send_batch_command(usv_list, self.ros_signal.stabilized_command, "离群 STABILIZED", is_departed=True)
 
-    def set_departed_posctl(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.posctl_command, "离群 POSCTL")
+    def set_departed_hold(self, usv_list: List[Dict[str, Any]]) -> None:
+        self._send_batch_command(usv_list, self.ros_signal.hold_command, "离群 HOLD", is_departed=True)
 
-    def set_departed_altctl(self, usv_list: List[Dict[str, Any]]) -> None:
-        self._send_batch_command(usv_list, self.ros_signal.altctl_command, "离群 ALTCTL")
+    # ============== 3D 载体起飞与降落控制 ==============
+    def _send_flight_command(
+        self,
+        usv_list: List[Dict[str, Any]],
+        signal: Any,
+        cmd_name: str,
+        altitude: float = -1.0,
+        is_departed: bool = False,
+    ) -> None:
+        try:
+            namespaces = self._extract_namespaces(usv_list)
+            if not namespaces:
+                if is_departed:
+                    self.append_info(
+                        f"⚠️ 【离群列表】为空，无法发送 {cmd_name}。默认载具在【集群列表】中，请使用【cluster command / 3D顶部HUD】按钮，或先选中载具移入离群列表。"
+                    )
+                else:
+                    self.append_info(f"⚠️ 【集群列表】为空，无法发送 {cmd_name}")
+                return
+            payload = {
+                'usv_ids': namespaces,
+                'altitude': float(altitude),
+            }
+            signal.emit(payload)
+        except Exception as e:
+            self.append_info(f"❌ 发送 {cmd_name} 失败: {e}")
+            _logger.error(f"Flight command {cmd_name} error: {e}")
+
+    def cluster_takeoff(self, usv_list: List[Dict[str, Any]], altitude: float = -1.0) -> None:
+        self._send_flight_command(usv_list, self.ros_signal.takeoff_command, "集群起飞 Takeoff", altitude, is_departed=False)
+
+    def cluster_land(self, usv_list: List[Dict[str, Any]], altitude: float = -1.0) -> None:
+        self._send_flight_command(usv_list, self.ros_signal.land_command, "集群降落 Land", altitude, is_departed=False)
+
+    def departed_takeoff(self, usv_list: List[Dict[str, Any]], altitude: float = -1.0) -> None:
+        self._send_flight_command(usv_list, self.ros_signal.takeoff_command, "离群起飞 Takeoff", altitude, is_departed=True)
+
+    def departed_land(self, usv_list: List[Dict[str, Any]], altitude: float = -1.0) -> None:
+        self._send_flight_command(usv_list, self.ros_signal.land_command, "离群降落 Land", altitude, is_departed=True)
 
     # ============== 外设控制 ==============
     def sound_start(self) -> None:

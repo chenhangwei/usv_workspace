@@ -114,7 +114,7 @@ class Px4CommandInterface:
         param5: float = 0.0,
         param6: float = 0.0,
         param7: float = 0.0,
-        target_system: int = 1,
+        target_system: int = 0,
         target_component: int = 1,
         callback: Optional[Callable[[bool, int], None]] = None
     ) -> bool:

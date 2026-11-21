@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>usv_sim</name>
+  <version>0.1.0</version>
+  <description>PX4 + Gazebo 单载具独立 SITL 仿真与 RL 启动包（兼容 usv_rl 启动接口，支持多机架自动匹配）</description>
+  <maintainer email="chenhangwei77777@hotmail.com">chenhangwei</maintainer>
+  <license>Apache-2.0</license>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>usv_bringup</exec_depend>
+  <exec_depend>usv_control</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

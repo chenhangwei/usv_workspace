@@ -43,7 +43,7 @@ class AutoSetHomePx4Node(Node):
         # =====================================================================
         qos_px4 = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
@@ -61,6 +61,8 @@ class AutoSetHomePx4Node(Node):
         self.fixed_lat = self.get_parameter('fixed_lat').value
         self.fixed_lon = self.get_parameter('fixed_lon').value
         self.fixed_alt = self.get_parameter('fixed_alt').value
+        self.target_system = 0
+        self.target_component = 1
 
         # =====================================================================
         # 发布器
@@ -76,7 +78,7 @@ class AutoSetHomePx4Node(Node):
         # =====================================================================
         self.status_sub = self.create_subscription(
             VehicleStatus,
-            'fmu/out/vehicle_status',
+            'fmu/out/vehicle_status_v1',
             self.vehicle_status_callback,
             qos_px4
         )
@@ -110,8 +112,11 @@ class AutoSetHomePx4Node(Node):
 
     def vehicle_status_callback(self, msg: VehicleStatus):
         """飞控状态回调"""
-        # PX4 总是"连接"的（如果能收到消息）
         self.vehicle_connected = True
+        if int(msg.system_id) > 0:
+            self.target_system = int(msg.system_id)
+        if int(msg.component_id) > 0:
+            self.target_component = int(msg.component_id)
 
     def local_position_callback(self, msg: VehicleLocalPosition):
         """本地位置回调 - 用于检测 UWB 定位是否就绪"""
@@ -154,9 +159,9 @@ class AutoSetHomePx4Node(Node):
         try:
             msg = VehicleCommand()
             msg.command = self.VEHICLE_CMD_DO_SET_HOME
-            msg.target_system = 1
-            msg.target_component = 1
-            msg.source_system = 1
+            msg.target_system = int(self.target_system)
+            msg.target_component = int(self.target_component)
+            msg.source_system = 255
             msg.source_component = 1
             msg.from_external = True
             msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)

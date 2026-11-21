@@ -188,7 +188,7 @@ class UsvManager:
         # QoS 配置
         self.qos_px4 = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
@@ -227,6 +227,19 @@ class UsvManager:
         self.clear_target_pubs: Dict[str, Any] = {}  # 清除目标点发布器
         self.nav_goal_pubs: Dict[str, Any] = self.navigation_goal_pubs  # 别名兼容
         self.attitude_cmd_pubs: Dict[str, Any] = {}  # 姿态动作指令发布器（单向）
+        self.takeoff_cmd_pubs: Dict[str, Any] = {}   # 3D 起飞指令发布器
+        self.land_cmd_pubs: Dict[str, Any] = {}      # 3D 降落锁桨指令发布器
+        self.cancel_navigation_pubs: Dict[str, Any] = {}  # 暂停导航发布者 (HOLD)
+        self.stop_navigation_pubs: Dict[str, Any] = {}    # 停止导航发布者 (STOP)
+
+        # 导航与速度参数下发发布器
+        self.nav_arrival_threshold_pubs: Dict[str, Any] = {}
+        self.nav_switch_threshold_pubs: Dict[str, Any] = {}
+        self.nav_smooth_navigation_pubs: Dict[str, Any] = {}
+        self.velocity_cruise_speed_pubs: Dict[str, Any] = {}
+        self.velocity_max_angular_pubs: Dict[str, Any] = {}
+        self.velocity_goal_tolerance_pubs: Dict[str, Any] = {}
+        self.velocity_switch_tolerance_pubs: Dict[str, Any] = {}
         
         # 回调函数
         self._on_status_update: Optional[Callable[[str, UsvStatusInfo], None]] = None
@@ -284,13 +297,14 @@ class UsvManager:
         # 自动检测模式：检查 PX4 话题是否存在
         if remote_mode is None:
             topic_list = [name for name, _ in self.node.get_topic_names_and_types()]
+            px4_topic_v1 = f'{prefix}/fmu/out/vehicle_status_v1'
             px4_topic = f'{prefix}/fmu/out/vehicle_status'
             usv_state_topic = f'{prefix}/usv_state'
             
-            if px4_topic in topic_list:
-                remote_mode = False  # PX4 话题存在，使用本地模式
-            elif usv_state_topic in topic_list:
-                remote_mode = True   # 只有 usv_state，使用远程模式
+            if usv_state_topic in topic_list:
+                remote_mode = True   # 优先使用 usv_state 聚合话题（姿态/偏航/健康状态最全）
+            elif px4_topic_v1 in topic_list or px4_topic in topic_list:
+                remote_mode = False  # 仅有原生 PX4 话题时使用本地模式
             else:
                 remote_mode = True   # 默认使用远程模式（Zenoh 桥接）
         
@@ -317,11 +331,17 @@ class UsvManager:
         )
     
     def _subscribe_px4_topics(self, usv_id: str, prefix: str):
-        """订阅 PX4 原生话题（本地模式）"""
+        """订阅 PX4 原生话题（本地模式，兼容 PX4 v1.15+ vehicle_status_v1）"""
+        topic_list = [name for name, _ in self.node.get_topic_names_and_types()]
+        status_topic = (
+            f'{prefix}/fmu/out/vehicle_status_v1'
+            if f'{prefix}/fmu/out/vehicle_status_v1' in topic_list
+            else f'{prefix}/fmu/out/vehicle_status'
+        )
         # VehicleStatus 订阅
         self._vehicle_status_subs[usv_id] = self.node.create_subscription(
             VehicleStatus,
-            f'{prefix}/fmu/out/vehicle_status',
+            status_topic,
             lambda msg, uid=usv_id: self._vehicle_status_callback(uid, msg),
             self.qos_px4
         )
@@ -368,7 +388,7 @@ class UsvManager:
     def _create_command_publishers(self, usv_id: str, prefix: str):
         """创建命令发布器"""
         from common_interfaces.msg import NavigationGoal, AttitudeCommand
-        from std_msgs.msg import Bool
+        from std_msgs.msg import Bool, Float32
         
         self._mode_pubs[usv_id] = self.node.create_publisher(
             String,
@@ -398,6 +418,41 @@ class UsvManager:
             AttitudeCommand,
             f'{prefix}/attitude/command',
             self.qos_reliable
+        )
+
+        self.cancel_navigation_pubs[usv_id] = self.node.create_publisher(
+            Bool, f'{prefix}/cancel_navigation', self.qos_reliable
+        )
+        self.stop_navigation_pubs[usv_id] = self.node.create_publisher(
+            Bool, f'{prefix}/stop_navigation', self.qos_reliable
+        )
+        self.takeoff_cmd_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/takeoff_command', self.qos_reliable
+        )
+        self.land_cmd_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/land_command', self.qos_reliable
+        )
+
+        self.nav_arrival_threshold_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_nav_arrival_threshold', self.qos_reliable
+        )
+        self.nav_switch_threshold_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_nav_switch_threshold', self.qos_reliable
+        )
+        self.nav_smooth_navigation_pubs[usv_id] = self.node.create_publisher(
+            Bool, f'{prefix}/set_nav_smooth_navigation', self.qos_reliable
+        )
+        self.velocity_cruise_speed_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_velocity_cruise_speed', self.qos_reliable
+        )
+        self.velocity_max_angular_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_velocity_max_angular', self.qos_reliable
+        )
+        self.velocity_goal_tolerance_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_velocity_goal_tolerance', self.qos_reliable
+        )
+        self.velocity_switch_tolerance_pubs[usv_id] = self.node.create_publisher(
+            Float32, f'{prefix}/set_velocity_switch_tolerance', self.qos_reliable
         )
 
     def remove_usv_namespace(self, namespace: str):
@@ -441,6 +496,21 @@ class UsvManager:
             self.node.destroy_publisher(self.clear_target_pubs.pop(usv_id))
         if usv_id in self.attitude_cmd_pubs:
             self.node.destroy_publisher(self.attitude_cmd_pubs.pop(usv_id))
+        for pub_dict in (
+            self.takeoff_cmd_pubs,
+            self.land_cmd_pubs,
+            self.cancel_navigation_pubs,
+            self.stop_navigation_pubs,
+            self.nav_arrival_threshold_pubs,
+            self.nav_switch_threshold_pubs,
+            self.nav_smooth_navigation_pubs,
+            self.velocity_cruise_speed_pubs,
+            self.velocity_max_angular_pubs,
+            self.velocity_goal_tolerance_pubs,
+            self.velocity_switch_tolerance_pubs,
+        ):
+            if usv_id in pub_dict:
+                self.node.destroy_publisher(pub_dict.pop(usv_id))
         
         # 移除状态
         del self._usv_status[usv_id]

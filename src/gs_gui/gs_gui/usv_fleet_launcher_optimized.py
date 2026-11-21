@@ -763,6 +763,11 @@ class UsvFleetLauncher(QDialog):
             namespace = usv_id
             fcu_url = str(config.get('fcu_url', '') or '')
             platform_mode = str(config.get('platform_mode', '3d')).strip().lower() or '3d'
+            vehicle_type = str(config.get('vehicle_type', 'flying_sphere')).strip().lower() or 'flying_sphere'
+            nav_mode = str(config.get('nav_mode', 'rl' if vehicle_type in ('usv_diff', 'usv') else 'position')).strip().lower()
+            rl_model = str(config.get('rl_policy_model', '')).strip()
+            reach_xy = config.get('reach_xy_threshold', -1.0)
+            reach_z = config.get('reach_z_threshold', -1.0)
 
             # 从 fcu_url 推导 usv_launch.py 串口参数（仅支持 serial:///dev/xxx:baudrate 形式；否则保持 usv_launch.py 默认值）
             use_ethernet_arg = None
@@ -789,8 +794,15 @@ class UsvFleetLauncher(QDialog):
                 f"source {workspace}/install/setup.bash; "
                 f"ros2 launch usv_bringup usv_launch.py "
                 f"namespace:={namespace} "
-                f"platform_mode:={platform_mode}"
+                f"platform_mode:={platform_mode} "
+                f"vehicle_type:={vehicle_type} "
+                f"nav_mode:={nav_mode} "
+                f"rl_policy_enabled:={'true' if nav_mode == 'rl' else 'false'} "
+                f"reach_xy_threshold:={reach_xy} "
+                f"reach_z_threshold:={reach_z}"
             )
+            if rl_model:
+                remote_cmd += f" rl_policy_model:={rl_model}"
 
             if use_ethernet_arg is not None:
                 remote_cmd += f" use_ethernet:={use_ethernet_arg}"

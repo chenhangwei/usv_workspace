@@ -21,7 +21,7 @@ def update_mode_style(label: QLabel, mode: str) -> None:
         color = "#27ae60"  # 绿色
     elif "MANUAL" in mode_str:
         color = "#f39c12"  # 橙色
-    elif "AUTO" in mode_str:
+    elif "HOLD" in mode_str or "LOITER" in mode_str or "AUTO" in mode_str:
         color = "#3498db"  # 蓝色
     elif "STABILIZED" in mode_str or "POSCTL" in mode_str:
         color = "#9b59b6"  # 紫色

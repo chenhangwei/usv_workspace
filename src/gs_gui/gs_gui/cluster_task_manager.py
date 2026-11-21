@@ -41,6 +41,8 @@ class ClusterTaskManager:
         self.update_status_callback = None
         # 任务加载回调 (用于更新 2D 预览)
         self.task_loaded_callback = None
+        # 3D 起飞预高度门控预检回调: fn(usv_ids: list[str]) -> (ok: bool, reasons: list[str])
+        self.pre_start_validator = None
         
         # 集群任务状态
         self.cluster_task_running = False
@@ -96,6 +98,10 @@ class ClusterTaskManager:
     def set_task_loaded_callback(self, callback):
         """设置任务加载回调"""
         self.task_loaded_callback = callback
+
+    def set_pre_start_validator(self, validator):
+        """设置启动集群路径前的预检函数（如 3D 载体起飞预高度与锁桨保护检查）"""
+        self.pre_start_validator = validator
 
     def _update_status(self, text, style="normal"):
         """内部方法：调用回调更新状态"""
@@ -605,8 +611,20 @@ class ClusterTaskManager:
             return False
         
         # 统计参与的唯一 USV 数量
-        unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list}
+        unique_usvs_in_task = {item.get('usv_id', '') for item in filtered_list if item.get('usv_id', '')}
         usv_count_in_task = len(unique_usvs_in_task)
+
+        # 3D 载体（飞行球、海豚、飞艇）起飞预高度门控检查：未升至设定预高度禁止启动路径程序集群动作
+        if self.pre_start_validator is not None:
+            ok, reasons = self.pre_start_validator(sorted(unique_usvs_in_task))
+            if not ok:
+                detail = "\n".join(f"• {r}" for r in reasons)
+                warn_msg = f"3D 载体未达到设定起飞预高度或处于保护锁止，无法触发路径程序集群动作：\n{detail}"
+                self.append_warning(warn_msg)
+                self._update_status("⚠️ 请先点击 Takeoff 起飞至预高度", "warning")
+                if self.parent_widget is not None:
+                    QMessageBox.warning(self.parent_widget, "未达起飞预高度", warn_msg)
+                return False
 
         # 弹窗确认
         reply = QMessageBox.question(

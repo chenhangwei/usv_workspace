@@ -4,12 +4,55 @@
 """
 
 import queue
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 
 
 class CommandProcessor:
     def __init__(self, node):
         self.node = node
+
+    def _stop_vehicle_navigation(self, usv_list, reason_mode: str):
+        """停止目标载具的集群任务/编队与机载导航目标，避免后续航点把载具重新拉回 OFFBOARD"""
+        from std_msgs.msg import Bool
+
+        normalized_ids = []
+        for ns in (usv_list if isinstance(usv_list, list) else [usv_list]):
+            if isinstance(ns, dict):
+                uid = ns.get('namespace', '').lstrip('/')
+            else:
+                uid = ns.lstrip('/') if isinstance(ns, str) else str(ns)
+            if uid:
+                normalized_ids.append(uid)
+
+        # 若编队正在运行且涉及目标载具，停止编队（防止 formation_follower_node 10Hz 继续发航点）
+        fm = getattr(self.node, 'formation_manager', None)
+        if fm is not None and fm.is_any_active():
+            fm.stop_all(f"切换 {reason_mode}")
+            if hasattr(self.node, 'cluster_controller'):
+                self.node.cluster_controller.clear_excluded_ids()
+
+        # 若集群任务正在运行且未暂停，自动暂停集群任务推进（防止下一步自动续发航点）
+        cc = getattr(self.node, 'cluster_controller', None)
+        if cc is not None and getattr(cc, 'is_cluster_task_running', False) and not getattr(cc, 'is_paused', False):
+            cc.pause_cluster_task()
+            self.node.get_logger().info(f"⏸️ 切换 {reason_mode}，已自动暂停正在执行的集群任务")
+
+        for usv_id in normalized_ids:
+            # 同时发送 clear_target 与 stop_navigation，让 usv_control_node 与 policy_inference_node 全部停航
+            if usv_id in self.node.usv_manager.clear_target_pubs:
+                clear_msg = Bool()
+                clear_msg.data = True
+                self.node.usv_manager.clear_target_pubs[usv_id].publish(clear_msg)
+            if usv_id in self.node.usv_manager.stop_navigation_pubs:
+                stop_msg = Bool()
+                stop_msg.data = True
+                self.node.usv_manager.stop_navigation_pubs[usv_id].publish(stop_msg)
+
+            if usv_id in self.node._usv_nav_target_cache:
+                del self.node._usv_nav_target_cache[usv_id]
+                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
+            else:
+                self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
 
     def set_hold_callback(self, msg):
         """
@@ -18,36 +61,11 @@ class CommandProcessor:
         Args:
             msg: 包含USV列表的消息
         """
-        from std_msgs.msg import Bool
-        
         # 记录日志信息
         self.node.get_logger().info("接收到HOLD模式命令")
-        
-        # 切换到HOLD模式时，应该停止所有导航任务
-        usv_list = msg if isinstance(msg, list) else [msg]
-        for ns in usv_list:
-            # 提取USV ID
-            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
-            
-            # 发送 clear_target 命令，停止 USV 端发送 setpoint
-            if usv_id in self.node.usv_manager.clear_target_pubs:
-                clear_msg = Bool()
-                clear_msg.data = True
-                self.node.usv_manager.clear_target_pubs[usv_id].publish(clear_msg)
-                self.node.get_logger().info(f"📤 发送清除目标点命令到 {usv_id}")
-            
-            # 如果该USV有正在执行的导航任务，取消它
-            if usv_id in self.node._usv_nav_target_cache:
-                self.node.get_logger().info(f"🛑 切换HOLD模式，取消 {usv_id} 的导航任务")
-                del self.node._usv_nav_target_cache[usv_id]
-                # 更新导航状态显示为"已停止"
-                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
-            else:
-                # 如果没有活动的导航任务，显示为"待命"
-                self.node.ros_signal.nav_status_update.emit(usv_id, "待命")
-        
-        # 调用通用设置模式方法，切换到 AUTO.LOITER（保持位置）
-        self._set_mode_for_usvs(msg, "AUTO.LOITER")
+        self._stop_vehicle_navigation(msg, "HOLD")
+        # 调用通用设置模式方法，切换到 HOLD（保持位置）
+        self._set_mode_for_usvs(msg, "HOLD")
 
     def set_offboard_callback(self, msg):
         """
@@ -70,20 +88,8 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到STABILIZED稳定模式命令")
-        
-        # 切换到STABILIZED模式时，应该停止所有导航任务
-        usv_list = msg if isinstance(msg, list) else [msg]
-        for ns in usv_list:
-            # 提取USV ID
-            usv_id = ns.lstrip('/') if isinstance(ns, str) else ns
-            # 如果该USV有正在执行的导航任务，取消它
-            if usv_id in self.node._usv_nav_target_cache:
-                self.node.get_logger().info(f"🛑 切换STABILIZED模式，取消 {usv_id} 的导航任务")
-                del self.node._usv_nav_target_cache[usv_id]
-                # 更新导航状态显示为"已停止"
-                self.node.ros_signal.nav_status_update.emit(usv_id, "已停止")
-        
-        # 调用通用设置模式方法 - MAVROS 使用 STABILIZED
+        self._stop_vehicle_navigation(msg, "STABILIZED")
+        # 调用通用设置模式方法 - PX4 STABILIZED
         self._set_mode_for_usvs(msg, "STABILIZED")
 
     def set_posctl_callback(self, msg):
@@ -156,6 +162,8 @@ class CommandProcessor:
         """
         # 记录日志信息
         self.node.get_logger().info("接收到解除武装命令")
+        # 上锁前先停止目标载具的导航/编队，避免上锁后仍继续推航点
+        self._stop_vehicle_navigation(msg, "DISARM")
         # 调用通用设置武装状态方法 (USV端期望 "arm" 或 "disarm")
         self._set_arming_for_usvs(msg, "disarm")
 
@@ -199,6 +207,8 @@ class CommandProcessor:
                 continue
             
             # 创建武装状态消息并发送
+            if arming_state == "arm" and usv_id in self.node.usv_states:
+                self.node.usv_states[usv_id]['protection_locked'] = False
             arming_msg = String()
             arming_msg.data = arming_state
             self.node.publish_queue.put((self.node.usv_manager.set_usv_arming_pubs[usv_id], arming_msg))
@@ -212,6 +222,126 @@ class CommandProcessor:
             self.node.get_logger().warn(f"⚠️  跳过 {offline_count} 艘离线USV")
         if invalid_count > 0:
             self.node.get_logger().warn(f"⚠️  跳过 {invalid_count} 个无效USV")
+
+    def _is_3d_vehicle(self, usv_id: str) -> bool:
+        """判断指定载具是否为 3D 载体（飞行球 / 仿生海豚 / 仿生飞艇）"""
+        st = self.node.usv_states.get(usv_id, {}) or {}
+        vt = str(st.get('vehicle_type') or self.node._usv_vehicle_type.get(usv_id, '')).strip().lower()
+        if vt in ('usv', 'usv_diff', 'usv_boat', 'boat', 'diff_boat', 'rover_differential'):
+            return False
+        if vt in ('flying_sphere', 'bionic_dolphin', 'bionic_airship', 'sphere', 'dolphin', 'airship', 'uav'):
+            return True
+        pm = str(st.get('platform_mode') or self.node._usv_platform_mode.get(usv_id, '3d')).strip().lower()
+        return pm != '2d'
+
+    def set_takeoff_callback(self, payload):
+        """
+        处理 3D 载体垂直起飞命令：
+        - 仅对在线、已手动解锁且未处于降落保护锁止的 3D 载体下发起飞至预高度指令
+        - 未解锁或处于降落锁桨保护状态的载体给出明确提示，需用户先手动点击 Arming 解锁
+        """
+        if isinstance(payload, dict):
+            usv_list = payload.get('usv_ids') or []
+            req_alt = float(payload.get('altitude', -1.0))
+        else:
+            usv_list = payload if isinstance(payload, list) else [payload]
+            req_alt = -1.0
+
+        sent_3d = []
+        skipped_2d = []
+        blocked_locked = []
+        blocked_disarmed = []
+
+        for ns in usv_list:
+            usv_id = ns.get('namespace', '').lstrip('/') if isinstance(ns, dict) else str(ns).lstrip('/')
+            if not usv_id:
+                continue
+            st = self.node.usv_states.get(usv_id, {}) or {}
+            if not st.get('connected', False):
+                continue
+            if not self._is_3d_vehicle(usv_id):
+                skipped_2d.append(usv_id)
+                continue
+            if bool(st.get('protection_locked', False)):
+                blocked_locked.append(usv_id)
+                continue
+            if not bool(st.get('armed', False)):
+                blocked_disarmed.append(usv_id)
+                continue
+            if usv_id not in self.node.usv_manager.takeoff_cmd_pubs:
+                continue
+
+            # 更新地面站记录的目标起飞预高度（req_alt > 0 表示 GUI 显式指定统一预高度）
+            if req_alt > 0.0:
+                self.node._usv_default_altitude[usv_id] = req_alt
+                st['takeoff_altitude'] = req_alt
+                st['default_altitude'] = req_alt
+            msg = Float32()
+            msg.data = float(req_alt)
+            self.node.publish_queue.put((self.node.usv_manager.takeoff_cmd_pubs[usv_id], msg))
+            sent_3d.append(usv_id)
+
+        if sent_3d:
+            alt_desc = f"{req_alt:.2f}m" if req_alt > 0.0 else "机型默认预高度"
+            info = f"🛫 已向 {', '.join(sent_3d)} 下发垂直起飞指令（目标高度: {alt_desc}）"
+            self.node.get_logger().info(info)
+            self.node.ros_signal.node_info.emit(info)
+        if skipped_2d:
+            self.node.get_logger().info(f"ℹ️ 跳过 2D 水面船（无需起飞）: {', '.join(skipped_2d)}")
+        if blocked_locked:
+            warn = f"🔒 {', '.join(blocked_locked)} 处于降落电机保护锁止状态！请先手动点击【Arming 解锁】后再点击【Takeoff 起飞】。"
+            self.node.get_logger().warn(warn)
+            self.node.ros_signal.node_warning.emit(warn)
+        if blocked_disarmed:
+            warn = f"⚠️ {', '.join(blocked_disarmed)} 当前未解锁（Disarmed），请先点击【Arming 解锁】后再点击【Takeoff 起飞】。"
+            self.node.get_logger().warn(warn)
+            self.node.ros_signal.node_warning.emit(warn)
+
+    def set_land_callback(self, payload):
+        """
+        处理 3D 载体垂直降落命令：
+        - 先停止目标载具的集群任务/编队与水平导航
+        - 下发垂直降落至设定降落高度指令，高度到达及以下电机自动锁桨进入保护状态
+        """
+        if isinstance(payload, dict):
+            usv_list = payload.get('usv_ids') or []
+            req_land_alt = float(payload.get('altitude', -1.0))
+        else:
+            usv_list = payload if isinstance(payload, list) else [payload]
+            req_land_alt = -1.0
+
+        self._stop_vehicle_navigation(usv_list, "LAND")
+
+        sent_3d = []
+        skipped_2d = []
+        for ns in usv_list:
+            usv_id = ns.get('namespace', '').lstrip('/') if isinstance(ns, dict) else str(ns).lstrip('/')
+            if not usv_id:
+                continue
+            st = self.node.usv_states.get(usv_id, {}) or {}
+            if not st.get('connected', False):
+                continue
+            if not self._is_3d_vehicle(usv_id):
+                skipped_2d.append(usv_id)
+                continue
+            if usv_id not in self.node.usv_manager.land_cmd_pubs:
+                continue
+
+            if req_land_alt >= 0.0:
+                self.node._usv_landing_altitude[usv_id] = req_land_alt
+                st['landing_altitude'] = req_land_alt
+            msg = Float32()
+            msg.data = float(req_land_alt)
+            self.node.publish_queue.put((self.node.usv_manager.land_cmd_pubs[usv_id], msg))
+            sent_3d.append(usv_id)
+
+        if sent_3d:
+            alt_desc = f"{req_land_alt:.2f}m" if req_land_alt >= 0.0 else "机型默认降落高度"
+            info = f"🛬 已向 {', '.join(sent_3d)} 下发垂直降落指令（降落锁桨高度: {alt_desc}，到位后电机自动保护锁止，需手动解锁恢复）"
+            self.node.get_logger().info(info)
+            self.node.ros_signal.node_info.emit(info)
+        if skipped_2d:
+            self.node.get_logger().info(f"ℹ️ 跳过 2D 水面船（无需垂直降落）: {', '.join(skipped_2d)}")
 
     def str_command_callback(self, msg):
         """

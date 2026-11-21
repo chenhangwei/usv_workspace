@@ -85,6 +85,18 @@ QPushButton[objectName^="stop"]:pressed, QPushButton[objectName^="quit"]:pressed
     background-color: #b02316;
 }
 
+QPushButton#takeoff_pushButton, QPushButton#departed_takeoff_pushButton {
+    background-color: #0277bd;
+    color: #ffffff;
+    border: none;
+}
+
+QPushButton#land_pushButton, QPushButton#departed_land_pushButton {
+    background-color: #e65100;
+    color: #ffffff;
+    border: none;
+}
+
 /* ============ Table View ============ */
 QTableView {
     background-color: #ffffff;

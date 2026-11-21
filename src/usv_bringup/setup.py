@@ -17,7 +17,10 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/launch', 
-            ['launch/usv_launch.py']),
+            [
+                'launch/usv_launch.py',
+                'launch/usv_sitl_agent_launch.py',
+            ]),
         ('share/' + package_name + '/config', 
             ['config/usv_params.yaml', 'config/zenoh_usv_config.json5']),
 

@@ -143,6 +143,16 @@ def generate_launch_description():
     )
     
     # =========================================================================
+    # 多智能体 RL / APF 邻船位姿聚合节点（支持动态发现任意 usv_N）
+    # =========================================================================
+    apf_neighbor_relay_node = Node(
+        package='gs_gui',
+        executable='apf_neighbor_relay_node',
+        name='apf_neighbor_relay_node',
+        output='screen',
+    )
+
+    # =========================================================================
     # GUI 应用（内部创建 GroundStationNode）
     # =========================================================================
     # 注：main_gui_app 内部已创建 GroundStationNode，无需单独启动
@@ -162,6 +172,7 @@ def generate_launch_description():
         period=3.0,
         actions=[
             cluster_manager_node,
+            apf_neighbor_relay_node,
             main_gui_node,
         ]
     )

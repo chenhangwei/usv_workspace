@@ -25,13 +25,14 @@ from logging.handlers import RotatingFileHandler
 
 import rclpy
 from rclpy.parameter import Parameter
-from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings, QPropertyAnimation, QEasingCurve
+from PyQt5.QtCore import QProcess, QTimer, Qt, QSettings, QPropertyAnimation, QEasingCurve, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QAbstractItemView, QMessageBox, QAction, QDialog, QMenu,
     QTabWidget, QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, 
-    QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup, QInputDialog
+    QHeaderView, QProgressBar, QFrame, QLabel, QActionGroup, QInputDialog,
+    QPushButton, QSplitter, QShortcut
 )
-from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush
+from PyQt5.QtGui import QFont, QColor, QLinearGradient, QGradient, QPalette, QBrush, QKeySequence
 from PyQt5.QtWidgets import QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 from gs_gui.ros_signal import ROSSignal
 from gs_gui.ground_station_node import GroundStationNode
@@ -59,6 +60,221 @@ from gs_gui.mission_queue_widget import MissionQueueWidget
 from gs_gui.choreographer_widget import ChoreographerWidget
 
 
+class ElasticPanelWindow(QDialog):
+    """弹性面板窗口：支持独立悬浮弹出、一键停靠到主界面分栏、需要时弹出、不需要时隐藏。"""
+
+    visibility_changed = pyqtSignal(str, bool)
+
+    def __init__(self, panel_key: str, title: str, content_widget: QWidget,
+                 dock_splitter: QSplitter, dock_index: int = -1,
+                 default_size=(540, 720), parent=None):
+        super().__init__(
+            parent,
+            Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint
+            | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint
+        )
+        self.panel_key = panel_key
+        self.panel_title = title
+        self.content_widget = content_widget
+        self.dock_splitter = dock_splitter
+        self.dock_index = dock_index
+        self._is_docked = False
+        self._saved_float_geometry = None
+
+        self.setWindowTitle(title)
+        self.resize(*default_size)
+
+        # 承载容器（可在悬浮窗与主界面 Splitter 之间无损迁移）
+        self.container = QFrame()
+        self.container.setObjectName(f"elasticContainer_{panel_key}")
+        c_layout = QVBoxLayout(self.container)
+        c_layout.setContentsMargins(4, 4, 4, 4)
+        c_layout.setSpacing(4)
+
+        # 弹性面板顶部控制条
+        self.header_bar = QFrame()
+        self.header_bar.setObjectName("elasticHeaderBar")
+        self.header_bar.setFixedHeight(32)
+        h_layout = QHBoxLayout(self.header_bar)
+        h_layout.setContentsMargins(8, 2, 6, 2)
+        h_layout.setSpacing(6)
+
+        self.title_label = QLabel(title)
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 10pt;")
+        h_layout.addWidget(self.title_label)
+        h_layout.addStretch(1)
+
+        self.btn_dock_toggle = QPushButton("📌 停靠主窗")
+        self.btn_dock_toggle.setToolTip("在『独立悬浮弹性窗口』与『停靠主窗口侧栏』之间切换")
+        self.btn_dock_toggle.setFixedHeight(24)
+        self.btn_dock_toggle.clicked.connect(self.toggle_dock_mode)
+        h_layout.addWidget(self.btn_dock_toggle)
+
+        self.btn_hide = QPushButton("✕ 隐藏")
+        self.btn_hide.setToolTip("隐藏此弹性面板（不中断后台状态更新，随时可再次弹出）")
+        self.btn_hide.setFixedHeight(24)
+        self.btn_hide.clicked.connect(self.hide_panel)
+        h_layout.addWidget(self.btn_hide)
+
+        c_layout.addWidget(self.header_bar)
+
+        if self.content_widget.parent() is not None:
+            self.content_widget.setParent(None)
+        self.content_widget.show()
+        c_layout.addWidget(self.content_widget, 1)
+
+        dlg_layout = QVBoxLayout(self)
+        dlg_layout.setContentsMargins(0, 0, 0, 0)
+        dlg_layout.addWidget(self.container)
+
+        self.set_theme('modern_dark')
+
+    @property
+    def is_panel_open(self) -> bool:
+        if self._is_docked:
+            return self.container.isVisible()
+        return self.isVisible()
+
+    def popup_panel(self):
+        """弹出或显示弹性面板"""
+        if self._is_docked:
+            self.container.show()
+        else:
+            if self._saved_float_geometry is not None:
+                self.restoreGeometry(self._saved_float_geometry)
+            elif self.parentWidget() is not None:
+                parent_geo = self.parentWidget().frameGeometry()
+                if self.panel_key == 'fleet':
+                    self.move(parent_geo.left() + 24, parent_geo.top() + 86)
+                elif self.panel_key == 'feedback_table':
+                    self.move(
+                        parent_geo.center().x() - self.width() // 2,
+                        max(parent_geo.top() + 80, parent_geo.bottom() - self.height() - 32),
+                    )
+                else:
+                    self.move(
+                        max(parent_geo.left() + 40, parent_geo.right() - self.width() - 24),
+                        parent_geo.top() + 86,
+                    )
+            self.show()
+            self.raise_()
+            self.activateWindow()
+        self.visibility_changed.emit(self.panel_key, True)
+
+    def hide_panel(self):
+        """隐藏弹性面板（保留所有内部控件与状态）"""
+        if self._is_docked:
+            self.container.hide()
+        else:
+            self._saved_float_geometry = self.saveGeometry()
+            self.hide()
+        self.visibility_changed.emit(self.panel_key, False)
+
+    def set_panel_visible(self, visible: bool):
+        if visible:
+            self.popup_panel()
+        else:
+            self.hide_panel()
+
+    def toggle_panel(self):
+        self.set_panel_visible(not self.is_panel_open)
+
+    def toggle_dock_mode(self):
+        """在独立悬浮弹窗与停靠主窗口分栏之间弹性切换"""
+        if not self._is_docked:
+            self._saved_float_geometry = self.saveGeometry()
+            self.hide()
+            self._is_docked = True
+            self.btn_dock_toggle.setText("🗗 独立弹出")
+            if self.dock_index >= 0:
+                self.dock_splitter.insertWidget(self.dock_index, self.container)
+            else:
+                self.dock_splitter.addWidget(self.container)
+            self.container.show()
+            self.visibility_changed.emit(self.panel_key, True)
+        else:
+            self.container.hide()
+            self.container.setParent(None)
+            self.layout().addWidget(self.container)
+            self.container.show()
+            self._is_docked = False
+            self.btn_dock_toggle.setText("📌 停靠主窗")
+            if self._saved_float_geometry is not None:
+                self.restoreGeometry(self._saved_float_geometry)
+            self.show()
+            self.raise_()
+            self.activateWindow()
+            self.visibility_changed.emit(self.panel_key, True)
+
+    def set_theme(self, theme_name: str):
+        is_dark = (theme_name != 'light')
+        if is_dark:
+            self.container.setStyleSheet("""
+                QFrame[objectName^="elasticContainer_"] {
+                    background-color: #161b22;
+                    border: 1px solid #2b4c6f;
+                    border-radius: 5px;
+                }
+                QFrame#elasticHeaderBar {
+                    background-color: #0d1b2a;
+                    border-bottom: 1px solid #00b4d8;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                }
+                QFrame#elasticHeaderBar QLabel {
+                    color: #00f2ff;
+                }
+                QFrame#elasticHeaderBar QPushButton {
+                    background-color: #1b2838;
+                    color: #d8e9f8;
+                    border: 1px solid #355270;
+                    border-radius: 4px;
+                    padding: 1px 8px;
+                    font-size: 9pt;
+                }
+                QFrame#elasticHeaderBar QPushButton:hover {
+                    border-color: #00f2ff;
+                    color: #ffffff;
+                }
+            """)
+        else:
+            self.container.setStyleSheet("""
+                QFrame[objectName^="elasticContainer_"] {
+                    background-color: #ffffff;
+                    border: 1px solid #b8cfe5;
+                    border-radius: 5px;
+                }
+                QFrame#elasticHeaderBar {
+                    background-color: #eaf3fc;
+                    border-bottom: 1px solid #0078d7;
+                    border-top-left-radius: 4px;
+                    border-top-right-radius: 4px;
+                }
+                QFrame#elasticHeaderBar QLabel {
+                    color: #005a9e;
+                }
+                QFrame#elasticHeaderBar QPushButton {
+                    background-color: #ffffff;
+                    color: #203850;
+                    border: 1px solid #b0c4de;
+                    border-radius: 4px;
+                    padding: 1px 8px;
+                    font-size: 9pt;
+                }
+                QFrame#elasticHeaderBar QPushButton:hover {
+                    border-color: #0078d7;
+                    color: #0078d7;
+                }
+            """)
+
+    def closeEvent(self, event):
+        """拦截窗口关闭为隐藏，防止销毁底层列表/操作控件"""
+        self._saved_float_geometry = self.saveGeometry()
+        event.ignore()
+        self.hide()
+        self.visibility_changed.emit(self.panel_key, False)
+
+
 class MainWindow(QMainWindow):
     """主窗口类"""
     
@@ -66,7 +282,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        self.setWindowTitle("Ground Station GUI")
+        self.setWindowTitle("Ground Station 3D — 异构集群三维态势与控制中心")
         
         # 恢复窗口大小和位置
         self.settings = QSettings("USV_Team", "GroundStation")
@@ -74,15 +290,12 @@ class MainWindow(QMainWindow):
         if geometry:
             self.restoreGeometry(geometry)
         else:
-            self.resize(1024, 512)
-            self.setGeometry(100, 100, 1124, 612)
+            self.resize(1380, 840)
+            self.setGeometry(80, 60, 1380, 840)
 
         # 更新按钮文本以匹配新的彩虹循环行为
         try:
             self.ui.led1_pushButton.setText("彩虹循环")
-            # 更新手动操作模式按钮文本 (Arco->Hold, Steering->RTL)
-            self.ui.set_departed_ARCO_pushButton.setText("HOLD")
-            self.ui.set_departed_Steering_pushButton.setText("RTL")
         except Exception:
             pass
         
@@ -219,8 +432,12 @@ class MainWindow(QMainWindow):
         # 连接UI按钮信号
         self._connect_ui_signals()
         
+        # 连接任务进度与列表计数到顶部 3D HUD 状态条
+        self.ros_signal.receive_state_list.connect(self._update_hud_fleet_badges)
+
         # 在初始化最后刷新表格表头
         self.table_manager.refresh_table_header()
+        self._update_hud_fleet_badges()
     
     def _init_task_status_label(self):
         """初始化集群任务状态标签"""
@@ -266,34 +483,37 @@ class MainWindow(QMainWindow):
             self.action_geofence_toggle.blockSignals(False)
 
     def update_plot_preview(self, task_data):
-        """当任务加载后，更新绘图窗口的预览路径"""
+        """当任务加载后，更新 3D/2D 主界面的预览路径"""
         # 保存当前任务数据，以便在修改坐标原点时重新计算
         self.current_task_data = task_data
 
-        # 此时窗口已嵌入在 Feedback Tab 中，直接更新数据
+        # 3D 反馈画布现为主界面常驻视图，直接更新三维路径
         if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
-             offset_x = 0.0
-             offset_y = 0.0
-             offset_angle = 0.0
-             if hasattr(self, 'current_area_offset') and self.current_area_offset:
-                 offset_x = float(self.current_area_offset.get('x', 0.0))
-                 offset_y = float(self.current_area_offset.get('y', 0.0))
-                 offset_angle = float(self.current_area_offset.get('angle', 0.0))
-             
-             self.usv_plot_window.set_preview_path(task_data, offset=(offset_x, offset_y), angle=offset_angle)
-             # 确保标记也被绘制/更新
-             self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
-             
-        # 自动切换到反馈选项卡 (Tab Index 2: 📊 反馈)
-        if hasattr(self, 'right_tab_widget'):
-            self.right_tab_widget.setCurrentIndex(2)
+            offset_x = 0.0
+            offset_y = 0.0
+            offset_z = 0.0
+            offset_angle = 0.0
+            if hasattr(self, 'current_area_offset') and self.current_area_offset:
+                offset_x = float(self.current_area_offset.get('x', 0.0))
+                offset_y = float(self.current_area_offset.get('y', 0.0))
+                offset_z = float(self.current_area_offset.get('z', 0.0))
+                offset_angle = float(self.current_area_offset.get('angle', 0.0))
+
+            self.usv_plot_window.set_preview_path(
+                task_data, offset=(offset_x, offset_y, offset_z), angle=offset_angle
+            )
+            self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
+        self._sync_hud_task_buttons()
 
     def update_cluster_status(self, text, style_sheet=None):
-        """更新集群任务状态标签"""
+        """更新集群任务状态标签及主界面 HUD 状态"""
         if hasattr(self, 'cluster_status_label'):
             self.cluster_status_label.setText(text)
             if style_sheet:
                 self.cluster_status_label.setStyleSheet(style_sheet)
+        if hasattr(self, 'hud_status_hint_label'):
+            self.hud_status_hint_label.setText(text)
+        self._sync_hud_task_buttons()
     
     def _connect_ros_signals(self):
         """连接ROS信号到处理函数"""
@@ -329,20 +549,89 @@ class MainWindow(QMainWindow):
         self.current_area_offset = offset_dict
         # 实时刷新 Plot Window 的 Area Center 标记
         if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
-             offset_x = float(offset_dict.get('x', 0.0))
-             offset_y = float(offset_dict.get('y', 0.0))
-             # 获取偏转角度, 默认0
-             offset_angle = float(offset_dict.get('angle', 0.0))
-             
-             # 传递角度给 plot window 绘制中心点（也许以后十字也可以旋转）
-             self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
-             
-             # 如果当前有加载的任务，重新计算预览偏移
-             if hasattr(self, 'current_task_data') and self.current_task_data:
-                 self.usv_plot_window.set_preview_path(self.current_task_data, offset=(offset_x, offset_y), angle=offset_angle)
-                 # 刷新以显示变更
-                 if hasattr(self.usv_plot_window, 'canvas'):
+            offset_x = float(offset_dict.get('x', 0.0))
+            offset_y = float(offset_dict.get('y', 0.0))
+            offset_z = float(offset_dict.get('z', 0.0))
+            # 获取偏转角度, 默认0
+            offset_angle = float(offset_dict.get('angle', 0.0))
+
+            # 传递角度给 plot window 绘制中心点
+            self.usv_plot_window.draw_area_center_marker(offset_x, offset_y)
+
+            # 如果当前有加载的任务，重新计算三维预览偏移
+            if hasattr(self, 'current_task_data') and self.current_task_data:
+                self.usv_plot_window.set_preview_path(
+                    self.current_task_data,
+                    offset=(offset_x, offset_y, offset_z),
+                    angle=offset_angle,
+                )
+                if hasattr(self.usv_plot_window, 'canvas'):
                     self.usv_plot_window.canvas.draw_idle()
+
+    def _handle_plot_send_3d_target(self, payload: dict):
+        """处理来自 3D/2D 态势主界面的三维目标下发请求"""
+        if not isinstance(payload, dict):
+            return
+        usv_ids = payload.get('usv_ids', [])
+        if not usv_ids:
+            self.ui_utils.append_warning("⚠️ 未选择目标载具，无法下发三维目标点")
+            return
+        x = float(payload.get('x', 0.0))
+        y = float(payload.get('y', 0.0))
+        z = float(payload.get('z', 0.0))
+        frame = payload.get('coord_frame', 'local')
+        for uid in usv_ids:
+            self.ros_signal.nav_status_update.emit(uid, "执行中")
+        self.ros_signal.single_target_point_command.emit(payload)
+        frame_cn = "任务区相对坐标" if frame == 'area' else "局部ENU坐标"
+        self.ui_utils.append_info(
+            f"🎯 已下发三维目标 [{frame_cn}] ({x:.2f}, {y:.2f}, {z:.2f})m → {', '.join(usv_ids)}"
+        )
+
+    def _handle_plot_fill_departed(self, x: float, y: float, z: float):
+        """将 3D 画布拾取的坐标填入离群目标框并弹出集群/离群弹性面板"""
+        try:
+            self.ui.set_departed_x_doubleSpinBox.setValue(float(x))
+            self.ui.set_departed_y_doubleSpinBox.setValue(float(y))
+            if hasattr(self.ui, 'set_departed_z_doubleSpinBox'):
+                self.ui.set_departed_z_doubleSpinBox.setValue(float(z))
+            if hasattr(self, 'elastic_panels') and 'fleet' in self.elastic_panels:
+                self.elastic_panels['fleet'].popup_panel()
+            self.ui_utils.append_info(
+                f"📌 已填入离群三维目标点: X={x:.2f}m, Y={y:.2f}m, Z={z:.2f}m"
+            )
+        except Exception as e:
+            self.ui_utils.append_warning(f"填入离群目标点失败: {e}")
+
+    def _handle_plot_usv_selected(self, usv_id: str, _usv_dict: dict):
+        """在 3D 画布单击载具时，同步选中表格行并刷新详情/导航面板"""
+        if not usv_id:
+            return
+        try:
+            # 尝试在集群表或离群表中定位对应行
+            for is_cluster, table_view, model_list in (
+                (True, self.ui.cluster_tableView, self.list_manager.usv_cluster_list),
+                (False, self.ui.departed_tableView, self.list_manager.usv_departed_list),
+            ):
+                for row_idx, item in enumerate(model_list):
+                    ns = item.get('namespace') if isinstance(item, dict) else None
+                    if ns == usv_id:
+                        if table_view.selectionModel():
+                            table_view.selectionModel().clearSelection()
+                            table_view.selectRow(row_idx)
+                        self._current_selected_table = 'cluster' if is_cluster else 'departed'
+                        self._refresh_selected_usv_info()
+                        self._refresh_selected_usv_navigation()
+                        return
+            # 若尚未分配表格行，直接用缓存状态刷新详情面板
+            state = self.state_handler.get_usv_state(usv_id)
+            if state is not None:
+                self.usv_info_panel.update_state(state)
+                feedback = self.state_handler.get_usv_navigation_feedback(usv_id)
+                nav_status = self.state_handler.usv_nav_status.get(usv_id, "空闲")
+                self.usv_navigation_panel.update_navigation_state(state, feedback, nav_status)
+        except Exception:
+            pass
     
 
     def _handle_plot_set_home_request(self, x, y):
@@ -373,22 +662,39 @@ class MainWindow(QMainWindow):
 
     def _connect_ui_signals(self):
         """连接UI按钮信号到处理函数"""
-        # ============== 集群控制按钮 ==============
+        # ============== 集群控制按钮 (PX4: Arming / Disarming / STABILIZED / HOLD / Takeoff / Land) ==============
         self.ui.arming_pushButton.clicked.connect(self.set_cluster_arming_command)
         self.ui.disarming_pushButton.clicked.connect(self.cluster_disarming_command)
-        self.ui.set_cluster_manual_pushButton.clicked.connect(self.set_cluster_manual_command)
-        self.ui.set_guided_pushButton.clicked.connect(self.set_cluster_guided_command)
-        self.ui.set_manual_pushButton.clicked.connect(self.set_cluster_hold_command)
+        self.ui.set_stabilized_pushButton.clicked.connect(self.set_cluster_stabilized_command)
+        self.ui.set_hold_pushButton.clicked.connect(self.set_cluster_hold_command)
+        if hasattr(self.ui, 'takeoff_pushButton'):
+            self.ui.takeoff_pushButton.setToolTip(
+                "3D载体（飞行球/海豚/飞艇）垂直起飞：Z升至设定预高度，到位后方可启动路径程序集群动作"
+            )
+            self.ui.takeoff_pushButton.clicked.connect(self.cluster_takeoff_command)
+        if hasattr(self.ui, 'land_pushButton'):
+            self.ui.land_pushButton.setToolTip(
+                "3D载体（飞行球/海豚/飞艇）垂直降落：Z降至设定降落高度后电机进入保护锁止状态，需手动Arming解锁恢复"
+            )
+            self.ui.land_pushButton.clicked.connect(self.cluster_land_command)
         self.ui.send_cluster_point_pushButton.clicked.connect(self.toggle_cluster_task)
         self.ui.stop_cluster_task_pushButton.clicked.connect(self.stop_cluster_task)
         
-        # ============== 离群控制按钮 ==============
+        # ============== 离群控制按钮 (PX4: Arming / Disarming / STABILIZED / HOLD / Takeoff / Land) ==============
         self.ui.departed_arming_pushButton.clicked.connect(self.departed_arming_command)
         self.ui.departed_disarming_pushButton.clicked.connect(self.departed_disarming_command)
-        self.ui.set_departed_guided_pushButton.clicked.connect(self.set_departed_guided_command)
-        self.ui.set_departed_manual_pushButton.clicked.connect(self.set_departed_manual_command)
-        self.ui.set_departed_ARCO_pushButton.clicked.connect(self.set_departed_hold_command)
-        self.ui.set_departed_Steering_pushButton.clicked.connect(self.set_departed_rtl_command)
+        self.ui.set_departed_stabilized_pushButton.clicked.connect(self.set_departed_stabilized_command)
+        self.ui.set_departed_hold_pushButton.clicked.connect(self.set_departed_hold_command)
+        if hasattr(self.ui, 'departed_takeoff_pushButton'):
+            self.ui.departed_takeoff_pushButton.setToolTip(
+                "离群3D载体垂直起飞（若手动Z>0则使用手动Z高度，否则使用设定起飞预高度/机型默认预高度）"
+            )
+            self.ui.departed_takeoff_pushButton.clicked.connect(self.departed_takeoff_command)
+        if hasattr(self.ui, 'departed_land_pushButton'):
+            self.ui.departed_land_pushButton.setToolTip(
+                "离群3D载体垂直降落并进入电机保护锁止状态（需再次手动Arming解锁）"
+            )
+            self.ui.departed_land_pushButton.clicked.connect(self.departed_land_command)
         self.ui.send_departed_point_pushButton.clicked.connect(self.send_departed_point_command)
         
         # ============== 集群列表管理按钮 ==============
@@ -427,7 +733,8 @@ class MainWindow(QMainWindow):
         self.ui.departed_tableView.clicked.connect(
             lambda index: self._handle_table_clicked(index, is_cluster=False)
         )
-        # self.ui.action3D.triggered.connect(self.show_usv_plot_window)
+        if hasattr(self.ui, 'action3D'):
+            self.ui.action3D.triggered.connect(self.show_usv_plot_window)
         self.action_launch_usv_fleet.triggered.connect(self.launch_usv_fleet)
         self.action_set_area_offset.triggered.connect(self.set_area_offset_command)
         # self.action_set_uwb_offset.triggered.connect(self.open_uwb_offset_dialog)  # 已弃用
@@ -450,7 +757,39 @@ class MainWindow(QMainWindow):
         self.action_adjust_spacing.triggered.connect(self._adjust_formation_spacing)
 
     def _init_custom_menu(self):
-        """在菜单栏中增加坐标偏移设置入口、LED传染模式开关和工具菜单"""
+        """在菜单栏中增加弹性面板视图菜单、坐标偏移设置入口、LED传染模式开关和工具菜单"""
+        # 视图与弹性面板菜单
+        view_menu = self.ui.menubar.addMenu("弹性视图(&V)")
+        self.action_toggle_fleet_panel = QAction("☷ 集群与离群控制列表 (弹性窗口)", self)
+        self.action_toggle_fleet_panel.setCheckable(True)
+        self.action_toggle_fleet_panel.setShortcut("F2")
+        self.action_toggle_fleet_panel.triggered.connect(
+            lambda checked: self.set_elastic_panel_visible('fleet', checked)
+        )
+        view_menu.addAction(self.action_toggle_fleet_panel)
+
+        self.action_toggle_feedback_table = QAction("📊 实时导航反馈表 (弹性窗口)", self)
+        self.action_toggle_feedback_table.setCheckable(True)
+        self.action_toggle_feedback_table.setShortcut("F3")
+        self.action_toggle_feedback_table.triggered.connect(
+            lambda checked: self.set_elastic_panel_visible('feedback_table', checked)
+        )
+        view_menu.addAction(self.action_toggle_feedback_table)
+
+        self.action_toggle_inspector_panel = QAction("🗂 详情 / 队列 / 编舞 / 日志 (弹性窗口)", self)
+        self.action_toggle_inspector_panel.setCheckable(True)
+        self.action_toggle_inspector_panel.setShortcut("F4")
+        self.action_toggle_inspector_panel.triggered.connect(
+            lambda checked: self.set_elastic_panel_visible('inspector', checked)
+        )
+        view_menu.addAction(self.action_toggle_inspector_panel)
+
+        view_menu.addSeparator()
+        self.action_hide_all_elastic = QAction("🗕 一键收起所有弹性面板 (沉浸3D视图)", self)
+        self.action_hide_all_elastic.setShortcut("Esc")
+        self.action_hide_all_elastic.triggered.connect(self.hide_all_elastic_panels)
+        view_menu.addAction(self.action_hide_all_elastic)
+
         # USV控制菜单
         usv_menu = self.ui.menubar.addMenu("USV控制(&U)")
         self.action_launch_usv_fleet = QAction("🚀 启动 USV 集群", self)
@@ -640,6 +979,15 @@ class MainWindow(QMainWindow):
                     self.usv_navigation_panel.set_theme(theme_name)
                 except Exception:
                     pass
+
+            # 12. 更新弹性面板与顶部 3D HUD 栏样式
+            if hasattr(self, 'elastic_panels'):
+                for panel in self.elastic_panels.values():
+                    try:
+                        panel.set_theme(theme_name)
+                    except Exception:
+                        pass
+            self._update_hud_bar_style(theme_name)
         else:
             QMessageBox.warning(self, "主题切换失败", f"无法加载主题: {theme_name}")
             # 回滚Checkbox状态
@@ -1053,125 +1401,357 @@ limitations under the License.
         setup_context_menu(self.ui.warning_textEdit)
     
     def _init_side_tab_panel(self):
-        """初始化右侧侧边栏综合选项卡（合并详情、导航、反馈、日志）"""
-        # 1. 创建 TabWidget
+        """
+        构建『3D 态势反馈为主界面 + 列表/详情/反馈表弹性窗口』架构：
+        - 主窗口中央全幅承载：顶部紧凑型 HUD 控制条 + 3D/2D 态势反馈视图 (UsvPlotWindow)
+        - 原有的集群/离群列表与全部集群控制按钮 (ui.groupBox)、导航反馈表、详情/队列/编舞/日志
+          全部无损封装进 ElasticPanelWindow，默认隐藏，需要时一键弹出或停靠，不需要时隐藏。
+        """
+        from gs_gui.usv_plot_window import UsvPlotWindow
+
+        # 1. 初始化详情/导航/日志综合选项卡（供右侧弹性面板使用）
         self.right_tab_widget = QTabWidget()
         self.right_tab_widget.setTabPosition(QTabWidget.North)
-        self.right_tab_widget.setDocumentMode(True)  # 更现代的文档模式外观
-        
-        # 2. 准备各个面板
-        # [Tab 1] USV 详情
+        self.right_tab_widget.setDocumentMode(True)
+
         self.usv_info_panel = UsvInfoPanel()
         self.right_tab_widget.addTab(self.usv_info_panel, "📋 详情")
-        
-        # [Tab 2] USV 导航
+
         self.usv_navigation_panel = UsvNavigationPanel()
         self.right_tab_widget.addTab(self.usv_navigation_panel, "🧭 导航")
-        
-        # [Tab 3] 任务反馈 (Dashboard + Table)
-        feedback_widget = self._init_feedback_tab()
-        self.right_tab_widget.addTab(feedback_widget, "📊 反馈")
-        
-        # [Tab 4] 系统信息 (复用现有控件)
+
         if self.ui.info_textEdit.parent():
             self.ui.info_textEdit.setParent(None)
         self.right_tab_widget.addTab(self.ui.info_textEdit, "ℹ 信息")
-        
-        # [Tab 5] 系统警告 (复用现有控件)
+
         if self.ui.warning_textEdit.parent():
             self.ui.warning_textEdit.setParent(None)
         self.right_tab_widget.addTab(self.ui.warning_textEdit, "⚠ 警告")
-        
-        # 3. 清理旧布局
-        # 隐藏原有的 groupBox_usv_details 和 groupBox_2 (Message)
+
+        # 隐藏旧 Designer 残留分组框
         self.ui.groupBox_usv_details.hide()
         self.ui.groupBox_2.hide()
-        
-        # 4. 添加到 Splitter (替换右侧区域)
-        main_splitter = self.ui.mainSplitter
-        # 现在的 Splitter 应该有: [0: LeftControl, 1: OldDetails, 2: OldMessage]
-        # 我们调整拉伸因子，因为现在只有两部分：List(0) 和 Tabs(1-added)
-        main_splitter.addWidget(self.right_tab_widget)
-        
-        # 5. 设置选项卡样式（根据主题）
+
+        # 2. 初始化实时导航反馈表容器（供底部/悬浮弹性面板使用）
+        self.feedback_table_container = self._init_feedback_tab()
+
+        # 3. 重组主窗口中央布局：左中右水平 Splitter + 中央垂直 Splitter
+        self.ui.centralLayout.setContentsMargins(4, 4, 4, 4)
+        self.ui.centralLayout.setSpacing(4)
+
+        # 将原有左侧集群列表与操作面板 (ui.groupBox) 从旧 mainSplitter 剥离，准备放入弹性窗口
+        self.ui.groupBox.setParent(None)
+        self.ui.mainSplitter.hide()
+
+        self.workspace_h_splitter = QSplitter(Qt.Horizontal, self.ui.centralwidget)
+        self.workspace_v_splitter = QSplitter(Qt.Vertical, self.workspace_h_splitter)
+
+        # 构建 3D 主态势工作区 (顶部 HUD 条 + 全幅 3D UsvPlotWindow)
+        self.main_3d_stage = QWidget()
+        stage_layout = QVBoxLayout(self.main_3d_stage)
+        stage_layout.setContentsMargins(0, 0, 0, 0)
+        stage_layout.setSpacing(4)
+
+        self._init_top_hud_bar(stage_layout)
+
+        self.usv_plot_window = UsvPlotWindow(self.list_manager.get_usv_list, self)
+        self.usv_plot_window.request_set_home_callback = self._handle_plot_set_home_request
+        self.usv_plot_window.request_send_3d_target_callback = self._handle_plot_send_3d_target
+        self.usv_plot_window.request_fill_departed_callback = self._handle_plot_fill_departed
+        self.usv_plot_window.usv_selected_callback = self._handle_plot_usv_selected
+        stage_layout.addWidget(self.usv_plot_window, stretch=1)
+
+        self.workspace_v_splitter.addWidget(self.main_3d_stage)
+        self.workspace_v_splitter.setStretchFactor(0, 1)
+        self.workspace_h_splitter.addWidget(self.workspace_v_splitter)
+        self.workspace_h_splitter.setStretchFactor(0, 1)
+        self.ui.centralLayout.addWidget(self.workspace_h_splitter)
+
+        # 4. 创建三大弹性窗口（默认全部隐藏，主界面 100% 聚焦 3D 态势反馈）
+        self.elastic_panels = {
+            'fleet': ElasticPanelWindow(
+                panel_key='fleet',
+                title='☷ 集群 / 离群列表与控制面板',
+                content_widget=self.ui.groupBox,
+                dock_splitter=self.workspace_h_splitter,
+                dock_index=0,
+                default_size=(540, 760),
+                parent=self,
+            ),
+            'feedback_table': ElasticPanelWindow(
+                panel_key='feedback_table',
+                title='📊 实时导航与避碰反馈表 (3D CPA/TCPA)',
+                content_widget=self.feedback_table_container,
+                dock_splitter=self.workspace_v_splitter,
+                dock_index=-1,
+                default_size=(960, 280),
+                parent=self,
+            ),
+            'inspector': ElasticPanelWindow(
+                panel_key='inspector',
+                title='🗂 载具详情 / 导航 / 任务队列 / 编舞 / 日志',
+                content_widget=self.right_tab_widget,
+                dock_splitter=self.workspace_h_splitter,
+                dock_index=-1,
+                default_size=(560, 720),
+                parent=self,
+            ),
+        }
+        for panel in self.elastic_panels.values():
+            panel.visibility_changed.connect(self._on_elastic_panel_visibility_changed)
+
+        # 5. 应用主题样式
         self._update_side_tab_style(self.style_manager.current_theme)
+        self._update_feedback_tab_style(self.style_manager.current_theme)
+        self._update_hud_bar_style(self.style_manager.current_theme)
+
+    def _init_top_hud_bar(self, parent_layout):
+        """初始化 3D 主界面顶部的紧凑型任务仪表盘与弹性窗口呼出栏"""
+        self.hud_bar = QFrame()
+        self.hud_bar.setObjectName("main3DHudBar")
+        hud_layout = QHBoxLayout(self.hud_bar)
+        hud_layout.setContentsMargins(8, 5, 8, 5)
+        hud_layout.setSpacing(6)
+
+        # 弹性窗口呼出按钮组
+        self.btn_elastic_fleet = QPushButton("☷ 集群/离群列表 (0/0)")
+        self.btn_elastic_fleet.setCheckable(True)
+        self.btn_elastic_fleet.setToolTip("弹出或隐藏『集群与离群列表及全套控制按钮』弹性窗口 (F2)")
+        self.btn_elastic_fleet.clicked.connect(
+            lambda checked: self.set_elastic_panel_visible('fleet', checked)
+        )
+        hud_layout.addWidget(self.btn_elastic_fleet)
+
+        self.btn_elastic_table = QPushButton("📊 导航反馈表")
+        self.btn_elastic_table.setCheckable(True)
+        self.btn_elastic_table.setToolTip("弹出或隐藏『实时导航距离/航向/3D避碰反馈表』弹性窗口 (F3)")
+        self.btn_elastic_table.clicked.connect(
+            lambda checked: self.set_elastic_panel_visible('feedback_table', checked)
+        )
+        hud_layout.addWidget(self.btn_elastic_table)
+
+        self.btn_elastic_inspector = QPushButton("🗂 详情/队列/日志")
+        self.btn_elastic_inspector.setCheckable(True)
+        self.btn_elastic_inspector.setToolTip("弹出或隐藏『单机详情、导航、任务队列、编舞与系统日志』弹性窗口 (F4)")
+        self.btn_elastic_inspector.clicked.connect(
+            lambda checked: self.set_elastic_panel_visible('inspector', checked)
+        )
+        hud_layout.addWidget(self.btn_elastic_inspector)
+
+        # 分隔符
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.VLine)
+        sep1.setFrameShadow(QFrame.Sunken)
+        hud_layout.addWidget(sep1)
+
+        # 快捷集群操作镜像按钮（与集群面板完全同步，无需弹窗即可在3D主界面直接控场）
+        self.btn_hud_load_task = QPushButton("📂 加载任务")
+        self.btn_hud_load_task.setToolTip("加载 XML/JSON 三维或二维集群任务文件")
+        self.btn_hud_load_task.clicked.connect(lambda: self.task_manager.read_data_from_file())
+        hud_layout.addWidget(self.btn_hud_load_task)
+
+        self.btn_hud_cluster_arm = QPushButton("🔓 集群解锁")
+        self.btn_hud_cluster_arm.clicked.connect(self.set_cluster_arming_command)
+        hud_layout.addWidget(self.btn_hud_cluster_arm)
+
+        self.btn_hud_cluster_disarm = QPushButton("🔒 集群加锁")
+        self.btn_hud_cluster_disarm.clicked.connect(self.cluster_disarming_command)
+        hud_layout.addWidget(self.btn_hud_cluster_disarm)
+
+        self.btn_hud_cluster_stabilized = QPushButton("⚖️ STABILIZED")
+        self.btn_hud_cluster_stabilized.clicked.connect(self.set_cluster_stabilized_command)
+        hud_layout.addWidget(self.btn_hud_cluster_stabilized)
+
+        self.btn_hud_cluster_hold = QPushButton("⚓ HOLD")
+        self.btn_hud_cluster_hold.clicked.connect(self.set_cluster_hold_command)
+        hud_layout.addWidget(self.btn_hud_cluster_hold)
+
+        self.btn_hud_cluster_takeoff = QPushButton("🛫 起飞")
+        self.btn_hud_cluster_takeoff.setToolTip("3D载体垂直起飞至设定预高度（到位后方可触发路径程序集群动作）")
+        self.btn_hud_cluster_takeoff.clicked.connect(self.cluster_takeoff_command)
+        hud_layout.addWidget(self.btn_hud_cluster_takeoff)
+
+        self.btn_hud_cluster_land = QPushButton("🛬 降落")
+        self.btn_hud_cluster_land.setToolTip("3D载体垂直降落至设定降落高度并自动锁桨保护（需再次手动解锁恢复）")
+        self.btn_hud_cluster_land.clicked.connect(self.cluster_land_command)
+        hud_layout.addWidget(self.btn_hud_cluster_land)
+
+        self.btn_hud_cluster_start = QPushButton("▶ 启动集群任务")
+        self.btn_hud_cluster_start.clicked.connect(self.toggle_cluster_task)
+        hud_layout.addWidget(self.btn_hud_cluster_start)
+
+        self.btn_hud_cluster_stop = QPushButton("⏹ 停止")
+        self.btn_hud_cluster_stop.clicked.connect(self.stop_cluster_task)
+        hud_layout.addWidget(self.btn_hud_cluster_stop)
+
+        hud_layout.addStretch(1)
+
+        # 内嵌紧凑型科幻任务仪表盘（保留完整字段属性供 _update_mission_dashboard 驱动）
+        self._init_mission_dashboard(hud_layout)
+
+        parent_layout.addWidget(self.hud_bar)
+
+    def _update_hud_bar_style(self, theme_name):
+        """更新 3D 主界面顶部 HUD 栏样式"""
+        if not hasattr(self, 'hud_bar'):
+            return
+        is_dark = (theme_name != 'light')
+        if is_dark:
+            self.hud_bar.setStyleSheet("""
+                QFrame#main3DHudBar {
+                    background-color: #0d1624;
+                    border: 1px solid #1e3a5f;
+                    border-radius: 6px;
+                }
+                QFrame#main3DHudBar QPushButton {
+                    background-color: #162436;
+                    color: #dcebf7;
+                    border: 1px solid #2b4c6f;
+                    border-radius: 4px;
+                    padding: 4px 10px;
+                    font-size: 9.5pt;
+                    font-weight: 600;
+                }
+                QFrame#main3DHudBar QPushButton:hover {
+                    border-color: #00f2ff;
+                    color: #ffffff;
+                }
+                QFrame#main3DHudBar QPushButton:checked {
+                    background-color: #005f73;
+                    color: #00f2ff;
+                    border: 1px solid #00f2ff;
+                }
+            """)
+        else:
+            self.hud_bar.setStyleSheet("""
+                QFrame#main3DHudBar {
+                    background-color: #f3f8fe;
+                    border: 1px solid #bfd6ee;
+                    border-radius: 6px;
+                }
+                QFrame#main3DHudBar QPushButton {
+                    background-color: #ffffff;
+                    color: #1f364d;
+                    border: 1px solid #b8cfe5;
+                    border-radius: 4px;
+                    padding: 4px 10px;
+                    font-size: 9.5pt;
+                    font-weight: 600;
+                }
+                QFrame#main3DHudBar QPushButton:hover {
+                    border-color: #0078d7;
+                    color: #0078d7;
+                }
+                QFrame#main3DHudBar QPushButton:checked {
+                    background-color: #d9ecff;
+                    color: #005a9e;
+                    border: 1px solid #0078d7;
+                }
+            """)
+
+    def set_elastic_panel_visible(self, panel_key: str, visible: bool):
+        """按需弹出或隐藏指定弹性窗口"""
+        panel = getattr(self, 'elastic_panels', {}).get(panel_key)
+        if panel is not None:
+            panel.set_panel_visible(visible)
+
+    def toggle_elastic_panel(self, panel_key: str):
+        panel = getattr(self, 'elastic_panels', {}).get(panel_key)
+        if panel is not None:
+            panel.toggle_panel()
+
+    def hide_all_elastic_panels(self):
+        """一键收起所有弹性窗口，回到纯净全屏 3D 态势反馈界面"""
+        for panel in getattr(self, 'elastic_panels', {}).values():
+            panel.hide_panel()
+
+    def _on_elastic_panel_visibility_changed(self, panel_key: str, visible: bool):
+        """同步 HUD 按钮与视图菜单的勾选状态"""
+        btn_map = {
+            'fleet': getattr(self, 'btn_elastic_fleet', None),
+            'feedback_table': getattr(self, 'btn_elastic_table', None),
+            'inspector': getattr(self, 'btn_elastic_inspector', None),
+        }
+        act_map = {
+            'fleet': getattr(self, 'action_toggle_fleet_panel', None),
+            'feedback_table': getattr(self, 'action_toggle_feedback_table', None),
+            'inspector': getattr(self, 'action_toggle_inspector_panel', None),
+        }
+        btn = btn_map.get(panel_key)
+        if btn is not None:
+            btn.blockSignals(True)
+            btn.setChecked(visible)
+            btn.blockSignals(False)
+        act = act_map.get(panel_key)
+        if act is not None:
+            act.blockSignals(True)
+            act.setChecked(visible)
+            act.blockSignals(False)
+
+    def _update_hud_fleet_badges(self, *_args):
+        """实时更新 HUD 上弹性列表按钮的集群/离群数量徽标"""
+        if not hasattr(self, 'btn_elastic_fleet') or not hasattr(self, 'list_manager'):
+            return
+        n_cluster = len(self.list_manager.usv_cluster_list)
+        n_departed = len(self.list_manager.usv_departed_list)
+        if n_departed > 0:
+            self.btn_elastic_fleet.setText(f"☷ 集群({n_cluster}) / 离群({n_departed})")
+        else:
+            self.btn_elastic_fleet.setText(f"☷ 集群/离群列表 ({n_cluster})")
+
+    def _sync_hud_task_buttons(self):
+        """同步 HUD 快捷集群任务按钮文本"""
+        if hasattr(self, 'btn_hud_cluster_start') and hasattr(self, 'task_manager'):
+            txt = self.task_manager.get_button_text()
+            self.btn_hud_cluster_start.setText(f"▶ {txt}")
 
     def _init_feedback_tab(self):
-        """初始化反馈选项卡内容"""
+        """初始化导航反馈表格面板（装入底部/悬浮弹性窗口）"""
         widget = QWidget()
         layout = QVBoxLayout(widget)
-        layout.setContentsMargins(5, 5, 5, 5)
-        layout.setSpacing(10)
-        
-        # 1. 任务仪表盘 (Mission Dashboard)
-        self._init_mission_dashboard(layout)
-        
-        # 2. 导航反馈表格 (Navigation Table)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
+
         self._init_navigation_feedback_table()
-        layout.addWidget(self.nav_feedback_table)
-        
-        # 3. 嵌入 2D 绘图窗口 (Embedded 2D Plot)
-        from gs_gui.usv_plot_window import UsvPlotWindow
-        # 我们在这里创建唯一的实例，放在表格下面
-        self.usv_plot_window = UsvPlotWindow(self.list_manager.get_usv_list, self)
-        # 连接 Plot Window 的 "Set Home" 回调
-        self.usv_plot_window.request_set_home_callback = self._handle_plot_set_home_request
-        layout.addWidget(self.usv_plot_window, stretch=1) # 占据剩余空间
-        
-        # 保存 layout 引用以便后续使用
+        layout.addWidget(self.nav_feedback_table, stretch=1)
+
         self.nav_feedback_layout = layout
-        
-        # 应用初始样式 (默认 Dark) - 必须在所有控件初始化后调用
-        self._update_feedback_tab_style('modern_dark')
-        
         return widget
 
     def _init_mission_dashboard(self, parent_layout):
-        """初始化科幻任务仪表盘"""
+        """初始化紧凑型科幻任务仪表盘（嵌入主界面顶部 HUD 条）"""
         self.mission_dashboard = QFrame()
-        self.mission_dashboard.setFixedHeight(100) # 固定高度
+        self.mission_dashboard.setFixedHeight(38)
+        self.mission_dashboard.setMinimumWidth(420)
         self.mission_dashboard.setObjectName("missionDashboard")
-        
-        db_layout = QVBoxLayout(self.mission_dashboard)
-        db_layout.setContentsMargins(15, 10, 15, 10)
-        
-        # 上部分：标题与状态标签
-        top_layout = QHBoxLayout()
-        title_label = QLabel("MISSION STATUS")
+
+        db_layout = QHBoxLayout(self.mission_dashboard)
+        db_layout.setContentsMargins(10, 3, 10, 3)
+        db_layout.setSpacing(10)
+
+        title_label = QLabel("MISSION")
         title_label.setObjectName("dbTitle")
-        
+        db_layout.addWidget(title_label)
+
         self.mission_state_label = QLabel("IDLE")
         self.mission_state_label.setObjectName("dbState")
-        self.mission_state_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        
-        top_layout.addWidget(title_label)
-        top_layout.addStretch()
-        top_layout.addWidget(self.mission_state_label)
-        db_layout.addLayout(top_layout)
-        
-        # 中部分：数据概览
-        info_layout = QHBoxLayout()
+        db_layout.addWidget(self.mission_state_label)
+
         self.mission_step_label = QLabel("STEP: 0/0")
         self.mission_units_label = QLabel("UNITS: 0/0")
         self.mission_time_label = QLabel("TIME: 0.0s")
         for lbl in [self.mission_step_label, self.mission_units_label, self.mission_time_label]:
             lbl.setObjectName("dbInfo")
-            info_layout.addWidget(lbl)
-            info_layout.addStretch()
-        # 移除最后一个 stretch
-        if info_layout.count() > 0:
-            info_layout.takeAt(info_layout.count()-1)
-        db_layout.addLayout(info_layout)
-        
-        # 下部分：进度条
+            db_layout.addWidget(lbl)
+
         self.mission_progress_bar = QProgressBar()
         self.mission_progress_bar.setObjectName("dbProgress")
         self.mission_progress_bar.setValue(0)
-        self.mission_progress_bar.setFormat("MISSION PROGRESS: %p%")
+        self.mission_progress_bar.setFormat("%p%")
         self.mission_progress_bar.setAlignment(Qt.AlignCenter)
-        self.mission_progress_bar.setFixedHeight(20)
+        self.mission_progress_bar.setFixedSize(96, 18)
         db_layout.addWidget(self.mission_progress_bar)
-        
+
         parent_layout.addWidget(self.mission_dashboard)
 
     def _update_mission_dashboard(self, progress_info):
@@ -1260,22 +1840,8 @@ limitations under the License.
         self._last_disarm_time = now
         self.command_handler.cluster_disarming(self.list_manager.usv_cluster_list)
     
-    def set_cluster_guided_command(self):
-        """集群设置guided模式（带防抖）"""
-        # 防抖：1秒内只允许一次 guided 命令
-        import time
-        now = time.time()
-        if not hasattr(self, '_last_guided_time'):
-            self._last_guided_time = 0
-        if now - self._last_guided_time < 1.0:
-            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
-            return
-        self._last_guided_time = now
-        self.command_handler.set_cluster_guided(self.list_manager.usv_cluster_list)
-    
     def set_cluster_hold_command(self):
-        """集群设置HOLD模式（带防抖）"""
-        # 防抖：1秒内只允许一次 HOLD 命令
+        """集群设置 HOLD 模式（带防抖）"""
         import time
         now = time.time()
         if not hasattr(self, '_last_hold_time'):
@@ -1286,17 +1852,8 @@ limitations under the License.
         self._last_hold_time = now
         self.command_handler.set_cluster_hold(self.list_manager.usv_cluster_list)
 
-    def set_cluster_manual_command(self):
-        """
-        集群 Manual 模式切换
-        
-        编队模式下且只有 1 个编队组时：
-        - 只将领队切到 MANUAL，跟随者保持 GUIDED 继续跟随
-        - 用户可通过遥控器控制领队运动
-        
-        非编队模式 / 多编队组时：
-        - 将所有集群 USV 切到 MANUAL
-        """
+    def set_cluster_stabilized_command(self):
+        """集群设置 STABILIZED 模式（带防抖）"""
         import time
         now = time.time()
         if not hasattr(self, '_last_manual_time'):
@@ -1305,30 +1862,7 @@ limitations under the License.
             self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
             return
         self._last_manual_time = now
-
-        if self.task_manager._is_formation_active():
-            # 编队模式下：检查是否只有一个编队组
-            formation_config = self.task_manager._formation_config
-            if isinstance(formation_config, list) and len(formation_config) == 1:
-                leader_id = formation_config[0].get('leader_id', '')
-                if leader_id:
-                    # 只将领队切到 MANUAL
-                    self.command_handler.set_cluster_manual([leader_id])
-                    self.ui_utils.append_info(
-                        f"🎮 编队模式: 领队 {leader_id} 已切换到 MANUAL\n"
-                        f"    跟随者保持 GUIDED 继续跟随领队"
-                    )
-                    return
-                else:
-                    self.ui_utils.append_warning("编队配置中未找到领队 ID")
-            else:
-                self.ui_utils.append_warning(
-                    "多编队组模式下不支持单独切换领队到 MANUAL\n"
-                    "将所有集群 USV 切换到 MANUAL"
-                )
-
-        # 非编队模式 或 多组: 所有集群 USV 切到 MANUAL
-        self.command_handler.set_cluster_manual(self.list_manager.usv_cluster_list)
+        self.command_handler.set_cluster_stabilized(self.list_manager.usv_cluster_list)
     
     # ============== 离群命令包装方法 ==============
     def departed_arming_command(self):
@@ -1356,23 +1890,9 @@ limitations under the License.
             return
         self._last_departed_disarm_time = now
         self.command_handler.departed_disarming(self.list_manager.usv_departed_list)
-    
-    def set_departed_guided_command(self):
-        """离群设置guided模式（带防抖）"""
-        # 防抖：1秒内只允许一次 guided 命令
-        import time
-        now = time.time()
-        if not hasattr(self, '_last_departed_guided_time'):
-            self._last_departed_guided_time = 0
-        if now - self._last_departed_guided_time < 1.0:
-            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
-            return
-        self._last_departed_guided_time = now
-        self.command_handler.set_departed_guided(self.list_manager.usv_departed_list)
-    
-    def set_departed_manual_command(self):
-        """离群设置manual模式（带防抖）"""
-        # 防抖：1秒内只允许一次 manual 命令
+
+    def set_departed_stabilized_command(self):
+        """离群设置 STABILIZED 模式（带防抖）"""
         import time
         now = time.time()
         if not hasattr(self, '_last_departed_manual_time'):
@@ -1381,15 +1901,86 @@ limitations under the License.
             self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
             return
         self._last_departed_manual_time = now
-        self.command_handler.set_departed_manual(self.list_manager.usv_departed_list)
-    
+        self.command_handler.set_departed_stabilized(self.list_manager.usv_departed_list)
+
     def set_departed_hold_command(self):
-        """设置离群HOLD模式 (原 ARCO 按钮)"""
+        """离群设置 HOLD 模式（带防抖）"""
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_departed_hold_time'):
+            self._last_departed_hold_time = 0
+        if now - self._last_departed_hold_time < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_departed_hold_time = now
         self.command_handler.set_departed_hold(self.list_manager.usv_departed_list)
-    
-    def set_departed_rtl_command(self):
-        """设置离群RTL模式 (原 Steering 按钮)"""
-        self.command_handler.set_departed_rtl(self.list_manager.usv_departed_list)
+
+    def _get_preset_takeoff_altitude(self) -> float:
+        """读取集群面板上的起飞预高度设定值（0 表示使用各 3D 机型默认预高度）"""
+        if hasattr(self.ui, 'takeoff_z_doubleSpinBox'):
+            val = float(self.ui.takeoff_z_doubleSpinBox.value())
+            return val if val > 0.0 else -1.0
+        return -1.0
+
+    def _get_preset_land_altitude(self) -> float:
+        """读取集群面板上的降落锁桨高度设定值（<0 表示使用各 3D 机型默认降落高度）"""
+        if hasattr(self.ui, 'land_z_doubleSpinBox'):
+            val = float(self.ui.land_z_doubleSpinBox.value())
+            return val if val >= 0.0 else -1.0
+        return -1.0
+
+    def cluster_takeoff_command(self):
+        """集群 3D 载体起飞命令（带防抖）"""
+        import time
+        now = time.time()
+        if now - getattr(self, '_last_takeoff_time', 0.0) < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_takeoff_time = now
+        self.command_handler.cluster_takeoff(
+            self.list_manager.usv_cluster_list,
+            altitude=self._get_preset_takeoff_altitude(),
+        )
+
+    def cluster_land_command(self):
+        """集群 3D 载体降落并进入电机保护锁止状态（带防抖）"""
+        import time
+        now = time.time()
+        if now - getattr(self, '_last_land_time', 0.0) < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_land_time = now
+        self.command_handler.cluster_land(
+            self.list_manager.usv_cluster_list,
+            altitude=self._get_preset_land_altitude(),
+        )
+
+    def departed_takeoff_command(self):
+        """离群 3D 载体起飞命令"""
+        import time
+        now = time.time()
+        if now - getattr(self, '_last_departed_takeoff_time', 0.0) < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_departed_takeoff_time = now
+        manual_z = 0.0
+        if hasattr(self.ui, 'set_departed_z_doubleSpinBox'):
+            manual_z = float(self.ui.set_departed_z_doubleSpinBox.value())
+        alt = manual_z if manual_z > 0.0 else self._get_preset_takeoff_altitude()
+        self.command_handler.departed_takeoff(self.list_manager.usv_departed_list, altitude=alt)
+
+    def departed_land_command(self):
+        """离群 3D 载体降落并进入电机保护锁止状态"""
+        import time
+        now = time.time()
+        if now - getattr(self, '_last_departed_land_time', 0.0) < 1.0:
+            self.ui_utils.append_info("⚠️ 操作过快，请等待 1 秒后再试")
+            return
+        self._last_departed_land_time = now
+        self.command_handler.departed_land(
+            self.list_manager.usv_departed_list,
+            altitude=self._get_preset_land_altitude(),
+        )
     
     # ============== 集群任务控制 ==============
     def toggle_cluster_task(self):
@@ -1400,6 +1991,7 @@ limitations under the License.
             return
         button_text = self.task_manager.toggle_task(self.list_manager.usv_departed_list)
         self.ui.send_cluster_point_pushButton.setText(button_text)
+        self._sync_hud_task_buttons()
     
     def stop_cluster_task(self):
         """停止集群任务并刷新按钮文本"""
@@ -1408,6 +2000,7 @@ limitations under the License.
             self.mission_queue_manager.stop_queue()
         self.task_manager.stop_task()
         self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        self._sync_hud_task_buttons()
 
     # ============== 编队模式控制 ==============
     def open_formation_dialog(self):
@@ -1428,7 +2021,21 @@ limitations under the License.
         dialog.exec_()
 
     def _on_formation_confirmed(self, group_configs: list):
-        """编队配置确认后启动多编队"""
+        """编队配置确认后启动多编队（先检查 3D 载体是否已起飞至设定预高度）"""
+        if getattr(self.task_manager, 'pre_start_validator', None) is not None:
+            involved = []
+            for g in (group_configs or []):
+                if isinstance(g, dict):
+                    if g.get('leader_id'):
+                        involved.append(g['leader_id'])
+                    involved.extend(g.get('follower_ids') or [])
+            ok, reasons = self.task_manager.pre_start_validator(involved)
+            if not ok:
+                detail = "\n".join(f"• {r}" for r in reasons)
+                warn_msg = f"3D 载体未达到设定起飞预高度或处于保护锁止，无法启动编队：\n{detail}"
+                self.ui_utils.append_warning(warn_msg)
+                QMessageBox.warning(self, "未达起飞预高度", warn_msg)
+                return
         self.task_manager.start_formation(group_configs)
         # 编队启动后，stop 按钮切换为"停止编队"，集群按钮保持不变以便启动集群任务
         self.ui.stop_cluster_task_pushButton.setText("停止编队")
@@ -1562,6 +2169,7 @@ limitations under the License.
         else:
             self.task_manager.update_progress(progress_info)
             self.ui.send_cluster_point_pushButton.setText(self.task_manager.get_button_text())
+        self._sync_hud_task_buttons()
         
         # 更新科幻仪表盘
         if hasattr(self, 'mission_dashboard'):
@@ -1608,6 +2216,7 @@ limitations under the License.
                 )
                 # 移除确认对话框，直接在info窗口输出
                 self.ui_utils.append_info(f"✅ 设备 {usv_info['namespace']} 已添加到集群列表")
+                self._update_hud_fleet_badges()
         else:
             self.ui_utils.append_info("请先选择一行")
     
@@ -1627,6 +2236,7 @@ limitations under the License.
                 )
                 # 移除确认对话框，直接在info窗口输出
                 self.ui_utils.append_info(f"✅ 设备 {usv_info['namespace']} 已添加到离群列表")
+                self._update_hud_fleet_badges()
         else:
             self.ui_utils.append_info("请先选择一行")
     
@@ -1970,7 +2580,7 @@ limitations under the License.
         self.nav_feedback_table.setItem(row, 9, tcpa_item)
 
     def _compute_avoidance_metrics(self, usv_id):
-        """基于当前舰队状态计算最近邻距离与避让风险等级。"""
+        """基于当前异构集群三维状态计算最近邻欧氏距离 (3D) 与避让风险等级。"""
         default_color = QColor("#9e9e9e")
         try:
             if not hasattr(self, 'ros_node') or self.ros_node is None:
@@ -1984,6 +2594,7 @@ limitations under the License.
             own_pos = own_state.get('position', {})
             own_x = float(own_pos.get('x'))
             own_y = float(own_pos.get('y'))
+            own_z = float(own_pos.get('z', 0.0))
 
             min_dist = None
             nearest_usv = None
@@ -1995,7 +2606,8 @@ limitations under the License.
                     continue
                 ox = float(other_pos.get('x'))
                 oy = float(other_pos.get('y'))
-                dist = math.hypot(own_x - ox, own_y - oy)
+                oz = float(other_pos.get('z', 0.0))
+                dist = math.sqrt((own_x - ox) ** 2 + (own_y - oy) ** 2 + (own_z - oz) ** 2)
                 if min_dist is None or dist < min_dist:
                     min_dist = dist
                     nearest_usv = other_id
@@ -2015,7 +2627,7 @@ limitations under the License.
             return None, None, "N/A", default_color
 
     def _compute_cpa_tcpa(self, usv_id, neighbor_usv_id):
-        """计算当前 USV 相对最近邻船的 CPA/TCPA。"""
+        """计算当前载具相对最近邻载具的三维 CPA/TCPA。"""
         default_color = QColor("#9e9e9e")
         try:
             if not neighbor_usv_id:
@@ -2036,33 +2648,39 @@ limitations under the License.
 
             ox = float(own_pos.get('x'))
             oy = float(own_pos.get('y'))
+            oz = float(own_pos.get('z', 0.0))
             nx = float(nbr_pos.get('x'))
             ny = float(nbr_pos.get('y'))
+            nz = float(nbr_pos.get('z', 0.0))
             ovx = float(own_vel.get('x', 0.0))
             ovy = float(own_vel.get('y', 0.0))
+            ovz = float(own_vel.get('z', 0.0))
             nvx = float(nbr_vel.get('x', 0.0))
             nvy = float(nbr_vel.get('y', 0.0))
+            nvz = float(nbr_vel.get('z', 0.0))
 
-            # 相对运动：r = own - neighbor, v = own_vel - neighbor_vel
+            # 三维相对运动：r = own - neighbor, v = own_vel - neighbor_vel
             rx = ox - nx
             ry = oy - ny
+            rz = oz - nz
             rvx = ovx - nvx
             rvy = ovy - nvy
+            rvz = ovz - nvz
 
-            v2 = rvx * rvx + rvy * rvy
+            v2 = rvx * rvx + rvy * rvy + rvz * rvz
             if v2 < 1e-6:
-                # 相对速度几乎为0，CPA 退化为当前距离，TCPA 无意义
-                cpa_dist = math.hypot(rx, ry)
+                cpa_dist = math.sqrt(rx * rx + ry * ry + rz * rz)
                 cpa_color = QColor("#f44336") if cpa_dist <= 1.0 else (QColor("#ff9800") if cpa_dist <= 1.5 else QColor("#4caf50"))
                 return cpa_dist, None, cpa_color
 
-            tcpa = - (rx * rvx + ry * rvy) / v2
+            tcpa = -(rx * rvx + ry * rvy + rz * rvz) / v2
             if tcpa < 0.0:
                 tcpa = 0.0
 
             cpa_rx = rx + rvx * tcpa
             cpa_ry = ry + rvy * tcpa
-            cpa_dist = math.hypot(cpa_rx, cpa_ry)
+            cpa_rz = rz + rvz * tcpa
+            cpa_dist = math.sqrt(cpa_rx * cpa_rx + cpa_ry * cpa_ry + cpa_rz * cpa_rz)
 
             if cpa_dist <= 1.0:
                 cpa_color = QColor("#f44336")
@@ -2179,10 +2797,8 @@ limitations under the License.
             glow.setOffset(0, 0)
             glow.setBlurRadius(18)
             if is_light_theme:
-                # 浅色主题：使用暗色半透明 glow 作为描边增强
-                glow.setColor(QColor(0, 0, 0, 160))
+                glow.setColor(QColor(0, 120, 215, 160))
             else:
-                # 暗色主题：使用暖色发光提高可见性
                 glow.setColor(QColor(255, 160, 80, 200))
             widget.setGraphicsEffect(glow)
         except Exception:
@@ -2190,10 +2806,11 @@ limitations under the License.
     
     # ============== UI辅助方法 ==============
     def show_usv_plot_window(self):
-        """显示USV绘图窗口 (切换到反馈Tab)"""
-        # 以前是弹窗，现在是切换到 Feedback Tab
-        if hasattr(self, 'right_tab_widget'):
-            self.right_tab_widget.setCurrentIndex(2) # Index 2 is Feedback tab
+        """聚焦到主界面 3D 态势反馈视图并切换为 3D 模式"""
+        if hasattr(self, 'usv_plot_window') and self.usv_plot_window:
+            self.usv_plot_window.set_view_mode('3d')
+            self.raise_()
+            self.activateWindow()
     
     def update_selected_table_row(self):
         """更新选中行数据"""
@@ -2753,8 +3370,13 @@ limitations under the License.
         Args:
             event: QCloseEvent对象
         """
-        # 保存窗口大小和位置
+        # 保存窗口大小和位置并收起所有悬浮弹性面板
         self.settings.setValue("geometry", self.saveGeometry())
+        for panel in getattr(self, 'elastic_panels', {}).values():
+            try:
+                panel.hide()
+            except Exception:
+                pass
         
         try:
             # 如果已经发送过关闭命令，直接接受关闭事件
@@ -2859,8 +3481,9 @@ def main(argv=None):
         append_warning=main_window.ui_utils.append_warning
     )
     
-    # 将 ROS 节点传递给主窗口（用于参数管理功能）
+    # 将 ROS 节点传递给主窗口（用于参数管理功能与 3D 载体起飞预高度门控检查）
     main_window.ros_node = node
+    main_window.task_manager.set_pre_start_validator(node.validate_3d_cluster_takeoff_ready)
     
     # 加载参数
     try:
@@ -2902,17 +3525,19 @@ def main(argv=None):
     except Exception as e:
         node.get_logger().error(f"加载 gs_params.yaml 时出错: {e}")
     
-    # 连接ROS信号到节点
+    # 连接ROS信号到节点 (PX4 模式)
     ros_signal.hold_command.connect(node.set_hold_callback)
-    ros_signal.guided_command.connect(node.set_guided_callback)
-    ros_signal.manual_command.connect(node.set_manual_callback)  # ✅ 修复：添加manual信号连接
+    ros_signal.offboard_command.connect(node.set_offboard_callback)
+    ros_signal.stabilized_command.connect(node.set_stabilized_callback)
+    ros_signal.posctl_command.connect(node.set_posctl_callback)
+    ros_signal.altctl_command.connect(node.set_altctl_callback)
     ros_signal.arm_command.connect(node.set_arming_callback)
     ros_signal.disarm_command.connect(node.set_disarming_callback)
-    ros_signal.arco_command.connect(node.set_arco_callback)
-    ros_signal.steering_command.connect(node.set_steering_callback)  # ✅ 修复：callback不是command
-    ros_signal.rtl_command.connect(node.set_rtl_callback)
+    ros_signal.takeoff_command.connect(node.set_takeoff_callback)
+    ros_signal.land_command.connect(node.set_land_callback)
     ros_signal.cluster_target_point_command.connect(node.set_cluster_target_point_callback)
     ros_signal.departed_target_point_command.connect(node.set_departed_target_point_callback)
+    ros_signal.single_target_point_command.connect(node.set_single_target_point_callback)
     ros_signal.cluster_pause_request.connect(node.pause_cluster_task_callback)
     ros_signal.cluster_resume_request.connect(node.resume_cluster_task_callback)
     ros_signal.cluster_stop_request.connect(node.stop_cluster_task_callback)

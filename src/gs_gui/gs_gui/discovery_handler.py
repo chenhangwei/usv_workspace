@@ -7,7 +7,9 @@ USV 发现处理模块
 - 管理 USV 在线状态
 """
 
+import json
 from rcl_interfaces.msg import Log
+from std_msgs.msg import String
 from common_interfaces.msg import UsvStatus
 from common_utils import ThreadSafeDict
 
@@ -53,6 +55,8 @@ class DiscoveryHandler:
         self._nav_feedback_subs = {}
         self._nav_result_subs = {}
         self._nav_ack_subs = {}
+        self._telemetry_status_subs = {}
+        self._flight_state_subs = {}
         
         # 预探测订阅列表（用于触发 Zenoh 桥接）
         self._probe_subs = []
@@ -206,6 +210,10 @@ class DiscoveryHandler:
             # 订阅该 USV 的 usv_state（通过 Zenoh 桥接的远程 USV）
             self._subscribe_usv_state(usv_id)
 
+            # 订阅异构机型元数据（vehicle_type / platform_mode）与起降保护状态
+            self._subscribe_telemetry_status(usv_id)
+            self._subscribe_flight_state(usv_id)
+
             # 订阅导航反馈/结果/应答（用于任务推进与停止 step_timeout 重发）
             self._subscribe_navigation_topics(usv_id)
             
@@ -245,6 +253,112 @@ class DiscoveryHandler:
             10
         )
         self._usv_state_subs.append(sub)
+
+    def _subscribe_telemetry_status(self, usv_id: str):
+        """订阅 USV 的 telemetry/status 话题，动态同步机型与 2d/3d 平台模式"""
+        if usv_id in self._telemetry_status_subs:
+            return
+        topic = f"/{usv_id}/telemetry/status"
+        sub = self.node.create_subscription(
+            String,
+            topic,
+            lambda msg, uid=usv_id: self._telemetry_status_callback(msg, uid),
+            10
+        )
+        self._telemetry_status_subs[usv_id] = sub
+
+    def _subscribe_flight_state(self, usv_id: str):
+        """订阅 USV 的 flight_state 话题，实时同步 3D 起飞/降落与电机保护锁止状态"""
+        if usv_id in self._flight_state_subs:
+            return
+        topic = f"/{usv_id}/flight_state"
+        sub = self.node.create_subscription(
+            String,
+            topic,
+            lambda msg, uid=usv_id: self._flight_state_callback(msg, uid),
+            10
+        )
+        self._flight_state_subs[usv_id] = sub
+
+    def _apply_flight_meta(self, usv_id: str, data: dict):
+        """将机载上报的起降高度、动作与电机保护锁止标记同步到地面站缓存"""
+        if not isinstance(data, dict):
+            return
+        st = self._usv_states.get(usv_id)
+        if 'takeoff_altitude' in data and data['takeoff_altitude'] is not None:
+            try:
+                ta = float(data['takeoff_altitude'])
+                if ta >= 0.0:
+                    if hasattr(self.node, '_usv_default_altitude'):
+                        self.node._usv_default_altitude[usv_id] = ta
+                    if isinstance(st, dict):
+                        st['takeoff_altitude'] = ta
+                        st['default_altitude'] = ta
+            except Exception:
+                pass
+        if 'landing_altitude' in data and data['landing_altitude'] is not None:
+            try:
+                la = float(data['landing_altitude'])
+                if la >= 0.0:
+                    if hasattr(self.node, '_usv_landing_altitude'):
+                        self.node._usv_landing_altitude[usv_id] = la
+                    if isinstance(st, dict):
+                        st['landing_altitude'] = la
+            except Exception:
+                pass
+        if 'protection_locked' in data and isinstance(st, dict):
+            prev_lock = bool(st.get('protection_locked', False))
+            now_lock = bool(data['protection_locked'])
+            st['protection_locked'] = now_lock
+            if now_lock and not prev_lock:
+                try:
+                    self.ros_signal.nav_status_update.emit(usv_id, "🔒降落锁桨保护")
+                except Exception:
+                    pass
+        if 'flight_action' in data and isinstance(st, dict):
+            fa = str(data.get('flight_action') or 'idle')
+            prev_fa = str(st.get('flight_action') or 'idle')
+            st['flight_action'] = fa
+            if fa != prev_fa:
+                try:
+                    if fa == 'takeoff':
+                        self.ros_signal.nav_status_update.emit(usv_id, "🛫正在起飞")
+                    elif fa == 'land':
+                        self.ros_signal.nav_status_update.emit(usv_id, "🛬正在降落")
+                    elif prev_fa == 'takeoff' and bool(data.get('takeoff_ready', False)):
+                        self.ros_signal.nav_status_update.emit(usv_id, "✅起飞到位")
+                except Exception:
+                    pass
+        if 'takeoff_ready' in data and isinstance(st, dict):
+            st['takeoff_ready'] = bool(data['takeoff_ready'])
+
+    def _flight_state_callback(self, msg: String, usv_id: str):
+        """解析 flight_state JSON"""
+        try:
+            data = json.loads(msg.data) if msg and msg.data else {}
+            self._apply_flight_meta(usv_id, data)
+        except Exception:
+            pass
+
+    def _telemetry_status_callback(self, msg: String, usv_id: str):
+        """解析 telemetry/status JSON 并更新机型/平台模式与起降保护状态"""
+        try:
+            data = json.loads(msg.data) if msg and msg.data else {}
+            vt = str(data.get('vehicle_type', '')).strip().lower()
+            pm = str(data.get('platform_mode', '')).strip().lower()
+            if vt:
+                if hasattr(self.node, '_usv_vehicle_type'):
+                    self.node._usv_vehicle_type[usv_id] = vt
+                if usv_id in self._usv_states:
+                    self._usv_states[usv_id]['vehicle_type'] = vt
+            if pm in ('2d', '3d'):
+                if hasattr(self.node, '_usv_platform_mode'):
+                    self.node._usv_platform_mode[usv_id] = pm
+                if usv_id in self._usv_states:
+                    self._usv_states[usv_id]['platform_mode'] = pm
+            self._apply_flight_meta(usv_id, data)
+        except Exception:
+            pass
 
     def _subscribe_navigation_topics(self, usv_id: str) -> None:
         """订阅 USV 的导航话题：feedback/result/ack。"""
@@ -426,6 +540,9 @@ class DiscoveryHandler:
                 if sub is not None:
                     self.node.destroy_subscription(sub)
                 sub = self._nav_ack_subs.pop(usv_id, None)
+                if sub is not None:
+                    self.node.destroy_subscription(sub)
+                sub = self._telemetry_status_subs.pop(usv_id, None)
                 if sub is not None:
                     self.node.destroy_subscription(sub)
             except Exception:

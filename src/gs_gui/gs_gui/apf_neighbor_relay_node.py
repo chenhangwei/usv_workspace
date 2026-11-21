@@ -3,9 +3,10 @@
 
 import math
 import os
+import re
 import time
 import importlib
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import rclpy
 from rclpy.node import Node
@@ -35,6 +36,7 @@ class ApfNeighborRelayNode(Node):
         self.declare_parameter('publish_rate', 10.0)
         self.declare_parameter('neighbor_timeout', 0.8)
         self.declare_parameter('max_neighbor_distance', 12.0)
+        self.declare_parameter('layer_separation_z', 3.0)
         self.declare_parameter('prefer_velocity_topic', True)
         self.declare_parameter('velocity_estimation_min_dt', 0.05)
         self.declare_parameter('velocity_smoothing_alpha', 0.35)
@@ -54,7 +56,9 @@ class ApfNeighborRelayNode(Node):
         self._publish_rate = float(self.get_parameter('publish_rate').value or 10.0)
         self._neighbor_timeout = float(self.get_parameter('neighbor_timeout').value or 0.8)
         self._max_neighbor_distance = float(self.get_parameter('max_neighbor_distance').value or 12.0)
+        self._layer_separation_z = float(self.get_parameter('layer_separation_z').value or 3.0)
         self._prefer_velocity_topic = bool(self.get_parameter('prefer_velocity_topic').value)
+        self._safety_radius: Dict[str, float] = {}
         self._vel_min_dt = float(self.get_parameter('velocity_estimation_min_dt').value or 0.05)
         self._vel_alpha = float(self.get_parameter('velocity_smoothing_alpha').value or 0.35)
         self._max_estimated_speed = float(self.get_parameter('max_estimated_speed').value or 3.0)
@@ -62,46 +66,68 @@ class ApfNeighborRelayNode(Node):
         if not self._usv_ids:
             self._usv_ids = self._load_usv_ids_from_fleet_config(self._fleet_config_file)
 
-        if not self._usv_ids:
-            self.get_logger().warn('未检测到可用 USV 列表，邻船聚合节点不会发布数据。')
+        self._qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
 
-        qos_best_effort = QoSProfile(depth=10, reliability=QoSReliabilityPolicy.BEST_EFFORT)
-
+        self._registered_ids: Set[str] = set()
         self._latest_pose: Dict[str, Dict[str, float]] = {}
         self._pose_subs = []
         self._vel_subs = []
         self._neighbor_pubs = {}
 
         for usv_id in self._usv_ids:
-            pose_topic = f'/{usv_id}/{self._source_pose_topic_suffix}'.replace('//', '/')
-            sub = self.create_subscription(
-                PoseStamped,
-                pose_topic,
-                lambda msg, uid=usv_id: self._pose_callback(msg, uid),
-                qos_best_effort,
-            )
-            self._pose_subs.append(sub)
+            self._register_usv(usv_id)
 
-            vel_topic = f'/{usv_id}/{self._source_velocity_topic_suffix}'.replace('//', '/')
-            vel_sub = self.create_subscription(
-                TwistStamped,
-                vel_topic,
-                lambda msg, uid=usv_id: self._velocity_callback(msg, uid),
-                qos_best_effort,
-            )
-            self._vel_subs.append(vel_sub)
-
-            pub_topic = f'/{usv_id}/{self._neighbors_topic_suffix}'.replace('//', '/')
-            self._neighbor_pubs[usv_id] = self.create_publisher(FleetNeighborPoses, pub_topic, qos_best_effort)
+        # 动态自动发现任意独立启动的 usv_N 实例
+        self._discovery_timer = self.create_timer(2.0, self._discover_dynamic_usvs)
 
         if self._publish_rate > 0.0:
             self._timer = self.create_timer(1.0 / self._publish_rate, self._publish_neighbors)
 
         self.get_logger().info(
-            f'APF邻船聚合已启动: usv_ids={self._usv_ids}, pose_suffix={self._source_pose_topic_suffix}, '
+            f'APF邻船聚合已启动: 初始 usv_ids={sorted(self._registered_ids)} (支持动态发现), '
+            f'pose_suffix={self._source_pose_topic_suffix}, '
             f'vel_suffix={self._source_velocity_topic_suffix}, neighbors_suffix={self._neighbors_topic_suffix}, '
             f'rate={self._publish_rate:.1f}Hz'
         )
+
+    def _register_usv(self, usv_id: str):
+        if not usv_id or usv_id in self._registered_ids:
+            return
+        self._registered_ids.add(usv_id)
+        if usv_id not in self._usv_ids:
+            self._usv_ids.append(usv_id)
+
+        pose_topic = f'/{usv_id}/{self._source_pose_topic_suffix}'.replace('//', '/')
+        sub = self.create_subscription(
+            PoseStamped,
+            pose_topic,
+            lambda msg, uid=usv_id: self._pose_callback(msg, uid),
+            self._qos_best_effort,
+        )
+        self._pose_subs.append(sub)
+
+        vel_topic = f'/{usv_id}/{self._source_velocity_topic_suffix}'.replace('//', '/')
+        vel_sub = self.create_subscription(
+            TwistStamped,
+            vel_topic,
+            lambda msg, uid=usv_id: self._velocity_callback(msg, uid),
+            self._qos_best_effort,
+        )
+        self._vel_subs.append(vel_sub)
+
+        pub_topic = f'/{usv_id}/{self._neighbors_topic_suffix}'.replace('//', '/')
+        self._neighbor_pubs[usv_id] = self.create_publisher(FleetNeighborPoses, pub_topic, self._qos_best_effort)
+
+    def _discover_dynamic_usvs(self):
+        suffix = '/' + self._source_pose_topic_suffix.lstrip('/')
+        pattern = re.compile(r'^/(usv_\w+)' + re.escape(suffix) + r'$')
+        for topic_name, _ in self.get_topic_names_and_types():
+            m = pattern.match(topic_name)
+            if m:
+                uid = m.group(1)
+                if uid not in self._registered_ids:
+                    self._register_usv(uid)
+                    self.get_logger().info(f'动态发现并接入邻船载具: {uid}')
 
     def _velocity_callback(self, msg, usv_id: str):
         now_sec = time.time()
@@ -134,8 +160,14 @@ class ApfNeighborRelayNode(Node):
                     cfg = yaml.safe_load(f) or {}
                 fleet = cfg.get('usv_fleet', {})
                 ids = [uid for uid, item in fleet.items() if isinstance(item, dict) and item.get('enabled', True)]
+                for uid, item in fleet.items():
+                    if isinstance(item, dict) and 'safety_radius' in item:
+                        try:
+                            self._safety_radius[uid] = float(item['safety_radius'])
+                        except Exception:
+                            pass
                 if ids:
-                    self.get_logger().info(f'已从 fleet 配置加载 USV 列表: {ids}')
+                    self.get_logger().info(f'已从 fleet 配置加载 USV 列表: {ids}, 安全半径: {self._safety_radius}')
                     return sorted(ids)
             except Exception as exc:
                 self.get_logger().warn(f'读取 fleet 配置失败: {path}, {exc}')
@@ -156,6 +188,7 @@ class ApfNeighborRelayNode(Node):
 
         x = float(msg.pose.position.x)
         y = float(msg.pose.position.y)
+        z = float(msg.pose.position.z)
         vx = 0.0
         vy = 0.0
 
@@ -189,6 +222,7 @@ class ApfNeighborRelayNode(Node):
         self._latest_pose[usv_id] = {
             'x': x,
             'y': y,
+            'z': z,
             'yaw': float(yaw),
             'vx': float(vx),
             'vy': float(vy),
@@ -219,10 +253,17 @@ class ApfNeighborRelayNode(Node):
                 if now_sec - other_pose['stamp_sec'] > self._neighbor_timeout:
                     continue
 
+                # 异构立体分层：垂直高度差超过层间距时不触发水平 APF 避让
+                dz = abs(float(target_pose.get('z', 0.0)) - float(other_pose.get('z', 0.0)))
+                if self._layer_separation_z > 0.0 and dz > self._layer_separation_z:
+                    continue
+
                 dx = target_pose['x'] - other_pose['x']
                 dy = target_pose['y'] - other_pose['y']
                 dist = math.hypot(dx, dy)
-                if self._max_neighbor_distance > 0.0 and dist > self._max_neighbor_distance:
+                r_sum = self._safety_radius.get(target_usv, 1.5) + self._safety_radius.get(other_usv, 1.5)
+                eff_max_dist = max(self._max_neighbor_distance, r_sum + 4.0)
+                if eff_max_dist > 0.0 and dist > eff_max_dist:
                     continue
 
                 item = NeighborPose()

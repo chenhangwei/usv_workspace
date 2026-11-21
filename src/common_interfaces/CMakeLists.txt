@@ -25,6 +25,14 @@ rosidl_generate_interfaces(
   "msg/NavigationFeedback.msg"
   "msg/NavigationResult.msg"
   "msg/ClusterStatus.msg"
+  "msg/MpcDebug.msg"
+  "msg/FormationConfig.msg"
+  "msg/NeighborPose.msg"
+  "msg/FleetNeighborPoses.msg"
+  "msg/VisionObstacle.msg"
+  "msg/VisionObstacleArray.msg"
+  "msg/GimbalState.msg"
+  "msg/GimbalCommand.msg"
   "srv/ShutdownControl.srv"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )

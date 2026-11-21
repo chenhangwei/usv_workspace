@@ -66,6 +66,29 @@ class UsvInfoPanel(QWidget):
         }
     """
 
+    def _lookup_vehicle_type(self, usv_id):
+        """从 usv_fleet.yaml 查询机型标签（带内存缓存）"""
+        cache = getattr(self, '_vehicle_type_cache', None)
+        if cache is None:
+            cache = {}
+            try:
+                import os, yaml
+                for p in (
+                    os.path.expanduser('~/usv_workspace/install/gs_bringup/share/gs_bringup/config/usv_fleet.yaml'),
+                    os.path.expanduser('~/usv_workspace/src/gs_bringup/config/usv_fleet.yaml'),
+                ):
+                    if os.path.exists(p):
+                        with open(p, 'r', encoding='utf-8') as f:
+                            cfg = yaml.safe_load(f) or {}
+                        for uid, item in (cfg.get('usv_fleet') or {}).items():
+                            if isinstance(item, dict) and item.get('vehicle_type'):
+                                cache[uid] = str(item['vehicle_type']).strip().lower()
+                        break
+            except Exception:
+                pass
+            self._vehicle_type_cache = cache
+        return cache.get(usv_id, '')
+
     def _get_groupbox_style(self, border_color="#3498db"):
         """根据主题返回 QGroupBox 样式"""
         dark = is_dark_theme()
@@ -682,8 +705,18 @@ class UsvInfoPanel(QWidget):
             sensor_status = state.get('sensor_status') or []
             prearm_ready = bool(state.get('prearm_ready', False))
 
-            # 更新基本信息
-            self.id_label.setText(str(state.get('namespace', '--')))
+            # 更新基本信息（优先读取运行时 telemetry/status，其次回退 usv_fleet.yaml）
+            ns_text = str(state.get('namespace', '--'))
+            vt = str(state.get('vehicle_type') or '').strip().lower() or self._lookup_vehicle_type(ns_text)
+            vt_tag = {
+                'bionic_airship': ' [飞艇]',
+                'bionic_dolphin': ' [海豚]',
+                'flying_sphere': ' [飞行球]',
+                'usv': ' [无人船]',
+                'usv_diff': ' [差速无人船]',
+                'usv_boat': ' [差速无人船]',
+            }.get(vt, '')
+            self.id_label.setText(f"{ns_text}{vt_tag}")
             
             mode = state.get('mode', '--')
             self.mode_label.setText(str(mode))
@@ -692,7 +725,8 @@ class UsvInfoPanel(QWidget):
             # Ready 指示与连接状态
             connected = state.get('connected', False)
             armed = state.get('armed', False)
-            self._update_ready_view(prearm_ready, prearm_warnings, connected, armed)
+            protection_locked = bool(state.get('protection_locked', False))
+            self._update_ready_view(prearm_ready, prearm_warnings, connected, armed, protection_locked)
             self._update_sensor_list(sensor_status)
             self._update_vehicle_messages(vehicle_messages)
 
@@ -702,8 +736,7 @@ class UsvInfoPanel(QWidget):
             self._update_status_style(status)
             
             # Armed 标签更新（armed 已在上面获取）
-            self.armed_label.setText(str(armed))
-            self._update_armed_style(armed)
+            self._update_armed_style(armed, protection_locked)
             
             # 更新位置信息
             # 更新位置信息
@@ -873,12 +906,15 @@ class UsvInfoPanel(QWidget):
             }}
         """)
     
-    def _update_armed_style(self, armed):
-        """根据解锁状态更新样式"""
+    def _update_armed_style(self, armed, protection_locked=False):
+        """根据解锁状态与降落电机保护状态更新样式"""
         armed_str = str(armed).upper()
         if "TRUE" in armed_str or "ARMED" in armed_str:
             color = "#e74c3c"  # 红色
             text = "已解锁"
+        elif protection_locked:
+            color = "#d35400"  # 深琥珀色（降落保护锁止，需手动解锁）
+            text = "🔒保护锁桨(需手动解锁)"
         else:
             color = "#27ae60"  # 绿色
             text = "已锁定"
@@ -894,7 +930,7 @@ class UsvInfoPanel(QWidget):
             }}
         """)
 
-    def _update_ready_view(self, ready, warnings, connected, armed=False):
+    def _update_ready_view(self, ready, warnings, connected, armed=False, protection_locked=False):
         """根据预检结果和解锁状态更新 Ready 按钮和警告列表
         
         Args:
@@ -902,6 +938,7 @@ class UsvInfoPanel(QWidget):
             warnings: 预检警告列表
             connected: 是否连接
             armed: 是否已解锁（USV Arm 成功后为 True）
+            protection_locked: 是否处于降落电机保护锁止状态
         """
         if not hasattr(self, 'ready_button'):
             return
@@ -913,8 +950,12 @@ class UsvInfoPanel(QWidget):
         elif armed:
             # 已解锁状态优先显示（USV Arm 成功后）
             button_text = "Armed"
-            summary = "无人船已解锁，准备航行"
+            summary = "载具已解锁，3D载体可点击 Takeoff 起飞至预高度"
             button_bg, button_fg = "#27ae60", "#ffffff"
+        elif protection_locked:
+            button_text = "🔒 降落电机保护锁止"
+            summary = "已降至设定降落高度并锁桨，请手动点击 Arming 解锁后方可再次工作"
+            button_bg, button_fg = "#d35400", "#ffffff"
         elif ready:
             button_text = "Ready to Sail"
             summary = "所有预检检查通过"

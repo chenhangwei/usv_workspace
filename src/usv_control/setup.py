@@ -3,6 +3,7 @@
 该文件定义了ROS 2包的元数据和安装要求
 """
 
+from glob import glob
 from setuptools import find_packages, setup
 
 package_name = 'usv_control'
@@ -15,6 +16,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/models', glob('models/*.pt') + glob('models/*.onnx') + glob('models/*.zip')),
     ],
     install_requires=[
         'setuptools',
@@ -35,6 +37,8 @@ including path planning, obstacle avoidance, and autonomous navigation functiona
             'usv_command_node = usv_control.usv_command_node:main',
             'usv_control_node = usv_control.usv_control_node:main',
             'coord_transform_node = usv_control.coord_transform_node:main',
+            'formation_follower_node = usv_control.formation_follower_node:main',
+            'policy_inference_node = usv_control.rl_policy.policy_inference_node:main',
         ],
     },
     classifiers=[

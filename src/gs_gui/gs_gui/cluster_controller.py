@@ -58,7 +58,9 @@ class ClusterController:
         self._usv_step_progress: Dict[str, int] = ThreadSafeDict()
 
         # ==================== 航点预发送 (Lookahead) ====================
-        self._lookahead_enabled = True        # 是否启用预发送
+        # PX4 uXRCE-DDS 的 usv_control_node 为单目标实时跟踪器（无多航点缓存队列），
+        # 若立即预发送下一步会覆盖当前正在执行的航点，故默认关闭 Lookahead，完成当前步后再平滑下发下一步
+        self._lookahead_enabled = False       # 是否启用预发送
         self._lookahead_steps = 1             # 预发送步数 (当前步+N个后续步)
         self._lookahead_queue_threshold = 2   # 当 USV 队列剩余 < 此值时预发送
         self._lookahead_sent: Dict[str, set] = ThreadSafeDict()  # 已预发送的 (usv_id -> set of steps)
@@ -252,6 +254,23 @@ class ClusterController:
                 self.node.get_logger().info("接收到空列表，暂停/停止集群任务")
                 self._reset_cluster_task(ClusterTaskState.IDLE, "收到空目标列表")
                 return
+
+            # ========== 3D 载体（飞行球、海豚、飞艇）起飞预高度门控检查 ==========
+            involved_usvs = [
+                t.get('usv_id') for t in temp_list
+                if t.get('usv_id') and t.get('usv_id') not in self._excluded_ids
+            ]
+            if hasattr(self.node, 'validate_3d_cluster_takeoff_ready'):
+                ok, reasons = self.node.validate_3d_cluster_takeoff_ready(involved_usvs)
+                if not ok:
+                    warn_msg = (
+                        "🚫 3D 载体未起飞至设定预高度或处于电机保护锁止，拒绝启动路径程序集群动作：\n  • "
+                        + "\n  • ".join(reasons)
+                    )
+                    self.node.get_logger().warn(warn_msg)
+                    self.node.ros_signal.node_warning.emit(warn_msg)
+                    self._reset_cluster_task(ClusterTaskState.IDLE, "3D起飞预高度未就绪", cancel_active=False)
+                    return
 
             # 更新目标点和步骤信息，保存当前接收到的目标列表
             self.node.current_targets = temp_list
@@ -774,14 +793,15 @@ class ClusterController:
             if not all(k in pos for k in ('x', 'y')):
                 self.node.get_logger().warning(f"目标点缺少坐标: {ns}, 跳过")
                 return
-            # 支持z坐标,yaw设为0让ArduPilot自动调整航向
+            # 支持z坐标,yaw设为0让飞控自动调整航向
             self.node.send_nav_goal_via_topic(
                 usv_id,
                 pos.get('x', 0.0),
                 pos.get('y', 0.0),
                 pos.get('z', 0.0),
-                0.0,  # 不设置航向要求
-                self._action_timeout,
+                yaw=0.0,
+                use_yaw=False,
+                timeout=self._action_timeout,
             )
         else:
             # 达到最大重试次数，但不应标记为"已确认"
@@ -1201,6 +1221,30 @@ class ClusterController:
                 self.node.get_logger().info(f"🛑 发送停止导航请求到 {usv_id}")
             except Exception as e:
                 self.node.get_logger().error(f"发送停止导航请求失败 {usv_id}: {e}")
+
+    def mark_usv_goal_ack(self, usv_id: str, accepted: bool, goal_step: Optional[int] = None) -> None:
+        """收到 USV 的 navigation/ack 接收应答后标记 state.received=True，停止 step_timeout 误重发。"""
+        state = self._ack_states.get(usv_id)
+        if state is None:
+            return
+        if goal_step is not None and state.step != goal_step:
+            return
+        if accepted:
+            state.received = True
+            self.node.get_logger().debug(f"📨 {usv_id} 已确认接收 Step {state.step} 导航目标")
+        else:
+            state.received = False
+            self.node.get_logger().warning(f"⚠️ {usv_id} 拒绝接收 Step {state.step} 导航目标")
+
+    def on_navigation_feedback(self, usv_id: str, feedback_msg) -> None:
+        """收到有效导航反馈即表明 USV 正在执行当前目标，同步置位 state.received。"""
+        state = self._ack_states.get(usv_id)
+        if state is not None and not state.received:
+            state.received = True
+
+    def maybe_trigger_attitude_on_feedback(self, usv_id: str, xy_dist: float, goal_step: Optional[int] = None) -> None:
+        """兼容姿态动作触发钩子（无动作要求时静默跳过）。"""
+        return
 
     def mark_usv_goal_result(self, usv_id: str, success: bool, goal_step: Optional[int] = None) -> None:
         """根据导航结果更新指定 USV 的 ack 状态。"""

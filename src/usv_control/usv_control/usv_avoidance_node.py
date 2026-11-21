@@ -22,8 +22,6 @@ from std_msgs.msg import Bool
 from px4_msgs.msg import (
     VehicleStatus,
     VehicleLocalPosition,
-    TrajectorySetpoint,
-    OffboardControlMode,
 )
 
 # 导入common_utils工具
@@ -50,7 +48,7 @@ class UsvAvoidancePx4Node(Node):
         # =====================================================================
         qos_px4 = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
-            durability=QoSDurabilityPolicy.TRANSIENT_LOCAL,
+            durability=QoSDurabilityPolicy.VOLATILE,
             history=QoSHistoryPolicy.KEEP_LAST,
             depth=10
         )
@@ -79,26 +77,11 @@ class UsvAvoidancePx4Node(Node):
         self.coordinate_system = self.get_parameter('coordinate_system').value
 
         # =====================================================================
-        # PX4 发布器
-        # =====================================================================
-        self.setpoint_pub = self.create_publisher(
-            TrajectorySetpoint,
-            'fmu/in/trajectory_setpoint',
-            qos_px4
-        )
-        
-        self.offboard_mode_pub = self.create_publisher(
-            OffboardControlMode,
-            'fmu/in/offboard_control_mode',
-            qos_px4
-        )
-
-        # =====================================================================
-        # PX4 订阅器
+        # PX4 订阅器（通过 avoidance_position / avoidance_flag 交由 usv_control_node 统一执行）
         # =====================================================================
         self.status_sub = self.create_subscription(
             VehicleStatus,
-            'fmu/out/vehicle_status',
+            'fmu/out/vehicle_status_v1',
             self.vehicle_status_callback,
             qos_px4
         )
@@ -273,7 +256,7 @@ class UsvAvoidancePx4Node(Node):
         avoid_y = self.current_position.y - self.avoid_offset * math.cos(heading)
         avoid_z = self.current_target.z  # 保持目标高度
 
-        # ============ 方法1：发布 PoseStamped 供控制节点使用 ============
+        # 发布 PoseStamped 供 usv_control_node 统一转换为 PX4 设定值（避免双发布冲突）
         pose_msg = PoseStamped()
         pose_msg.header.stamp = self.get_clock().now().to_msg()
         pose_msg.header.frame_id = 'map'
@@ -283,39 +266,6 @@ class UsvAvoidancePx4Node(Node):
         pose_msg.pose.orientation.w = 1.0
         
         self.avoidance_position_pub.publish(pose_msg)
-        
-        # ============ 方法2：直接发布 TrajectorySetpoint ============
-        # 转换为 NED 坐标系
-        if self.coordinate_system == 'ENU':
-            # ENU -> NED: x_ned = y_enu, y_ned = x_enu, z_ned = -z_enu
-            ned_x = avoid_y
-            ned_y = avoid_x
-            ned_z = -avoid_z
-        else:
-            ned_x = avoid_x
-            ned_y = avoid_y
-            ned_z = avoid_z
-        
-        # 发送 OffboardControlMode
-        offboard_msg = OffboardControlMode()
-        offboard_msg.position = True
-        offboard_msg.velocity = False
-        offboard_msg.acceleration = False
-        offboard_msg.attitude = False
-        offboard_msg.body_rate = False
-        offboard_msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        self.offboard_mode_pub.publish(offboard_msg)
-        
-        # 发送 TrajectorySetpoint
-        setpoint_msg = TrajectorySetpoint()
-        setpoint_msg.position = [ned_x, ned_y, ned_z]
-        setpoint_msg.velocity = [float('nan'), float('nan'), float('nan')]
-        setpoint_msg.acceleration = [float('nan'), float('nan'), float('nan')]
-        setpoint_msg.yaw = float('nan')  # 保持当前航向
-        setpoint_msg.yawspeed = float('nan')
-        setpoint_msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        
-        self.setpoint_pub.publish(setpoint_msg)
         
         self.get_logger().info(
             f'📍 避障目标点已发布: ({avoid_x:.2f}, {avoid_y:.2f}, {avoid_z:.2f})'
